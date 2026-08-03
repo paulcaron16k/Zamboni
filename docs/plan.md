@@ -108,6 +108,9 @@ test stops existing, so this table cannot rot silently.
 | FR-4.5 | Partition values survive the rewrite | `test_partition_values_survive_a_round_trip` |
 | FR-4.6 | A new partition field takes a fresh field id | `test_new_partition_field_gets_a_fresh_id` |
 | FR-4.7 | Evolution can be disabled fleet-wide or per table | `test_disabled_evolution_plans_nothing`, `test_evolution_can_be_disabled_fleet_wide`, `test_a_table_can_opt_out_of_evolution` |
+| FR-4.8 | A compound spec evolves with one new spec, the aged field coarsened and the rest carried through | `test_a_compound_spec_needs_one_new_spec_not_one_per_combination`, `test_the_carried_field_keeps_its_field_id_and_the_aged_one_gets_a_fresh_one`, `test_a_compound_spec_evolves_end_to_end` |
+| FR-4.9 | Grouping keys on the whole output partition, not just the coarse window | `test_files_are_grouped_by_the_whole_output_partition` |
+| FR-4.10 | Two fields of the rule's granularity are refused, naming them | `test_two_fields_of_the_same_granularity_are_still_refused` |
 
 ### FR-5 — Configuration
 

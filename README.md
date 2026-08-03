@@ -460,7 +460,7 @@ in a day-spec manifest — metadata that reads correctly until a predicate prune
 `MultiSpecReplaceFiles` corrects the asymmetry, and `test_evolution.py` asserts
 manifest/file spec agreement rather than only row counts.
 
-Limited to single-field partition specs; a compound spec is reported as skipped.
+Compound specs evolve when exactly one field matches the rule's granularity: that field coarsens, the others carry through, and grouping keys on the whole output partition. Two fields of the same granularity are skipped -- which one dates the partition is ambiguous.
 
 ## Reclaiming storage
 

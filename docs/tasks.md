@@ -27,7 +27,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 |---|---|---|---|---|
 | ZMBNI-1 | Data-file compaction | Rewrite small files into target-sized ones and commit a `replace` snapshot. FR-1, FR-2, FR-6. design §2.4, §5.2 | done | 2026-08-03 |
 | ZMBNI-2 | Query-shaped layout | Declared sort and multi-key Z-order, with honest `sort_order_id`. FR-3. design §2.2 | done | 2026-08-03 |
-| ZMBNI-3 | Partition evolution | Condense aged fine-grained partitions without moving where new data lands. FR-4. design §5.3 | inproject | |
+| ZMBNI-3 | Partition evolution | Condense aged fine-grained partitions without moving where new data lands. FR-4. design §5.3 | done | 2026-08-03 |
 | ZMBNI-4 | Declarative configuration | `table-config.json` and its Meltano authoring surface. FR-5. design §4, §5.1 | done | 2026-08-03 |
 | ZMBNI-5 | Storage reclamation | Snapshot expiry and orphan-file removal, fenced by hard invariants. FR-7. design §2.4, §5.4, §6.6 | done | 2026-08-03 |
 | ZMBNI-6 | Metadata hygiene | Dangling deletes, manifest regrouping, `metadata.json` retention. FR-8, FR-9.1–9.2. design §2.1, §2.3 | inproject | |
@@ -36,7 +36,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-9 | Verification and CI | The suite, live verification, and automation. plan.md §4 | inproject | |
 | ZMBNI-10 | Documentation | HLD, delivery plan, config spec, verification record. See ZMBNI-1007 | inproject | |
 
-**Story counts:** 41 done · 1 inproject · 8 todo · 1 cancelled  (51 stories)
+**Story counts:** 42 done · 1 inproject · 7 todo · 1 cancelled  (51 stories)
 
 ---
 
@@ -68,7 +68,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 |---|---|---|---|---|
 | ZMBNI-301 | Days into months | Add the coarse spec without making it default, so new data keeps landing daily. Aged from the window *end*, protecting late arrivals. FR-4.1–4.3, FR-4.7. design §5.3 | done | 2026-08-03 |
 | ZMBNI-302 | Multi-spec metadata integrity | One manifest per spec, and a fresh partition-field id — reusing the source field's id makes one id mean two things. FR-4.4–4.6 | done | 2026-08-03 |
-| ZMBNI-303 | Compound partition specs | Evolution handles single-field specs only; a compound spec is reported as skipped rather than guessed at. Needs a rule for which field ages when several could. No FR yet. design §6.5 | todo | |
+| ZMBNI-303 | Compound partition specs | A compound spec now evolves when exactly one field matches the rule's granularity: that field coarsens, the others carry through with their field ids, and grouping keys on the whole output partition tuple. The old skip rested on faulty reasoning — it assumed a spec per combination of the other fields, but those combinations are partition values under one shared spec. Two fields of the same granularity are still refused, because `older_than_days` measures from a window end and two fields give two answers. FR-4.8–4.10 | done | 2026-08-03 |
 
 ---
 
@@ -163,7 +163,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 
 ## What is actually left
 
-One story is in flight, 8 are open, and one is closed as a decision rather than a gap.
+One story is in flight, 7 are open, and one is closed as a decision rather than a gap.
 
 **In flight — ZMBNI-905.** The CI workflow exists and every command in it was run locally,
 but GitHub has never executed it: this repository has no remote. That is the single item
@@ -173,11 +173,10 @@ standing between "tests pass on my machine" and "tests pass". Nothing else is st
 capability probe or a named upstream limitation, and each lifts on its own when PyIceberg
 grows the capability. They are tracked so nobody re-investigates from scratch.
 
-**Ours to schedule — four.** In rough order of what would bite first:
+**Ours to schedule — three.** In rough order of what would bite first:
 
 | | |
 |---|---|
-| ZMBNI-303 | Compound partition specs cannot evolve, and are skipped rather than guessed at |
 | ZMBNI-906 | `scripts/verify-live.py` now duplicates `tests/test_dev_stack.py` |
 | ZMBNI-1007 | No operator runbook: nothing says how often to run any of this |
 | ZMBNI-907 | No release or versioning convention |

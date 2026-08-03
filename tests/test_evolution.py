@@ -16,8 +16,8 @@ import pyarrow as pa
 import pytest
 from pyiceberg.partitioning import PartitionField, PartitionSpec
 from pyiceberg.schema import Schema
-from pyiceberg.transforms import DayTransform
-from pyiceberg.types import IntegerType, NestedField, TimestampType
+from pyiceberg.transforms import DayTransform, IdentityTransform
+from pyiceberg.types import IntegerType, NestedField, StringType, TimestampType
 
 from zamboni import CompactionConfig, TableCompactor
 from zamboni.evolution import plan_evolution
@@ -303,3 +303,186 @@ def test_an_atomic_commit_records_every_evolved_group(session):
 
     label = session.table("db.evolved_many").current_snapshot().summary["zamboni.evolution"]
     assert "2026-01" in label and "2026-02" in label, label
+
+
+# -- compound partition specs --------------------------------------------
+
+COMPOUND_SCHEMA = Schema(
+    NestedField(1, "id", IntegerType(), required=False),
+    NestedField(2, "ts", TimestampType(), required=False),
+    NestedField(3, "region", StringType(), required=False),
+)
+COMPOUND_ARROW = pa.schema(
+    [
+        pa.field("id", pa.int32()),
+        pa.field("ts", pa.timestamp("us")),
+        pa.field("region", pa.string()),
+    ]
+)
+COMPOUND_SPEC = PartitionSpec(
+    PartitionField(source_id=2, field_id=1000, transform=DayTransform(), name="ts_day"),
+    PartitionField(source_id=3, field_id=1001, transform=IdentityTransform(), name="region"),
+)
+
+EVOLVE_CONFIG = TableConfig(
+    defaults=TableSettings(
+        partition_evolution=PartitionEvolution(
+            enabled=True, rules=(EvolutionRule("day", "month", 90),)
+        )
+    ),
+    tables={},
+)
+
+
+@pytest.fixture
+def compound(session):
+    """[ts:day, region:identity] with two old days in each of two regions."""
+    tbl = session.catalog.create_table(
+        "db.compound",
+        schema=COMPOUND_SCHEMA,
+        partition_spec=COMPOUND_SPEC,
+        properties={"format-version": "2"},
+    )
+    for day in (3, 4):
+        for region in ("eu", "us"):
+            tbl.append(
+                pa.table(
+                    {
+                        "id": [day],
+                        "ts": [dt.datetime(2026, 1, day)],
+                        "region": [region],
+                    },
+                    schema=COMPOUND_ARROW,
+                )
+            )
+    return session.catalog.load_table("db.compound")
+
+
+def test_a_compound_spec_needs_one_new_spec_not_one_per_combination(compound):
+    """The reasoning the old skip rested on was wrong.
+
+    Condensing one field does not require a spec per combination of the others.
+    The combinations are partition *values*, which each file carries under a
+    single shared spec -- so two regions and one month need exactly one new spec.
+    """
+    plan = plan_evolution(
+        compound, EVOLVE_CONFIG.for_table("db.compound"), profile_table(compound).live_files
+    )
+
+    assert len(plan.required_specs) == 1, plan.required_specs
+    spec = next(iter(plan.required_specs.values()))
+    assert [str(f.transform) for f in spec.fields] == ["month", "identity"], (
+        "the aged field must coarsen and the other carry through unchanged"
+    )
+    assert [f.source_id for f in spec.fields] == [2, 3]
+
+
+def test_the_carried_field_keeps_its_field_id_and_the_aged_one_gets_a_fresh_one(compound):
+    """A changed field must not reuse an id; an unchanged one must not change it.
+
+    A manifest's partition struct uses partition field ids as struct field ids,
+    so a reused id would leave one id meaning two things -- and a gratuitously
+    renumbered one would break pruning on data already written.
+    """
+    plan = plan_evolution(
+        compound, EVOLVE_CONFIG.for_table("db.compound"), profile_table(compound).live_files
+    )
+    spec = next(iter(plan.required_specs.values()))
+
+    aged, carried = spec.fields
+    assert carried.field_id == 1001, "the untouched field was renumbered"
+    assert aged.field_id not in (1000, 1001), f"the aged field reused id {aged.field_id}"
+
+
+def test_files_are_grouped_by_the_whole_output_partition(compound):
+    """Two regions in one month are two output partitions, not one group."""
+    plan = plan_evolution(
+        compound, EVOLVE_CONFIG.for_table("db.compound"), profile_table(compound).live_files
+    )
+
+    assert len(plan.groups) == 2, [g.label for g in plan.groups]
+    for group in plan.groups:
+        regions = {f.partition[1] for f in group.files}
+        assert len(regions) == 1, f"{group.label} mixes regions {regions}"
+    labels = sorted(g.label for g in plan.groups)
+    assert "region=eu" in labels[0] and "region=us" in labels[1], labels
+
+
+def test_a_compound_spec_evolves_end_to_end(session, compound):
+    """Rows preserved, manifests agreeing with their files, region kept."""
+    before = sorted(compound.scan().to_arrow()["id"].to_pylist())
+    regions_before = sorted(compound.scan().to_arrow()["region"].to_pylist())
+
+    result = TableCompactor.from_table_config(
+        session, "db.compound", EVOLVE_CONFIG, base=CompactionConfig()
+    ).execute()
+    assert len(result.evolved) == 2, result.evolved
+
+    tbl = session.table("db.compound")
+    arrow = tbl.scan().to_arrow()
+    assert sorted(arrow["id"].to_pylist()) == before
+    assert sorted(arrow["region"].to_pylist()) == regions_before
+
+    # Two output files, one per region, each under the month spec.
+    live = profile_table(tbl).live_files
+    assert len(live) == 2, [f.path for f in live]
+    specs = tbl.metadata.specs()
+    for f in live:
+        assert [str(x.transform) for x in specs[f.spec_id].fields] == ["month", "identity"]
+
+    # The check this module exists for: every manifest's spec matches its files.
+    for manifest in tbl.current_snapshot().manifests(io=tbl.io):
+        for entry in manifest.fetch_manifest_entry(io=tbl.io, discard_deleted=True):
+            assert manifest.partition_spec_id == entry.data_file.spec_id, (
+                f"{manifest.manifest_path} declares spec {manifest.partition_spec_id} "
+                f"but holds a file of spec {entry.data_file.spec_id}"
+            )
+
+
+def test_two_fields_of_the_same_granularity_are_still_refused(session):
+    """The genuinely ambiguous case, which stays skipped.
+
+    `older_than_days` is measured from a window end. Two day fields give two
+    answers, so ageing by either would be a guess about which column dates the
+    row.
+    """
+    schema = Schema(
+        NestedField(1, "id", IntegerType(), required=False),
+        NestedField(2, "created_at", TimestampType(), required=False),
+        NestedField(3, "updated_at", TimestampType(), required=False),
+    )
+    arrow = pa.schema(
+        [
+            pa.field("id", pa.int32()),
+            pa.field("created_at", pa.timestamp("us")),
+            pa.field("updated_at", pa.timestamp("us")),
+        ]
+    )
+    spec = PartitionSpec(
+        PartitionField(source_id=2, field_id=1000, transform=DayTransform(), name="created_day"),
+        PartitionField(source_id=3, field_id=1001, transform=DayTransform(), name="updated_day"),
+    )
+    tbl = session.catalog.create_table(
+        "db.two_days", schema=schema, partition_spec=spec, properties={"format-version": "2"}
+    )
+    for day in (3, 4):
+        tbl.append(
+            pa.table(
+                {
+                    "id": [day],
+                    "created_at": [dt.datetime(2026, 1, day)],
+                    "updated_at": [dt.datetime(2026, 1, day)],
+                },
+                schema=arrow,
+            )
+        )
+    tbl = session.catalog.load_table("db.two_days")
+
+    plan = plan_evolution(
+        tbl, EVOLVE_CONFIG.for_table("db.two_days"), profile_table(tbl).live_files
+    )
+
+    assert plan.groups == []
+    reasons = [r for _, r in plan.skipped]
+    assert any("ambiguous" in r for r in reasons), reasons
+    assert any("created_day, updated_day" in r for r in reasons), reasons

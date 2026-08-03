@@ -513,8 +513,9 @@ sequenceDiagram
 
 ### 6.5 Functional limits
 
-- **Partition evolution handles single-field specs only.** A compound spec is reported as
-  skipped, not guessed at.
+- **Partition evolution needs one unambiguous time field.** A compound spec evolves when
+  exactly one field matches the rule's granularity; two that do are skipped, because
+  `older_than_days` is measured from a window end and two fields give two answers.
 - **Equality deletes are blocked**, pending upstream support.
 - **`max-ref-age-ms` is applied**, dropping the ref so its snapshots can expire, but only
   when configured — the default is "not set", because removing a named tag or branch destroys

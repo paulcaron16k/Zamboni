@@ -113,8 +113,20 @@ alone it writes month-partitioned files into a day-spec manifest — metadata th
 until a predicate tries to prune on it. `zamboni` overrides that (`MultiSpecReplaceFiles`)
 and tests assert manifest/file spec agreement on every evolved table.
 
-Currently limited to **single-field partition specs**. A compound spec is reported as
-skipped rather than guessed at.
+**Compound specs are supported** when exactly one field matches the rule's `from`
+granularity. That field coarsens; the others are copied through untouched, keeping their
+partition field ids because they still mean what they meant. Only one new spec is needed —
+the combinations of the other fields are partition *values*, which every file carries
+individually under one shared spec.
+
+Grouping then keys on the whole output partition tuple, so `[ts:day, region:identity]` with
+two regions in one month produces two groups and two output files, not one merged across
+regions.
+
+A spec where **two or more fields share the rule's granularity** is still skipped, and the
+reason names them: `older_than_days` is measured from a partition window's end, so two `day`
+fields give two answers about when the data ages, and picking one would be a guess about
+which column dates the row.
 
 ---
 
