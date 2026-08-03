@@ -156,17 +156,17 @@ class DuckDBArrowBackend(RewriteBackend):
     # -- sort ------------------------------------------------------------
 
     def _sort(self, table: pa.Table, ctx: RewriteContext) -> pa.Table:
-        sql = ordering_sql("_icemaint_src", list(table.schema.names), ctx)
+        sql = ordering_sql("_zamboni_src", list(table.schema.names), ctx)
         if not sql:
             return table
         self._configure_duckdb(ctx)
-        self._con.register("_icemaint_src", table)
+        self._con.register("_zamboni_src", table)
         try:
             # .arrow() returns a RecordBatchReader in duckdb 1.5; we want the
             # materialised table here because the caller is in IN_MEMORY mode.
             return self._con.execute(sql).to_arrow_table()
         finally:
-            self._con.unregister("_icemaint_src")
+            self._con.unregister("_zamboni_src")
 
     # -- chunked path ----------------------------------------------------
 
@@ -184,17 +184,17 @@ class DuckDBArrowBackend(RewriteBackend):
         unregistering can only happen once the caller is done.
         """
         reader = self._read_batches(tasks, ctx)
-        sql = ordering_sql("_icemaint_stream", list(reader.schema.names), ctx)
+        sql = ordering_sql("_zamboni_stream", list(reader.schema.names), ctx)
         if not sql:
             yield reader
             return
 
         self._configure_duckdb(ctx)
-        self._con.register("_icemaint_stream", reader)
+        self._con.register("_zamboni_stream", reader)
         try:
             yield _to_arrow_reader(self._con.execute(sql))
         finally:
-            self._con.unregister("_icemaint_stream")
+            self._con.unregister("_zamboni_stream")
 
     def _configure_duckdb(self, ctx: RewriteContext) -> None:
         if ctx.config.temp_directory:

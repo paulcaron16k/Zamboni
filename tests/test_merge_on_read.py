@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import pytest
 
-from icemaint import CompactionConfig, MemoryMode, TableCompactor
-from icemaint.compactor import CompactionBlocked
-from icemaint.profile import profile_table
+from zamboni import CompactionConfig, MemoryMode, TableCompactor
+from zamboni.compactor import CompactionBlocked
+from zamboni.profile import profile_table
 
 
 def live_ids(tbl) -> list[int]:

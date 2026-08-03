@@ -8,7 +8,7 @@ Two ways to author it:
 
 1. **Directly**, as a file in the pipeline repo.
 2. **In the Meltano/Singer catalog**, under an `x-iceberg` key per stream, and generated
-   with `icemaint from-catalog`. See [Authoring in Meltano](#authoring-in-meltano) — and
+   with `zamboni from-catalog`. See [Authoring in Meltano](#authoring-in-meltano) — and
    the warning there about why it is *generated* rather than read at runtime.
 
 ---
@@ -89,7 +89,7 @@ into.
 
 **The default is days-to-months, enabled, at 90 days.** Turn it off fleet-wide by setting
 `defaults.partition_evolution.enabled` to `false`, or per table in that table's block.
-`icemaint from-catalog --no-evolution` generates a config with it off.
+`zamboni from-catalog --no-evolution` generates a config with it off.
 
 - `from` / `to` must be time granularities (`hour` < `day` < `month` < `year`) and `to`
   must be **coarser**. Compaction merges files; it never splits them, so a
@@ -110,7 +110,7 @@ added **without** becoming the default.
 One caveat worth knowing: PyIceberg's stock snapshot producer hardcodes the added manifest
 to the table's *default* spec while grouping deleted entries by each file's own spec. Left
 alone it writes month-partitioned files into a day-spec manifest — metadata that reads fine
-until a predicate tries to prune on it. `icemaint` overrides that (`MultiSpecReplaceFiles`)
+until a predicate tries to prune on it. `zamboni` overrides that (`MultiSpecReplaceFiles`)
 and tests assert manifest/file spec agreement on every evolved table.
 
 Currently limited to **single-field partition specs**. A compound spec is reported as
@@ -193,7 +193,7 @@ as compaction's superseded data files do; expiry and orphan removal free the byt
 > claiming to hold data files, and a reader would treat position deletes as rows. A dangling
 > delete sharing a manifest with one that still applies is reported as retained, with the
 > reason. This lifts automatically if PyIceberg gains a delete-manifest writer; the
-> capability is probed, not assumed (`icemaint doctor`).
+> capability is probed, not assumed (`zamboni doctor`).
 
 ---
 
@@ -217,7 +217,7 @@ z-order both define row order and only one can apply.
 Clusters the leading column tightly and progressively less thereafter. Output files are
 left with `sort_order_id = null` unless the ordering *is* the table's declared sort order —
 claiming otherwise would assert an ordering the data does not satisfy. (Use
-`icemaint compact --sort-by-table-order` for the case where it does.)
+`zamboni compact --sort-by-table-order` for the case where it does.)
 
 ### `mode: "zorder"`
 
@@ -279,9 +279,9 @@ extractors:
 Then generate:
 
 ```bash
-icemaint from-catalog .meltano/catalog.json --namespace analytics -o table-config.json
-icemaint validate-config table-config.json
-icemaint compact analytics.events --table-config table-config.json --yes
+zamboni from-catalog .meltano/catalog.json --namespace analytics -o table-config.json
+zamboni validate-config table-config.json
+zamboni compact analytics.events --table-config table-config.json --yes
 ```
 
 The block is read from stream metadata (breadcrumb `[]`) or, failing that, from the

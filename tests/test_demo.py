@@ -17,8 +17,8 @@ import pytest
 
 from himsdemo.cli import main
 from himsdemo.state import TOTAL_DAYS, DemoState
-from icemaint import CatalogSession
-from icemaint.profile import profile_table
+from zamboni import CatalogSession
+from zamboni.profile import profile_table
 
 SOURCE = Path(__file__).resolve().parent.parent / "data" / "healthims"
 EVS_EVENTS = {

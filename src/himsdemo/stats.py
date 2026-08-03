@@ -13,10 +13,10 @@ from dataclasses import dataclass
 
 from pyiceberg.table import Table
 
-from icemaint.orphans import list_storage, storage_roots
-from icemaint.profile import TableProfile, profile_table
-from icemaint.reachable import reachable_files
-from icemaint.tableconfig import TableConfig
+from zamboni.orphans import list_storage, storage_roots
+from zamboni.profile import TableProfile, profile_table
+from zamboni.reachable import reachable_files
+from zamboni.tableconfig import TableConfig
 
 
 @dataclass
@@ -105,7 +105,7 @@ def _on_disk(tbl: Table) -> OnDisk:
     use, with nothing deleted. Reporting it here is what made the gap between
     "1 live file" and "120 files on disk" visible in the first place.
     """
-    from icemaint.reachable import canonical
+    from zamboni.reachable import canonical
 
     storage = list_storage(tbl, storage_roots(tbl))
     referenced = reachable_files(tbl).paths
@@ -229,7 +229,7 @@ def render(stats: list[TableStats], *, write_mode: str, days_ingested: int) -> s
         lines += [
             "  Note: PyIceberg cannot write position deletes -- its delete() and upsert()",
             "  are both copy-on-write. The delete files above were written directly to",
-            "  simulate what Spark or Flink would emit. See icemaint/testing.py.",
+            "  simulate what Spark or Flink would emit. See zamboni/testing.py.",
             "",
         ]
     return "\n".join(lines)

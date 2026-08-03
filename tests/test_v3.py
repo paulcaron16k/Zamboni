@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from icemaint.profile import Severity, _assess, profile_table
+from zamboni.profile import Severity, _assess, profile_table
 
 from .conftest import SCHEMA
 
@@ -83,8 +83,8 @@ def test_v1_is_still_blocked_for_its_own_reason(unpartitioned):
 
 def test_compaction_refuses_a_v3_table(session, monkeypatch, unpartitioned):
     """The blocker has to actually stop `execute()`, not merely be reported."""
-    from icemaint import CompactionConfig, TableCompactor
-    from icemaint.compactor import CompactionBlocked
+    from zamboni import CompactionConfig, TableCompactor
+    from zamboni.compactor import CompactionBlocked
 
     real = profile_table
 
@@ -94,7 +94,7 @@ def test_compaction_refuses_a_v3_table(session, monkeypatch, unpartitioned):
         profile.findings = _assess(tbl, profile)
         return profile
 
-    monkeypatch.setattr("icemaint.compactor.profile_table", as_v3)
+    monkeypatch.setattr("zamboni.compactor.profile_table", as_v3)
 
     with pytest.raises(CompactionBlocked, match="format-version-3"):
         TableCompactor(session, "db.unpartitioned", CompactionConfig()).execute()
@@ -107,9 +107,9 @@ def test_metadata_only_operations_are_not_blocked_by_v3(session, unpartitioned):
     lineage survives them. Blocking them on V3 would be gratuitous, and the
     docstring in each module says why they are safe.
     """
-    from icemaint.deletes import find_dangling
-    from icemaint.expire import RetentionPolicy, decide_retention
-    from icemaint.manifests import plan_rewrite
+    from zamboni.deletes import find_dangling
+    from zamboni.expire import RetentionPolicy, decide_retention
+    from zamboni.manifests import plan_rewrite
 
     tbl = session.table("db.unpartitioned")
 
@@ -126,7 +126,7 @@ def test_manifest_rewriting_preserves_the_v3_row_lineage_field(session, partitio
     ``entry.data_file`` wholesale rather than rebuilding it -- is what makes the
     operation V3-safe, and a refactor that rebuilt the file would drop it.
     """
-    from icemaint.manifests import ManifestRewriter
+    from zamboni.manifests import ManifestRewriter
 
     def row_ids(tbl):
         found = {}
@@ -146,7 +146,7 @@ def test_deletion_vectors_can_be_read_but_not_written():
     """V3 replaces position delete files with puffin deletion vectors.
 
     PyIceberg ships a reader and no writer, so a V3 merge-on-read table can be
-    profiled but its deletes cannot be simulated the way `icemaint.testing`
+    profiled but its deletes cannot be simulated the way `zamboni.testing`
     simulates V2 position deletes.
     """
     from pyiceberg.table import puffin

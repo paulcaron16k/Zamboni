@@ -29,15 +29,15 @@ from pyiceberg.schema import Schema
 from pyiceberg.transforms import IdentityTransform
 from pyiceberg.types import IntegerType, NestedField, StringType
 
-from icemaint import CatalogSession, CompactionConfig, S3Settings, TableCompactor
-from icemaint.deletes import DanglingDeleteCleaner, find_dangling
-from icemaint.expire import RetentionPolicy, SnapshotExpirer
-from icemaint.manifests import ManifestRewriter
-from icemaint.orphans import OrphanCleaner, list_storage, storage_roots
-from icemaint.profile import profile_table
-from icemaint.properties import apply_metadata_properties
-from icemaint.reachable import reachable_files
-from icemaint.tableconfig import MetadataSettings
+from zamboni import CatalogSession, CompactionConfig, S3Settings, TableCompactor
+from zamboni.deletes import DanglingDeleteCleaner, find_dangling
+from zamboni.expire import RetentionPolicy, SnapshotExpirer
+from zamboni.manifests import ManifestRewriter
+from zamboni.orphans import OrphanCleaner, list_storage, storage_roots
+from zamboni.profile import profile_table
+from zamboni.properties import apply_metadata_properties
+from zamboni.reachable import reachable_files
+from zamboni.tableconfig import MetadataSettings
 
 
 def map_host(alias: str, target: str) -> None:
@@ -60,7 +60,7 @@ def map_host(alias: str, target: str) -> None:
     socket.getaddrinfo = patched
 
 
-NAMESPACE = "icemaint_verify"
+NAMESPACE = "zamboni_verify"
 SCHEMA = Schema(
     NestedField(1, "id", IntegerType(), required=False),
     NestedField(2, "category", StringType(), required=False),
@@ -188,7 +188,7 @@ def _direct_session(args) -> CatalogSession:
             "s3.region": args.s3_region,
         },
     )
-    from icemaint.session import _new_duckdb
+    from zamboni.session import _new_duckdb
 
     return CatalogSession(catalog=catalog, con=_new_duckdb(4), threads=4)
 

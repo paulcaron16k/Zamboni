@@ -1,7 +1,7 @@
 """The `query` command: what a developer would actually ask this data.
 
 Read path is PyIceberg scan -> Arrow -> DuckDB. DuckDB cannot ATTACH a SQLite
-Iceberg catalog (only REST), and this is the same pattern `icemaint` itself
+Iceberg catalog (only REST), and this is the same pattern `zamboni` itself
 uses for its rewrite reads.
 
 **The Iceberg read is inside the timed region.** That matters: the read is the

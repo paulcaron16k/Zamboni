@@ -13,13 +13,13 @@ from pathlib import Path
 
 import pytest
 
-from icemaint.orphans import (
+from zamboni.orphans import (
     OrphanCleaner,
     OrphanCleanupAborted,
     list_storage,
     storage_roots,
 )
-from icemaint.reachable import Category, ReachableSet, reachable_files
+from zamboni.reachable import Category, ReachableSet, reachable_files
 
 from .conftest import SCHEMA, batch
 
@@ -120,7 +120,7 @@ def test_current_metadata_is_never_a_candidate(table, monkeypatch):
         )
         return ReachableSet(by_category=trimmed)
 
-    monkeypatch.setattr("icemaint.orphans.reachable_files", without_metadata)
+    monkeypatch.setattr("zamboni.orphans.reachable_files", without_metadata)
 
     current = Path(table.metadata_location.replace("file://", ""))
     assert current.exists()
@@ -152,7 +152,7 @@ def test_an_empty_reachable_category_aborts(table, monkeypatch, category, messag
         trimmed[category] = frozenset()
         return ReachableSet(by_category=trimmed)
 
-    monkeypatch.setattr("icemaint.orphans.reachable_files", crippled)
+    monkeypatch.setattr("zamboni.orphans.reachable_files", crippled)
 
     before = set(list_storage(table, storage_roots(table)))
     with pytest.raises(OrphanCleanupAborted, match=message):

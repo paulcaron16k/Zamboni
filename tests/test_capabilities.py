@@ -6,7 +6,7 @@ import dataclasses
 
 import pytest
 
-from icemaint.capabilities import PyIcebergCapabilities, detect
+from zamboni.capabilities import PyIcebergCapabilities, detect
 
 
 def test_probes_the_installed_build():
@@ -73,7 +73,7 @@ def test_describe_lists_every_probe():
 
 def test_equality_delete_blocker_follows_the_capability(session, unpartitioned, monkeypatch):
     """When a build can read equality deletes, their presence stops being a blocker."""
-    import icemaint.profile as profile_module
+    import zamboni.profile as profile_module
 
     fake_profile = dataclasses.replace  # noqa: F841 - readability only
 

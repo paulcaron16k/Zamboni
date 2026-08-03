@@ -1,4 +1,4 @@
-# icemaint — High-Level Design
+# Zamboni — High-Level Design
 
 **Iceberg table maintenance for MinIO + Lakekeeper, without Trino or Spark.**
 
@@ -36,8 +36,8 @@ orders with DuckDB, and commits an Iceberg `replace` snapshot. Layout intent is
 
 ```mermaid
 flowchart LR
-  A["meltano.yml<br/>x-iceberg block"] -->|icemaint from-catalog| B["table-config.json"]
-  B -->|icemaint compact| C["icemaint"]
+  A["meltano.yml<br/>x-iceberg block"] -->|zamboni from-catalog| B["table-config.json"]
+  B -->|zamboni compact| C["zamboni"]
   C -->|read scan tasks| D[("MinIO<br/>data files")]
   C -->|order / rewrite| E["DuckDB + PyIceberg writer"]
   E --> D
@@ -329,14 +329,14 @@ sequenceDiagram
     actor DE as Data Engineer
     participant MY as meltano.yml
     participant CAT as Singer catalog
-    participant IM as icemaint from-catalog
+    participant IM as zamboni from-catalog
     participant TCJ as table-config.json
     participant CI as CI / review
 
     An->>MY: add x-iceberg block to stream metadata
     DE->>MY: review query patterns, choose partition + ordering
     MY->>CAT: meltano applies metadata rules (raw dict merge)
-    DE->>IM: icemaint from-catalog catalog.json --namespace analytics
+    DE->>IM: zamboni from-catalog catalog.json --namespace analytics
     IM->>CAT: read x-iceberg from stream metadata, else schema root
     IM->>IM: validate each block (unknown keys rejected)
     IM->>TCJ: write generated config
@@ -350,7 +350,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     actor Op as Operator
-    participant CLI as icemaint compact
+    participant CLI as zamboni compact
     participant CAP as capabilities
     participant PROF as profile
     participant PLAN as planner
@@ -432,8 +432,8 @@ actually free bytes, and the ordering between them is not interchangeable.
 ```mermaid
 sequenceDiagram
     actor Op as Operator
-    participant EX as icemaint expire
-    participant OR as icemaint remove-orphans
+    participant EX as zamboni expire
+    participant OR as zamboni remove-orphans
     participant RE as reachable
     participant LK as Lakekeeper
     participant S3 as MinIO
@@ -506,7 +506,7 @@ sequenceDiagram
 | Constraint | Consequence |
 |---|---|
 | PyIceberg's SQL catalog needs SQLAlchemy ≥ 2; the machine's global env pins 1.4.x for Airflow | Everything runs from a locked `uv` venv; nothing resolves against global packages |
-| The `bin/icemaint` executable pins its Python from `.python-version` | The shipped executable runs the interpreter the tests ran on |
+| The `bin/zamboni` executable pins its Python from `.python-version` | The shipped executable runs the interpreter the tests ran on |
 | Lakekeeper OSS has no maintenance queues | Expiry and orphan removal run from this tool, scheduled by the operator |
 | A remote-signing Lakekeeper warehouse (`sts-enabled: false`, `push-s3-delete-disabled: true`) signs object GET/PUT only | `ListObjectsV2`, `HeadObject` and multi-object `DELETE` are refused, so compaction fails and no storage can be reclaimed. Needs STS-vended or direct credentials — measured in [live-verification.md](live-verification.md) |
 | Lakekeeper returns storage settings per table in the load-table response | Those properties win over client config, so `py-io-impl`, `s3.endpoint` and `s3.remote-signing-enabled` cannot be overridden from the client |
@@ -597,8 +597,8 @@ flowchart LR
   high-cardinality keys rather than partitioning by them).
 - Set `target_file_size_bytes` and `min_input_files` where the default does not fit.
 - Decide per-table `partition_evolution`, including opting out.
-- Run `icemaint from-catalog` and `validate-config` in CI; commit the generated artifact.
-- Read `icemaint describe` output — the size histogram and blocker list are the signal that
+- Run `zamboni from-catalog` and `validate-config` in CI; commit the generated artifact.
+- Read `zamboni describe` output — the size histogram and blocker list are the signal that
   a layout choice is not working.
 
 **Does not** manage catalog credentials or the job schedule.
@@ -607,13 +607,13 @@ flowchart LR
 
 **Owns: that the job runs safely.**
 
-- Schedule `icemaint compact --table-config ... --yes`, with `--dry-run` first on a new
+- Schedule `zamboni compact --table-config ... --yes`, with `--dry-run` first on a new
   table.
-- Manage Lakekeeper/MinIO credentials and the `ICEMAINT_*` environment.
+- Manage Lakekeeper/MinIO credentials and the `ZAMBONI_*` environment.
 - Tune operational settings — `--memory-mode`, `--memory-budget-bytes`,
   `--temp-directory`, `--branch`. These deliberately stay on the command line, not in the
   file analysts own.
-- Run `icemaint doctor` after any dependency upgrade, and regenerate `bin/icemaint` after
+- Run `zamboni doctor` after any dependency upgrade, and regenerate `bin/zamboni` after
   `uv sync --upgrade`.
 - Watch for `CompactionBlocked` (exit 3) and dangling-delete-file counts.
 

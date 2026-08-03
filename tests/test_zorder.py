@@ -12,7 +12,7 @@ import itertools
 import duckdb
 import pytest
 
-from icemaint.zorder import build_zorder_sql, zorder_key
+from zamboni.zorder import build_zorder_sql, zorder_key
 
 
 @pytest.fixture

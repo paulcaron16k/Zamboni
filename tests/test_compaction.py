@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from icemaint import CompactionConfig, MemoryMode, TableCompactor
-from icemaint.profile import profile_table
+from zamboni import CompactionConfig, MemoryMode, TableCompactor
+from zamboni.profile import profile_table
 
 
 def live_paths(tbl) -> set[str]:
@@ -66,7 +66,7 @@ def test_commit_uses_replace_operation(session, unpartitioned):
     tbl = session.table("db.unpartitioned")
     snapshot = tbl.current_snapshot()
     assert snapshot.summary.operation.value == "replace"
-    assert snapshot.summary["icemaint.operation"] == "compaction"
+    assert snapshot.summary["zamboni.operation"] == "compaction"
 
 
 def test_partitioned_compaction_is_partition_scoped(session, partitioned):

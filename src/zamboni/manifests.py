@@ -29,7 +29,7 @@ sees rather than merely how fast it gets there:
   first added a file.
 
 Delete manifests are left untouched: ``ManifestWriterV2`` cannot write one (see
-:mod:`icemaint.deletes`). That costs little here -- dangling-delete removal is
+:mod:`zamboni.deletes`). That costs little here -- dangling-delete removal is
 what shrinks the delete-manifest count, and it runs first.
 """
 
@@ -339,9 +339,9 @@ class ManifestRewriter:
             )
 
         properties = {
-            "icemaint.operation": "rewrite-manifests",
-            "icemaint.manifests-replaced": str(len(plan.replaced)),
-            "icemaint.manifests-created": str(len(plan.bins)),
+            "zamboni.operation": "rewrite-manifests",
+            "zamboni.manifests-replaced": str(len(plan.replaced)),
+            "zamboni.manifests-created": str(len(plan.bins)),
         }
         with tbl.transaction() as txn:
             producer = _RewriteManifests(

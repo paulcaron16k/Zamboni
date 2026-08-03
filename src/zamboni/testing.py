@@ -1,6 +1,6 @@
 """Helpers for producing table states PyIceberg cannot write on its own.
 
-**Not part of the maintenance API.** Nothing in `icemaint` calls this at
+**Not part of the maintenance API.** Nothing in `zamboni` calls this at
 runtime; it exists so tests and the demo can construct merge-on-read tables.
 
 PyIceberg's `delete()` and `upsert()` are both copy-on-write, so there is no

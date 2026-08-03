@@ -1,6 +1,6 @@
 """Rewrite backend interface.
 
-A backend turns one :class:`~icemaint.planner.FileGroup` into a list of new
+A backend turns one :class:`~zamboni.planner.FileGroup` into a list of new
 :class:`~pyiceberg.manifest.DataFile` objects. It does not commit -- the
 committer owns that -- so a backend that fails leaves nothing but orphaned
 Parquet files, which the committer then cleans up.

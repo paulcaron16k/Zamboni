@@ -13,14 +13,14 @@ import pytest
 from pyiceberg.table.refs import MAIN_BRANCH, SnapshotRef, SnapshotRefType
 from pyiceberg.table.snapshots import Operation, Snapshot, Summary
 
-from icemaint.expire import (
+from zamboni.expire import (
     DEFAULT_MAX_SNAPSHOT_AGE_MS,
     RetentionPolicy,
     SnapshotExpirer,
     decide_retention,
     files_of_snapshots,
 )
-from icemaint.reachable import reachable_files
+from zamboni.reachable import reachable_files
 
 from .conftest import SCHEMA, batch
 from .test_reachable import list_storage

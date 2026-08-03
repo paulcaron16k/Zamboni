@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from icemaint import CompactionConfig, CompactionPlanner, TableCompactor
-from icemaint.config import DEFAULT_TARGET_FILE_SIZE_BYTES, resolve_target_file_size
-from icemaint.profile import profile_table
+from zamboni import CompactionConfig, CompactionPlanner, TableCompactor
+from zamboni.config import DEFAULT_TARGET_FILE_SIZE_BYTES, resolve_target_file_size
+from zamboni.profile import profile_table
 
 
 def test_min_input_files_skips_small_partitions(session, unpartitioned):

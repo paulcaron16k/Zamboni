@@ -284,7 +284,7 @@ class MetadataSettings:
     Both default to ``None``, meaning "leave the table property alone". Setting
     ``previous_versions_max`` *without* ``delete_after_commit`` trims the log
     but deletes nothing, turning every dropped entry into an unreferenced file
-    -- see :mod:`icemaint.properties` for the measured behaviour. That is a
+    -- see :mod:`zamboni.properties` for the measured behaviour. That is a
     supported choice, because orphan removal sweeps them behind its age guard,
     and it is the safer one under concurrent writers.
     """

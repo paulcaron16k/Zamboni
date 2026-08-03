@@ -1,7 +1,7 @@
 # HIMS Discharge Demo — Requirements
 
 A developer-facing demo that shows, over five days of simulated hospital ingestion, what
-small-file accumulation does to an Iceberg table and what `icemaint` maintenance does about
+small-file accumulation does to an Iceberg table and what `zamboni` maintenance does about
 it.
 
 **Audience:** developers evaluating the maintenance tooling.
@@ -17,7 +17,7 @@ it.
 ./bin/demo next-day              # ingest day 2 ...
 ./bin/demo status                # re-print status on demand
 ./bin/demo query                 # list discharges and events, with timings
-./bin/demo maintenance           # run icemaint, then print status automatically
+./bin/demo maintenance           # run zamboni, then print status automatically
 ./bin/demo query                 # same queries, compare
 ...
 ./bin/demo next-day              # after day 5 -> "No More Data"
@@ -173,7 +173,7 @@ DAYS_INGESTED=0         # 0 = cleared, 1 = day 1 ingested, … 5 = all days
 
 ## 5. Layout optimisation
 
-Declared in `table-config.json`, consumed by `icemaint`.
+Declared in `table-config.json`, consumed by `zamboni`.
 
 | Table | Partition | Ordering | Rationale |
 |---|---|---|---|
@@ -211,7 +211,7 @@ buried.
 | `mode [cow\|mor]` | Show or set `WRITE_MODE`. Refuses to change mode mid-run (must `clear` first) | yes |
 | `next-day` | Ingest the next day's CSVs, then print `status`. After day 5 prints **"No More Data"** | yes |
 | `status` | Iceberg metadata + stats: snapshots, live and on-disk file counts, sizes, partition/spec layout, delete files, size histogram | no |
-| `maintenance` | Run `icemaint` with `table-config.json` -- compact, expire snapshots, remove orphans -- then print `status` | yes |
+| `maintenance` | Run `zamboni` with `table-config.json` -- compact, expire snapshots, remove orphans -- then print `status` | yes |
 | `maintenance --reclaim-now` | The same, with the snapshot age and orphan age guard both set to zero, so storage falls within one run. Prints why that is unsafe outside a demo | yes |
 | `query` | Run the discharge and event queries in DuckDB, print results and timings | no |
 
@@ -228,7 +228,7 @@ Each of these was verified against the installed stack, not assumed.
 | **PyIceberg 0.11.1 has no `VariantType`** (types are `Binary…UUID`, no variant) | `hims_events.data` is **VARCHAR holding JSON**, not VARIANT. Queries use DuckDB's `json_extract` |
 | **PyIceberg cannot write position deletes** — its `delete()` and `upsert()` are copy-on-write | `mode mor` must **hand-write position delete files** (the technique already proven in `tests/conftest.py::add_position_deletes`). This simulates what Spark or Flink would emit; it is not PyIceberg doing it |
 | **Python 3.13 has no `uuid.uuid7()`** (stdlib gains it in 3.14) | UUIDv7 is generated locally: 48-bit millisecond timestamp + random. Time-ordered, which also helps z-order locality |
-| **DuckDB cannot ATTACH a SQLite Iceberg catalog** (only REST) | `query` reads through PyIceberg into Arrow, then queries with DuckDB. Same pattern `icemaint` already uses |
+| **DuckDB cannot ATTACH a SQLite Iceberg catalog** (only REST) | `query` reads through PyIceberg into Arrow, then queries with DuckDB. Same pattern `zamboni` already uses |
 | **Equality deletes are blocked** by PyIceberg scan planning | MoR mode uses **position deletes only** |
 
 ### 7.2 Schema additions beyond the brief

@@ -12,8 +12,8 @@ import pytest
 from pyarrow.fs import FileSelector
 from pyiceberg.io.pyarrow import PyArrowFileIO
 
-from icemaint.reachable import Category, canonical, reachable_files
-from icemaint.testing import add_position_deletes
+from zamboni.reachable import Category, canonical, reachable_files
+from zamboni.testing import add_position_deletes
 
 from .conftest import SCHEMA, batch
 
@@ -135,8 +135,8 @@ def test_reachable_covers_a_partitioned_multi_spec_table(session):
     """Evolution leaves files under two specs; both must stay reachable."""
     import datetime as dt
 
-    from icemaint import CompactionConfig, TableCompactor
-    from icemaint.tableconfig import (
+    from zamboni import CompactionConfig, TableCompactor
+    from zamboni.tableconfig import (
         EvolutionRule,
         PartitionEvolution,
         TableConfig,
@@ -199,7 +199,7 @@ def test_canonical_is_not_idempotent_for_object_keys():
 
 def test_listing_keys_match_reachable_keys(busy_table):
     """The property the bug broke, asserted on the two sets directly."""
-    from icemaint.orphans import list_storage, storage_roots
+    from zamboni.orphans import list_storage, storage_roots
 
     storage = set(list_storage(busy_table, storage_roots(busy_table)))
     referenced = reachable_files(busy_table).paths

@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from icemaint import CompactionConfig, MemoryMode, TableCompactor
-from icemaint.committer import (
+from zamboni import CompactionConfig, MemoryMode, TableCompactor
+from zamboni.committer import (
     ConcurrentModification,
     ReplaceCommitter,
     assert_supported_pyiceberg,
 )
-from icemaint.compactor import CompactionBlocked
-from icemaint.profile import Finding, Severity, TableProfile, profile_table
+from zamboni.compactor import CompactionBlocked
+from zamboni.profile import Finding, Severity, TableProfile, profile_table
 
 from .conftest import SCHEMA, batch
 
@@ -76,7 +76,7 @@ def test_concurrent_write_is_refused_not_lost(session, unpartitioned):
 
 def test_row_count_mismatch_aborts_before_commit(session, unpartitioned, monkeypatch):
     """A rewrite that loses rows must never reach the table."""
-    from icemaint.backends.duckdb_arrow import DuckDBArrowBackend
+    from zamboni.backends.duckdb_arrow import DuckDBArrowBackend
 
     original = DuckDBArrowBackend._read_table
 

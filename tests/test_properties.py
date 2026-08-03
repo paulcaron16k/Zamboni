@@ -12,15 +12,15 @@ from pathlib import Path
 
 import pytest
 
-from icemaint.orphans import OrphanCleaner
-from icemaint.properties import (
+from zamboni.orphans import OrphanCleaner
+from zamboni.properties import (
     PROP_DELETE_AFTER_COMMIT,
     PROP_PREVIOUS_VERSIONS_MAX,
     apply_metadata_properties,
     desired_properties,
     unreferenced_metadata_files,
 )
-from icemaint.tableconfig import MetadataSettings
+from zamboni.tableconfig import MetadataSettings
 
 from .conftest import SCHEMA, batch
 
@@ -150,7 +150,7 @@ def test_dry_run_changes_nothing(session, unpartitioned):
 
 
 def test_a_zero_version_limit_is_rejected():
-    from icemaint.tableconfig import TableConfigError
+    from zamboni.tableconfig import TableConfigError
 
     with pytest.raises(TableConfigError, match="must be >= 1"):
         MetadataSettings(previous_versions_max=0).validate("retention.metadata")

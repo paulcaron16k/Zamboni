@@ -2,7 +2,7 @@
 
 `table_schema.json` is the logical contract -- columns, types, primary key,
 replication key. The physical layout it gets written under comes from
-`table-config.json` and is applied by `icemaint`. Keeping them apart means an
+`table-config.json` and is applied by `zamboni`. Keeping them apart means an
 analyst can change how a table is laid out without touching what it holds.
 """
 
@@ -23,7 +23,7 @@ from pyiceberg.table import Table
 from pyiceberg.transforms import DayTransform, IdentityTransform
 from pyiceberg.types import NestedField, StringType, TimestampType
 
-from icemaint.tableconfig import TableConfig
+from zamboni.tableconfig import TableConfig
 
 #: Only the types this demo's schema uses. Deliberately small: an unmapped type
 #: should fail loudly rather than be silently coerced to string.

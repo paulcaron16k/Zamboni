@@ -278,8 +278,8 @@ class DanglingDeleteCleaner:
             )
 
         properties = {
-            "icemaint.operation": "remove-dangling-deletes",
-            "icemaint.removed-delete-files": str(len(report.removable)),
+            "zamboni.operation": "remove-dangling-deletes",
+            "zamboni.removed-delete-files": str(len(report.removable)),
         }
         with tbl.transaction() as txn:
             producer = _RemoveDeleteFiles(

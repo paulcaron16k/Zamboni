@@ -24,7 +24,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 from pyiceberg.table import Table
 
-from icemaint.testing import locate_rows, write_position_deletes
+from zamboni.testing import locate_rows, write_position_deletes
 
 from .schema import SchemaDocument, TableDefinition, read_csv
 
@@ -161,7 +161,7 @@ def _apply_merge_on_read(tbl: Table, changed: pa.Table, key: str) -> int:
     PyIceberg cannot do this: its `delete()` and `upsert()` are both
     copy-on-write. So the superseded rows get a position delete file and the
     new versions are appended, which is the shape Spark or Flink would leave
-    behind. See :mod:`icemaint.testing`.
+    behind. See :mod:`zamboni.testing`.
     """
     keys = set(changed.column(key).to_pylist())
     # Locate the superseded rows *before* appending, or the new versions would

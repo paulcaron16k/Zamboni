@@ -42,7 +42,7 @@ class OrphanCleanupAborted(RuntimeError):
 @dataclass(frozen=True)
 class StorageFile:
     #: The comparison key: the form a listing returns, which is what
-    #: :func:`icemaint.reachable.canonical` maps metadata locations onto.
+    #: :func:`zamboni.reachable.canonical` maps metadata locations onto.
     path: str
     #: The form to hand to ``FileIO.delete``. On object storage these differ --
     #: a listing yields ``bucket/key`` while the FileIO needs ``s3://bucket/key``

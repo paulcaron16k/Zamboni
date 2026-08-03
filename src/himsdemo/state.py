@@ -94,7 +94,7 @@ class DemoState:
         self.root.mkdir(parents=True, exist_ok=True)
         marker = f"INGESTING_DAY={self.ingesting_day}\n" if self.ingesting_day else ""
         self.env_path.write_text(
-            "# icemaint HIMS demo state. Safe to read; edit via ./bin/demo.\n"
+            "# zamboni HIMS demo state. Safe to read; edit via ./bin/demo.\n"
             f"WRITE_MODE={self.write_mode}\n"
             f"DAYS_INGESTED={self.days_ingested}\n" + marker
         )

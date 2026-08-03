@@ -19,10 +19,10 @@ from pyiceberg.schema import Schema
 from pyiceberg.transforms import DayTransform
 from pyiceberg.types import IntegerType, NestedField, TimestampType
 
-from icemaint import CompactionConfig, TableCompactor
-from icemaint.evolution import plan_evolution
-from icemaint.profile import profile_table
-from icemaint.tableconfig import EvolutionRule, PartitionEvolution, TableConfig, TableSettings
+from zamboni import CompactionConfig, TableCompactor
+from zamboni.evolution import plan_evolution
+from zamboni.profile import profile_table
+from zamboni.tableconfig import EvolutionRule, PartitionEvolution, TableConfig, TableSettings
 
 TS_SCHEMA = Schema(
     NestedField(1, "id", IntegerType(), required=False),

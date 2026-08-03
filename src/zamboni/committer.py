@@ -112,9 +112,9 @@ class ReplaceCommitter:
             )
 
         properties = {
-            "icemaint.operation": "compaction",
-            "icemaint.removed-data-files": str(len(removed)),
-            "icemaint.added-data-files": str(len(added)),
+            "zamboni.operation": "compaction",
+            "zamboni.removed-data-files": str(len(removed)),
+            "zamboni.added-data-files": str(len(added)),
             **self._snapshot_properties,
         }
 
@@ -173,7 +173,7 @@ def cleanup_orphans(tbl: Table, data_files: list[DataFile]) -> int:
 def assert_supported_pyiceberg() -> None:
     """Refuse to run on a PyIceberg build whose internals would corrupt a table.
 
-    The checks themselves live in :mod:`icemaint.capabilities`, which probes the
+    The checks themselves live in :mod:`zamboni.capabilities`, which probes the
     installed build structurally rather than comparing version numbers.
     """
     from .capabilities import detect

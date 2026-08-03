@@ -11,13 +11,13 @@ from __future__ import annotations
 import pytest
 from pyiceberg.manifest import DataFileContent, ManifestContent
 
-from icemaint import CompactionConfig, TableCompactor
-from icemaint.deletes import (
+from zamboni import CompactionConfig, TableCompactor
+from zamboni.deletes import (
     DanglingDeleteCleaner,
     DanglingDeleteError,
     find_dangling,
 )
-from icemaint.profile import profile_table
+from zamboni.profile import profile_table
 
 
 def delete_files(tbl) -> list:
@@ -105,7 +105,7 @@ def test_removal_is_recorded_in_the_snapshot_summary(session, mor_table):
     assert summary["removed-delete-files"] == "1"
     assert summary["removed-position-deletes"] == "3"
     assert summary.operation.value == "replace"
-    assert summary["icemaint.operation"] == "remove-dangling-deletes"
+    assert summary["zamboni.operation"] == "remove-dangling-deletes"
 
 
 def test_removal_leaves_the_file_on_disk_for_time_travel(session, mor_table):
@@ -168,7 +168,7 @@ def test_a_partially_dangling_manifest_is_retained_not_rewritten(session, mor_ta
     reader would then treat position deletes as rows. Reclaiming less is the
     only safe answer available.
     """
-    from icemaint.deletes import DeleteManifest
+    from zamboni.deletes import DeleteManifest
 
     TableCompactor(session, "db.mor", CompactionConfig()).execute()
     tbl = session.table("db.mor")
@@ -202,8 +202,8 @@ def test_the_producer_refuses_to_rewrite_a_delete_manifest(session, partitioned)
     """
     from pyiceberg.table.snapshots import Operation
 
-    from icemaint.deletes import _RemoveDeleteFiles
-    from icemaint.testing import write_position_deletes
+    from zamboni.deletes import _RemoveDeleteFiles
+    from zamboni.testing import write_position_deletes
 
     by_partition: dict = {}
     for task in partitioned.scan().plan_files():

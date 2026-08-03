@@ -12,7 +12,7 @@ from pyiceberg.table.sorting import NullOrder, SortDirection, SortField, SortOrd
 from pyiceberg.transforms import BucketTransform, IdentityTransform
 from pyiceberg.types import IntegerType, NestedField, StringType
 
-from icemaint import CatalogSession
+from zamboni import CatalogSession
 
 SCHEMA = Schema(
     NestedField(1, "id", IntegerType(), required=False),
@@ -81,11 +81,11 @@ def partitioned(session):
 def add_position_deletes(tbl, target_path: str, positions: list[int]):
     """Attach a position delete file to ``target_path``.
 
-    Delegates to :mod:`icemaint.testing`, which the demo also uses -- PyIceberg
+    Delegates to :mod:`zamboni.testing`, which the demo also uses -- PyIceberg
     has no supported way to produce a merge-on-read table, so the one
     implementation of that workaround is shared rather than duplicated.
     """
-    from icemaint.testing import add_position_deletes as _add
+    from zamboni.testing import add_position_deletes as _add
 
     return _add(tbl, target_path, positions, name_hint="test")
 

@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from icemaint.tableconfig import (
+from zamboni.tableconfig import (
     DEFAULT_PARTITION_EVOLUTION,
     SPEC_VERSION,
     EvolutionRule,

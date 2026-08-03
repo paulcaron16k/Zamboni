@@ -11,8 +11,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from icemaint import CatalogSession, CompactionConfig, MemoryMode
-from icemaint.tableconfig import TableConfig
+from zamboni import CatalogSession, CompactionConfig, MemoryMode
+from zamboni.tableconfig import TableConfig
 
 from . import queries, stats
 from .ingest import ingest_day
@@ -54,7 +54,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("next-day", help="ingest the next day, then print status")
     sub.add_parser("status", help="Iceberg metadata and statistics")
-    maintenance = sub.add_parser("maintenance", help="run icemaint, then print status")
+    maintenance = sub.add_parser("maintenance", help="run zamboni, then print status")
     maintenance.add_argument(
         "--reclaim-now",
         action="store_true",
@@ -207,7 +207,7 @@ def _maintenance(state: DemoState, args: argparse.Namespace) -> int:
         print("nothing ingested yet -- run './bin/demo next-day' first")
         return 0
 
-    from icemaint import TableCompactor
+    from zamboni import TableCompactor
 
     session, schema, config, _tables = _open(state, create=True)
     try:
@@ -217,7 +217,7 @@ def _maintenance(state: DemoState, args: argparse.Namespace) -> int:
             memory_mode=MemoryMode.AUTO,
             temp_directory=str(state.spill_path),
         )
-        print("\n  Running icemaint")
+        print("\n  Running zamboni")
         print("  " + "─" * 74)
         if args.reclaim_now:
             print(
@@ -248,11 +248,11 @@ def _reclaim(session, identifier: str, config: TableConfig, *, reclaim_now: bool
     the rest -- writes that were made and then abandoned, and metadata versions
     dropped from the log.
     """
-    from icemaint.deletes import DanglingDeleteCleaner
-    from icemaint.expire import RetentionPolicy, SnapshotExpirer
-    from icemaint.manifests import ManifestRewriter
-    from icemaint.orphans import OrphanCleaner
-    from icemaint.properties import apply_metadata_properties
+    from zamboni.deletes import DanglingDeleteCleaner
+    from zamboni.expire import RetentionPolicy, SnapshotExpirer
+    from zamboni.manifests import ManifestRewriter
+    from zamboni.orphans import OrphanCleaner
+    from zamboni.properties import apply_metadata_properties
 
     retention = config.for_table(identifier).retention
 

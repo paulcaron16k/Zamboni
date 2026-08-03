@@ -249,7 +249,7 @@ class TableCompactor:
                 branch=self._config.branch,
                 snapshot_operation=self._config.snapshot_operation,
                 producer_cls=MultiSpecReplaceFiles,
-                snapshot_properties={"icemaint.evolution": group.label},
+                snapshot_properties={"zamboni.evolution": group.label},
             )
             try:
                 outcome = committer.commit(

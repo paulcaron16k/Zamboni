@@ -1,4 +1,4 @@
-# icemaint
+# Zamboni
 
 Iceberg table maintenance -- compaction, dangling-delete removal, manifest rewriting,
 snapshot expiry and orphan-file removal -- for a MinIO + Lakekeeper lakehouse, without Trino
@@ -108,7 +108,7 @@ file through its own producer puts it in a manifest labelled `content: data`, be
 `ManifestWriterV2` hardcodes the content and there is no delete-manifest writer. PyIceberg
 and DuckDB both dispatch on the *entry's* content and read such a table correctly, so
 nothing would have failed -- but an engine that prunes on manifest content would apply no
-deletes at all. `icemaint/testing.py` supplies the missing writer, and a test asserts every
+deletes at all. `zamboni/testing.py` supplies the missing writer, and a test asserts every
 manifest's content agrees with the files inside it.
 
 Requirements and domain model: [data/healthims/Demo_Requirements.md](data/healthims/Demo_Requirements.md).
@@ -135,9 +135,9 @@ example. Analysts can author it inside the Meltano/Singer catalog under an `x-ic
 key and generate the file:
 
 ```bash
-icemaint from-catalog .meltano/catalog.json --namespace analytics -o table-config.json
-icemaint validate-config table-config.json
-icemaint compact analytics.events --table-config table-config.json --yes
+zamboni from-catalog .meltano/catalog.json --namespace analytics -o table-config.json
+zamboni validate-config table-config.json
+zamboni compact analytics.events --table-config table-config.json --yes
 ```
 
 Days-to-months partition evolution is **on by default** (90 days); disable it fleet-wide in
@@ -156,7 +156,7 @@ target-sized files with PyIceberg's own writer, and commits the swap as a single
 `replace` snapshot per partition.
 
 ```python
-from icemaint import CatalogSession, CompactionConfig, S3Settings, TableCompactor
+from zamboni import CatalogSession, CompactionConfig, S3Settings, TableCompactor
 
 session = CatalogSession.for_lakekeeper(
     uri="http://localhost:8181/catalog",
@@ -200,15 +200,15 @@ uv run pytest -q
 uv run scripts/build-executable.py   # keep the executable in step with the lock
 ```
 
-### The `icemaint` executable
+### The `zamboni` executable
 
-`bin/icemaint` is a single-file PEP 723 script with every dependency pinned from
+`bin/zamboni` is a single-file PEP 723 script with every dependency pinned from
 `uv.lock` and a `#!/usr/bin/env -S uv run --script` shebang. uv builds and caches an
 isolated environment for it on first run, so it works from any directory without an
 activated venv and never picks up global packages:
 
 ```console
-$ /path/to/Zamboni/bin/icemaint doctor
+$ /path/to/Zamboni/bin/zamboni doctor
   pyiceberg                    0.11.1
   operation injectable         True
   REPLACE summary native       False
@@ -223,14 +223,14 @@ the tests do — without that pin uv resolves `>=3.11` to the newest interpreter
 you ship on a Python you never tested.
 
 ```console
-$ icemaint describe default.events --uri http://localhost:8181/catalog --warehouse demo
-$ icemaint plan     default.events ...
-$ icemaint compact  default.events ... --yes          # --yes required; --dry-run to preview
-$ icemaint expire   default.events ... --yes          # apply retention, delete what it orphans
-$ icemaint remove-orphans default.events ... --yes    # sweep unreferenced files
-$ icemaint remove-dangling-deletes default.events ... --yes   # drop deletes that apply to nothing
-$ icemaint rewrite-manifests default.events ... --yes  # regroup manifests by partition
-$ icemaint apply-properties default.events ... --yes   # metadata-retention table properties
+$ zamboni describe default.events --uri http://localhost:8181/catalog --warehouse demo
+$ zamboni plan     default.events ...
+$ zamboni compact  default.events ... --yes          # --yes required; --dry-run to preview
+$ zamboni expire   default.events ... --yes          # apply retention, delete what it orphans
+$ zamboni remove-orphans default.events ... --yes    # sweep unreferenced files
+$ zamboni remove-dangling-deletes default.events ... --yes   # drop deletes that apply to nothing
+$ zamboni rewrite-manifests default.events ... --yes  # regroup manifests by partition
+$ zamboni apply-properties default.events ... --yes   # metadata-retention table properties
 ```
 
 `expire` and `remove-orphans` are dry-run without `--yes`, like `compact`. Both take
@@ -238,7 +238,7 @@ $ icemaint apply-properties default.events ... --yes   # metadata-retention tabl
 accept overrides (`--max-snapshot-age-days`, `--min-snapshots-to-keep`,
 `--older-than-days`) for one-off runs.
 
-Catalog and S3 settings also read from `ICEMAINT_*` environment variables, so the same
+Catalog and S3 settings also read from `ZAMBONI_*` environment variables, so the same
 invocation works from a shell, a cron entry, or a container.
 
 ## Memory
@@ -334,7 +334,7 @@ bit-interleaving expression in `sort_expression`.
 
 Every version-dependent decision routes through `capabilities.detect()`, which probes the
 installed PyIceberg structurally — does this function exist, what does this signature
-accept, what does this source say. `icemaint doctor` prints the result.
+accept, what does this source say. `zamboni doctor` prints the result.
 
 This is not defensive over-engineering; it is the shape of the problem. PyIceberg 0.11.1
 is the current release, and unreleased main (heading for 0.12) already changes three of the
@@ -501,4 +501,4 @@ verbatim, `first_row_id` included.
 
 Rewriting a *partially* dangling delete manifest, and splitting a single partition across
 manifests. Both are limited by PyIceberg having no delete-manifest writer; both lift
-automatically if one appears, and `icemaint doctor` probes for it rather than assuming.
+automatically if one appears, and `zamboni doctor` probes for it rather than assuming.

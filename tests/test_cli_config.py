@@ -6,10 +6,10 @@ import json
 
 import pytest
 
-from icemaint.catalog_import import EXTENSION_KEY
-from icemaint.cli import main
-from icemaint.profile import profile_table
-from icemaint.tableconfig import TableConfig
+from zamboni.catalog_import import EXTENSION_KEY
+from zamboni.cli import main
+from zamboni.profile import profile_table
+from zamboni.tableconfig import TableConfig
 
 from .conftest import SCHEMA, batch
 

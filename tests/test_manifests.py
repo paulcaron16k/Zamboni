@@ -12,12 +12,12 @@ import pyarrow as pa
 import pytest
 from pyiceberg.manifest import ManifestContent
 
-from icemaint.manifests import (
+from zamboni.manifests import (
     ManifestRewriter,
     manifest_partition_spread,
     plan_rewrite,
 )
-from icemaint.testing import add_position_deletes
+from zamboni.testing import add_position_deletes
 
 from .conftest import ARROW_SCHEMA, batch
 
@@ -83,7 +83,7 @@ def test_tombstone_manifests_are_dropped(session, unpartitioned):
     keeps DELETED entries only when the *current* snapshot made them. So the
     manifest goes, and one live entry is left in one manifest.
     """
-    from icemaint import CompactionConfig, TableCompactor
+    from zamboni import CompactionConfig, TableCompactor
 
     TableCompactor(session, "db.unpartitioned", CompactionConfig()).execute()
     tbl = session.table("db.unpartitioned")
@@ -179,7 +179,7 @@ def test_the_snapshot_says_replace_and_moves_no_files(session, scattered):
     props = summary.additional_properties
 
     assert summary.operation.value == "replace"
-    assert props["icemaint.operation"] == "rewrite-manifests"
+    assert props["zamboni.operation"] == "rewrite-manifests"
     # No data file was added or removed, so neither counter may appear.
     assert "added-data-files" not in props
     assert "removed-data-files" not in props
@@ -234,7 +234,7 @@ def test_a_target_size_of_one_byte_splits_every_partition(session, scattered):
 
 
 def test_a_bad_target_size_property_is_rejected(session, scattered):
-    from icemaint.manifests import ManifestRewriteError
+    from zamboni.manifests import ManifestRewriteError
 
     scattered.transaction().set_properties(
         **{"write.manifest.target-size-bytes": "eight megs"}
@@ -290,8 +290,8 @@ def test_multi_spec_tables_keep_one_manifest_per_spec(session):
     """A manifest belongs to exactly one partition spec."""
     import datetime as dt
 
-    from icemaint import CompactionConfig, TableCompactor
-    from icemaint.tableconfig import EvolutionRule, PartitionEvolution, TableConfig, TableSettings
+    from zamboni import CompactionConfig, TableCompactor
+    from zamboni.tableconfig import EvolutionRule, PartitionEvolution, TableConfig, TableSettings
 
     from .test_evolution import DAY_SPEC, TS_ARROW, TS_SCHEMA
 

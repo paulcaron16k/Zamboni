@@ -52,7 +52,7 @@ class PyIcebergCapabilities:
     #: avro metadata it writes says ``content: data`` too -- so rewriting a
     #: delete manifest through it produces a manifest that claims to hold data
     #: files. Dangling-delete removal is therefore limited to dropping whole
-    #: delete manifests; see :mod:`icemaint.deletes`.
+    #: delete manifests; see :mod:`zamboni.deletes`.
     delete_manifests_writable: bool
 
     @property

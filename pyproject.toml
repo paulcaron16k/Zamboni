@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "icemaint"
+name = "zamboni"
 version = "0.1.0"
 description = "Iceberg table maintenance (compaction) for MinIO + Lakekeeper, without Trino or Spark"
 readme = "README.md"
@@ -24,14 +24,14 @@ bucket = ["pyiceberg-core>=0.5.0"]
 sql = ["pyiceberg[sql-sqlite]>=0.11.1"]
 
 [project.scripts]
-icemaint = "icemaint.cli:main"
+zamboni = "zamboni.cli:main"
 demo = "himsdemo.cli:main"
 
 [dependency-groups]
 dev = [
     "pytest>=8",
     "ruff>=0.6",
-    "icemaint[bucket,sql,s3]",
+    "zamboni[bucket,sql,s3]",
 ]
 
 [tool.uv]
@@ -40,7 +40,7 @@ dev = [
 default-groups = ["dev"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/icemaint", "src/himsdemo"]
+packages = ["src/zamboni", "src/himsdemo"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

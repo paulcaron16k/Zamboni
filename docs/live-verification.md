@@ -14,7 +14,7 @@ its own namespace, works only inside it, and drops it at the end.
 uv run scripts/verify-live.py --warehouse acme_db --map-host minio=172.19.0.2
 
 # Against the object store directly (SQL catalog, real credentials)
-uv run scripts/verify-live.py --direct-s3 s3://warehouse/icemaint-verify \
+uv run scripts/verify-live.py --direct-s3 s3://warehouse/zamboni-verify \
     --s3-endpoint http://172.19.0.2:9000
 ```
 
@@ -63,13 +63,13 @@ credentials; it asks Lakekeeper to sign each request. Lakekeeper signs object
 - `HeadObject` → `403 Forbidden` from MinIO, which is why compaction fails: its
   reader stats the file before opening it.
 
-None of this is a defect in `icemaint`, and none of it is a defect in
+None of this is a defect in `zamboni`, and none of it is a defect in
 Lakekeeper — `push-s3-delete-disabled: true` says plainly that clients are not
 meant to delete objects; that is the `tabular_purge` queue's job. It does mean:
 
 > **Storage reclamation needs a warehouse that vends credentials
 > (`sts-enabled: true`) or direct S3 credentials.** On a remote-signing
-> warehouse, `icemaint` can compact metadata and expire snapshots but cannot
+> warehouse, `zamboni` can compact metadata and expire snapshots but cannot
 > free a byte.
 
 `--bypass-remote-signing` sends `s3.remote-signing-enabled=false`, but

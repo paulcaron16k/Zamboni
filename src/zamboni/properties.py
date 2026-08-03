@@ -34,7 +34,7 @@ Orphan removal
     invariants. Slower to reclaim, and safe under concurrency.
 
 Default here is the second: leave ``delete-after-commit`` alone and let
-:mod:`icemaint.orphans` handle it. The first is available by declaring it.
+:mod:`zamboni.orphans` handle it. The first is available by declaring it.
 
 Under a REST catalog the server builds the new metadata, so the *trimming* is
 Lakekeeper's to do -- driven by the same property on the same table. The
@@ -120,7 +120,7 @@ def unreferenced_metadata_files(tbl: Table) -> int:
     its age guard. This is the number that explains why that guard has anything
     to sweep.
 
-    Listing goes through :func:`icemaint.orphans.list_storage` rather than a
+    Listing goes through :func:`zamboni.orphans.list_storage` rather than a
     second copy of it. An earlier version reached for ``PyArrowFileIO`` directly
     and so raised ``AttributeError`` on any deployment using ``FsspecFileIO`` --
     which is every Lakekeeper warehouse with remote signing, i.e. exactly where

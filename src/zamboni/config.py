@@ -72,7 +72,7 @@ class CompactionConfig:
             duckdb-iceberg's native compactor tells.
         branch: Target branch for the compaction snapshot.
         snapshot_operation: ``"replace"`` (spec-correct for compaction; needs a
-            small PyIceberg subclass, see :mod:`icemaint.committer`) or
+            small PyIceberg subclass, see :mod:`zamboni.committer`) or
             ``"overwrite"`` (no private-API subclassing, less precise label).
         dangling_delete_policy: What to do when a rewrite group's source files
             have delete files attached. ``"report"`` proceeds and counts them;
@@ -152,7 +152,7 @@ def resolve_target_file_size(config: CompactionConfig, table_properties: dict[st
 
 
 def config_from_table_settings(settings, base: CompactionConfig | None = None) -> CompactionConfig:
-    """Turn a declarative :class:`~icemaint.tableconfig.TableSettings` into a run config.
+    """Turn a declarative :class:`~zamboni.tableconfig.TableSettings` into a run config.
 
     Only the layout-target fields come from the table config; operational
     concerns (memory mode, temp directory, branch) stay on ``base`` so an

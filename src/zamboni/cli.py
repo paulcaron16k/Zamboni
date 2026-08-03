@@ -105,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="icemaint", description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(prog="zamboni", description=__doc__.splitlines()[0])
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -196,25 +196,23 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _add_catalog_args(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("catalog")
-    g.add_argument("--uri", default=os.environ.get("ICEMAINT_URI"), help="REST catalog endpoint")
-    g.add_argument("--warehouse", default=os.environ.get("ICEMAINT_WAREHOUSE"))
-    g.add_argument("--credential", default=os.environ.get("ICEMAINT_CREDENTIAL"))
-    g.add_argument("--token", default=os.environ.get("ICEMAINT_TOKEN"))
-    g.add_argument("--oauth2-server-uri", default=os.environ.get("ICEMAINT_OAUTH2_SERVER_URI"))
-    g.add_argument("--scope", default=os.environ.get("ICEMAINT_SCOPE"))
+    g.add_argument("--uri", default=os.environ.get("ZAMBONI_URI"), help="REST catalog endpoint")
+    g.add_argument("--warehouse", default=os.environ.get("ZAMBONI_WAREHOUSE"))
+    g.add_argument("--credential", default=os.environ.get("ZAMBONI_CREDENTIAL"))
+    g.add_argument("--token", default=os.environ.get("ZAMBONI_TOKEN"))
+    g.add_argument("--oauth2-server-uri", default=os.environ.get("ZAMBONI_OAUTH2_SERVER_URI"))
+    g.add_argument("--scope", default=os.environ.get("ZAMBONI_SCOPE"))
     g.add_argument(
         "--local-warehouse",
-        default=os.environ.get("ICEMAINT_LOCAL_WAREHOUSE"),
+        default=os.environ.get("ZAMBONI_LOCAL_WAREHOUSE"),
         help="path to a filesystem warehouse with a SQL catalog, instead of --uri",
     )
 
     s = p.add_argument_group("s3 / minio")
-    s.add_argument("--s3-endpoint", default=os.environ.get("ICEMAINT_S3_ENDPOINT"))
-    s.add_argument("--s3-access-key-id", default=os.environ.get("ICEMAINT_S3_ACCESS_KEY_ID"))
-    s.add_argument(
-        "--s3-secret-access-key", default=os.environ.get("ICEMAINT_S3_SECRET_ACCESS_KEY")
-    )
-    s.add_argument("--s3-region", default=os.environ.get("ICEMAINT_S3_REGION", "us-east-1"))
+    s.add_argument("--s3-endpoint", default=os.environ.get("ZAMBONI_S3_ENDPOINT"))
+    s.add_argument("--s3-access-key-id", default=os.environ.get("ZAMBONI_S3_ACCESS_KEY_ID"))
+    s.add_argument("--s3-secret-access-key", default=os.environ.get("ZAMBONI_S3_SECRET_ACCESS_KEY"))
+    s.add_argument("--s3-region", default=os.environ.get("ZAMBONI_S3_REGION", "us-east-1"))
 
 
 def _add_config_args(p: argparse.ArgumentParser) -> None:
@@ -248,7 +246,7 @@ def _session_from(args: argparse.Namespace) -> CatalogSession:
 
     if not args.uri or not args.warehouse:
         raise ValueError(
-            "need --uri and --warehouse (or ICEMAINT_URI / ICEMAINT_WAREHOUSE), "
+            "need --uri and --warehouse (or ZAMBONI_URI / ZAMBONI_WAREHOUSE), "
             "or --local-warehouse for a filesystem catalog"
         )
 

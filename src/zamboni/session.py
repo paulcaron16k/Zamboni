@@ -5,7 +5,7 @@ drift apart: the PyIceberg catalog that reads metadata and commits snapshots,
 and the DuckDB connection used to sort and to spill large rewrite groups.
 
 DuckDB is deliberately *not* asked to attach the Iceberg catalog here. Data is
-read through PyIceberg's scan (see :mod:`icemaint.backends.duckdb_arrow`), which
+read through PyIceberg's scan (see :mod:`zamboni.backends.duckdb_arrow`), which
 works identically for a Lakekeeper REST catalog and for the local SQL catalog
 used by the tests, and hands DuckDB a plain Arrow stream. The DuckDB Iceberg
 extension is only needed for the equality-delete story, which phase 1 blocks on.

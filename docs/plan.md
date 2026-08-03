@@ -1,4 +1,4 @@
-# icemaint — Delivery Plan
+# Zamboni — Delivery Plan
 
 **What was built, what proves it, and what is deliberately left out.**
 

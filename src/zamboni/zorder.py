@@ -23,7 +23,7 @@ The construction, per rewrite group:
    single-key sort only clusters the leading column.
 
 The output key is a signed BIGINT, so ``precision_bits * len(columns)`` must fit
-in 62 bits; :class:`~icemaint.tableconfig.ZOrder` enforces that at config-load
+in 62 bits; :class:`~zamboni.tableconfig.ZOrder` enforces that at config-load
 time rather than letting it silently overflow here.
 
 The ranking windows mean a full pass over the group before ordering. DuckDB
@@ -52,8 +52,8 @@ class ZOrderSQL:
         """A full SELECT that returns ``columns`` ordered by the z-order key."""
         projected = ", ".join(f'"{c}"' for c in columns)
         return (
-            f"WITH _icemaint_ranked AS ({self.projection.format(relation=relation)}) "
-            f"SELECT {projected} FROM _icemaint_ranked ORDER BY {self.key_column}"
+            f"WITH _zamboni_ranked AS ({self.projection.format(relation=relation)}) "
+            f"SELECT {projected} FROM _zamboni_ranked ORDER BY {self.key_column}"
         )
 
 
@@ -97,7 +97,7 @@ def build_zorder_sql(columns: list[str], precision_bits: int = 16) -> ZOrderSQL:
 
     projection = (
         "SELECT *, "
-        f"({interleave}) AS _icemaint_zkey "
+        f"({interleave}) AS _zamboni_zkey "
         "FROM (SELECT *, "
         + ", ".join(scale_terms)
         + " FROM (SELECT *, "
@@ -107,7 +107,7 @@ def build_zorder_sql(columns: list[str], precision_bits: int = 16) -> ZOrderSQL:
         + " FROM {relation}) _z_ranked) _z_spanned) _z_scaled"
     )
 
-    return ZOrderSQL(projection=projection, key_column="_icemaint_zkey")
+    return ZOrderSQL(projection=projection, key_column="_zamboni_zkey")
 
 
 def zorder_key(values: list[int], precision_bits: int) -> int:

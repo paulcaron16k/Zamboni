@@ -247,7 +247,7 @@ def _assess(tbl: Table, profile: TableProfile) -> list[Finding]:
                 "left referenced after compaction. Rewritten rows already have the "
                 "deletes applied and the new files carry a higher sequence number, "
                 "so this is correct but adds metadata. Clear it with "
-                "`icemaint remove-dangling-deletes`, which the maintenance run "
+                "`zamboni remove-dangling-deletes`, which the maintenance run "
                 "does immediately after compacting.",
             )
         )

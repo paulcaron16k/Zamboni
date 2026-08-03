@@ -7,8 +7,8 @@ import json
 
 import pytest
 
-from icemaint.cli import main
-from icemaint.profile import profile_table
+from zamboni.cli import main
+from zamboni.profile import profile_table
 
 from .conftest import SCHEMA, batch
 
@@ -271,7 +271,7 @@ def test_remove_orphans_aborts_with_a_distinct_exit_code(warehouse, session, cap
     """A safety abort must be distinguishable from an ordinary failure."""
     from pathlib import Path
 
-    from icemaint.reachable import Category, reachable_files
+    from zamboni.reachable import Category, reachable_files
 
     tbl = session.table("db.events")
     live = sorted(reachable_files(tbl).by_category[Category.DATA])[0]
@@ -310,12 +310,12 @@ def test_expire_aborts_with_the_same_exit_code_as_orphans(
     An operator scripting these should not have to learn two exit codes for
     "the tool stopped because it no longer trusts its own arithmetic".
     """
-    from icemaint.expire import ExpiryAborted
+    from zamboni.expire import ExpiryAborted
 
     def refuse(self, tbl, *, now=None):
         raise ExpiryAborted("db.events: 3 file(s) marked for deletion are still referenced")
 
-    monkeypatch.setattr("icemaint.expire.SnapshotExpirer.run", refuse)
+    monkeypatch.setattr("zamboni.expire.SnapshotExpirer.run", refuse)
 
     code = main(
         [

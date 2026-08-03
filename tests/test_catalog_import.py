@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-from icemaint.catalog_import import EXTENSION_KEY, config_from_catalog, load_catalog
-from icemaint.tableconfig import TableConfigError
+from zamboni.catalog_import import EXTENSION_KEY, config_from_catalog, load_catalog
+from zamboni.tableconfig import TableConfigError
 
 ICEBERG_BLOCK = {
     "partition": [{"column": "occurred_at", "transform": "day"}],
