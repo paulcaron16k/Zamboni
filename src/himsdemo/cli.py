@@ -11,7 +11,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from zamboni import CompactionConfig, MemoryMode
+from zamboni import CompactionConfig, MemoryMode, version_banner
 from zamboni.tableconfig import TableConfig
 
 from . import catalogs, queries, stats
@@ -49,6 +49,9 @@ def main(argv: list[str] | None = None) -> int:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="demo", description=__doc__.splitlines()[0])
+    # Same banner as `zamboni --version`: the demo ships from the same wheel, and
+    # what it demonstrates depends on the same probed PyIceberg.
+    parser.add_argument("--version", action="version", version=version_banner())
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help=argparse.SUPPRESS)
     parser.add_argument(
         "--catalog",

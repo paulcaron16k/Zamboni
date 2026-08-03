@@ -40,6 +40,7 @@ import os
 import sys
 from dataclasses import replace
 
+from . import version_banner
 from .capabilities import detect
 from .catalog_import import config_from_catalog, load_catalog
 from .compactor import CompactionBlocked, TableCompactor
@@ -128,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="zamboni", description=__doc__.splitlines()[0])
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("--version", action="version", version=version_banner())
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("doctor", help="report the installed PyIceberg's capabilities")

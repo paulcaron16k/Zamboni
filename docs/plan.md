@@ -7,7 +7,7 @@ Day-to-day operation is [runbook.md](runbook.md). Outstanding work is tracked in
 
 | | |
 |---|---|
-| Status | All planned operations implemented. 313 tests passing. Verified against a live Lakekeeper 0.13.1 + MinIO — [live-verification.md](live-verification.md) |
+| Status | All planned operations implemented. 327 tests passing. Verified against a live Lakekeeper 0.13.1 + MinIO — [live-verification.md](live-verification.md) |
 | In scope | Data-file compaction, layout ordering, partition evolution, dangling-delete removal, manifest rewriting, snapshot expiry, orphan-file removal, metadata retention |
 | Out of scope | Rewriting a *partially* dangling delete manifest; splitting one partition across manifests; format-version 3 row rewriting |
 | Demo | [../data/healthims](../data/healthims) — five days of simulated hospital discharge ingest |
@@ -188,13 +188,28 @@ test stops existing, so this table cannot rot silently.
 | FR-9.4 | Metadata-only operations stay allowed on V3 | `test_metadata_only_operations_are_not_blocked_by_v3`, `test_manifest_rewriting_preserves_the_v3_row_lineage_field` |
 | FR-9.5 | The upstream V3 guard is serialisation-only, so ours is needed | `test_the_upstream_block_is_serialisation_only`, `test_pyiceberg_cannot_write_v3_at_all` |
 
+### FR-10 — Versioning and releases
+
+The contract is in [releasing.md](releasing.md). Its substance is FR-10.5: for a
+tool that deletes files, a changed default is a breaking change with no signature
+moved, so the destructive defaults are named as public surface rather than left
+implicit.
+
+| ID | Requirement | Verified by |
+|---|---|---|
+| FR-10.1 | The version is declared once, in `pyproject.toml`, and derived everywhere else | `test_the_package_reports_the_declared_version`, `test_the_declared_version_is_semver` |
+| FR-10.2 | `--version` reports zamboni, PyIceberg and Python, since one alone does not identify behaviour | `test_the_version_banner_names_all_three_versions`, `test_both_entry_points_report_the_version_and_exit_zero` |
+| FR-10.3 | A changelog with somewhere to record the next change, and dated release sections | `test_the_changelog_has_somewhere_to_record_the_next_change`, `test_every_released_changelog_section_carries_a_date`, `test_the_changelog_checks_reject_a_malformed_changelog` |
+| FR-10.4 | A release cannot ship with the changelog ahead of the declared version | `test_the_declared_version_is_not_behind_the_changelog` |
+| FR-10.5 | The contract states what counts as breaking, including destructive defaults | `test_the_release_convention_is_documented` |
+
 ---
 
 ## 4. How it is verified
 
 Three layers, because each catches what the others cannot.
 
-**Unit and integration** — 300 of the 313 tests, against a SQL catalog over a temporary
+**Unit and integration** — 314 of the 327 tests, against a SQL catalog over a temporary
 directory. Fast, hermetic, and where every logic branch is exercised. Blind to anything about object storage.
 
 **Safety by omission** — the tests that matter most assert the tool **refuses**.

@@ -158,6 +158,10 @@ bypassed hook is worse than none.
 - **[docs/table-config.md](docs/table-config.md)** — the `table-config.json` specification.
 - **[docs/live-verification.md](docs/live-verification.md)** — what runs against a real
   Lakekeeper + MinIO, what a remote-signing warehouse blocks, and the two bugs it found.
+- **[docs/releasing.md](docs/releasing.md)** — what a version number promises, and the release
+  checklist. Mostly the first half: for a tool that deletes files, a changed default is a
+  breaking change with no signature moved, so the destructive defaults are public surface.
+- **[CHANGELOG.md](CHANGELOG.md)** — notable changes, with `BREAKING` and `SAFETY` called out.
 - **[examples/table-config.json](examples/table-config.json)** — worked example.
 
 ## Declarative table layout

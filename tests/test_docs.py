@@ -13,7 +13,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-DOCS = Path(__file__).resolve().parent.parent / "docs"
+ROOT = Path(__file__).resolve().parent.parent
+DOCS = ROOT / "docs"
 TESTS = Path(__file__).resolve().parent
 
 
@@ -43,12 +44,29 @@ def test_the_requirements_table_still_carries_its_evidence():
     assert len(cited) > 50, f"plan.md cites only {len(cited)} tests; expected the full matrix"
 
 
-def test_design_doc_links_resolve():
-    design_dir = DOCS
-    for doc in DOCS.glob("*.md"):
-        for target in re.findall(r"\]\((?!https?:)([^)#]+)", doc.read_text()):
-            resolved = (design_dir / target).resolve()
+def linking_docs() -> list[Path]:
+    """docs/*.md plus the two at the repository root.
+
+    Globbing only docs/ left README.md and CHANGELOG.md unchecked, and both link
+    into docs/ -- so the file most likely to be read first was the one file whose
+    links nothing verified. Relative targets resolve against each file's own
+    directory, which is why this returns paths rather than names.
+    """
+    return sorted(DOCS.glob("*.md")) + [
+        path for path in (ROOT / "README.md", ROOT / "CHANGELOG.md") if path.exists()
+    ]
+
+
+def test_doc_links_resolve():
+    checked = 0
+    for doc in linking_docs():
+        # Skip absolute URLs and mailto:; strip anchors, which are not paths.
+        for target in re.findall(r"\]\((?!https?:|mailto:)([^)#]+)", doc.read_text()):
+            resolved = (doc.parent / target).resolve()
             assert resolved.exists(), f"{doc.name} links to missing {target}"
+            checked += 1
+
+    assert checked > 20, f"only {checked} relative links found; the pattern stopped matching"
 
 
 # -- the task backlog ----------------------------------------------------

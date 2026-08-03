@@ -18,3 +18,10 @@ data/healthims/.spill/
 
 # Dev-stack secrets. dev-stack/.env.sample IS committed.
 dev-stack/.env
+
+# Editor scratch. Vim leaves .*.swp behind on a crashed session; one was very
+# nearly committed alongside a release-convention change, which would have been
+# a poor advertisement for it.
+*.swp
+*.swo
+*~

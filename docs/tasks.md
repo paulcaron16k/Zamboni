@@ -34,9 +34,9 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-7 | Format-version coverage | V1 refused, V2 full, V3 metadata-only. FR-6.8, FR-9.3–9.5. design §2.1, §6.1 | inproject | |
 | ZMBNI-8 | Environment and dev stack | Locked venv, self-contained executables, Lakekeeper + MinIO stack. design §6.4 | done | 2026-08-03 |
 | ZMBNI-9 | Verification and CI | The suite, live verification, and automation. plan.md §4 | inproject | |
-| ZMBNI-10 | Documentation | HLD, delivery plan, config spec, runbook, verification record | done | 2026-08-03 |
+| ZMBNI-10 | Documentation | HLD, delivery plan, config spec, runbook, release convention, verification record | done | 2026-08-03 |
 
-**Story counts:** 46 done · 1 inproject · 5 todo · 1 cancelled  (53 stories)
+**Story counts:** 47 done · 1 inproject · 4 todo · 1 cancelled  (53 stories)
 
 ---
 
@@ -137,13 +137,13 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-910 | Review the five unreviewed commits | Dev stack, CI, backlog, ZMBNI-908 and ZMBNI-505 had landed with verification but no review pass. Found four defects, all reproduced before fixing: a stale ref reported as dropped while still present, a false soft-delete claim in user-facing output, a queue assertion weaker than the claim it defended, and an untested behaviour change in `S3Settings` | done | 2026-08-03 |
 | ZMBNI-911 | Reconcile the --yes posture | One rule for all six verbs: without `--yes`, nothing is committed, and each says it is previewing. `compact` previews instead of exiting 2, and the notice is now unconditional — three verbs printed it only when they found work, so the rule was visible on some runs and not others. FR-6.2 | done | 2026-08-03 |
 | ZMBNI-912 | Make the CLI tests hermetic | `test_rest_catalog_requires_uri_and_warehouse` asserted the CLI errors without `--uri`/`--warehouse`, but every catalog flag also reads a `ZAMBONI_*` variable — and dev-stack/README.md tells developers to export two of them. It passed on a clean shell and failed on the shell of anyone who followed the instructions. Now clears them explicitly | done | 2026-08-03 |
-| ZMBNI-901 | Unit and integration suite | 313 tests against a SQL catalog over a temp directory. plan.md §4 | done | 2026-08-03 |
+| ZMBNI-901 | Unit and integration suite | 314 tests against a SQL catalog over a temp directory. plan.md §4 | done | 2026-08-03 |
 | ZMBNI-902 | Safety-by-omission tests | Monkeypatch each reference category away in turn and assert nothing is deleted. Without these, enabling orphan removal by default is unjustified. FR-7.7 | done | 2026-08-03 |
 | ZMBNI-903 | Live verification | Every operation against a real Lakekeeper 0.13.1 and MinIO. Found four bugs the local suite could not. [live-verification.md](live-verification.md) | done | 2026-08-03 |
-| ZMBNI-904 | Dev-stack tests | 12 tests asserting the stack is configured such that reclamation *can* work, skipping cleanly when it is down | done | 2026-08-03 |
+| ZMBNI-904 | Dev-stack tests | 13 tests asserting the stack is configured such that reclamation *can* work, skipping cleanly when it is down. The 13th arrived with ZMBNI-906, covering the one operation only `verify-live.py` had exercised | done | 2026-08-03 |
 | ZMBNI-905 | CI workflow | Four jobs written and every command verified locally, but **never executed by GitHub** — this repository has no remote, so nothing runs until one is added and pushed. Expect the first run to surface something; the likeliest is the pinned `172.31.0.0/24` colliding on a runner, which the job checks for by name | inproject | |
 | ZMBNI-906 | Retire `scripts/verify-live.py` | Not deleted: the premise that it was redundant was wrong. The tests read `dev-stack/.env` and so cannot be aimed elsewhere, while the script's real value is diagnosing a deployment this repo did not create — which is how the remote-signing finding came out. It is now a 90-line launcher for those tests instead of 348 lines reimplementing them, the tests take an environment override, and the one operation only the script covered has a test. Fixed two leaks it exposed: a namespace stranded when setup errors, and the demo test writing a fixed namespace into a foreign warehouse | done | 2026-08-03 |
-| ZMBNI-907 | Release process | Version is hardcoded `0.1.0` in `pyproject.toml` with no tagging or changelog convention. Needed before anyone depends on a version number | todo | |
+| ZMBNI-907 | Release process | Semver with the 0.x caveat, `vMAJOR.MINOR.PATCH` annotated tags, a Keep-a-Changelog `CHANGELOG.md`, and `--version` on both entry points reporting zamboni, PyIceberg and Python — one alone does not identify behaviour, since which operations are attempted is decided by probing the installed PyIceberg. The version is declared once in `pyproject.toml` and derived everywhere else. The substance is what counts as breaking *for this tool*: a lowered `older_than_days` deletes files on the next nightly run with no signature moved, so the destructive defaults are named as public surface. No `v0.1.0` tag yet — deliberate, pending ZMBNI-905, since CI has never run. FR-10.1–10.5. [releasing.md](releasing.md) | done | 2026-08-03 |
 | ZMBNI-908 | Type checking | mypy over `src` and `scripts`, enforced in the `lint` job and pre-commit. Demonstrated rather than assumed: reintroducing the `FileIO` has no `_initialize_fs` bug that took a live Lakekeeper run to find is now caught statically. Fixed 15 findings, of which 5 were real hazards -- an unguarded `Snapshot \| None`, a shadowed loop variable, a resolver whose type admitted `None`, and `S3Settings` requiring credentials a vending catalog supplies | done | 2026-08-03 |
 | ZMBNI-909 | One byte formatter | The same function existed in four modules and had already diverged -- three capped at GiB, one reached TiB -- so a size formatted differently depending on which module reported it. Consolidated into `zamboni.units.human_bytes` with tests | done | 2026-08-03 |
 
@@ -165,7 +165,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 
 ## What is actually left
 
-One story is in flight, 5 are open, and one is closed as a decision rather than a gap.
+One story is in flight, 4 are open, and one is closed as a decision rather than a gap.
 
 **In flight — ZMBNI-905.** The CI workflow exists and every command in it was run locally,
 but GitHub has never executed it: this repository has no remote. That is the single item
@@ -175,11 +175,11 @@ standing between "tests pass on my machine" and "tests pass". Nothing else is st
 capability probe or a named upstream limitation, and each lifts on its own when PyIceberg
 grows the capability. They are tracked so nobody re-investigates from scratch.
 
-**Ours to schedule — one.**
-
-| | |
-|---|---|
-| ZMBNI-907 | No release or versioning convention |
+**Ours to schedule — none.** ZMBNI-907 was the last, and closing it leaves ZMBNI-905 as the
+only work not waiting on PyIceberg. Note that the two are coupled in one direction: the
+release convention is in place and enforced by tests, but the first `v0.1.0` tag waits on
+ZMBNI-905, because tagging a release whose test matrix has never executed would put a
+version number on an unverified claim. See [releasing.md §4](releasing.md).
 
 **Closed as a decision — ZMBNI-605.** Splitting one partition across manifests would defeat
 the pruning that manifest regrouping exists to create, so it is cancelled rather than

@@ -202,3 +202,18 @@ have come from the config or a table property.
 window has opened. Compare the `data files` and `on disk` lines: `on disk` staying
 high with `N superseded` means the files are retained for time travel, exactly as
 designed.
+
+**Reporting any of the above.** Quote `zamboni --version`, which reports all three
+versions that matter:
+
+```console
+$ zamboni --version
+zamboni 0.1.0 (pyiceberg 0.11.1, python 3.13.14)
+```
+
+The PyIceberg version is not decoration. Which operations this tool will attempt
+is decided by probing the installed build rather than comparing versions
+(`zamboni doctor` prints the full result), so the same Zamboni refuses equality
+deletes against one PyIceberg and reads them against another. What a version
+change is allowed to alter — including the defaults that decide what gets deleted
+— is in [releasing.md](releasing.md).

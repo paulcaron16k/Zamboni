@@ -1,8 +1,17 @@
 """Iceberg table maintenance without Trino or Spark.
 
-Phase 1 covers data-file compaction for copy-on-write tables and for
-merge-on-read tables using position deletes or V3 deletion vectors.
+Compaction, ordering and partition evolution; snapshot expiry, orphan-file
+removal, dangling-delete removal, manifest regrouping and metadata retention.
+Format version 2 throughout: V1 is refused, V3 is metadata-only.
+
+What a release of this is allowed to change is in docs/releasing.md. For a tool
+whose job includes deleting files, a changed default is a breaking change even
+when no signature moved -- so the contract is written down rather than implied.
 """
+
+import sys
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _distribution_version
 
 from .backends.base import RewriteBackend, RewriteContext, RewriteOutput
 from .capabilities import PyIcebergCapabilities, detect
@@ -12,6 +21,41 @@ from .config import CompactionConfig, MemoryMode
 from .planner import CompactionPlan, CompactionPlanner, FileGroup
 from .profile import Finding, Severity, TableProfile, profile_table
 from .session import CatalogSession, S3Settings
+
+# Read from the installed distribution rather than repeated as a literal here.
+# pyproject.toml is the single source of truth, so `zamboni --version` cannot
+# disagree with the wheel it came from -- the failure mode of a hand-maintained
+# __version__ is that it goes stale precisely when it matters, in a bug report.
+try:
+    __version__ = _distribution_version("zamboni")
+except PackageNotFoundError:  # pragma: no cover - importable but not installed
+    __version__ = "0+unknown"
+
+
+def version_banner() -> str:
+    """Three versions, because one of them does not explain a bug report.
+
+    Which operations this tool will even attempt is decided by probing the
+    installed PyIceberg (see ``capabilities.py``), so "zamboni 0.1.0" alone does
+    not identify the behaviour someone is reporting: the same zamboni refuses
+    equality deletes on one PyIceberg and reads them on another.
+
+    Python is in there because it genuinely varies. The package declares
+    ``>=3.11``, CI runs the suite on 3.11 and 3.13, and the executables in
+    ``bin/`` pin ``==3.13.*`` -- so "which Python" is a real question with three
+    plausible answers rather than a constant worth omitting.
+
+    ``importlib.metadata`` reads metadata without importing either package, so
+    this is cheap enough for argparse to build on every invocation.
+    """
+    try:
+        pyiceberg = _distribution_version("pyiceberg")
+    except PackageNotFoundError:  # pragma: no cover - a hard dependency
+        pyiceberg = "not installed"
+
+    python = ".".join(str(part) for part in sys.version_info[:3])
+    return f"zamboni {__version__} (pyiceberg {pyiceberg}, python {python})"
+
 
 __all__ = [
     "CatalogSession",
@@ -34,6 +78,8 @@ __all__ = [
     "TableCompactor",
     "TableProfile",
     "UnsupportedPyIceberg",
+    "__version__",
     "detect",
     "profile_table",
+    "version_banner",
 ]
