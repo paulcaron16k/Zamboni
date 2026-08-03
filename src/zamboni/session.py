@@ -127,8 +127,12 @@ class S3Settings:
     """MinIO / S3 connection details for PyIceberg's FileIO."""
 
     endpoint: str
-    access_key_id: str
-    secret_access_key: str
+    #: Optional, because a credential-vending catalog supplies them per table.
+    #: Pointing at an endpoint while letting Lakekeeper vend the keys is a valid
+    #: and useful combination, and passing `None` through to PyIceberg as if it
+    #: were a key is not -- so an absent credential is omitted rather than sent.
+    access_key_id: str | None = None
+    secret_access_key: str | None = None
     region: str = "us-east-1"
     path_style_access: bool = True
     extra: dict[str, str] = field(default_factory=dict)
@@ -136,12 +140,14 @@ class S3Settings:
     def as_properties(self) -> dict[str, str]:
         props = {
             "s3.endpoint": self.endpoint,
-            "s3.access-key-id": self.access_key_id,
-            "s3.secret-access-key": self.secret_access_key,
             "s3.region": self.region,
             # MinIO serves bucket-in-path, not bucket-as-subdomain.
             "s3.path-style-access": "true" if self.path_style_access else "false",
         }
+        if self.access_key_id is not None:
+            props["s3.access-key-id"] = self.access_key_id
+        if self.secret_access_key is not None:
+            props["s3.secret-access-key"] = self.secret_access_key
         props.update(self.extra)
         return props
 

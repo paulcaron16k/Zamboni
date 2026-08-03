@@ -121,7 +121,7 @@ Event catalogue: [data/healthims/HIMS_Discharge_Process_Events.md](data/healthim
 
 | Job | What it guards |
 |---|---|
-| `lint` | ruff check and format; `uv sync --frozen` fails on a stale lockfile; pre-commit and CI must pin the same ruff |
+| `lint` | ruff check and format; mypy over `src` and `scripts`; `uv sync --frozen` fails on a stale lockfile; pre-commit and CI must pin the same ruff |
 | `test` | The suite on Python **3.11 and 3.13** — the floor `pyproject.toml` claims and the version pinned for development |
 | `executables` | `bin/` regenerates to a no-op, and both PEP 723 scripts run **from outside the project directory** |
 | `dev-stack` | The real thing: brings up Lakekeeper + Postgres + MinIO from `.env.sample`, bootstraps it, runs the 12 dev-stack tests, then the demo end to end |

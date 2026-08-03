@@ -192,6 +192,14 @@ hermetic, and where every logic branch is exercised. Blind to anything about obj
 `tests/test_orphans.py` monkeypatches each reference category away in turn and asserts
 nothing is deleted. Without these, enabling orphan removal by default would be unjustified.
 
+**Static** — mypy over `src` and `scripts`, in the `lint` job and pre-commit. Deliberately
+not `strict`: this package drives private PyIceberg internals on purpose, and a strict run is
+dominated by untyped-call noise from exactly those. The rules enabled are the ones that catch
+what this codebase actually gets wrong — `None` reaching an attribute access, and a value
+used as a type it is not. That is not a guess: reintroducing the `FileIO has no
+_initialize_fs` bug from [live-verification.md](live-verification.md) is caught statically,
+and two of the four bugs found there were of that shape.
+
 **Automated** — [.github/workflows/ci.yml](../.github/workflows/ci.yml) runs all of the
 above plus the dev stack on every push and pull request. Two details are load-bearing:
 `ZAMBONI_REQUIRE_DEV_STACK=1` makes an unreachable stack a failure rather than a skip, and

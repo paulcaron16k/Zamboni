@@ -134,7 +134,9 @@ class CompactionPlanner:
 
 def _partition_label(partition: Record) -> str:
     try:
-        values = list(partition)
+        # Record is iterable at runtime -- PyIceberg's own code does this --
+        # but its type does not declare __iter__, hence the narrow ignore.
+        values = list(partition)  # type: ignore[call-overload]
     except TypeError:  # pragma: no cover - defensive
         return repr(partition)
     return "()" if not values else "(" + ", ".join(repr(v) for v in values) + ")"

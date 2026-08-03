@@ -67,10 +67,21 @@ class RetentionPolicy:
     ) -> RetentionPolicy:
         """Config wins, then the Iceberg table property, then the spec default."""
 
-        def prop(name: str, default: int | None) -> int | None:
+        def prop(name: str, default: int) -> int:
+            """A required knob: the caller always supplies a spec default."""
             raw = table_properties.get(name)
             if raw is None:
                 return default
+            try:
+                return int(raw)
+            except ValueError:
+                raise ValueError(f"table property {name!r} is not an integer: {raw!r}") from None
+
+        def optional_prop(name: str) -> int | None:
+            """A knob with no default: absent means "not configured"."""
+            raw = table_properties.get(name)
+            if raw is None:
+                return None
             try:
                 return int(raw)
             except ValueError:
@@ -90,7 +101,7 @@ class RetentionPolicy:
             max_ref_age_ms=(
                 _days_to_ms(max_ref_age_days)
                 if max_ref_age_days is not None
-                else prop(PROP_MAX_REF_AGE, None)
+                else optional_prop(PROP_MAX_REF_AGE)
             ),
         )
 

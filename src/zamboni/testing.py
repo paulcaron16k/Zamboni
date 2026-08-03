@@ -104,7 +104,7 @@ def locate_rows(tbl: Table, key_column: str, keys: set[str]) -> dict[str, list[i
     found: dict[str, list[int]] = {}
     for task in tbl.scan().plan_files():
         path = task.file.file_path
-        seen = covered.get(path, frozenset())
+        seen: set[int] | frozenset[int] = covered.get(path, frozenset())
         with tbl.io.new_input(path).open() as fh:
             column = pq.read_table(fh, columns=[key_column])[key_column].to_pylist()
         positions = [i for i, value in enumerate(column) if value in keys and i not in seen]

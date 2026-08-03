@@ -30,6 +30,7 @@ demo = "himsdemo.cli:main"
 [dependency-groups]
 dev = [
     "pre-commit>=4.6.1",
+    "mypy>=1.14",
     "pytest>=8",
     "python-dotenv>=1.2.2",
     "ruff>=0.6",
@@ -57,3 +58,20 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "RUF", "ISC", "PIE"]
 [tool.ruff.lint.per-file-ignores]
 # Tests reach into private helpers on purpose to pin internal behaviour.
 "tests/*" = ["SLF001"]
+
+[tool.mypy]
+# Scoped to the shipped packages and the scripts, not to tests. Test code
+# deliberately reaches into private internals and monkeypatches types; checking
+# it would generate noise that trains people to ignore the checker.
+files = ["src", "scripts"]
+python_version = "3.11"
+# PyIceberg ships no stubs for several modules we depend on.
+ignore_missing_imports = true
+# Not `strict`. This package drives private PyIceberg internals on purpose, and
+# a strict run is dominated by untyped-call noise from those. The rules enabled
+# here are the ones that catch the errors this codebase actually makes: None
+# reaching an attribute access, and a value used as a type it is not. Two of the
+# four bugs found by live verification were exactly that.
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true

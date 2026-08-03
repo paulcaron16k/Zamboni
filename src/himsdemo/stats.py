@@ -17,6 +17,7 @@ from zamboni.orphans import list_storage, storage_roots
 from zamboni.profile import TableProfile, profile_table
 from zamboni.reachable import reachable_files
 from zamboni.tableconfig import TableConfig
+from zamboni.units import human_bytes
 
 
 @dataclass
@@ -177,15 +178,6 @@ def _size_of(tbl: Table, path: str) -> int:
         return 0
 
 
-def human(n: int) -> str:
-    value = float(n)
-    for unit in ("B", "KiB", "MiB", "GiB"):
-        if abs(value) < 1024 or unit == "GiB":
-            return f"{value:.0f}{unit}" if unit == "B" else f"{value:.1f}{unit}"
-        value /= 1024.0
-    return f"{value:.1f}GiB"  # pragma: no cover
-
-
 def render(stats: list[TableStats], *, write_mode: str, days_ingested: int) -> str:
     from .state import TOTAL_DAYS
 
@@ -201,15 +193,16 @@ def render(stats: list[TableStats], *, write_mode: str, days_ingested: int) -> s
             f"      layout        {s.declared_layout}",
             f"      rows          {s.live_rows}",
             (
-                f"      data files    {s.data_files:<6} total {human(s.total_bytes):>9}"
-                f"   avg {human(s.average_bytes):>9}"
+                f"      data files    {s.data_files:<6} total {human_bytes(s.total_bytes):>9}"
+                f"   avg {human_bytes(s.average_bytes):>9}"
             ),
             (
-                f"      on disk       {s.on_disk.files:<6} total {human(s.on_disk.total_bytes):>9}"
+                f"      on disk       {s.on_disk.files:<6} "
+                f"total {human_bytes(s.on_disk.total_bytes):>9}"
                 f"   {s.on_disk.superseded} superseded, {s.on_disk.unreferenced} unreferenced"
             ),
             (
-                f"      manifests     {s.manifests:<6} metadata {human(s.metadata_bytes):>8}"
+                f"      manifests     {s.manifests:<6} metadata {human_bytes(s.metadata_bytes):>8}"
                 f"   snapshots {s.snapshots}"
             ),
         ]

@@ -49,6 +49,7 @@ from pyiceberg.table import Table
 from pyiceberg.table.snapshots import Operation
 
 from .committer import ConcurrentModification, _ReplaceFiles
+from .units import human_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +156,7 @@ class DanglingReport:
         ]
         if self.removable:
             lines.append(
-                f"  {len(self.removable)} removable ({_human(self.removable_bytes)}) "
+                f"  {len(self.removable)} removable ({human_bytes(self.removable_bytes)}) "
                 f"in {len(self.manifests_dropped)} whole manifest(s)"
             )
         if self.stuck:
@@ -165,15 +166,6 @@ class DanglingReport:
                 "manifest to split it"
             )
         return "\n".join(lines)
-
-
-def _human(n: int) -> str:
-    value = float(n)
-    for unit in ("B", "KiB", "MiB", "GiB"):
-        if abs(value) < 1024 or unit == "GiB":
-            return f"{value:.0f}{unit}" if unit == "B" else f"{value:.1f}{unit}"
-        value /= 1024.0
-    return f"{value:.1f}GiB"  # pragma: no cover
 
 
 def find_dangling(tbl: Table) -> DanglingReport:
@@ -219,8 +211,10 @@ def find_dangling(tbl: Table) -> DanglingReport:
     for path, delete_files in per_manifest.items():
         dangling = tuple(f for f in delete_files if f not in applied)
         report.dangling_files += len(dangling)
-        manifest = DeleteManifest(path=path, live=tuple(delete_files), dangling=dangling)
-        if manifest.fully_dangling:
+        # Not `manifest`: that name is the ManifestFile from the loop above, and
+        # rebinding it to a different type here reads as the same thing.
+        grouped = DeleteManifest(path=path, live=tuple(delete_files), dangling=dangling)
+        if grouped.fully_dangling:
             report.removable.extend(dangling)
             report.manifests_dropped.append(path)
         else:
@@ -241,7 +235,9 @@ class DeleteCleanupResult:
         verb = "would remove" if self.dry_run else "removed"
         lines = [self.report.describe()]
         if self.removed:
-            lines.append(f"  {verb} {self.removed} delete file(s) ({_human(self.removed_bytes)})")
+            lines.append(
+                f"  {verb} {self.removed} delete file(s) ({human_bytes(self.removed_bytes)})"
+            )
         return "\n".join(lines)
 
 

@@ -85,7 +85,7 @@ def _partition_key(entry: ManifestEntry) -> tuple:
     partition = entry.data_file.partition
     if partition is None:
         return ()
-    return tuple(partition)
+    return tuple(partition)  # type: ignore[arg-type]  # Record is iterable
 
 
 @dataclass
@@ -179,7 +179,8 @@ def plan_rewrite(
         plan.skipped_reason = "table has no snapshot"
         return plan
 
-    data_manifests, delete_manifests = [], []
+    data_manifests: list[ManifestFile] = []
+    delete_manifests: list[ManifestFile] = []
     for manifest in snapshot.manifests(io=tbl.io):
         (data_manifests if manifest.content == ManifestContent.DATA else delete_manifests).append(
             manifest
@@ -325,6 +326,10 @@ class ManifestRewriter:
             return result
 
         snapshot = tbl.current_snapshot()
+        # `worth_doing` implies a snapshot exists -- plan_rewrite cannot produce
+        # bins without one. Asserting it says so out loud, so a future change to
+        # either side fails here rather than on a None attribute access.
+        assert snapshot is not None, "worth_doing implies a current snapshot"
         result.manifests_before = len(snapshot.manifests(io=tbl.io))
         result.manifests_after = len(plan.bins) + len(plan.kept)
         if self._dry_run:

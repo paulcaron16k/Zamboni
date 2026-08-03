@@ -40,6 +40,11 @@ jobs:
           test "$locked" = "$hooked" \
             || { echo "::error::ruff mismatch -- uv.lock has $locked, .pre-commit-config.yaml pins $hooked"; exit 1; }
 
+      # Config declares its own file set, so no arguments. Catches None reaching
+      # an attribute access and values used as types they are not -- two of the
+      # four bugs live verification found were exactly that.
+      - run: uv run mypy
+
       - run: uv run pre-commit run --all-files --show-diff-on-failure
 
   test:

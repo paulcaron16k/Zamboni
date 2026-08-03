@@ -29,6 +29,7 @@ from pyiceberg.io.pyarrow import PyArrowFileIO
 from pyiceberg.table import Table
 
 from .reachable import Category, ReachableSet, canonical, reachable_files
+from .units import human_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -77,25 +78,16 @@ class OrphanResult:
                 f"{self.identifier}: scanned {self.scanned} file(s), "
                 f"{self.referenced} referenced, {self.orphans} unreferenced"
             ),
-            f"  {verb} {self.deleted} file(s) ({_human(self.deleted_bytes)})",
+            f"  {verb} {self.deleted} file(s) ({human_bytes(self.deleted_bytes)})",
         ]
         if self.too_young:
             lines.append(
-                f"  {self.too_young} file(s) ({_human(self.too_young_bytes)}) left in place: "
+                f"  {self.too_young} file(s) ({human_bytes(self.too_young_bytes)}) left in place: "
                 f"younger than the {self.older_than_days}-day age guard"
             )
         if self.failed:
             lines.append(f"  {self.failed} file(s) could not be deleted")
         return "\n".join(lines)
-
-
-def _human(n: int) -> str:
-    value = float(n)
-    for unit in ("B", "KiB", "MiB", "GiB"):
-        if abs(value) < 1024 or unit == "GiB":
-            return f"{value:.0f}{unit}" if unit == "B" else f"{value:.1f}{unit}"
-        value /= 1024.0
-    return f"{value:.1f}GiB"  # pragma: no cover
 
 
 def storage_roots(tbl: Table) -> list[str]:

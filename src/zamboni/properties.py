@@ -108,7 +108,7 @@ def apply_metadata_properties(tbl: Table, settings, *, dry_run: bool = False) ->
         return result
 
     with tbl.transaction() as txn:
-        txn.set_properties(**{c.key: c.now for c in result.changes})
+        txn.set_properties(properties={c.key: c.now for c in result.changes})
     tbl.refresh()
     return result
 

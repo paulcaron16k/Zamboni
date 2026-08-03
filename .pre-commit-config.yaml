@@ -37,6 +37,16 @@ repos:
 
   - repo: local
     hooks:
+      # The project's own mypy via uv, not pre-commit's mirror: a mirror pins a
+      # different version and resolves different stubs, so it disagrees with CI
+      # about what is an error. Same reason the ruff rev is pinned to uv.lock.
+      - id: mypy
+        name: mypy
+        entry: uv run mypy
+        language: system
+        pass_filenames: false
+        files: ^(src|scripts)/.*\.py$
+
       - id: no-dev-stack-env
         name: dev-stack/.env must never be committed
         entry: dev-stack/.env is gitignored for a reason -- it holds credentials

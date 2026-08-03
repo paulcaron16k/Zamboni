@@ -36,7 +36,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-9 | Verification and CI | The suite, live verification, and automation. plan.md §4 | inproject | |
 | ZMBNI-10 | Documentation | HLD, delivery plan, config spec, verification record. See ZMBNI-1007 | inproject | |
 
-**Story counts:** 36 done · 1 inproject · 11 todo · 1 cancelled  (49 stories)
+**Story counts:** 38 done · 1 inproject · 10 todo · 1 cancelled  (50 stories)
 
 ---
 
@@ -141,7 +141,8 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-905 | CI workflow | Four jobs written and every command verified locally, but **never executed by GitHub** — this repository has no remote, so nothing runs until one is added and pushed. Expect the first run to surface something; the likeliest is the pinned `172.31.0.0/24` colliding on a runner, which the job checks for by name | inproject | |
 | ZMBNI-906 | Retire `scripts/verify-live.py` | Now largely redundant with `tests/test_dev_stack.py`, which covers the same ground inside the suite. Its `--map-host` flag is also unnecessary against the dev stack. Keep only what the tests do not cover, or delete it | todo | |
 | ZMBNI-907 | Release process | Version is hardcoded `0.1.0` in `pyproject.toml` with no tagging or changelog convention. Needed before anyone depends on a version number | todo | |
-| ZMBNI-908 | Type checking | No mypy or equivalent in CI. The package leans on private PyIceberg internals whose signatures change between releases, which is exactly where a type check earns its cost | todo | |
+| ZMBNI-908 | Type checking | mypy over `src` and `scripts`, enforced in the `lint` job and pre-commit. Demonstrated rather than assumed: reintroducing the `FileIO` has no `_initialize_fs` bug that took a live Lakekeeper run to find is now caught statically. Fixed 15 findings, of which 5 were real hazards -- an unguarded `Snapshot \| None`, a shadowed loop variable, a resolver whose type admitted `None`, and `S3Settings` requiring credentials a vending catalog supplies | done | 2026-08-03 |
+| ZMBNI-909 | One byte formatter | The same function existed in four modules and had already diverged -- three capped at GiB, one reached TiB -- so a size formatted differently depending on which module reported it. Consolidated into `zamboni.units.human_bytes` with tests | done | 2026-08-03 |
 
 ---
 
@@ -161,7 +162,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 
 ## What is actually left
 
-One story is in flight, eleven are open, and one is closed as a decision rather than a gap.
+One story is in flight, 10 are open, and one is closed as a decision rather than a gap.
 
 **In flight — ZMBNI-905.** The CI workflow exists and every command in it was run locally,
 but GitHub has never executed it: this repository has no remote. That is the single item
@@ -171,14 +172,13 @@ standing between "tests pass on my machine" and "tests pass". Nothing else is st
 capability probe or a named upstream limitation, and each lifts on its own when PyIceberg
 grows the capability. They are tracked so nobody re-investigates from scratch.
 
-**Ours to schedule — seven.** In rough order of what would bite first:
+**Ours to schedule — six.** In rough order of what would bite first:
 
 | | |
 |---|---|
 | ZMBNI-505 | `max-ref-age-ms` is detected but not applied, so a stale ref quietly costs reclaimable storage |
 | ZMBNI-106 | Compaction is not atomic across partitions; a partial failure leaves a mixed state |
 | ZMBNI-303 | Compound partition specs cannot evolve, and are skipped rather than guessed at |
-| ZMBNI-908 | No type checking, on a package that leans on private PyIceberg internals |
 | ZMBNI-906 | `scripts/verify-live.py` now duplicates `tests/test_dev_stack.py` |
 | ZMBNI-1007 | No operator runbook: nothing says how often to run any of this |
 | ZMBNI-907 | No release or versioning convention |

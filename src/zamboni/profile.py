@@ -19,6 +19,7 @@ from pyiceberg.table import Table
 from pyiceberg.typedef import Record
 
 from .capabilities import detect
+from .units import human_bytes
 
 
 class Severity:
@@ -93,7 +94,7 @@ class TableProfile:
         """Count live files by size band. The small-file tail is the thing you
         are usually trying to see."""
         edges = sorted(buckets)
-        labels = [f"<{_human(e)}" for e in edges] + [f">={_human(edges[-1])}"]
+        labels = [f"<{human_bytes(e)}" for e in edges] + [f">={human_bytes(edges[-1])}"]
         counts = dict.fromkeys(labels, 0)
         for f in self.live_files:
             for edge, label in zip(edges, labels, strict=False):
@@ -112,7 +113,7 @@ class TableProfile:
             ),
             (
                 f"  live data files : {len(self.live_files)}  "
-                f"({_human(self.total_bytes)}, {self.total_records} rows)"
+                f"({human_bytes(self.total_bytes)}, {self.total_records} rows)"
             ),
             f"  size histogram  : {self.size_histogram()}",
             f"  partition specs : {sorted(self.spec_ids)} (default {self.default_spec_id})",
@@ -262,11 +263,3 @@ def _assess(tbl: Table, profile: TableProfile) -> list[Finding]:
 
 def _non_order_preserving_fields(spec: PartitionSpec) -> list[str]:
     return [f.name for f in spec.fields if not f.transform.preserves_order]
-
-
-def _human(n: int) -> str:
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if abs(n) < 1024 or unit == "TiB":
-            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
-        n /= 1024.0
-    return f"{n}B"  # pragma: no cover

@@ -395,7 +395,7 @@ def _transform_name(transform) -> str:
 
 
 def _single_partition_value(live: LiveFile) -> int | None:
-    values = list(live.partition)
+    values = list(live.partition)  # type: ignore[call-overload]  # Record is iterable
     if len(values) != 1 or values[0] is None:
         return None
     return int(values[0])
