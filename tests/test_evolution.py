@@ -226,3 +226,80 @@ def test_snapshot_summary_labels_use_each_file_s_own_spec(session, capsys):
     assert not any(k.startswith("partitions.ts_day=19") for k in labels), (
         f"a month partition value was rendered through the day spec: {labels}"
     )
+
+
+def test_evolution_honours_the_overwrite_escape_hatch(session):
+    """`snapshot_operation="overwrite"` must reach an evolved table too.
+
+    MultiSpecReplaceFiles hardcoded REPLACE in its summary, so any evolved table
+    silently produced a replace snapshot however it was configured -- defeating
+    the option that exists for anyone unwilling to depend on the relabelling
+    subclass at all. Latent until an atomic commit routed every table through
+    that producer.
+    """
+    import datetime as dt
+
+    tbl = session.catalog.create_table(
+        "db.evolved_overwrite",
+        schema=TS_SCHEMA,
+        partition_spec=DAY_SPEC,
+        properties={"format-version": "2"},
+    )
+    for d in range(1, 5):
+        tbl.append(pa.table({"id": [d], "ts": [dt.datetime(2026, 1, d)]}, schema=TS_ARROW))
+
+    config = TableConfig(
+        defaults=TableSettings(
+            partition_evolution=PartitionEvolution(
+                enabled=True, rules=(EvolutionRule("day", "month", 90),)
+            )
+        ),
+        tables={},
+    )
+    result = TableCompactor.from_table_config(
+        session,
+        "db.evolved_overwrite",
+        config,
+        base=CompactionConfig(snapshot_operation="overwrite"),
+    ).execute()
+    assert result.evolved, "nothing evolved; the fixture no longer exercises this"
+
+    snapshot = session.table("db.evolved_overwrite").current_snapshot()
+    assert snapshot.summary.operation.value == "overwrite"
+
+
+def test_an_atomic_commit_records_every_evolved_group(session):
+    """One snapshot covering several evolved groups must name them all.
+
+    Per-group commits each carried their own `zamboni.evolution` label; a single
+    commit that kept only one would lose the record of what it did.
+    """
+    import datetime as dt
+
+    tbl = session.catalog.create_table(
+        "db.evolved_many",
+        schema=TS_SCHEMA,
+        partition_spec=DAY_SPEC,
+        properties={"format-version": "2"},
+    )
+    # Two distinct months, so evolution produces two groups.
+    for month, day in ((1, 3), (1, 4), (2, 5), (2, 6)):
+        tbl.append(pa.table({"id": [day], "ts": [dt.datetime(2026, month, day)]}, schema=TS_ARROW))
+
+    config = TableConfig(
+        defaults=TableSettings(
+            partition_evolution=PartitionEvolution(
+                enabled=True, rules=(EvolutionRule("day", "month", 90),)
+            )
+        ),
+        tables={},
+    )
+    result = TableCompactor.from_table_config(
+        session, "db.evolved_many", config, base=CompactionConfig()
+    ).execute()
+
+    assert len(result.evolved) == 2, f"expected two month groups, got {result.evolved}"
+    assert len({g.snapshot_id for g in result.evolved}) == 1, "not a single commit"
+
+    label = session.table("db.evolved_many").current_snapshot().summary["zamboni.evolution"]
+    assert "2026-01" in label and "2026-02" in label, label

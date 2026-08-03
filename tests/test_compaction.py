@@ -198,3 +198,129 @@ def test_no_sort_expression_leaves_sort_order_unset(session, unpartitioned):
     TableCompactor(session, "db.unpartitioned", CompactionConfig()).execute()
     after = profile_table(session.table("db.unpartitioned"))
     assert all(f.data_file.sort_order_id is None for f in after.live_files)
+
+
+# -- atomic vs partial-progress commits ----------------------------------
+
+
+def snapshot_ids(tbl) -> list[int]:
+    return [s.snapshot_id for s in tbl.metadata.snapshots]
+
+
+def test_a_multi_partition_rewrite_commits_once_by_default(session, partitioned):
+    """Iceberg's default, and now ours: "a single commit when the entire job has
+    completed". Two partitions previously produced two snapshots."""
+    before = len(snapshot_ids(partitioned))
+    rows_before = sorted(partitioned.scan().to_arrow()["id"].to_pylist())
+
+    result = TableCompactor(session, "db.partitioned", CompactionConfig()).execute()
+
+    tbl = session.table("db.partitioned")
+    assert len(result.groups) == 2, "expected one group per partition"
+    assert len(snapshot_ids(tbl)) == before + 1, "more than one snapshot for one run"
+    # Every group reports the same snapshot, because there was only one.
+    assert len({g.snapshot_id for g in result.groups}) == 1
+    assert sorted(tbl.scan().to_arrow()["id"].to_pylist()) == rows_before
+
+
+def test_partial_progress_commits_each_group(session, partitioned):
+    before = len(snapshot_ids(partitioned))
+    rows_before = sorted(partitioned.scan().to_arrow()["id"].to_pylist())
+
+    result = TableCompactor(
+        session, "db.partitioned", CompactionConfig(partial_progress=True)
+    ).execute()
+
+    tbl = session.table("db.partitioned")
+    assert len(snapshot_ids(tbl)) == before + 2, "expected one snapshot per group"
+    assert len({g.snapshot_id for g in result.groups}) == 2
+    assert sorted(tbl.scan().to_arrow()["id"].to_pylist()) == rows_before
+
+
+def test_an_atomic_run_that_fails_leaves_the_table_untouched(session, partitioned, monkeypatch):
+    """The property the default buys: all or nothing.
+
+    The second group's rewrite fails, so the first group's work must not be
+    visible either -- which is the difference from partial progress.
+    """
+    from zamboni import compactor as compactor_module
+
+    real = compactor_module.DuckDBArrowBackend.rewrite
+    calls = {"n": 0}
+
+    def fail_on_second(self, group, ctx):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("boom")
+        return real(self, group, ctx)
+
+    monkeypatch.setattr(compactor_module.DuckDBArrowBackend, "rewrite", fail_on_second)
+
+    before = snapshot_ids(partitioned)
+    rows_before = sorted(partitioned.scan().to_arrow()["id"].to_pylist())
+
+    with pytest.raises(RuntimeError, match="boom"):
+        TableCompactor(session, "db.partitioned", CompactionConfig()).execute()
+
+    tbl = session.table("db.partitioned")
+    assert snapshot_ids(tbl) == before, "a failed atomic run committed something"
+    assert sorted(tbl.scan().to_arrow()["id"].to_pylist()) == rows_before
+
+
+def test_partial_progress_keeps_what_already_committed(session, partitioned, monkeypatch):
+    """The other side of the trade, asserted rather than assumed.
+
+    Per Iceberg this is not a correctness problem -- "file groups can be
+    compacted independently" -- it is a predictability one, so the behaviour is
+    worth pinning in both directions.
+    """
+    from zamboni import compactor as compactor_module
+
+    real = compactor_module.DuckDBArrowBackend.rewrite
+    calls = {"n": 0}
+
+    def fail_on_second(self, group, ctx):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("boom")
+        return real(self, group, ctx)
+
+    monkeypatch.setattr(compactor_module.DuckDBArrowBackend, "rewrite", fail_on_second)
+
+    before = len(snapshot_ids(partitioned))
+    rows_before = sorted(partitioned.scan().to_arrow()["id"].to_pylist())
+
+    with pytest.raises(RuntimeError, match="boom"):
+        TableCompactor(session, "db.partitioned", CompactionConfig(partial_progress=True)).execute()
+
+    tbl = session.table("db.partitioned")
+    assert len(snapshot_ids(tbl)) == before + 1, "the first group's commit was lost"
+    assert sorted(tbl.scan().to_arrow()["id"].to_pylist()) == rows_before, "rows changed"
+
+
+def test_a_failed_atomic_run_leaves_no_referenced_file_missing(session, partitioned, monkeypatch):
+    """Cleanup after a failed atomic run must not touch live files."""
+    from zamboni import compactor as compactor_module
+    from zamboni.orphans import list_storage, storage_roots
+    from zamboni.reachable import reachable_files
+
+    real = compactor_module.DuckDBArrowBackend.rewrite
+    calls = {"n": 0}
+
+    def fail_on_second(self, group, ctx):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("boom")
+        return real(self, group, ctx)
+
+    monkeypatch.setattr(compactor_module.DuckDBArrowBackend, "rewrite", fail_on_second)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        TableCompactor(session, "db.partitioned", CompactionConfig()).execute()
+
+    tbl = session.table("db.partitioned")
+    referenced = reachable_files(tbl).paths
+    on_disk = set(list_storage(tbl, storage_roots(tbl)))
+    assert referenced <= on_disk, (
+        f"{len(referenced - on_disk)} referenced file(s) were deleted by the cleanup"
+    )

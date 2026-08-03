@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, replace
 
 from pyiceberg.manifest import DataFile
 
-from .backends.base import RewriteBackend, RewriteContext
+from .backends.base import RewriteBackend, RewriteContext, RewriteOutput
 from .backends.duckdb_arrow import DuckDBArrowBackend
 from .committer import ReplaceCommitter, assert_supported_pyiceberg, cleanup_orphans
 from .config import (
@@ -188,26 +188,135 @@ class TableCompactor:
         if plan.is_empty and evolution_plan.is_empty:
             return result
 
-        committer = ReplaceCommitter(
-            branch=self._config.branch,
-            snapshot_operation=self._config.snapshot_operation,
-        )
-
+        # Adding a partition spec is a metadata update that leaves
+        # `current_snapshot_id` alone (verified), so the spec change can land
+        # first and one expected-snapshot check still covers the whole run.
         if evolution_plan.groups:
-            tbl = self._run_evolution(tbl, evolution_plan, result)
+            needed = {
+                g.target_spec_id: evolution_plan.required_specs[g.target_spec_id]
+                for g in evolution_plan.groups
+            }
+            ensure_specs(tbl, needed)
+            tbl = self._session.table(self._identifier)
 
-        for group in plan.groups:
-            group_result = self._run_group(tbl, group, committer)
-            result.groups.append(group_result)
+        if self._config.partial_progress:
+            self._run_incrementally(tbl, evolution_plan, plan, result)
+        else:
+            self._run_atomically(tbl, evolution_plan, plan, result)
+        return result
+
+    # -- the two commit strategies ---------------------------------------
+
+    def _run_atomically(self, tbl, evolution_plan: EvolutionPlan, plan, result) -> None:
+        """Rewrite everything, then commit it in one snapshot.
+
+        The default, and Iceberg's: "The default is false, which produces a
+        single commit when the entire job has completed." Every group is planned
+        and rewritten against one snapshot, so there is one concurrency check
+        rather than a chain of them, and a failure anywhere leaves the table
+        exactly as it was.
+
+        The cost is that every output file is written before anything is
+        committed, so a failure leaves more to clean up. That cleanup is
+        best-effort and its leftovers are ordinary orphans, which is a storage
+        cost rather than a correctness one.
+        """
+        expected = tbl.metadata.current_snapshot_id
+        removed: list[DataFile] = []
+        added: list[DataFile] = []
+        pending: list[tuple[GroupResult, bool]] = []
+
+        try:
+            for group in evolution_plan.groups:
+                output = self._rewrite_evolution_group(tbl, group)
+                removed += [f.data_file for f in group.files]
+                added += output.data_files
+                pending.append(
+                    (_group_result(f"evolution {group.label}", group.files, output), True)
+                )
+
+            for group in plan.groups:
+                output = self._rewrite_group(tbl, group)
+                removed += [f.data_file for f in group.files]
+                added += output.data_files
+                pending.append((_group_result(group.describe(), group.files, output), False))
+
+            if not added and not removed:
+                return
+
+            # MultiSpecReplaceFiles for every atomic commit, not only evolved
+            # ones: the added files may now span specs, and it delegates to
+            # upstream when they do not.
+            committer = ReplaceCommitter(
+                branch=self._config.branch,
+                snapshot_operation=self._config.snapshot_operation,
+                producer_cls=MultiSpecReplaceFiles,
+                snapshot_properties=_evolution_labels(evolution_plan),
+            )
+            outcome = committer.commit(
+                tbl, expected_snapshot_id=expected, removed=removed, added=added
+            )
+        except Exception:
+            cleanup_orphans(tbl, added)
+            raise
+
+        for group_result, evolved in pending:
+            group_result.snapshot_id = outcome.snapshot_id
+            (result.evolved if evolved else result.groups).append(group_result)
             result.rewritten_data_files += group_result.rewritten_data_files
             result.added_data_files += group_result.added_data_files
             result.rewritten_bytes += group_result.rewritten_bytes
             result.added_bytes += group_result.added_bytes
+
+    def _run_incrementally(self, tbl, evolution_plan: EvolutionPlan, plan, result) -> None:
+        """Commit each group as it completes.
+
+        Opt-in. Preferable on a table large enough that redoing the whole rewrite
+        after one failure is worse than living with a mixed state -- which, per
+        Iceberg, is not a correctness problem: "file groups can be compacted
+        independently".
+        """
+        for group in evolution_plan.groups:
+            output = self._rewrite_evolution_group(tbl, group)
+            committer = ReplaceCommitter(
+                branch=self._config.branch,
+                snapshot_operation=self._config.snapshot_operation,
+                producer_cls=MultiSpecReplaceFiles,
+                snapshot_properties={"zamboni.evolution": group.label},
+            )
+            outcome = self._commit_one(tbl, committer, group.files, output)
+            result.evolved.append(
+                _group_result(f"evolution {group.label}", group.files, output, outcome.snapshot_id)
+            )
+            _accumulate(result, group.files, output)
+            tbl = self._session.table(self._identifier)
+
+        committer = ReplaceCommitter(
+            branch=self._config.branch,
+            snapshot_operation=self._config.snapshot_operation,
+        )
+        for group in plan.groups:
+            output = self._rewrite_group(tbl, group)
+            outcome = self._commit_one(tbl, committer, group.files, output)
+            result.groups.append(
+                _group_result(group.describe(), group.files, output, outcome.snapshot_id)
+            )
+            _accumulate(result, group.files, output)
             # Every commit moves the table forward; the next group must plan
             # against the snapshot the previous commit produced.
             tbl = self._session.table(self._identifier)
 
-        return result
+    def _commit_one(self, tbl, committer, files, output):
+        try:
+            return committer.commit(
+                tbl,
+                expected_snapshot_id=tbl.metadata.current_snapshot_id,
+                removed=[f.data_file for f in files],
+                added=output.data_files,
+            )
+        except Exception:
+            cleanup_orphans(tbl, output.data_files)
+            raise
 
     # -- partition evolution ---------------------------------------------
 
@@ -216,108 +325,75 @@ class TableCompactor:
             return EvolutionPlan(groups=[], skipped=[], required_specs={})
         return plan_evolution(tbl, self._settings, profile.live_files)
 
-    def _run_evolution(self, tbl, plan: EvolutionPlan, result: CompactionResult):
-        """Rewrite each aged group under the coarser spec and commit it."""
-        needed = {g.target_spec_id: plan.required_specs[g.target_spec_id] for g in plan.groups}
-        tbl = ensure_specs(tbl, needed)
-        tbl = self._session.table(self._identifier)
-
-        for group in plan.groups:
-            file_group = FileGroup(
-                spec_id=group.files[0].spec_id,
-                partition=group.files[0].partition,
-                files=group.files,
-                target_file_size_bytes=self._config.target_file_size_bytes
-                or DEFAULT_TARGET_FILE_SIZE_BYTES,
-            )
-            # Writing under the coarse spec is what actually merges the days:
-            # left on the table's day spec, the writer would split the group
-            # right back into one file per day. It also has PyIceberg derive the
-            # month partition value from the data rather than trusting our
-            # arithmetic.
-            ctx = RewriteContext(table=tbl, config=self._config, write_spec_id=group.target_spec_id)
-            output = self._backend.rewrite(file_group, ctx)
-
-            if output.written_rows != output.source_live_rows:
-                cleanup_orphans(tbl, output.data_files)
-                raise RuntimeError(
-                    f"evolution of {group.label} produced {output.written_rows} rows but "
-                    f"the source holds {output.source_live_rows}; nothing was committed"
-                )
-
-            committer = ReplaceCommitter(
-                branch=self._config.branch,
-                snapshot_operation=self._config.snapshot_operation,
-                producer_cls=MultiSpecReplaceFiles,
-                snapshot_properties={"zamboni.evolution": group.label},
-            )
-            try:
-                outcome = committer.commit(
-                    tbl,
-                    expected_snapshot_id=tbl.metadata.current_snapshot_id,
-                    removed=[f.data_file for f in group.files],
-                    added=output.data_files,
-                )
-            except Exception:
-                cleanup_orphans(tbl, output.data_files)
-                raise
-
-            result.evolved.append(
-                GroupResult(
-                    group=f"evolution {group.label}",
-                    rewritten_data_files=outcome.removed_files,
-                    added_data_files=outcome.added_files,
-                    rewritten_bytes=outcome.removed_bytes,
-                    added_bytes=outcome.added_bytes,
-                    snapshot_id=outcome.snapshot_id,
-                )
-            )
-            result.rewritten_data_files += outcome.removed_files
-            result.added_data_files += outcome.added_files
-            result.rewritten_bytes += outcome.removed_bytes
-            result.added_bytes += outcome.added_bytes
-            tbl = self._session.table(self._identifier)
-
-        return tbl
-
-    def _run_group(self, tbl, group: FileGroup, committer: ReplaceCommitter) -> GroupResult:
-        ctx = RewriteContext(table=tbl, config=self._config)
-
-        output = self._backend.rewrite(group, ctx)
-        added: list[DataFile] = output.data_files
-
-        # The rewrite must be row-preserving. Checking here, before the commit,
-        # is what stops a bad read from ever reaching the table. The comparison
-        # is against *live* rows, not the manifests' physical record_count --
-        # those differ by exactly the deleted rows on a merge-on-read table.
-        if output.written_rows != output.source_live_rows:
-            cleanup_orphans(tbl, added)
-            raise RuntimeError(
-                f"rewrite of {group.describe()} produced {output.written_rows} rows but "
-                f"the source files hold {output.source_live_rows} live rows; "
-                "nothing was committed"
-            )
-
-        removed = [f.data_file for f in group.files]
-        try:
-            outcome = committer.commit(
-                tbl,
-                expected_snapshot_id=tbl.metadata.current_snapshot_id,
-                removed=removed,
-                added=added,
-            )
-        except Exception:
-            cleanup_orphans(tbl, added)
-            raise
-
-        return GroupResult(
-            group=group.describe(),
-            rewritten_data_files=outcome.removed_files,
-            added_data_files=outcome.added_files,
-            rewritten_bytes=outcome.removed_bytes,
-            added_bytes=outcome.added_bytes,
-            snapshot_id=outcome.snapshot_id,
+    def _rewrite_evolution_group(self, tbl, group) -> RewriteOutput:
+        """Rewrite one aged group under the coarser spec. No commit."""
+        file_group = FileGroup(
+            spec_id=group.files[0].spec_id,
+            partition=group.files[0].partition,
+            files=group.files,
+            target_file_size_bytes=self._config.target_file_size_bytes
+            or DEFAULT_TARGET_FILE_SIZE_BYTES,
         )
+        # Writing under the coarse spec is what actually merges the days: left on
+        # the table's day spec, the writer would split the group right back into
+        # one file per day. It also has PyIceberg derive the month partition value
+        # from the data rather than trusting our arithmetic.
+        ctx = RewriteContext(table=tbl, config=self._config, write_spec_id=group.target_spec_id)
+        output = self._backend.rewrite(file_group, ctx)
+        self._assert_rows_preserved(tbl, output, f"evolution of {group.label}")
+        return output
+
+    def _rewrite_group(self, tbl, group: FileGroup) -> RewriteOutput:
+        """Rewrite one compaction group in place. No commit."""
+        output = self._backend.rewrite(group, RewriteContext(table=tbl, config=self._config))
+        self._assert_rows_preserved(tbl, output, f"rewrite of {group.describe()}")
+        return output
+
+    @staticmethod
+    def _assert_rows_preserved(tbl, output: RewriteOutput, what: str) -> None:
+        """The rewrite must be row-preserving.
+
+        Checked before any commit, which is what stops a bad read from ever
+        reaching the table. The comparison is against *live* rows, not the
+        manifests' physical ``record_count`` -- those differ by exactly the
+        deleted rows on a merge-on-read table.
+        """
+        if output.written_rows != output.source_live_rows:
+            cleanup_orphans(tbl, output.data_files)
+            raise RuntimeError(
+                f"{what} produced {output.written_rows} rows but the source holds "
+                f"{output.source_live_rows} live rows; nothing was committed"
+            )
+
+
+def _group_result(
+    label: str, files, output: RewriteOutput, snapshot_id: int | None = None
+) -> GroupResult:
+    return GroupResult(
+        group=label,
+        rewritten_data_files=len(files),
+        added_data_files=len(output.data_files),
+        rewritten_bytes=sum(f.size_bytes for f in files),
+        added_bytes=sum(f.file_size_in_bytes for f in output.data_files),
+        snapshot_id=snapshot_id,
+    )
+
+
+def _accumulate(result: CompactionResult, files, output: RewriteOutput) -> None:
+    result.rewritten_data_files += len(files)
+    result.added_data_files += len(output.data_files)
+    result.rewritten_bytes += sum(f.size_bytes for f in files)
+    result.added_bytes += sum(f.file_size_in_bytes for f in output.data_files)
+
+
+def _evolution_labels(evolution_plan: EvolutionPlan) -> dict[str, str]:
+    """One snapshot property naming every evolved group in an atomic commit.
+
+    Per-group commits get one label each; a single commit covering several has to
+    name them all or the snapshot loses the record of what it did.
+    """
+    labels = [g.label for g in evolution_plan.groups]
+    return {"zamboni.evolution": ", ".join(labels)} if labels else {}
 
 
 def _without_files(plan: CompactionPlan, claimed: set[str]) -> CompactionPlan:

@@ -527,8 +527,10 @@ sequenceDiagram
 - **V3 deletion vectors** can be read but not written — PyIceberg ships a Puffin reader and
   no writer — so a V3 merge-on-read table can be profiled but its deletes cannot be
   simulated the way V2 position deletes are.
-- **Each group commits its own snapshot.** A partial failure leaves earlier partitions
-  compacted, at the cost of more snapshots than an all-or-nothing commit.
+- **A run commits once by default**, matching Iceberg's `partial-progress.enabled=false`, so
+  a failure anywhere leaves the table exactly as it was. `--partial-progress` commits each
+  group instead, which is preferable on a table too large to redo. Iceberg is explicit that
+  this is not a correctness question: "file groups can be compacted independently".
 - **A remote-signing Lakekeeper warehouse permits no reclamation.** Its signer refuses
   `ListObjectsV2`, `HeadObject` and multi-object `DELETE`, so compaction fails and nothing
   can be freed. See [live-verification.md](live-verification.md).

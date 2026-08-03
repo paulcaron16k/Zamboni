@@ -66,12 +66,15 @@ TRANSFORM_FOR = {
 
 
 class MultiSpecReplaceFiles(_ReplaceFiles):
-    """A replace producer that writes one added manifest per partition spec.
+    """A producer that writes one added manifest per partition spec.
 
     Upstream writes every added file into a single manifest declared under the
     table's default spec. That is fine while all added files share that spec and
     wrong the moment they do not -- which is exactly what partition evolution
     produces.
+
+    Named for its usual operation but it honours whichever the committer sets, so
+    it is equally usable for an ``overwrite`` snapshot.
     """
 
     def _summary(self, snapshot_properties: dict[str, str] = EMPTY_DICT) -> Summary:
@@ -126,8 +129,12 @@ class MultiSpecReplaceFiles(_ReplaceFiles):
             summary=Summary(operation=Operation.OVERWRITE, **ssc.build(), **snapshot_properties),
             previous_summary=previous_snapshot.summary if previous_snapshot else None,
         )
-        # Same relabel as _ReplaceFiles: REPLACE is rejected upstream.
-        return Summary(operation=Operation.REPLACE, **summary.additional_properties)
+        # Built as OVERWRITE because update_snapshot_summaries rejects REPLACE,
+        # then labelled with whatever the committer actually asked for. Hardcoding
+        # REPLACE here made `snapshot_operation="overwrite"` -- the escape hatch
+        # for anyone unwilling to subclass PyIceberg internals -- silently produce
+        # a replace snapshot on any evolved table.
+        return Summary(operation=self._operation, **summary.additional_properties)
 
     def _manifests(self) -> list[ManifestFile]:
         from pyiceberg.manifest import write_manifest

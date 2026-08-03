@@ -72,6 +72,9 @@ test stops existing, so this table cannot rot silently.
 | FR-1.5 | Partitions below the size or count threshold are left alone | `test_min_input_files_skips_small_partitions`, `test_files_at_target_size_are_left_alone` |
 | FR-1.6 | Target size resolves config → table property → default | `test_target_size_resolution_order`, `test_explicit_config_beats_table_properties` |
 | FR-1.7 | An empty table is a no-op, not an error | `test_empty_table_is_a_no_op` |
+| FR-1.8 | A multi-partition run commits once; a failure leaves the table untouched | `test_a_multi_partition_rewrite_commits_once_by_default`, `test_an_atomic_run_that_fails_leaves_the_table_untouched`, `test_a_failed_atomic_run_leaves_no_referenced_file_missing` |
+| FR-1.9 | `partial_progress` commits per group and keeps what already landed | `test_partial_progress_commits_each_group`, `test_partial_progress_keeps_what_already_committed` |
+| FR-1.10 | One atomic commit records every evolved group, and honours `snapshot_operation` | `test_an_atomic_commit_records_every_evolved_group`, `test_evolution_honours_the_overwrite_escape_hatch` |
 
 ### FR-2 — Merge-on-read
 

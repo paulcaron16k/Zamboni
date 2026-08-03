@@ -70,6 +70,16 @@ class CompactionConfig:
             ``sort_order_id = None``: the rows are ordered, but not by any order
             the table declares, and claiming otherwise would be the same lie
             duckdb-iceberg's native compactor tells.
+        partial_progress: Commit each rewrite group as it completes, rather than
+            the whole run in one snapshot. Off by default, matching Iceberg's own
+            ``partial-progress.enabled``, whose documentation is worth quoting:
+            "This will produce additional commits but allow for progress even if
+            some groups fail to commit. This setting will not change the
+            correctness of the rewrite operation as file groups can be compacted
+            independently." So this is a predictability choice, not a
+            correctness one -- with it off, a failure leaves the table exactly as
+            it was; with it on, earlier groups stay compacted and later ones do
+            not, which is preferable on a table too large to redo.
         branch: Target branch for the compaction snapshot.
         snapshot_operation: ``"replace"`` (spec-correct for compaction; needs a
             small PyIceberg subclass, see :mod:`zamboni.committer`) or
@@ -91,6 +101,7 @@ class CompactionConfig:
     zorder_precision_bits: int = 16
     branch: str = "main"
     snapshot_operation: str = "replace"
+    partial_progress: bool = False
     dangling_delete_policy: str = "report"
 
     def __post_init__(self) -> None:

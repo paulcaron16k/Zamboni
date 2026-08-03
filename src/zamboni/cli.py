@@ -221,6 +221,13 @@ def _add_config_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--min-input-files", type=int, default=2)
     g.add_argument("--rewrite-all", action="store_true")
     g.add_argument(
+        "--partial-progress",
+        action="store_true",
+        help="commit each rewrite group as it completes instead of the whole run at "
+        "once. Mirrors Iceberg's partial-progress.enabled: more commits, but a "
+        "failure leaves earlier groups compacted rather than redoing everything.",
+    )
+    g.add_argument(
         "--memory-mode", choices=[m.value for m in MemoryMode], default=MemoryMode.AUTO.value
     )
     g.add_argument("--memory-budget-bytes", type=int, default=1 << 30)
@@ -278,6 +285,7 @@ def _operational_config(args: argparse.Namespace) -> CompactionConfig:
     """How the run executes, with no layout opinions -- those come from the file."""
     return CompactionConfig(
         rewrite_all=args.rewrite_all,
+        partial_progress=args.partial_progress,
         memory_mode=MemoryMode(args.memory_mode),
         memory_budget_bytes=args.memory_budget_bytes,
         temp_directory=args.temp_directory,
@@ -292,6 +300,7 @@ def _config_from(args: argparse.Namespace) -> CompactionConfig:
         target_file_size_bytes=args.target_file_size_bytes,
         min_input_files=args.min_input_files,
         rewrite_all=args.rewrite_all,
+        partial_progress=args.partial_progress,
         memory_mode=MemoryMode(args.memory_mode),
         memory_budget_bytes=args.memory_budget_bytes,
         temp_directory=args.temp_directory,
