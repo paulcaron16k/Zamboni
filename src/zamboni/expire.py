@@ -277,7 +277,11 @@ class SnapshotExpirer:
             stale_refs=sorted(decision.stale_refs),
             dry_run=self._dry_run,
         )
-        if not decision.expire:
+        # Both halves matter. A ref can be stale while every snapshot it points at
+        # is retained by another ref, so `expire` is empty and there is still work
+        # to do. Guarding on `expire` alone left the ref in place while
+        # `describe()` reported it dropped -- a silent no-op that claimed success.
+        if not decision.expire and not decision.stale_refs:
             return result
 
         # Files only the doomed snapshots reference. Computed before the commit
@@ -333,7 +337,8 @@ def _drop_refs_and_expire(tbl: Table, decision: RetentionDecision) -> None:
                 manage.remove_branch(name).commit()
             else:
                 manage.remove_tag(name).commit()
-        ExpireSnapshots(transaction=txn).by_ids(sorted(decision.expire)).commit()
+        if decision.expire:
+            ExpireSnapshots(transaction=txn).by_ids(sorted(decision.expire)).commit()
 
 
 def _delete_all(tbl: Table, paths) -> tuple[int, int]:

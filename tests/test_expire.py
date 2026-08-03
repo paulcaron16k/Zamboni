@@ -424,3 +424,30 @@ def test_an_unconfigured_policy_leaves_every_ref_alone(session, aged):
 
     tbl = session.table("db.aged")
     assert "keep_me" in tbl.metadata.refs, "a ref was dropped without being asked for"
+
+
+def test_a_stale_ref_is_dropped_even_when_nothing_needs_expiring(session, aged):
+    """The case the early return skipped, while still reporting success.
+
+    A ref can be past its age while every snapshot it points at is retained by
+    another ref -- here the tag is on the current snapshot, which main keeps. The
+    expiry set is then empty, and guarding only on that left the ref in place
+    while `describe()` said "dropped 1 ref(s)".
+    """
+    tbl = session.table("db.aged")
+    tbl.manage_snapshots().create_tag(
+        snapshot_id=tbl.current_snapshot().snapshot_id, tag_name="on_the_head"
+    ).commit()
+    tbl = session.table("db.aged")
+
+    # Keep every snapshot by count, so nothing expires; age out every ref.
+    policy = RetentionPolicy(max_snapshot_age_ms=10**12, min_snapshots_to_keep=99, max_ref_age_ms=0)
+    result = SnapshotExpirer(policy).run(tbl)
+
+    assert result.expired_snapshots == 0
+    assert result.stale_refs == ["on_the_head"]
+    tbl = session.table("db.aged")
+    assert "on_the_head" not in tbl.metadata.refs, (
+        "reported as dropped but still present -- the report outran the action"
+    )
+    assert tbl.current_snapshot() is not None, "the snapshot main needs was expired"

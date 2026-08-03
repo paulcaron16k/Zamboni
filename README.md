@@ -6,11 +6,14 @@ or Spark.
 
 Nothing in that stack compacts tables today:
 
-- **Lakekeeper OSS** ships only maintenance queues for its own bookkeeping. Verified against
-  running servers: `v0.13.1` reports `["tabular_expiration", "tabular_purge",
-  "task_log_cleanup"]` and `latest-main` reports `["soft_deletion", "tabular_purge",
-  "task_log_cleanup"]`. The names differ between builds; neither has a compaction, expiry or
-  orphan queue, and `tests/test_dev_stack.py` asserts that against whatever is running.
+- **Lakekeeper OSS** ships queues for its own bookkeeping only. Verified against running
+  servers: `v0.13.1` reports `["tabular_expiration", "tabular_purge", "task_log_cleanup"]`
+  and `latest-main` reports `["soft_deletion", "tabular_purge", "task_log_cleanup"]`.
+  `tabular_expiration` is easy to misread — it expires soft-deleted *tables* after a delay
+  (7 days by default), not snapshots. None of these compacts data files, expires snapshots
+  or removes orphan files. `tests/test_dev_stack.py` checks the queue set against an
+  allow-list, so a genuinely new queue fails the build rather than slipping past a
+  keyword match.
 - **PyIceberg** (0.11.1, the current release) exposes `table.maintenance.expire_snapshots()`
   and nothing else.
   That call is metadata-only — it emits a `RemoveSnapshotsUpdate` and never deletes a file.

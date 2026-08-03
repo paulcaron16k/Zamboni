@@ -36,7 +36,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-9 | Verification and CI | The suite, live verification, and automation. plan.md §4 | inproject | |
 | ZMBNI-10 | Documentation | HLD, delivery plan, config spec, verification record. See ZMBNI-1007 | inproject | |
 
-**Story counts:** 39 done · 1 inproject · 9 todo · 1 cancelled  (50 stories)
+**Story counts:** 40 done · 1 inproject · 9 todo · 1 cancelled  (51 stories)
 
 ---
 
@@ -134,6 +134,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 
 | id | title | description | status | completed-at |
 |---|---|---|---|---|
+| ZMBNI-910 | Review the five unreviewed commits | Dev stack, CI, backlog, ZMBNI-908 and ZMBNI-505 had landed with verification but no review pass. Found four defects, all reproduced before fixing: a stale ref reported as dropped while still present, a false soft-delete claim in user-facing output, a queue assertion weaker than the claim it defended, and an untested behaviour change in `S3Settings` | done | 2026-08-03 |
 | ZMBNI-901 | Unit and integration suite | 264 tests against a SQL catalog over a temp directory. plan.md §4 | done | 2026-08-03 |
 | ZMBNI-902 | Safety-by-omission tests | Monkeypatch each reference category away in turn and assert nothing is deleted. Without these, enabling orphan removal by default is unjustified. FR-7.7 | done | 2026-08-03 |
 | ZMBNI-903 | Live verification | Every operation against a real Lakekeeper 0.13.1 and MinIO. Found four bugs the local suite could not. [live-verification.md](live-verification.md) | done | 2026-08-03 |

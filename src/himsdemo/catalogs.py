@@ -10,8 +10,8 @@ string:
   *namespace* is there.
 - **Clearing.** Locally, `clear` deletes a directory and a file. Remotely there
   is nothing to delete on disk: the tables must be dropped through the catalog,
-  and Lakekeeper's soft-delete means a dropped table's storage goes when its
-  purge queue runs, not when the API returns.
+  and *when* the objects go is the warehouse's business, not ours -- it depends
+  on its delete-profile, which may purge immediately or after a delay.
 
 Selection is by ``--catalog`` or ``ZAMBONI_DEMO_CATALOG``; the default stays
 ``sqlite`` so `./bin/demo` works with no Docker and no configuration.
@@ -166,7 +166,9 @@ def clear(catalog: DemoCatalog, state, table_names: list[str]) -> str:
             session.catalog.drop_namespace(NAMESPACE)
     finally:
         session.close()
-    return (
-        f"dropped {dropped} table(s) from {catalog.location}. "
-        "Lakekeeper soft-deletes: the objects go when its purge queue runs."
-    )
+    # Deliberately says nothing about when the objects go. That depends on the
+    # warehouse's delete-profile, which this code does not set and cannot see
+    # from here -- the dev stack's default turns out to be `hard`, so an earlier
+    # version of this message telling the user it was a soft delete was simply
+    # wrong.
+    return f"dropped {dropped} table(s) from {catalog.location}"

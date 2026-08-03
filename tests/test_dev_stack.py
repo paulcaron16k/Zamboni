@@ -169,18 +169,36 @@ def test_the_ui_is_served_by_lakekeeper_itself(env):
     assert "<!doctype html" in r.text[:200].lower()
 
 
+#: Queues Lakekeeper OSS is known to ship, none of which does table maintenance.
+#: `tabular_expiration` is easy to misread: it expires soft-deleted *tables* after
+#: a delay (`default_tabular_expiration_delay_seconds`, 7 days), not snapshots.
+KNOWN_QUEUES = {
+    "tabular_expiration",
+    "tabular_purge",
+    "task_log_cleanup",
+    "soft_deletion",  # the name latest-main uses
+}
+
+
 def test_lakekeeper_ships_no_maintenance_queues(env):
     """The premise of this whole project, asserted against the running server.
 
-    If a compaction, expiry or orphan queue ever appears in Lakekeeper OSS, the
-    justification in docs/design.md needs revisiting -- so fail loudly rather
-    than let the claim quietly go stale.
+    Checked as an allow-list rather than by searching for words like "compact".
+    A substring test passes for any queue whose name we did not think of, which
+    makes it read as verification while proving very little -- and the claim
+    being defended is about data-file compaction, snapshot expiry and orphan
+    removal specifically.
     """
     r = requests.get(f"http://localhost:{env['LAKEKEEPER_PORT']}/management/v1/info", timeout=10)
     queues = set(r.json().get("queues", []))
-    assert not any("compact" in q for q in queues), f"a compaction queue appeared: {queues}"
-    assert not any("orphan" in q for q in queues), f"an orphan queue appeared: {queues}"
-    assert not any("snapshot" in q for q in queues), f"a snapshot queue appeared: {queues}"
+    assert queues, "no queues reported; the info endpoint changed shape"
+
+    unexpected = queues - KNOWN_QUEUES
+    assert not unexpected, (
+        f"Lakekeeper grew queue(s) we have not assessed: {sorted(unexpected)}. "
+        "If any of them compacts data files, expires snapshots or removes orphans, "
+        "the justification in docs/design.md needs revisiting."
+    )
 
 
 def test_the_warehouse_vends_credentials_rather_than_signing(warehouse):
