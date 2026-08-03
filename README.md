@@ -208,7 +208,7 @@ isolated environment for it on first run, so it works from any directory without
 activated venv and never picks up global packages:
 
 ```console
-$ /path/to/maintenance/bin/icemaint doctor
+$ /path/to/Zamboni/bin/icemaint doctor
   pyiceberg                    0.11.1
   operation injectable         True
   REPLACE summary native       False

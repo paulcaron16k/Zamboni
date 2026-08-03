@@ -264,7 +264,7 @@ The demo must **not** present a noisy millisecond delta as if it were a benchmar
 | A2 | `process_id` is a **UUIDv7 string** for both tables | Auto-increment integer; the brief allows either. UUIDv7 keeps one type across tables and sorts by time |
 | A3 | `table_schema.json` holds **column definitions**; `table-config.json` holds **layout** | Merge both into `table_schema.json` |
 | A4 | `hims_employees` uses **upsert** (stable row identity) | Full `overwrite` — the brief offers both; upsert is gentler on the table's history |
-| A5 | Demo lives at `maintenance/bin/demo`, data under `maintenance/data/healthims/` | A separate top-level project |
+| A5 | Demo lives at `Zamboni/bin/demo`, data under `Zamboni/data/healthims/` | A separate top-level project |
 
 ---
 
