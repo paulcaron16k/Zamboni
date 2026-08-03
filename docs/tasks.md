@@ -35,8 +35,19 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-8 | Environment and dev stack | Locked venv, self-contained executables, Lakekeeper + MinIO stack. design §6.4 | done | 2026-08-03 |
 | ZMBNI-9 | Verification and CI | The suite, live verification, and automation. plan.md §4 | inproject | |
 | ZMBNI-10 | Documentation | HLD, delivery plan, config spec, runbook, release convention, verification record | done | 2026-08-03 |
+| ZMBNI-11 | PyIceberg 0.12 | Develop against unreleased 0.12 on a branch; three of seven capability probes flip, neither waited-on blocker lifts. [roadmap.md RM-1](roadmap.md) | todo | |
+| ZMBNI-12 | Maintainer interface | `Maintainer` ABC, `LocalMaintainer` extracted, Trino and Spark stubs, capabilities that refuse rather than degrade. [roadmap.md RM-2](roadmap.md) | todo | |
+| ZMBNI-13 | Zamboni vs Trino vs Spark | The analysis that determines the interface seam. [roadmap.md RM-3](roadmap.md) | todo | |
+| ZMBNI-14 | Trino maintainer | `ALTER TABLE … EXECUTE` for four of six verbs, refusing the other two. [roadmap.md RM-4](roadmap.md) | todo | |
+| ZMBNI-15 | Spark maintainer | Iceberg Spark procedures, including the one operation we cannot do locally. [roadmap.md RM-5](roadmap.md) | todo | |
+| ZMBNI-16 | Zamboni vs ice-keeper | A deployed comparable with operational layers we lack, and prior art for the interface. [roadmap.md RM-6](roadmap.md) | todo | |
 
-**Story counts:** 47 done · 1 inproject · 4 todo · 1 cancelled  (53 stories)
+> **On section order.** Epics ZMBNI-1…10 appear below in numeric order; the roadmap epics
+> ZMBNI-11…16 appear in *delivery* order (13, 16, 12, 14, 11, 15), which is not their numeric
+> order. The numbers follow [roadmap.md](roadmap.md)'s RM-1…RM-6 so the two documents agree on
+> identity; the sequence is explained in each section's subtitle.
+
+**Story counts:** 47 done · 1 inproject · 38 todo · 1 cancelled  (87 stories)
 
 ---
 
@@ -163,22 +174,120 @@ has not been specified yet — that is deliberate signal, not an omission.
 
 ---
 
+## ZMBNI-13 — Zamboni vs Trino vs Spark
+
+First, because designing the interface before knowing the three surfaces means finding the
+mismatch after the ABC has callers. [roadmap.md RM-3](roadmap.md)
+
+| id | title | description | status | completed-at |
+|---|---|---|---|---|
+| ZMBNI-1301 | Enumerate each engine's surface | Exact procedure and parameter names from primary docs, not memory: Trino `ALTER TABLE … EXECUTE` (`optimize`, `optimize_manifests`, `expire_snapshots`, `remove_orphan_files`, `drop_extended_stats`) and the Iceberg Spark procedures. Preliminary passes are already recorded in roadmap.md's verified-facts table; this is the deliberate version | todo | |
+| ZMBNI-1302 | Map onto the six verbs | Which of Zamboni's verbs each engine can express, and the common denominator the interface must cover. Known: Trino maps four of six | todo | |
+| ZMBNI-1303 | Semantic-difference register | The same-sounding operation that differs. Known already: Trino has no Z-order and no sort on `optimize`; its `retention_threshold` has a configured floor (default `7d`) that *rejects* our 5-day and 3-day defaults rather than honouring them; `retain_last` is the spec's `min-snapshots-to-keep` under another name; `max-ref-age-ms` has no Trino equivalent | todo | |
+| ZMBNI-1304 | Which safety invariants survive delegation | Zamboni's orphan removal is fenced client-side by five invariants that abort rather than delete (design.md §6.6): completeness, non-empty categories, current metadata sacred, list-before-reachable ordering, and a mandatory age guard. A server-side `remove_orphan_files` gives up all five. "Both support remove-orphans" is true and misleading, and the interface has to carry the difference | todo | |
+| ZMBNI-1305 | Recommend the seam | With the rejected alternatives recorded: SQL-statement generation (ice-keeper's, unavailable to us) and metadata manipulation (ours, unavailable to them) | todo | |
+
+---
+
+## ZMBNI-16 — Zamboni vs ice-keeper
+
+Alongside ZMBNI-13, because its abstraction is an input to the interface design rather than
+a retrospective. [roadmap.md RM-6](roadmap.md)
+
+| id | title | description | status | completed-at |
+|---|---|---|---|---|
+| ZMBNI-1601 | Inventory it | `../ice-keeper`: 8 399 lines of PyIceberg 0.10.x plus PySpark over py4j, Airflow-scheduled nightly. Actions for expiry, fast expiry via a Java implementation, orphans, rewrite, optimization, lifecycle and config auditing | todo | |
+| ZMBNI-1602 | Capability gaps, both directions | Theirs that we lack are operational rather than algorithmic: a maintenance schedule table, a journal of what ran with status and timings, partition-health diagnosis driving which partitions get optimized, **S3 storage inventory reports as an orphan-detection input** — which sidesteps the bucket listing we depend on and that a remote-signing warehouse refuses outright — a config auditor, and failure notification | todo | |
+| ZMBNI-1603 | What its seam teaches ZMBNI-12 | `ActionStrategy.prepare_statement_to_execute() -> str` is the closest prior art to our interface, and a useful negative result: the SQL seam works only because both its backends are SQL engines. Worth having in hand before designing ours | todo | |
+| ZMBNI-1604 | Recommend per capability | Adopt, adapt, or decline — not a licensing or adoption decision in itself. The schedule/journal layer is the one to decide deliberately, since it is arguably a maintenance *service* rather than a maintenance *tool*. Open question 4 | todo | |
+
+---
+
+## ZMBNI-12 — Maintainer interface
+
+The class hierarchy everything after it plugs into. [roadmap.md RM-2](roadmap.md)
+
+| id | title | description | status | completed-at |
+|---|---|---|---|---|
+| ZMBNI-1201 | The `Maintainer` ABC | The six operations plus `describe`/`plan`, returning the existing result objects so `describe()` output stays engine-independent | todo | |
+| ZMBNI-1202 | Declared capabilities | Per-operation support *and* guarantee level, following `capabilities.py`'s existing posture: refuse rather than silently degrade. An unsupported option must be an error, not an ignored argument | todo | |
+| ZMBNI-1203 | Extract `LocalMaintainer` | A refactor with no behaviour change; the 327 existing tests are the regression net that proves it | todo | |
+| ZMBNI-1204 | Trino and Spark stubs | Registered so `--engine` can list them, each raising with the reason it is not implemented rather than failing obscurely | todo | |
+| ZMBNI-1205 | Config translation | `table-config.json` to each engine's parameter vocabulary, validating floors and unsupported options at plan time rather than at commit time | todo | |
+| ZMBNI-1206 | Reconcile the `--yes` contract | The hardest part. "Without `--yes`, nothing is committed" has no counterpart in `ALTER TABLE … EXECUTE` or a Spark `CALL`. A maintainer that cannot preview must say so, and the CLI must not print a dry-run notice over an engine that has no such mode — that would turn the one rule we made exceptionless back into a lie. Open question 2 in roadmap.md | todo | |
+
+---
+
+## ZMBNI-14 — Trino maintainer
+
+First implementation behind the abstraction, against a stable PyIceberg. Four of six verbs
+map; the two that do not are the instructive part. [roadmap.md RM-4](roadmap.md)
+
+| id | title | description | status | completed-at |
+|---|---|---|---|---|
+| ZMBNI-1401 | Trino session | Connection and catalog/schema resolution, alongside the existing `CatalogSession` rather than replacing it | todo | |
+| ZMBNI-1402 | `compact` via `optimize` | `file_size_threshold`, and the `WHERE` clause on partition columns or `"$file_modified_time"` as the partition selector. Must refuse a config asking for sort or Z-order | todo | |
+| ZMBNI-1403 | `rewrite-manifests` via `optimize_manifests` | Trino clusters manifests by partitioning columns, which is what ours does; confirm the semantics match before claiming equivalence | todo | |
+| ZMBNI-1404 | `expire` via `expire_snapshots` | `retention_threshold`, `retain_last`, `clean_expired_metadata`. The min-retention floor must be surfaced as a config error naming the server setting, not passed through to fail server-side | todo | |
+| ZMBNI-1405 | `remove-orphans` via `remove_orphan_files` | And report the weaker guarantee honestly: none of our four client-side invariants apply | todo | |
+| ZMBNI-1406 | Declare what it cannot do | Z-order, dangling-delete removal, partition-evolution ageing, and preview. Each an explicit refusal with a reason | todo | |
+| ZMBNI-1407 | Live verification | Against a real Trino. Depends on open question 3 — whether the dev stack grows one | todo | |
+
+---
+
+## ZMBNI-11 — PyIceberg 0.12
+
+Parallel, on `feature/pyiceberg-0.12`. Cannot land on `main` until 0.12 is on PyPI, because
+the path dependency makes `uv.lock` unreproducible elsewhere. [roadmap.md RM-1](roadmap.md)
+
+| id | title | description | status | completed-at |
+|---|---|---|---|---|
+| ZMBNI-1101 | The branch and the path dependency | `feature/pyiceberg-0.12` against the `../iceberg-python` checkout, with the lock-file consequence documented where someone will hit it | todo | |
+| ZMBNI-1102 | Re-probe and record the delta | Three of seven probes flip: streaming writes, manifest predicate pruning, and derives-delete-predicate, all False → True. The last two are the pair whose *split* would make Zamboni refuse to run; they land together, which is why this migration is lower risk than its size suggests. Assert the `doctor` output rather than describing it | todo | |
+| ZMBNI-1103 | Audit the private APIs we drive | The real work: 397 commits since 0.11.1. Known movers — `_scan_plan_helper` renamed to `_plan_manifest_entries`, `BaseScan`/`ManifestGroupPlanner` extracted, and `ManifestEntry.snapshot_id`'s setter fixed for writing to the wrong index, which `manifests.py` depends on preserving exactly | todo | |
+| ZMBNI-1104 | Adopt streaming writes | `_dataframe_to_data_files` now accepts `pa.RecordBatchReader`, so the writer bin-packs the stream itself. May retire part of the chunked backend; measure before deleting | todo | |
+| ZMBNI-1105 | Re-verify on 0.12 | Full suite plus live verification. Neither waited-on blocker lifts — `ManifestWriterV2.content()` still returns `DATA`, there is still no `ManifestWriterV3`, and the equality-delete guard is still present — so ZMBNI-604 and 704–706 stay blocked and should be re-confirmed, not assumed | todo | |
+| ZMBNI-1106 | Decide the support window | One PyIceberg line or two. Open question 1 in roadmap.md: the probes make both possible, the cost is a doubled test matrix | todo | |
+
+---
+
+## ZMBNI-15 — Spark maintainer
+
+Last: the largest dependency footprint for the engine that overlaps us most.
+[roadmap.md RM-5](roadmap.md)
+
+| id | title | description | status | completed-at |
+|---|---|---|---|---|
+| ZMBNI-1501 | Spark session | PySpark and py4j as an optional dependency group, so nobody installs a JVM to compact locally. `../ice-keeper` is working prior art | todo | |
+| ZMBNI-1502 | `compact` via `rewrite_data_files` | Including `sort` and `zorder` — the one engine besides ours that can Z-order | todo | |
+| ZMBNI-1503 | `rewrite-manifests` and `expire` | `rewrite_manifests`, `expire_snapshots` | todo | |
+| ZMBNI-1504 | `remove-orphans` | `remove_orphan_files`, with the same guarantee caveat as Trino's | todo | |
+| ZMBNI-1505 | Dangling deletes via `rewrite_position_delete_files` | The case that justifies the interface carrying capability in both directions: Spark rewrites *partially* dangling delete files, which is ZMBNI-604 — blocked for us on PyIceberg, available here | todo | |
+| ZMBNI-1506 | Live verification | Against a real Spark. Open question 3 | todo | |
+
+---
+
 ## What is actually left
 
-One story is in flight, 4 are open, and one is closed as a decision rather than a gap.
+Two kinds of remaining work: finishing `v0.1.0`'s loose end, and the roadmap.
 
 **In flight — ZMBNI-905.** The CI workflow exists and every command in it was run locally,
 but GitHub has never executed it: this repository has no remote. That is the single item
-standing between "tests pass on my machine" and "tests pass". Nothing else is started.
+standing between "tests pass on my machine" and "tests pass". `v0.1.0` is tagged; `1.0.0`
+waits on this going green and on one maintenance cycle against a warehouse we did not build,
+because "verified" is what a 1.0 claims. See [releasing.md §4](releasing.md).
 
 **Blocked upstream — ZMBNI-604, 704, 705, 706.** No decision to make. Each carries either a
 capability probe or a named upstream limitation, and each lifts on its own when PyIceberg
-grows the capability. They are tracked so nobody re-investigates from scratch.
+grows the capability. They are tracked so nobody re-investigates from scratch. Worth noting
+that **PyIceberg 0.12 does not lift any of them** — verified against `main`, see ZMBNI-1105 —
+so they are not waiting on ZMBNI-11.
 
-**Ours to schedule — none.** ZMBNI-907 was the last, and closing it leaves ZMBNI-905 as the
-only work not waiting on PyIceberg. `v0.1.0` is tagged; `1.0.0` waits on ZMBNI-905 going green
-and on one maintenance cycle against a warehouse we did not build, because "verified" is what a
-1.0 claims and CI has still never executed. See [releasing.md §4](releasing.md).
+**The roadmap — ZMBNI-11 … 16.** Six features, defined in [roadmap.md](roadmap.md). The theme
+is to stop being one implementation: three engines can do this work, and Zamboni should be one
+of them behind a common interface. Delivery order is ZMBNI-13 + ZMBNI-16 (analysis, together)
+→ ZMBNI-12 (the interface) → ZMBNI-14 (Trino) → ZMBNI-11 (0.12, parallel on a branch) →
+ZMBNI-15 (Spark). Nothing is started.
 
 **Closed as a decision — ZMBNI-605.** Splitting one partition across manifests would defeat
 the pruning that manifest regrouping exists to create, so it is cancelled rather than

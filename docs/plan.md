@@ -264,9 +264,16 @@ Known and accepted:
 
 ## 6. Not in scope
 
+Out of scope **for `v0.1.0`, which is PyIceberg-only**. Two of these are limitations of that
+choice rather than of the operations, and [roadmap.md](roadmap.md) plans an engine that does
+not share them — Spark's `rewrite_position_delete_files` rewrites partially dangling delete
+files (ZMBNI-1505). What follows is the scope of *this* implementation.
+
 - **Rewriting a partially dangling delete manifest** — blocked by
   `ManifestWriterV2.content()` returning `ManifestContent.DATA` unconditionally, so PyIceberg
-  cannot write a delete manifest at all. Tracked as ZMBNI-604.
+  cannot write a delete manifest at all. Tracked as ZMBNI-604. Still true on unreleased
+  `main`: `content()` is unchanged and there is no `ManifestWriterV3`, so PyIceberg 0.12 does
+  not lift this.
 - **Splitting one partition across manifests** — *not* an upstream limitation but a
   deliberate choice, and an earlier draft of this section wrongly conflated the two. A
   manifest records lower/upper partition bounds, so splitting one partition across manifests

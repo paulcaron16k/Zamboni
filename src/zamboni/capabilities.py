@@ -4,8 +4,11 @@ Every version-dependent decision in this package routes through here rather than
 through a version comparison or a comment. The reason is concrete: the
 behaviours that matter are split across a release boundary that is currently
 open. PyIceberg 0.11.1 is the latest release; unreleased main (heading for 0.12)
-already changes three of the four probes below. Pinning to "0.11.1 behaves like
-X" would silently rot the day 0.12 ships.
+already changes three of the seven probes below -- streaming writes, manifest
+pruning and delete-predicate derivation all go False -> True, the last two
+together, which is what keeps ``manifest_pruning_is_safe`` true across the
+boundary. Pinning to "0.11.1 behaves like X" would silently rot the day 0.12
+ships. See docs/roadmap.md RM-1 for the full delta.
 
 Probes are structural -- they ask whether a function exists or what a parameter
 set contains -- so they answer for whatever build is installed, including a
