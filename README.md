@@ -148,6 +148,8 @@ bypassed hook is worse than none.
   constraints, and who owns what.
 - **[docs/plan.md](docs/plan.md)** — delivery plan: scope, phasing, requirements
   traceability, verification approach, residual risk.
+- **[docs/tasks.md](docs/tasks.md)** — the ZMBNI backlog: what is done, what is left, and
+  what is deliberately not being done.
 - **[docs/table-config.md](docs/table-config.md)** — the `table-config.json` specification.
 - **[docs/live-verification.md](docs/live-verification.md)** — what runs against a real
   Lakekeeper + MinIO, what a remote-signing warehouse blocks, and the two bugs it found.

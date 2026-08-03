@@ -3,6 +3,7 @@
 **What was built, what proves it, and what is deliberately left out.**
 
 Design rationale lives in [design.md](design.md); this document is the delivery record.
+Outstanding work is tracked in [tasks.md](tasks.md).
 
 | | |
 |---|---|
@@ -232,9 +233,13 @@ Known and accepted:
 
 ## 6. Not in scope
 
-- **Rewriting a partially dangling delete manifest** and **splitting one partition across
-  manifests** — both blocked by `ManifestWriterV2.content()` returning `ManifestContent.DATA`
-  unconditionally, so PyIceberg cannot write a delete manifest at all.
+- **Rewriting a partially dangling delete manifest** — blocked by
+  `ManifestWriterV2.content()` returning `ManifestContent.DATA` unconditionally, so PyIceberg
+  cannot write a delete manifest at all. Tracked as ZMBNI-604.
+- **Splitting one partition across manifests** — *not* an upstream limitation but a
+  deliberate choice, and an earlier draft of this section wrongly conflated the two. A
+  manifest records lower/upper partition bounds, so splitting one partition across manifests
+  is exactly what stops the manifest evaluator pruning. Cancelled as ZMBNI-605.
 - **Format-version 3 row rewriting** — see FR-9.3.
 - **Server-side scan planning** — the REST specification defines it optionally; Lakekeeper
   0.13.1 does not expose it, so all pruning stays client-side.
