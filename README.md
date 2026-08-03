@@ -503,7 +503,8 @@ table from 57 manifests to 3.
 Both reclaim verbs read one referenced-file set (`reachable.py`) covering all six places Iceberg
 metadata points at files -- data and delete files, manifests, manifest lists, metadata
 JSON, statistics, and partition statistics. `max-ref-age-ms` is detected and reported but
-not applied; keeping a stale ref reclaims less, which is the conservative error.
+applied when configured: the ref is dropped so its snapshots can expire. Off by default,
+because removing a named tag or branch destroys metadata someone chose to create.
 
 ## Manifest rewriting
 

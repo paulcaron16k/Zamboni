@@ -114,15 +114,15 @@ def _days_to_ms(days: int) -> int:
 class RetentionDecision:
     retain: frozenset[int]
     expire: frozenset[int]
-    #: Non-main refs whose snapshot is older than ``max-ref-age-ms``. Reported
-    #: but **not** dropped -- see the note in :func:`decide_retention`.
+    #: Non-main refs whose snapshot is older than ``max-ref-age-ms``. These are
+    #: dropped, which is what lets their snapshots expire.
     stale_refs: frozenset[str]
 
     def describe(self) -> str:
         lines = [f"retain {len(self.retain)} snapshot(s), expire {len(self.expire)}"]
         if self.stale_refs:
             lines.append(
-                f"  {len(self.stale_refs)} ref(s) past max-ref-age-ms, kept: "
+                f"  {len(self.stale_refs)} ref(s) past max-ref-age-ms, dropping: "
                 + ", ".join(sorted(self.stale_refs))
             )
         return "\n".join(lines)
@@ -143,24 +143,41 @@ def decide_retention(
        ``min-snapshots-to-keep`` of that branch.
     5. Expire everything else.
 
-    Step 2 is **detected but not applied**: dropping a ref is a separate table
-    update, and retaining a stale ref is the conservative error. Its snapshots
-    stay reachable, so the only cost is reclaiming less.
+    Step 2 applies: a ref past its ``max-ref-age-ms`` is dropped, and because
+    steps 3 and 4 then never see it, the snapshots it was pinning become
+    expirable. This is opt-in by construction -- ``max_ref_age_ms`` defaults to
+    ``None``, meaning "not configured", so no ref is ever dropped unless a table
+    property or the table config asks for it.
+
+    ``main`` is exempt: "The main branch never expires."
     """
     now_ms = int((now or dt.datetime.now(dt.UTC)).timestamp() * 1000)
     by_id = {s.snapshot_id: s for s in metadata.snapshots}
 
+    # Step 2. A ref's own max-ref-age-ms wins over the table property -- the spec
+    # says the field "Defaults to table property history.expire.max-ref-age-ms",
+    # so the ref value is the primary. Consulting only the policy would also
+    # ignore a ref carrying its own age on a table that sets no property at all.
     stale_refs = set()
-    if policy.max_ref_age_ms is not None:
-        for name, ref in metadata.refs.items():
-            if name == MAIN_BRANCH:
-                continue  # the spec: "The main branch never expires."
-            snapshot = by_id.get(ref.snapshot_id)
-            if snapshot and now_ms - snapshot.timestamp_ms > policy.max_ref_age_ms:
-                stale_refs.add(name)
+    for name, ref in metadata.refs.items():
+        if name == MAIN_BRANCH:
+            continue  # the spec: "The main branch never expires."
+        max_ref_age = (
+            ref.max_ref_age_ms if ref.max_ref_age_ms is not None else policy.max_ref_age_ms
+        )
+        if max_ref_age is None:
+            continue  # not configured for this ref: never stale
+        snapshot = by_id.get(ref.snapshot_id)
+        if snapshot and now_ms - snapshot.timestamp_ms > max_ref_age:
+            stale_refs.add(name)
 
     retain: set[int] = set()
-    for ref in metadata.refs.values():
+    for name, ref in metadata.refs.items():
+        # Steps 3 and 4 run over the refs that survived step 2. Skipping them
+        # here is what actually frees their snapshots: a dropped ref must stop
+        # pinning its head and its ancestors, or dropping it reclaims nothing.
+        if name in stale_refs:
+            continue
         snapshot = by_id.get(ref.snapshot_id)
         if snapshot is None:
             continue
@@ -236,8 +253,9 @@ class ExpireResult:
         if self.failed_deletes:
             lines.append(f"  {self.failed_deletes} file(s) could not be deleted")
         if self.stale_refs:
+            verb = "would drop" if self.dry_run else "dropped"
             lines.append(
-                "  refs past max-ref-age-ms are reported, not dropped: "
+                f"  {verb} {len(self.stale_refs)} ref(s) past max-ref-age-ms: "
                 + ", ".join(sorted(self.stale_refs))
             )
         return "\n".join(lines)
@@ -274,7 +292,7 @@ class SnapshotExpirer:
         if self._dry_run:
             return result
 
-        tbl.maintenance.expire_snapshots().by_ids(sorted(decision.expire)).commit()
+        _drop_refs_and_expire(tbl, decision)
         tbl.refresh()
 
         # Cheap post-check against a logic error in the diff: nothing we are
@@ -288,6 +306,34 @@ class SnapshotExpirer:
 
         result.deleted_files, result.failed_deletes = _delete_all(tbl, doomed.values())
         return result
+
+
+def _drop_refs_and_expire(tbl: Table, decision: RetentionDecision) -> None:
+    """Drop the stale refs and expire the snapshots in one commit.
+
+    The order inside the transaction is load-bearing.
+    ``ExpireSnapshots._commit`` silently subtracts every ref head from the set
+    it was asked to expire -- "will always skip protected snapshots" -- reading
+    ``refs`` from the transaction's metadata. That metadata reflects staged
+    updates, so removing a ref first in the same transaction makes its head
+    expirable. Reverse the order and the expiry is a silent partial no-op: the
+    ref would be gone but the snapshot it pinned would survive, and nothing
+    would say so.
+
+    One transaction rather than two so a failure cannot leave the table with a
+    ref dropped and its snapshots still present.
+    """
+    from pyiceberg.table.update.snapshot import ExpireSnapshots, ManageSnapshots
+
+    with tbl.transaction() as txn:
+        for name in sorted(decision.stale_refs):
+            ref = tbl.metadata.refs.get(name)
+            manage = ManageSnapshots(transaction=txn)
+            if ref is not None and ref.snapshot_ref_type == SnapshotRefType.BRANCH:
+                manage.remove_branch(name).commit()
+            else:
+                manage.remove_tag(name).commit()
+        ExpireSnapshots(transaction=txn).by_ids(sorted(decision.expire)).commit()
 
 
 def _delete_all(tbl: Table, paths) -> tuple[int, int]:

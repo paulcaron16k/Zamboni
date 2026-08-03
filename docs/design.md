@@ -516,8 +516,9 @@ sequenceDiagram
 - **Partition evolution handles single-field specs only.** A compound spec is reported as
   skipped, not guessed at.
 - **Equality deletes are blocked**, pending upstream support.
-- **`max-ref-age-ms`** is detected and reported, not applied: a stale non-main ref keeps its
-  snapshots. Retaining is the conservative error; the cost is reclaiming less.
+- **`max-ref-age-ms` is applied**, dropping the ref so its snapshots can expire, but only
+  when configured — the default is "not set", because removing a named tag or branch destroys
+  metadata someone chose to create. `main` is exempt.
 - **Delete manifests cannot be written** — `ManifestWriterV2.content()` returns
   `ManifestContent.DATA` unconditionally. Dangling-delete removal is therefore limited to
   dropping whole delete manifests, and manifest rewriting leaves delete manifests alone.

@@ -29,14 +29,14 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-2 | Query-shaped layout | Declared sort and multi-key Z-order, with honest `sort_order_id`. FR-3. design §2.2 | done | 2026-08-03 |
 | ZMBNI-3 | Partition evolution | Condense aged fine-grained partitions without moving where new data lands. FR-4. design §5.3 | inproject | |
 | ZMBNI-4 | Declarative configuration | `table-config.json` and its Meltano authoring surface. FR-5. design §4, §5.1 | done | 2026-08-03 |
-| ZMBNI-5 | Storage reclamation | Snapshot expiry and orphan-file removal, fenced by hard invariants. FR-7. design §2.4, §5.4, §6.6 | inproject | |
+| ZMBNI-5 | Storage reclamation | Snapshot expiry and orphan-file removal, fenced by hard invariants. FR-7. design §2.4, §5.4, §6.6 | done | 2026-08-03 |
 | ZMBNI-6 | Metadata hygiene | Dangling deletes, manifest regrouping, `metadata.json` retention. FR-8, FR-9.1–9.2. design §2.1, §2.3 | inproject | |
 | ZMBNI-7 | Format-version coverage | V1 refused, V2 full, V3 metadata-only. FR-6.8, FR-9.3–9.5. design §2.1, §6.1 | inproject | |
 | ZMBNI-8 | Environment and dev stack | Locked venv, self-contained executables, Lakekeeper + MinIO stack. design §6.4 | done | 2026-08-03 |
 | ZMBNI-9 | Verification and CI | The suite, live verification, and automation. plan.md §4 | inproject | |
 | ZMBNI-10 | Documentation | HLD, delivery plan, config spec, verification record. See ZMBNI-1007 | inproject | |
 
-**Story counts:** 38 done · 1 inproject · 10 todo · 1 cancelled  (50 stories)
+**Story counts:** 39 done · 1 inproject · 9 todo · 1 cancelled  (50 stories)
 
 ---
 
@@ -89,7 +89,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-502 | Snapshot expiry | The spec's retention algorithm, then delete the set difference. PyIceberg implements almost none of it and deletes no files. FR-7.2–7.4, FR-7.9. design §5.4 | done | 2026-08-03 |
 | ZMBNI-503 | Orphan-file removal | List-before-reachable ordering, a 3-day mtime guard, and abort-on-doubt invariants. FR-7.5–7.8, FR-7.11. design §6.6 | done | 2026-08-03 |
 | ZMBNI-504 | FileIO-agnostic listing | Works on whichever FileIO the deployment forces; the listing form and the delete form differ on object storage. FR-7.12–7.14 | done | 2026-08-03 |
-| ZMBNI-505 | Apply `max-ref-age-ms` | Currently detected and reported but not applied: a stale non-main ref keeps its snapshots. Dropping a ref is a separate table update, and retaining is the conservative error — so this reclaims less than the spec allows. FR-7.2. design §6.5 | todo | |
+| ZMBNI-505 | Apply `max-ref-age-ms` | Spec step 2 now applies: a stale non-main ref is dropped in the same transaction as the expiry, so its snapshots stop being pinned. Fixed two detection defects on the way — a ref's own `max-ref-age-ms` was ignored, and the step was skipped entirely when the table set no property, so a ref carrying its own age was never evaluated. Off unless configured. FR-7.15–7.17. design §6.5 | done | 2026-08-03 |
 
 ---
 
@@ -162,7 +162,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 
 ## What is actually left
 
-One story is in flight, 10 are open, and one is closed as a decision rather than a gap.
+One story is in flight, 9 are open, and one is closed as a decision rather than a gap.
 
 **In flight — ZMBNI-905.** The CI workflow exists and every command in it was run locally,
 but GitHub has never executed it: this repository has no remote. That is the single item
@@ -172,11 +172,10 @@ standing between "tests pass on my machine" and "tests pass". Nothing else is st
 capability probe or a named upstream limitation, and each lifts on its own when PyIceberg
 grows the capability. They are tracked so nobody re-investigates from scratch.
 
-**Ours to schedule — six.** In rough order of what would bite first:
+**Ours to schedule — five.** In rough order of what would bite first:
 
 | | |
 |---|---|
-| ZMBNI-505 | `max-ref-age-ms` is detected but not applied, so a stale ref quietly costs reclaimable storage |
 | ZMBNI-106 | Compaction is not atomic across partitions; a partial failure leaves a mixed state |
 | ZMBNI-303 | Compound partition specs cannot evolve, and are skipped rather than guessed at |
 | ZMBNI-906 | `scripts/verify-live.py` now duplicates `tests/test_dev_stack.py` |

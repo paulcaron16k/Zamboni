@@ -150,8 +150,19 @@ never referenced cannot be touched.
 > heads and otherwise expires anything older than a timestamp, ignoring
 > `min-snapshots-to-keep`, branch ancestry and `max-ref-age-ms`. It also deletes no files.
 
-`max_ref_age_days` is **detected but not applied** — a stale non-main ref is reported and
-its snapshots kept. Retaining is the conservative error; the cost is reclaiming less.
+`max_ref_age_days` **drops the ref**, which is what lets the snapshots it was pinning
+expire. Per the spec, a ref's own `max-ref-age-ms` wins over the table property, and `main`
+is exempt — "The main branch never expires."
+
+It is off unless asked for: the default is `null`, meaning "not configured", so no tag or
+branch is ever removed without a table property or this setting saying so. That matters
+because dropping a named ref destroys metadata a person chose to create; unlike expiring an
+anonymous snapshot, nobody can tell afterwards what it was called.
+
+There is deliberately **no `--max-ref-age-days` CLI flag**, unlike the other two retention
+knobs. `expire` accepts one-off overrides for snapshot age and count because both act on
+anonymous snapshots. Deleting a tag someone named should be a reviewable change to this file,
+not a value typed at a prompt.
 
 ### `remove_orphan_files`
 

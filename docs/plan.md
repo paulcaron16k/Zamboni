@@ -153,6 +153,9 @@ test stops existing, so this table cannot rot silently.
 | FR-7.12 | The listing and the referenced set are keyed identically on object storage | `test_canonical_is_not_idempotent_for_object_keys`, `test_listing_keys_match_reachable_keys` |
 | FR-7.13 | Listing works on whichever FileIO the deployment forces | `test_fsspec_listing_uses_the_bucket_qualified_prefix_once`, `test_fsspec_entries_carry_a_deletable_location`, `test_an_io_that_can_neither_list_nor_be_understood_aborts` |
 | FR-7.14 | A bad age guard is a usage error, not a traceback | `test_a_negative_age_guard_is_a_usage_error_not_a_crash` |
+| FR-7.15 | A ref past `max-ref-age-ms` is dropped, so its snapshots stop being pinned | `test_a_stale_ref_is_dropped_and_stops_pinning_its_snapshots`, `test_a_stale_tag_is_dropped_and_its_snapshot_expires`, `test_a_stale_branch_is_dropped_too` |
+| FR-7.16 | A ref's own `max-ref-age-ms` beats the table property, including when the table sets none | `test_a_refs_own_max_ref_age_beats_the_table_policy`, `test_a_refs_own_max_ref_age_applies_with_no_table_property` |
+| FR-7.17 | No ref is dropped unless the age is configured, and `main` never is | `test_an_unconfigured_max_ref_age_never_drops_a_ref`, `test_an_unconfigured_policy_leaves_every_ref_alone`, `test_main_survives_however_stale_the_policy`, `test_dry_run_drops_no_refs` |
 
 ### FR-8 — Dangling deletes and manifests
 
@@ -231,7 +234,6 @@ Known and accepted:
 |---|---|
 | A warehouse without `sts-enabled` silently cannot reclaim storage | `dev-stack/bootstrap.py` warns; `tests/test_dev_stack.py` asserts the profile setting, the vended session token, and a real LIST and DELETE |
 | A partially dangling delete manifest cannot be split | Reported and retained. Lifts automatically if PyIceberg gains a delete-manifest writer; the capability is probed, not assumed |
-| `max-ref-age-ms` is detected but not applied | Retaining a stale ref is the conservative error; the cost is reclaiming less |
 | Compaction is blocked on format version 3 | Row lineage cannot be preserved through the scan-and-rewrite path. Metadata-only operations are unaffected |
 | A remote-signing Lakekeeper warehouse permits no reclamation | Documented with the exact storage-profile settings that cause it; needs STS-vended or direct credentials |
 | `scripts/verify-live.py --map-host` takes a bridge IP | Only needed against a warehouse advertising an in-cluster endpoint. The dev stack advertises the pinned compose gateway instead, so the flag is unnecessary there |

@@ -136,19 +136,92 @@ def test_per_ref_overrides_beat_the_table_policy():
     assert decision.expire == frozenset(), "the ref's own minimum should win"
 
 
-def test_stale_refs_are_reported_but_never_main():
+def test_a_stale_ref_is_dropped_and_stops_pinning_its_snapshots():
+    """Step 2 of the spec, and the reason it is worth applying.
+
+    A dropped ref must stop protecting its head in steps 3 and 4. Dropping it
+    while still retaining what it pointed at would reclaim nothing, which is
+    what the previous behaviour did.
+    """
     snaps = chain([100, 0])
     refs = main_ref(2)
     refs["old_branch"] = SnapshotRef(snapshot_id=1, snapshot_ref_type=SnapshotRefType.BRANCH)
-    meta = FakeMetadata(snaps, refs)
     decision = decide_retention(
-        meta,
+        FakeMetadata(snaps, refs),
         RetentionPolicy(max_snapshot_age_ms=5 * DAY_MS, max_ref_age_ms=10 * DAY_MS),
         now=NOW,
     )
     assert decision.stale_refs == frozenset({"old_branch"})
-    # Reported, not dropped -- so its snapshot is still retained.
+    assert 1 not in decision.retain, "the dropped ref is still pinning its snapshot"
+    assert 1 in decision.expire
+
+
+def test_a_fresh_ref_is_kept():
+    snaps = chain([3, 0])
+    refs = main_ref(2)
+    refs["recent"] = SnapshotRef(snapshot_id=1, snapshot_ref_type=SnapshotRefType.TAG)
+    decision = decide_retention(
+        FakeMetadata(snaps, refs),
+        RetentionPolicy(max_snapshot_age_ms=1 * DAY_MS, max_ref_age_ms=10 * DAY_MS),
+        now=NOW,
+    )
+    assert decision.stale_refs == frozenset()
+    assert 1 in decision.retain, "a tag younger than max-ref-age-ms must protect its snapshot"
+
+
+def test_an_unconfigured_max_ref_age_never_drops_a_ref():
+    """The default is opt-in: no property, no ref removal, however old.
+
+    Dropping a named tag or branch is destructive metadata, so it happens only
+    when a table asks for it.
+    """
+    snaps = chain([9999, 0])
+    refs = main_ref(2)
+    refs["ancient"] = SnapshotRef(snapshot_id=1, snapshot_ref_type=SnapshotRefType.TAG)
+    decision = decide_retention(
+        FakeMetadata(snaps, refs),
+        RetentionPolicy(max_snapshot_age_ms=5 * DAY_MS),  # max_ref_age_ms is None
+        now=NOW,
+    )
+    assert decision.stale_refs == frozenset()
     assert 1 in decision.retain
+
+
+def test_a_refs_own_max_ref_age_beats_the_table_policy():
+    """The spec: the field "Defaults to table property ...", so the ref wins."""
+    snaps = chain([20, 0])
+    refs = main_ref(2)
+    refs["short_lived"] = SnapshotRef(
+        snapshot_id=1, snapshot_ref_type=SnapshotRefType.TAG, max_ref_age_ms=5 * DAY_MS
+    )
+    decision = decide_retention(
+        FakeMetadata(snaps, refs),
+        # The table would keep it for 100 days; the ref asks for 5.
+        RetentionPolicy(max_snapshot_age_ms=1 * DAY_MS, max_ref_age_ms=100 * DAY_MS),
+        now=NOW,
+    )
+    assert decision.stale_refs == frozenset({"short_lived"})
+
+
+def test_a_refs_own_max_ref_age_applies_with_no_table_property():
+    """The case the previous implementation could not reach.
+
+    Consulting only the policy meant the whole step was skipped when the table
+    set no `history.expire.max-ref-age-ms`, so a ref carrying its own age was
+    never evaluated at all.
+    """
+    snaps = chain([20, 0])
+    refs = main_ref(2)
+    refs["short_lived"] = SnapshotRef(
+        snapshot_id=1, snapshot_ref_type=SnapshotRefType.TAG, max_ref_age_ms=5 * DAY_MS
+    )
+    decision = decide_retention(
+        FakeMetadata(snaps, refs),
+        RetentionPolicy(max_snapshot_age_ms=1 * DAY_MS),  # no table-level value
+        now=NOW,
+    )
+    assert decision.stale_refs == frozenset({"short_lived"})
+    assert 1 not in decision.retain
 
 
 def test_main_is_never_stale():
@@ -270,3 +343,84 @@ def test_files_of_snapshots_covers_manifests_and_lists(aged):
     # Keys are canonical, values are the original locations FileIO.delete wants.
     assert all(not k.startswith("file://") for k in files)
     assert any(v.startswith("file://") for v in files.values())
+
+
+# -- dropping refs against a real table ----------------------------------
+
+
+def tag_oldest(tbl, name: str) -> int:
+    """Tag the oldest snapshot, so it is pinned by something other than main."""
+    oldest = tbl.metadata.snapshots[0].snapshot_id
+    tbl.manage_snapshots().create_tag(snapshot_id=oldest, tag_name=name).commit()
+    return oldest
+
+
+def test_a_stale_tag_is_dropped_and_its_snapshot_expires(session, aged):
+    """The whole point, end to end.
+
+    Without step 2 the tag pins its snapshot forever and the files behind it can
+    never be reclaimed, however old the tag is.
+    """
+    tagged = tag_oldest(aged, "release_2020")
+    tbl = session.table("db.aged")
+    before_rows = tbl.scan().to_arrow().num_rows
+    assert "release_2020" in tbl.metadata.refs
+
+    # max_ref_age_ms=0 makes every non-main ref stale; the tag's own snapshot is
+    # the oldest, so it is the one that becomes expirable.
+    policy = RetentionPolicy(max_snapshot_age_ms=0, min_snapshots_to_keep=1, max_ref_age_ms=0)
+    result = SnapshotExpirer(policy).run(tbl)
+
+    tbl = session.table("db.aged")
+    assert "release_2020" not in tbl.metadata.refs, "the stale tag was not dropped"
+    assert tagged not in {s.snapshot_id for s in tbl.metadata.snapshots}
+    assert result.stale_refs == ["release_2020"]
+    assert "dropped 1 ref(s)" in result.describe()
+    assert tbl.scan().to_arrow().num_rows == before_rows, "dropping a ref changed the data"
+
+
+def test_a_stale_branch_is_dropped_too(session, aged):
+    """Branches and tags are removed through different PyIceberg calls."""
+    oldest = aged.metadata.snapshots[0].snapshot_id
+    aged.manage_snapshots().create_branch(snapshot_id=oldest, branch_name="abandoned").commit()
+    tbl = session.table("db.aged")
+    assert tbl.metadata.refs["abandoned"].snapshot_ref_type == SnapshotRefType.BRANCH
+
+    policy = RetentionPolicy(max_snapshot_age_ms=0, min_snapshots_to_keep=1, max_ref_age_ms=0)
+    SnapshotExpirer(policy).run(tbl)
+
+    assert "abandoned" not in session.table("db.aged").metadata.refs
+
+
+def test_main_survives_however_stale_the_policy(session, aged):
+    """`main` is exempt by the spec, and dropping it would orphan the table."""
+    policy = RetentionPolicy(max_snapshot_age_ms=0, min_snapshots_to_keep=1, max_ref_age_ms=0)
+    SnapshotExpirer(policy).run(aged)
+
+    tbl = session.table("db.aged")
+    assert MAIN_BRANCH in tbl.metadata.refs
+    assert tbl.current_snapshot() is not None
+
+
+def test_dry_run_drops_no_refs(session, aged):
+    tag_oldest(aged, "release_2020")
+    tbl = session.table("db.aged")
+
+    policy = RetentionPolicy(max_snapshot_age_ms=0, min_snapshots_to_keep=1, max_ref_age_ms=0)
+    result = SnapshotExpirer(policy, dry_run=True).run(tbl)
+
+    assert result.stale_refs == ["release_2020"]
+    assert "would drop 1 ref(s)" in result.describe()
+    assert "release_2020" in session.table("db.aged").metadata.refs
+
+
+def test_an_unconfigured_policy_leaves_every_ref_alone(session, aged):
+    """The default path: no max-ref-age means no ref is touched."""
+    tag_oldest(aged, "keep_me")
+    tbl = session.table("db.aged")
+
+    # Expire aggressively by count, but say nothing about ref age.
+    SnapshotExpirer(RetentionPolicy(max_snapshot_age_ms=0, min_snapshots_to_keep=1)).run(tbl)
+
+    tbl = session.table("db.aged")
+    assert "keep_me" in tbl.metadata.refs, "a ref was dropped without being asked for"
