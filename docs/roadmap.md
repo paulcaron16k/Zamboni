@@ -29,7 +29,7 @@ assumptions plans the wrong work. Each row says how it was established.
 | That checkout is on `main` at `154288fb` (2026-07-27), **397 commits** past `pyiceberg-0.11.1` | `git log` | Large surface for private-API drift — see RM-1 |
 | Trino has **no Z-order and no sort during `optimize`** | Trino Iceberg connector docs | A common interface cannot treat ordering as universally available |
 | Trino enforces **retention floors** (`iceberg.expire-snapshots.min-retention`, `remove-orphan-files.min-retention`, both default `7d`) | same | Zamboni's 5-day/3-day defaults are *rejected*, not honoured. Must fail at plan time |
-| Spark has `rewrite_position_delete_files`; Trino has no equivalent | Iceberg Spark procedures docs | Dangling-delete removal is Spark-only, and Spark can do what *we* cannot |
+| Spark removes dangling deletes via the `remove-dangling-deletes` option on `rewrite_data_files`; `rewrite_position_delete_files` is a separate procedure that *compacts* delete files; Trino has neither | Iceberg Spark procedures docs, corrected by RM-3 | Dangling-delete removal is Spark-only, and Spark can do what *we* cannot. An earlier draft of this row attributed it to the wrong procedure |
 | ice-keeper is 8 399 lines of PyIceberg 0.10.x + PySpark over py4j | `../ice-keeper` checkout | It is effectively a spark-maintainer already; RM-6 feeds RM-5 |
 | ice-keeper's abstraction is **SQL-statement-generating** — `ActionStrategy.prepare_statement_to_execute() -> str` | reading `ice_keeper/task/action/action.py` | That seam cannot be ours; see RM-2 |
 
@@ -118,12 +118,15 @@ backend cannot do. Concretely, it must express:
 - **Parameter vocabulary.** Trino's `retain_last` is the spec's
   `min-snapshots-to-keep`; its `retention_threshold` has a configured floor that
   will *reject* our defaults. `max-ref-age-ms` has no Trino equivalent at all.
-- **Whether a preview is even possible.** This one bites hardest. Zamboni's
-  central safety rule — *without `--yes`, nothing is committed*, enforced across
-  all six verbs — has no counterpart in `ALTER TABLE … EXECUTE optimize` or a
-  Spark `CALL`. A maintainer that cannot preview must say so, and the CLI must
-  not print "dry run" over an engine that has no such mode. Getting this wrong
-  turns the one rule we made exceptionless back into a lie.
+- **Whether a preview is even possible — per operation.** This one bites
+  hardest. Zamboni's central safety rule — *without `--yes`, nothing is
+  committed*, enforced across all six verbs — is only partly reproducible
+  elsewhere. RM-3 established the detail: Spark's `remove_orphan_files` has a
+  `dry_run` argument and no other Spark procedure does; Trino has none at all.
+  So the capability is `can_preview(operation)`, not `can_preview()`. A
+  maintainer that cannot preview must say so, and the CLI must not print "dry
+  run" over an engine that is about to delete — that would turn the one rule we
+  made exceptionless back into a lie.
 - **Guarantee level, not just capability.** Zamboni's orphan removal is fenced by
   five invariants it enforces client-side (design.md §6.6): completeness of the
   referenced set, non-empty reference categories, current metadata never a
@@ -152,7 +155,7 @@ above already produced two constraints that would have been easy to miss (Trino'
 retention floors, and the absence of any preview mode), and those came from
 skimming one page each. A deliberate pass will produce more.
 
-**Deliverable** is a document, not code: exact procedure and parameter names from
+**Delivered** as [engine-comparison.md](engine-comparison.md). It is a document, not code: exact procedure and parameter names from
 primary sources, a mapping onto Zamboni's six verbs, the semantic-difference
 register, a comparison of which safety invariants survive delegation, and a
 recommended seam with the rejected alternatives recorded.
@@ -191,9 +194,11 @@ what you want from the first implementation after the abstraction.
 **Last, deliberately.** It is the largest dependency footprint — a JVM, PySpark,
 py4j — for the engine that overlaps Zamboni most, so it buys the least new reach
 per unit of work. It is also the one place where the interface must express that
-a *non-local* maintainer can do something the local one cannot:
-`rewrite_position_delete_files` rewrites partially-dangling delete files, which is
-precisely ZMBNI-604, blocked on PyIceberg. RM-6 informs this heavily — ice-keeper
+a *non-local* maintainer can do something the local one cannot: Spark's
+`remove-dangling-deletes` compaction option drops deletes per file rather than
+per whole manifest, which is precisely the limitation of ZMBNI-604 — and it
+brings a second procedure, `rewrite_position_delete_files`, for compacting delete
+files, which neither Zamboni nor Trino has in any form. RM-6 informs this heavily — ice-keeper
 is a working Spark maintenance service and its Spark plumbing is prior art.
 
 ---
@@ -222,6 +227,8 @@ thing to the interface RM-2 defines, including the parts that do not transfer:
 the SQL-statement seam works only because both its backends are SQL engines. That
 is a useful negative result to have in hand *before* designing ours, which is why
 this belongs alongside RM-3 rather than at the end.
+
+**Delivered** as [ice-keeper-comparison.md](ice-keeper-comparison.md).
 
 **Not a licensing or adoption decision** — the deliverable is an analysis with a
 per-capability recommendation to adopt, adapt, or decline.

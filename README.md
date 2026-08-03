@@ -158,6 +158,10 @@ bypassed hook is worse than none.
 - **[docs/roadmap.md](docs/roadmap.md)** — the six features beyond `v0.1.0`, and why they are
   sequenced as they are. The theme is to stop being one implementation: Trino and Spark can do
   this work too, and Zamboni should be one option behind a common interface.
+- **[docs/engine-comparison.md](docs/engine-comparison.md)** — what Zamboni, Trino and Spark
+  each can do, and the twelve places where the same-sounding operation differs.
+- **[docs/ice-keeper-comparison.md](docs/ice-keeper-comparison.md)** — against a deployed
+  maintenance service: what to adopt, what to decline, and the defect the comparison found.
 - **[docs/table-config.md](docs/table-config.md)** — the `table-config.json` specification.
 - **[docs/live-verification.md](docs/live-verification.md)** — what runs against a real
   Lakekeeper + MinIO, what a remote-signing warehouse blocks, and the two bugs it found.
