@@ -161,17 +161,29 @@ changes, `hatchling` is already the backend and `uv build` already works.
 
 ---
 
-## 4. Why 0.1.0 is not tagged
+## 4. Why the first release is 0.1.0 and not 1.0.0
 
-There is no `v0.1.0` tag, and this is deliberate rather than an oversight.
+`v0.1.0` is tagged. It could have been `1.0.0` — the scope is delivered and every
+operation has been verified against a live Lakekeeper and MinIO — and it
+deliberately is not, for one reason and two specifics.
 
-The repository has no remote, so **CI has never run** — every command in
-`.github/workflows/ci.yml` has been run locally, on one machine, on one Python,
-against one live Lakekeeper. That is tracked as ZMBNI-905, and it is the single
-item between "tests pass on my machine" and "tests pass". Tagging a release
-whose test matrix has never executed would put a version number on exactly the
-kind of unverified claim the rest of this project's checks exist to catch.
+**The reason is asymmetry.** `0.x` costs nothing: it already permits breaking
+changes, and `1.0.0` can follow at any time. A promise cannot be withdrawn. Cut
+`1.0.0` too early and the first genuine correction to a destructive default has to
+be either `2.0.0` or a quiet slip into a minor release — and the second of those
+makes this document untrue, which is worse than a low version number.
 
-So the convention above is established and enforced by tests; the first tag
-follows ZMBNI-905. `0.1.0` in `pyproject.toml` is the *in-development* version,
-and `CHANGELOG.md` keeps its work under `[Unreleased]` until then.
+**CI has never executed.** The repository has no remote, so every command in
+`.github/workflows/ci.yml` has been run locally: one machine, one Python, one live
+Lakekeeper. `1.0.0` reads as "verified"; the honest claim today is narrower.
+Tracked as ZMBNI-905.
+
+**The parts a 1.0 locks hardest have had one author.** The `table-config.json`
+schema freezes its `version: 1` the moment a 1.0 tool depends on it, and config
+schemas are where a second user finds the sharp edges. The defaults deciding what
+gets deleted — §1 argues these are public API — were chosen against a single
+five-day dataset; `older_than_days: 3` is Iceberg's own number, but nobody has yet
+run this against a warehouse whose longest compaction we did not also write.
+
+**What 1.0.0 waits on:** a green CI run, and one maintenance cycle against a
+warehouse we did not build.

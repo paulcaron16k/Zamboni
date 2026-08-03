@@ -21,12 +21,26 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
-Everything below is the initial implementation. It has no released predecessor,
-so nothing here is described as a change *from* anything.
+Nothing yet.
 
-`0.1.0` in `pyproject.toml` is the in-development version and is **not tagged**:
-this repository has no remote, so CI has never executed. See
-[docs/releasing.md §4](docs/releasing.md). The first tag follows ZMBNI-905.
+## [0.1.0] - 2026-08-03
+
+The initial implementation. It has no released predecessor, so nothing here is
+described as a change *from* anything.
+
+**Why 0.1.0 and not 1.0.0.** The scope is delivered and every operation has been
+verified against a live Lakekeeper and MinIO, so a 1.0 would have been defensible.
+It is deliberately not that, for one reason and two specifics. The reason is
+asymmetry: 0.x costs nothing and can be followed by 1.0.0 at any time, whereas a
+promise cannot be withdrawn — and the first genuine correction to a destructive
+default would then have to be either 2.0.0 or a quiet slip into a minor release,
+which would make [docs/releasing.md](docs/releasing.md) untrue. The specifics are
+that CI has never executed (this repository has no remote — ZMBNI-905), so the
+honest claim is "every check passes on one machine, one Python, one live
+Lakekeeper"; and that the `table-config.json` schema and the defaults deciding
+what gets deleted have had exactly one author and one five-day dataset. 1.0.0
+follows a green CI run and a maintenance cycle against a warehouse we did not
+build.
 
 ### Added
 
