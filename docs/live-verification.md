@@ -6,8 +6,10 @@ whether the REST catalog accepts the snapshots we build, and whether the storage
 credentials permit a bucket **listing** and a **delete** — which the reclaim
 operations need and no other operation does.
 
-Reproduce with [`scripts/verify-live.py`](../scripts/verify-live.py). It creates
-its own namespace, works only inside it, and drops it at the end.
+Reproduce with [`scripts/verify-live.py`](../scripts/verify-live.py), which points
+`tests/test_dev_stack.py` at any deployment. It works only in namespaces it creates and
+drops them even when a test errors during setup — which matters here, because the
+interesting targets are the ones where writes fail.
 
 ```bash
 # Against the REST catalog

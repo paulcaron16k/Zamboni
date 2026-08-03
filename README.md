@@ -227,6 +227,16 @@ export ZAMBONI_WAREHOUSE=zamboni
 uv run pytest tests/test_dev_stack.py          # skipped when the stack is down
 ```
 
+The same 13 checks can be pointed at a deployment this repo did not create:
+
+```bash
+uv run scripts/verify-live.py --port 8181 --warehouse acme_db \
+    --s3-host 172.19.0.2 --s3-port 9000
+```
+
+A failure is the diagnosis. A warehouse that cannot reclaim storage fails
+`test_the_warehouse_vends_credentials_rather_than_signing` by name.
+
 Ports are shifted off the defaults so it coexists with anything else you are running.
 The two non-obvious settings — why the warehouse needs `sts-enabled` and why its S3 endpoint
 is the compose gateway rather than `minio` — are explained in

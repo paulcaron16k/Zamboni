@@ -69,11 +69,29 @@ def unavailable(reason: str):
     pytest.skip(reason)
 
 
+#: Overrides for pointing the whole module at a deployment other than the dev
+#: stack. `scripts/verify-live.py` sets these; nothing else does. Keeping one
+#: implementation and two entry points is the point -- the alternative was a
+#: second script reimplementing every operation, and this codebase has already
+#: had a bug reintroduced by exactly that kind of duplicate.
+OVERRIDES = {
+    "LAKEKEEPER_PORT": "ZAMBONI_VERIFY_PORT",
+    "WAREHOUSE_NAME": "ZAMBONI_VERIFY_WAREHOUSE",
+    "S3_GATEWAY": "ZAMBONI_VERIFY_S3_HOST",
+    "MINIO_PORT": "ZAMBONI_VERIFY_S3_PORT",
+    "MINIO_CONSOLE_PORT": "ZAMBONI_VERIFY_S3_CONSOLE_PORT",
+}
+
+
 def stack_env() -> dict[str, str] | None:
-    if not ENV_FILE.exists():
-        return None
-    values = {k: v for k, v in dotenv_values(ENV_FILE).items() if v}
-    return values or None
+    values = {k: v for k, v in dotenv_values(ENV_FILE).items() if v} if ENV_FILE.exists() else {}
+    for key, var in OVERRIDES.items():
+        if override := os.environ.get(var):
+            values[key] = override
+    # A target given entirely by environment needs no .env at all, which is what
+    # lets these tests run against a deployment this repo did not create.
+    required = ("LAKEKEEPER_PORT", "WAREHOUSE_NAME")
+    return values if all(values.get(k) for k in required) else None
 
 
 def stack_up(env: dict[str, str]) -> bool:
@@ -119,11 +137,34 @@ def session(env) -> CatalogSession:
     s.close()
 
 
+def _drop_namespace(session, namespace: str) -> None:
+    """Remove a namespace and everything in it, reporting what it cannot."""
+    with contextlib.suppress(NoSuchNamespaceError):
+        for table in session.catalog.list_tables(namespace):
+            with contextlib.suppress(NoSuchTableError):
+                session.catalog.drop_table(table)
+    try:
+        session.catalog.drop_namespace(namespace)
+    except NoSuchNamespaceError:
+        pass
+    except Exception as exc:  # pragma: no cover - reported, not swallowed
+        pytest.fail(f"left namespace {namespace} behind in the target warehouse: {exc}")
+
+
 @pytest.fixture
-def table(session):
-    """A partitioned table in a namespace unique to this test run."""
+def table(session, request):
+    """A partitioned table in a namespace unique to this test run.
+
+    Cleanup is registered with `addfinalizer` immediately after the namespace
+    exists, *before* the appends that may fail. A yield fixture only tears down
+    if it reaches its yield, so when setup raised -- which it does against a
+    warehouse that refuses writes, exactly the case worth diagnosing -- the
+    namespace leaked into somebody else's catalog. Five of them, before this.
+    """
     namespace = f"zt_{uuid.uuid4().hex[:8]}"
     session.catalog.create_namespace(namespace)
+    request.addfinalizer(lambda: _drop_namespace(session, namespace))
+
     identifier = f"{namespace}.events"
     tbl = session.catalog.create_table(
         identifier, schema=SCHEMA, partition_spec=SPEC, properties={"format-version": "2"}
@@ -138,13 +179,7 @@ def table(session):
                 schema=ARROW,
             )
         )
-    yield identifier
-    for drop in (
-        lambda: session.catalog.drop_table(identifier),
-        lambda: session.catalog.drop_namespace(namespace),
-    ):
-        with contextlib.suppress(NoSuchTableError, NoSuchNamespaceError):
-            drop()
+    return identifier
 
 
 # -- the stack itself -----------------------------------------------------
@@ -280,6 +315,23 @@ def test_object_deletion_works(session, table):
 # -- the whole lifecycle, against the real stack --------------------------
 
 
+def test_metadata_properties_can_be_applied(session, table):
+    """The one operation verify-live.py checked and these tests did not.
+
+    It writes table properties rather than data, so it exercises a different
+    commit path from every other operation here -- and against a REST catalog
+    that path is the server's, not PyIceberg's.
+    """
+    from zamboni.properties import PROP_PREVIOUS_VERSIONS_MAX, apply_metadata_properties
+    from zamboni.tableconfig import MetadataSettings
+
+    result = apply_metadata_properties(
+        session.table(table), MetadataSettings(previous_versions_max=2)
+    )
+    assert [c.key for c in result.changes] == [PROP_PREVIOUS_VERSIONS_MAX]
+    assert session.table(table).properties[PROP_PREVIOUS_VERSIONS_MAX] == "2"
+
+
 def test_every_operation_runs_and_preserves_the_data(session, table):
     tbl = session.table(table)
     before = sorted(tbl.scan().to_arrow()["id"].to_pylist())
@@ -306,7 +358,17 @@ def test_every_operation_runs_and_preserves_the_data(session, table):
 
 @pytest.fixture
 def demo_env(env, monkeypatch, tmp_path):
-    """Point the demo at the dev stack, in a namespace it can safely clear."""
+    """Point the demo at the dev stack, in a namespace it can safely clear.
+
+    Skipped against any other target. Unlike every other test here, the demo
+    uses a *fixed* namespace (`healthims`) and clears it -- safe on a stack this
+    repo created, not safe on a warehouse that might already have one.
+    """
+    if os.environ.get("ZAMBONI_VERIFY_WAREHOUSE"):
+        pytest.skip(
+            "the demo writes a fixed `healthims` namespace and clears it, so it only "
+            "runs against this repo's own dev stack, not an external target"
+        )
     import shutil
 
     from himsdemo.state import TOTAL_DAYS

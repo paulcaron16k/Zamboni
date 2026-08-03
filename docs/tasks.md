@@ -36,7 +36,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-9 | Verification and CI | The suite, live verification, and automation. plan.md §4 | inproject | |
 | ZMBNI-10 | Documentation | HLD, delivery plan, config spec, verification record. See ZMBNI-1007 | inproject | |
 
-**Story counts:** 42 done · 1 inproject · 7 todo · 1 cancelled  (51 stories)
+**Story counts:** 43 done · 1 inproject · 6 todo · 1 cancelled  (51 stories)
 
 ---
 
@@ -140,7 +140,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-903 | Live verification | Every operation against a real Lakekeeper 0.13.1 and MinIO. Found four bugs the local suite could not. [live-verification.md](live-verification.md) | done | 2026-08-03 |
 | ZMBNI-904 | Dev-stack tests | 12 tests asserting the stack is configured such that reclamation *can* work, skipping cleanly when it is down | done | 2026-08-03 |
 | ZMBNI-905 | CI workflow | Four jobs written and every command verified locally, but **never executed by GitHub** — this repository has no remote, so nothing runs until one is added and pushed. Expect the first run to surface something; the likeliest is the pinned `172.31.0.0/24` colliding on a runner, which the job checks for by name | inproject | |
-| ZMBNI-906 | Retire `scripts/verify-live.py` | Now largely redundant with `tests/test_dev_stack.py`, which covers the same ground inside the suite. Its `--map-host` flag is also unnecessary against the dev stack. Keep only what the tests do not cover, or delete it | todo | |
+| ZMBNI-906 | Retire `scripts/verify-live.py` | Not deleted: the premise that it was redundant was wrong. The tests read `dev-stack/.env` and so cannot be aimed elsewhere, while the script's real value is diagnosing a deployment this repo did not create — which is how the remote-signing finding came out. It is now a 90-line launcher for those tests instead of 348 lines reimplementing them, the tests take an environment override, and the one operation only the script covered has a test. Fixed two leaks it exposed: a namespace stranded when setup errors, and the demo test writing a fixed namespace into a foreign warehouse | done | 2026-08-03 |
 | ZMBNI-907 | Release process | Version is hardcoded `0.1.0` in `pyproject.toml` with no tagging or changelog convention. Needed before anyone depends on a version number | todo | |
 | ZMBNI-908 | Type checking | mypy over `src` and `scripts`, enforced in the `lint` job and pre-commit. Demonstrated rather than assumed: reintroducing the `FileIO` has no `_initialize_fs` bug that took a live Lakekeeper run to find is now caught statically. Fixed 15 findings, of which 5 were real hazards -- an unguarded `Snapshot \| None`, a shadowed loop variable, a resolver whose type admitted `None`, and `S3Settings` requiring credentials a vending catalog supplies | done | 2026-08-03 |
 | ZMBNI-909 | One byte formatter | The same function existed in four modules and had already diverged -- three capped at GiB, one reached TiB -- so a size formatted differently depending on which module reported it. Consolidated into `zamboni.units.human_bytes` with tests | done | 2026-08-03 |
@@ -163,7 +163,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 
 ## What is actually left
 
-One story is in flight, 7 are open, and one is closed as a decision rather than a gap.
+One story is in flight, 6 are open, and one is closed as a decision rather than a gap.
 
 **In flight — ZMBNI-905.** The CI workflow exists and every command in it was run locally,
 but GitHub has never executed it: this repository has no remote. That is the single item
@@ -173,11 +173,10 @@ standing between "tests pass on my machine" and "tests pass". Nothing else is st
 capability probe or a named upstream limitation, and each lifts on its own when PyIceberg
 grows the capability. They are tracked so nobody re-investigates from scratch.
 
-**Ours to schedule — three.** In rough order of what would bite first:
+**Ours to schedule — two.** In rough order of what would bite first:
 
 | | |
 |---|---|
-| ZMBNI-906 | `scripts/verify-live.py` now duplicates `tests/test_dev_stack.py` |
 | ZMBNI-1007 | No operator runbook: nothing says how often to run any of this |
 | ZMBNI-907 | No release or versioning convention |
 
