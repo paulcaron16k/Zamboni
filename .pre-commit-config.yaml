@@ -1,0 +1,44 @@
+# Fast checks on every commit. The full suite takes ~4 minutes and belongs in
+# CI, not in a commit hook -- a hook slow enough to be bypassed is worse than
+# none. Everything here runs in under a second.
+#
+#   uv run pre-commit install
+#   uv run pre-commit run --all-files
+#
+# `ruff-format` runs before `ruff` so a formatting fix cannot leave a lint error
+# behind in the same pass.
+#
+# The ruff rev is pinned to the version in uv.lock. They must match: ruff's
+# formatter changes between releases, so a hook on a different version rewrites
+# files that CI considers correct, and every commit churns. If you bump ruff in
+# pyproject.toml, bump this rev to the same version.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.1
+    hooks:
+      - id: ruff-format
+        files: ^(src|tests|scripts)/
+      - id: ruff
+        args: [--fix]
+        files: ^(src|tests|scripts)/
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb=200]
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      # A committed dev-stack/.env would put MinIO keys in permanent history.
+      # It is gitignored, but --no-verify and `git add -f` both bypass that.
+      - id: forbid-submodules
+
+  - repo: local
+    hooks:
+      - id: no-dev-stack-env
+        name: dev-stack/.env must never be committed
+        entry: dev-stack/.env is gitignored for a reason -- it holds credentials
+        language: fail
+        files: ^dev-stack/\.env$

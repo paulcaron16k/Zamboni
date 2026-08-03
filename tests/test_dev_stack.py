@@ -38,6 +38,11 @@ from zamboni.manifests import ManifestRewriter
 from zamboni.orphans import OrphanCleaner, list_storage, storage_roots
 from zamboni.reachable import reachable_files
 
+#: Set in CI. Without it a stack that never came up makes every test here skip,
+#: and a suite of skips is indistinguishable from a suite of passes -- which is
+#: precisely the failure mode these tests exist to catch elsewhere.
+REQUIRE = "ZAMBONI_REQUIRE_DEV_STACK"
+
 DEV_STACK = Path(__file__).resolve().parent.parent / "dev-stack"
 ENV_FILE = DEV_STACK / ".env"
 SAMPLE_FILE = DEV_STACK / ".env.sample"
@@ -55,6 +60,13 @@ SPEC = PartitionSpec(
 
 
 # -- reachability ---------------------------------------------------------
+
+
+def unavailable(reason: str):
+    """Skip locally, fail in CI."""
+    if os.environ.get(REQUIRE):
+        pytest.fail(f"{REQUIRE} is set but the dev stack is unusable: {reason}")
+    pytest.skip(reason)
 
 
 def stack_env() -> dict[str, str] | None:
@@ -76,9 +88,9 @@ def stack_up(env: dict[str, str]) -> bool:
 def env() -> dict[str, str]:
     values = stack_env()
     if values is None:
-        pytest.skip(f"no {ENV_FILE}; copy .env.sample to run the dev-stack tests")
+        unavailable(f"no {ENV_FILE}; copy .env.sample to run the dev-stack tests")
     if not stack_up(values):
-        pytest.skip(
+        unavailable(
             "dev stack not reachable or not bootstrapped -- "
             "cd dev-stack && docker compose up -d && uv run bootstrap.py"
         )
@@ -94,7 +106,7 @@ def warehouse(env) -> dict:
     for w in r.json().get("warehouses", []):
         if w["name"] == env["WAREHOUSE_NAME"]:
             return w
-    pytest.skip(f"warehouse {env['WAREHOUSE_NAME']} not found -- run dev-stack/bootstrap.py")
+    unavailable(f"warehouse {env['WAREHOUSE_NAME']} not found -- run dev-stack/bootstrap.py")
 
 
 @pytest.fixture
@@ -142,7 +154,7 @@ def test_env_sample_and_env_declare_the_same_keys():
     """Drift here is the classic dev-stack failure: .env.sample stops being
     a usable template and a new checkout comes up misconfigured."""
     if not ENV_FILE.exists():
-        pytest.skip(f"no {ENV_FILE}")
+        unavailable(f"no {ENV_FILE}")
     sample = set(dotenv_values(SAMPLE_FILE))
     actual = set(dotenv_values(ENV_FILE))
     assert sample == actual, (

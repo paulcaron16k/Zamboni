@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push supersedes an in-flight run on the same ref. Not on main, where
+# every commit's result is worth keeping.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  UV_VERSION: "0.11.26"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      # --frozen fails if uv.lock is stale against pyproject.toml, so a
+      # dependency edit that forgot to re-lock cannot reach main.
+      - run: uv sync --frozen
+      - run: uv run ruff check src tests scripts
+      - run: uv run ruff format --check src tests scripts
+
+      # A hook on a different ruff than CI rewrites files CI considers correct,
+      # so every commit churns. Caught this locally: the two disagreed on one
+      # blank line.
+      - name: pre-commit pins the same ruff as uv.lock
+        run: |
+          locked=$(uv run ruff --version | awk '{print $2}')
+          hooked=$(grep -A1 'ruff-pre-commit' .pre-commit-config.yaml | grep 'rev:' | tr -d ' v' | cut -d: -f2)
+          test "$locked" = "$hooked" \
+            || { echo "::error::ruff mismatch -- uv.lock has $locked, .pre-commit-config.yaml pins $hooked"; exit 1; }
+
+      - run: uv run pre-commit run --all-files --show-diff-on-failure
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.13 is the pinned development version; 3.11 is the floor that
+        # pyproject.toml claims to support. Testing only the pin would let a
+        # 3.12-only construct ship under a >=3.11 requirement.
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --frozen --python ${{ matrix.python }}
+      # The dev-stack tests are excluded rather than left to skip: this job has
+      # no Docker services, and the dedicated job below is where they must run.
+      - run: uv run --python ${{ matrix.python }} pytest -q --ignore=tests/test_dev_stack.py
+
+  executables:
+    # bin/zamboni and bin/demo are PEP 723 scripts that reference the project as
+    # an editable path install. Two bugs have already come from that path: one
+    # absolute (broke on directory rename) and one non-editable (ran stale code).
+    # Both were only visible when running from outside the project directory.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --frozen
+
+      - name: Regenerating them must be a no-op
+        run: |
+          uv run scripts/build-executable.py
+          git diff --exit-code -- bin/ \
+            || { echo "::error::bin/ is stale -- run: uv run scripts/build-executable.py"; exit 1; }
+
+      - name: Run from outside the project directory
+        run: |
+          cd /tmp
+          "$GITHUB_WORKSPACE/bin/zamboni" doctor
+          "$GITHUB_WORKSPACE/bin/zamboni" --help > /dev/null
+
+  dev-stack:
+    # The job that exercises what unit tests cannot: a real REST catalog, real
+    # object storage, and the S3 permissions the reclaim operations need.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --frozen
+
+      # The stack pins a subnet so the S3 endpoint it advertises is a knowable
+      # address. Fail with a clear message rather than a confusing compose error.
+      - name: Check the pinned subnet is free
+        run: |
+          if docker network ls -q | xargs -r -I{} docker network inspect {} \
+               --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' | grep -q '^172\.31\.0\.0/24$'; then
+            echo "::error::172.31.0.0/24 is already in use; change it in dev-stack/docker-compose.yaml and S3_GATEWAY"
+            exit 1
+          fi
+
+      # Using the committed .env.sample verbatim also proves it is a working
+      # template, which is the thing that rots first in a dev stack.
+      - name: Bring up the stack
+        working-directory: dev-stack
+        run: |
+          cp .env.sample .env
+          docker compose up -d --wait
+          docker compose ps
+
+      - name: Bootstrap Lakekeeper and create the warehouse
+        working-directory: dev-stack
+        run: uv run bootstrap.py
+
+      # ZAMBONI_REQUIRE_DEV_STACK turns "cannot reach the stack" from a skip into
+      # a failure. Without it a stack that never started produces a suite of
+      # skips, and a green tick that means nothing was tested.
+      - name: Run the dev-stack tests
+        env:
+          ZAMBONI_REQUIRE_DEV_STACK: "1"
+        run: uv run pytest tests/test_dev_stack.py -v
+
+      - name: The demo, end to end on Lakekeeper and MinIO
+        env:
+          ZAMBONI_URI: http://localhost:8182/catalog
+          ZAMBONI_WAREHOUSE: zamboni
+        run: |
+          ./bin/demo --catalog lakekeeper clear
+          ./bin/demo --catalog lakekeeper next-day
+          ./bin/demo --catalog lakekeeper maintenance --reclaim-now
+          ./bin/demo --catalog lakekeeper query
+          ./bin/demo --catalog lakekeeper clear
+
+      - name: Stack logs
+        if: failure()
+        working-directory: dev-stack
+        run: docker compose logs --tail 200
+
+      - name: Tear down
+        if: always()
+        working-directory: dev-stack
+        run: docker compose down -v

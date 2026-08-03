@@ -28,6 +28,7 @@ before the referenced-file set it depends on was proven complete.
 | 6 | Dangling-delete removal, manifest rewriting, metadata retention, V3 blocker |
 | 7 | Live verification against Lakekeeper + MinIO |
 | 8 | Dev stack (Lakekeeper + Postgres + MinIO, STS-vending), its tests, and the demo running on it |
+| 9 | CI: lint, the suite on 3.11 and 3.13, the PEP 723 executables, and the dev stack end to end |
 
 ---
 
@@ -189,6 +190,12 @@ hermetic, and where every logic branch is exercised. Blind to anything about obj
 **Safety by omission** — the tests that matter most assert the tool **refuses**.
 `tests/test_orphans.py` monkeypatches each reference category away in turn and asserts
 nothing is deleted. Without these, enabling orphan removal by default would be unjustified.
+
+**Automated** — [.github/workflows/ci.yml](../.github/workflows/ci.yml) runs all of the
+above plus the dev stack on every push and pull request. Two details are load-bearing:
+`ZAMBONI_REQUIRE_DEV_STACK=1` makes an unreachable stack a failure rather than a skip, and
+the `executables` job runs `bin/zamboni` from outside the project directory, which is the
+only way the two path bugs it guards were ever visible.
 
 **Live** — [live-verification.md](live-verification.md) runs every operation against a real
 Lakekeeper 0.13.1 and MinIO. This is not ceremony: it found four bugs the local suite could

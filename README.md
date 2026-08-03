@@ -115,6 +115,32 @@ manifest's content agrees with the files inside it.
 Requirements and domain model: [data/healthims/Demo_Requirements.md](data/healthims/Demo_Requirements.md).
 Event catalogue: [data/healthims/HIMS_Discharge_Process_Events.md](data/healthims/HIMS_Discharge_Process_Events.md).
 
+## CI
+
+[.github/workflows/ci.yml](.github/workflows/ci.yml) runs four jobs on push and pull request:
+
+| Job | What it guards |
+|---|---|
+| `lint` | ruff check and format; `uv sync --frozen` fails on a stale lockfile; pre-commit and CI must pin the same ruff |
+| `test` | The suite on Python **3.11 and 3.13** — the floor `pyproject.toml` claims and the version pinned for development |
+| `executables` | `bin/` regenerates to a no-op, and both PEP 723 scripts run **from outside the project directory** |
+| `dev-stack` | The real thing: brings up Lakekeeper + Postgres + MinIO from `.env.sample`, bootstraps it, runs the 12 dev-stack tests, then the demo end to end |
+
+The `dev-stack` job sets `ZAMBONI_REQUIRE_DEV_STACK=1`, which turns "cannot reach the stack"
+from a skip into a failure. Without it, a stack that never started yields a suite of skips
+and a green tick that means nothing was tested.
+
+Locally, [.pre-commit-config.yaml](.pre-commit-config.yaml) runs the fast checks on every
+commit:
+
+```bash
+uv run pre-commit install
+uv run pre-commit run --all-files
+```
+
+The full suite stays out of the hook deliberately — a four-minute hook gets bypassed, and a
+bypassed hook is worse than none.
+
 ## Documentation
 
 - **[docs/design.md](docs/design.md)** — high-level design: how Iceberg stores a table, how
