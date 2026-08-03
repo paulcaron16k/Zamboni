@@ -15,3 +15,6 @@ data/healthims/.spill/
 
 # Rendered docs -- regenerate from docs/*.md
 *.html
+
+# Dev-stack secrets. dev-stack/.env.sample IS committed.
+dev-stack/.env

@@ -6,7 +6,7 @@ Design rationale lives in [design.md](design.md); this document is the delivery 
 
 | | |
 |---|---|
-| Status | All planned operations implemented. 252 tests passing. Verified against a live Lakekeeper 0.13.1 + MinIO — [live-verification.md](live-verification.md) |
+| Status | All planned operations implemented. 264 tests passing. Verified against a live Lakekeeper 0.13.1 + MinIO — [live-verification.md](live-verification.md) |
 | In scope | Data-file compaction, layout ordering, partition evolution, dangling-delete removal, manifest rewriting, snapshot expiry, orphan-file removal, metadata retention |
 | Out of scope | Rewriting a *partially* dangling delete manifest; splitting one partition across manifests; format-version 3 row rewriting |
 | Demo | [../data/healthims](../data/healthims) — five days of simulated hospital discharge ingest |
@@ -27,6 +27,7 @@ before the referenced-file set it depends on was proven complete.
 | 5 | Reclamation: `reachable` set, snapshot expiry, orphan-file removal |
 | 6 | Dangling-delete removal, manifest rewriting, metadata retention, V3 blocker |
 | 7 | Live verification against Lakekeeper + MinIO |
+| 8 | Dev stack (Lakekeeper + Postgres + MinIO, STS-vending), its tests, and the demo running on it |
 
 ---
 
@@ -182,7 +183,7 @@ test stops existing, so this table cannot rot silently.
 
 Three layers, because each catches what the others cannot.
 
-**Unit and integration** — 252 tests against a SQL catalog over a temporary directory. Fast,
+**Unit and integration** — 264 tests against a SQL catalog over a temporary directory. Fast,
 hermetic, and where every logic branch is exercised. Blind to anything about object storage.
 
 **Safety by omission** — the tests that matter most assert the tool **refuses**.
@@ -212,11 +213,13 @@ Known and accepted:
 
 | Risk | Mitigation |
 |---|---|
+| A warehouse without `sts-enabled` silently cannot reclaim storage | `dev-stack/bootstrap.py` warns; `tests/test_dev_stack.py` asserts the profile setting, the vended session token, and a real LIST and DELETE |
 | A partially dangling delete manifest cannot be split | Reported and retained. Lifts automatically if PyIceberg gains a delete-manifest writer; the capability is probed, not assumed |
 | `max-ref-age-ms` is detected but not applied | Retaining a stale ref is the conservative error; the cost is reclaiming less |
 | Compaction is blocked on format version 3 | Row lineage cannot be preserved through the scan-and-rewrite path. Metadata-only operations are unaffected |
 | A remote-signing Lakekeeper warehouse permits no reclamation | Documented with the exact storage-profile settings that cause it; needs STS-vended or direct credentials |
-| The demo's `--map-host` uses a Docker bridge IP | Changes if the stack is recreated; it is a verification affordance, not product code |
+| `scripts/verify-live.py --map-host` takes a bridge IP | Only needed against a warehouse advertising an in-cluster endpoint. The dev stack advertises the pinned compose gateway instead, so the flag is unnecessary there |
+| The dev stack pins subnet `172.31.0.0/24` | Collides if that range is already used; change it in `docker-compose.yaml` and `S3_GATEWAY` together. `bootstrap.py` fails loudly if they disagree |
 
 ---
 

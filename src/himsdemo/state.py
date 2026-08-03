@@ -6,7 +6,6 @@ demo has no hidden state beyond the Iceberg tables themselves.
 
 from __future__ import annotations
 
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -99,20 +98,14 @@ class DemoState:
             f"DAYS_INGESTED={self.days_ingested}\n" + marker
         )
 
-    def clear(self) -> None:
-        """Drop everything the demo created, keeping the chosen write mode.
+    def reset_counters(self) -> None:
+        """Back to day 0, keeping the chosen write mode.
 
-        The source CSVs and the two config files are inputs and are never
-        touched -- only the catalog, the warehouse, and the day counter.
+        Removing the *tables* is :mod:`himsdemo.catalogs`' job, because how you
+        do that depends on the catalog: locally it is a directory and a file,
+        remotely it is a series of drop-table calls. This method owns only the
+        part that is the same either way.
         """
-        if self.warehouse_path.exists():
-            shutil.rmtree(self.warehouse_path)
-        if self.spill_path.exists():
-            shutil.rmtree(self.spill_path)
-        self.catalog_path.unlink(missing_ok=True)
-        # SQLite side files, if the process died mid-write.
-        for suffix in ("-wal", "-shm", "-journal"):
-            Path(str(self.catalog_path) + suffix).unlink(missing_ok=True)
         self.days_ingested = 0
         self.ingesting_day = None
         self.save()

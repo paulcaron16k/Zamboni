@@ -11,10 +11,10 @@ import argparse
 import sys
 from pathlib import Path
 
-from zamboni import CatalogSession, CompactionConfig, MemoryMode
+from zamboni import CompactionConfig, MemoryMode
 from zamboni.tableconfig import TableConfig
 
-from . import queries, stats
+from . import catalogs, queries, stats
 from .ingest import ingest_day
 from .schema import SchemaDocument, create_tables, load_tables
 from .state import MODES, TOTAL_DAYS, DemoState
@@ -28,6 +28,12 @@ def main(argv: list[str] | None = None) -> int:
     state = DemoState.load(args.root)
     for warning in state.warnings:
         print(f"warning: {warning}", file=sys.stderr)
+
+    try:
+        args.demo_catalog = catalogs.build(catalogs.resolve_backend(args.catalog), state)
+    except catalogs.CatalogUnavailable as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     handlers = {
         "clear": _clear,
@@ -44,6 +50,15 @@ def main(argv: list[str] | None = None) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="demo", description=__doc__.splitlines()[0])
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--catalog",
+        choices=catalogs.BACKENDS,
+        help=(
+            "where the tables live. 'sqlite' (default) needs nothing running; "
+            "'lakekeeper' uses the dev stack and reads ZAMBONI_URI / "
+            f"ZAMBONI_WAREHOUSE. Also settable via {catalogs.ENV_BACKEND}."
+        ),
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("clear", help="drop the catalog and warehouse, back to day 0")
@@ -70,19 +85,13 @@ def _build_parser() -> argparse.ArgumentParser:
 # -- session plumbing ----------------------------------------------------
 
 
-def _open(state: DemoState, *, create: bool):
+def _open(state: DemoState, catalog, *, create: bool):
     """Catalog session, schema document, layout config, and the tables.
 
     ``create=False`` is what read-only commands use: they must not bring a
     catalog into existence just by being run.
     """
-    if create:
-        state.warehouse_path.mkdir(parents=True, exist_ok=True)
-    session = CatalogSession.for_local(
-        warehouse_path=str(state.warehouse_path),
-        uri=f"sqlite:///{state.catalog_path}",
-        name="healthims",
-    )
+    session = catalogs.open_session(catalog, state, create=create)
     schema = SchemaDocument.load(state.schema_path)
     config = TableConfig.load(state.table_config_path)
     tables = (
@@ -93,22 +102,22 @@ def _open(state: DemoState, *, create: bool):
     return session, schema, config, tables
 
 
-def _has_catalog(state: DemoState) -> bool:
-    """Whether a catalog exists yet.
+def _has_catalog(state: DemoState, catalog) -> bool:
+    """Whether the demo has anything in this catalog yet.
 
-    Checked before opening, not after: SQLAlchemy creates the SQLite file on
-    connect, so merely opening the catalog to look would itself be the mutation
-    a read-only command must not make.
+    Checked before opening, not after: for SQLite, SQLAlchemy creates the file
+    on connect, so opening one to look would itself be the mutation a read-only
+    command must not make. See :mod:`himsdemo.catalogs`.
     """
-    return state.catalog_path.exists()
+    return catalogs.exists(catalog, state)
 
 
-def _print_status(state: DemoState) -> None:
-    if not _has_catalog(state):
+def _print_status(state: DemoState, catalog) -> None:
+    if not _has_catalog(state, catalog):
         print("\n  No tables yet -- run './bin/demo next-day'.\n")
         return
 
-    session, schema, config, tables = _open(state, create=False)
+    session, schema, config, tables = _open(state, catalog, create=False)
     try:
         if not tables:
             print("\n  No tables yet -- run './bin/demo next-day'.\n")
@@ -131,10 +140,14 @@ def _print_status(state: DemoState) -> None:
 
 
 def _clear(state: DemoState, args: argparse.Namespace) -> int:
-    state.clear()
+    catalog = args.demo_catalog
+    from .schema import SchemaDocument
+
+    names = [d.name for d in SchemaDocument.load(state.schema_path).tables]
+    detail = catalogs.clear(catalog, state, names)
+    state.reset_counters()
     print(f"cleared. mode={state.write_mode}, days ingested=0")
-    print(f"  catalog   {state.catalog_path}")
-    print(f"  warehouse {state.warehouse_path}")
+    print(f"  {detail}")
     return 0
 
 
@@ -163,6 +176,7 @@ def _mode(state: DemoState, args: argparse.Namespace) -> int:
 
 
 def _next_day(state: DemoState, args: argparse.Namespace) -> int:
+    catalog = args.demo_catalog
     if not state.has_more_days:
         print("No More Data")
         return 0
@@ -183,7 +197,7 @@ def _next_day(state: DemoState, args: argparse.Namespace) -> int:
     state.ingesting_day = day_no
     state.save()
 
-    session, schema, _config, tables = _open(state, create=True)
+    session, schema, _config, tables = _open(state, catalog, create=True)
     try:
         result = ingest_day(tables, schema, state.day_dir(day_no), day_no, state.write_mode)
         print(result.describe())
@@ -193,23 +207,24 @@ def _next_day(state: DemoState, args: argparse.Namespace) -> int:
     state.days_ingested = day_no
     state.ingesting_day = None
     state.save()
-    _print_status(state)
+    _print_status(state, args.demo_catalog)
     return 0
 
 
 def _status(state: DemoState, args: argparse.Namespace) -> int:
-    _print_status(state)
+    _print_status(state, args.demo_catalog)
     return 0
 
 
 def _maintenance(state: DemoState, args: argparse.Namespace) -> int:
-    if state.days_ingested == 0 or not _has_catalog(state):
+    catalog = args.demo_catalog
+    if state.days_ingested == 0 or not _has_catalog(state, catalog):
         print("nothing ingested yet -- run './bin/demo next-day' first")
         return 0
 
     from zamboni import TableCompactor
 
-    session, schema, config, _tables = _open(state, create=True)
+    session, schema, config, _tables = _open(state, catalog, create=True)
     try:
         # Layout comes from table-config.json; memory mode and temp directory
         # are operational choices and stay here.
@@ -234,7 +249,7 @@ def _maintenance(state: DemoState, args: argparse.Namespace) -> int:
     finally:
         session.close()
 
-    _print_status(state)
+    _print_status(state, args.demo_catalog)
     return 0
 
 
@@ -307,11 +322,12 @@ def _indent(text: str, width: int) -> None:
 
 
 def _query(state: DemoState, args: argparse.Namespace) -> int:
-    if state.days_ingested == 0 or not _has_catalog(state):
+    catalog = args.demo_catalog
+    if state.days_ingested == 0 or not _has_catalog(state, catalog):
         print("nothing ingested yet -- run './bin/demo next-day' first")
         return 0
 
-    session, _schema, _config, tables = _open(state, create=False)
+    session, _schema, _config, tables = _open(state, catalog, create=False)
     try:
         print("")
         print(

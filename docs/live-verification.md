@@ -41,7 +41,33 @@ failures traced to one cause below.
 
 ---
 
-## What the REST catalog blocks, and why
+## Update: a stack where it all works
+
+The findings below come from a warehouse using **remote signing**. Since then,
+[dev-stack/](../dev-stack/) provides one configured with **STS credential
+vending** instead, and against it every operation passes through the REST
+catalog — 13/13, including `remove-orphans`, with no host-name mapping needed.
+
+The decisive setting is `sts-enabled`, and the mechanism is worth being precise
+about, because the obvious reading is wrong:
+
+| Warehouse | Client gets | LIST / HEAD / DELETE |
+|---|---|---|
+| `sts-enabled: false`, `remote-signing-enabled: true` | `FsspecFileIO` + `S3V4RestSigner`, no credentials | refused |
+| `sts-enabled: true`, `remote-signing-enabled: true` | `PyArrowFileIO` + vended key and session token | **work** |
+
+Remote signing does not have to be turned *off*. When STS is on, Lakekeeper
+returns temporary credentials in the load-table response and does not configure
+a signer at all — `s3.signer` and `py-io-impl` are simply absent. So it is the
+presence of STS that decides, not the absence of signing.
+
+`tests/test_dev_stack.py` asserts this at three levels: the warehouse profile
+has `sts-enabled`, the client really receives a session token and
+`PyArrowFileIO`, and a real LIST and a real DELETE both succeed.
+
+---
+
+## What a remote-signing catalog blocks, and why
 
 The warehouse under test has this storage profile:
 

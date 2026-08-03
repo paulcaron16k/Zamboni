@@ -6,10 +6,11 @@ or Spark.
 
 Nothing in that stack compacts tables today:
 
-- **Lakekeeper OSS** ships only maintenance queues for its own bookkeeping. Verified
-  against a running 0.13.1: `GET /management/v1/info` reports
-  `"queues": ["soft_deletion", "tabular_purge", "task_log_cleanup"]`. No compaction,
-  expiry or orphan queue.
+- **Lakekeeper OSS** ships only maintenance queues for its own bookkeeping. Verified against
+  running servers: `v0.13.1` reports `["tabular_expiration", "tabular_purge",
+  "task_log_cleanup"]` and `latest-main` reports `["soft_deletion", "tabular_purge",
+  "task_log_cleanup"]`. The names differ between builds; neither has a compaction, expiry or
+  orphan queue, and `tests/test_dev_stack.py` asserts that against whatever is running.
 - **PyIceberg** (0.11.1, the current release) exposes `table.maintenance.expire_snapshots()`
   and nothing else.
   That call is metadata-only — it emits a `RemoveSnapshotsUpdate` and never deletes a file.
@@ -179,6 +180,26 @@ print(compactor.execute().describe())   # do it
 ```
 
 `execute(dry_run=True)` plans and logs without touching the table.
+
+## Dev stack
+
+A Lakekeeper + Postgres + MinIO stack, configured so reclamation works, lives in
+[dev-stack/](dev-stack/):
+
+```bash
+cp dev-stack/.env.sample dev-stack/.env
+cd dev-stack && docker compose up -d && uv run bootstrap.py
+
+export ZAMBONI_URI=http://localhost:8182/catalog
+export ZAMBONI_WAREHOUSE=zamboni
+./bin/demo --catalog lakekeeper next-day        # the demo, on Lakekeeper and MinIO
+uv run pytest tests/test_dev_stack.py          # skipped when the stack is down
+```
+
+Ports are shifted off the defaults so it coexists with anything else you are running.
+The two non-obvious settings — why the warehouse needs `sts-enabled` and why its S3 endpoint
+is the compose gateway rather than `minio` — are explained in
+[dev-stack/README.md](dev-stack/README.md).
 
 ## Environment
 

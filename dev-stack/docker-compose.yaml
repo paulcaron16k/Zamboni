@@ -1,0 +1,114 @@
+# Zamboni dev stack: Lakekeeper (with its built-in UI), Postgres, MinIO.
+#
+# Ports are deliberately shifted off the defaults so this coexists with any
+# other Lakekeeper/MinIO stack on the machine. Values come from .env -- copy
+# .env.sample if you have not already.
+#
+# The UI is served by Lakekeeper itself at /ui/; there is no separate UI image.
+name: zamboni-dev
+
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 10s
+      retries: 10
+      start_period: 5s
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [zamboni]
+
+  # Schema migration runs to completion before the server starts. Separating it
+  # is Lakekeeper's own pattern: `serve` does not migrate.
+  migrate:
+    image: &lakekeeper_image quay.io/lakekeeper/catalog:${LAKEKEEPER_VERSION}
+    environment: &lakekeeper_env
+      LAKEKEEPER__PG_ENCRYPTION_KEY: ${LAKEKEEPER_ENCRYPTION_KEY}
+      LAKEKEEPER__PG_DATABASE_URL_READ: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      LAKEKEEPER__PG_DATABASE_URL_WRITE: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      LAKEKEEPER__AUTHZ_BACKEND: allowall
+    command: ["migrate"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [zamboni]
+
+  lakekeeper:
+    image: *lakekeeper_image
+    environment: *lakekeeper_env
+    command: ["serve"]
+    healthcheck:
+      test: ["CMD", "/home/nonroot/lakekeeper", "healthcheck"]
+      interval: 2s
+      timeout: 10s
+      retries: 10
+      start_period: 5s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "${LAKEKEEPER_PORT}:8181"
+    networks: [zamboni]
+
+  minio:
+    image: minio/minio:${MINIO_VERSION}
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: ["server", "--console-address", ":9001", "/data"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 10s
+      retries: 10
+      start_period: 5s
+    ports:
+      - "${MINIO_PORT}:9000"
+      - "${MINIO_CONSOLE_PORT}:9001"
+    volumes:
+      - miniodata:/data
+    networks: [zamboni]
+
+  # Creates the bucket and exits. `restart: on-failure` rather than "no" so a
+  # cold start where MinIO is slow to accept writes still converges.
+  createbucket:
+    image: minio/mc:${MC_VERSION}
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: on-failure
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set zamboni http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} &&
+      mc mb --ignore-existing zamboni/${S3_BUCKET} &&
+      echo 'bucket ${S3_BUCKET} ready'
+      "
+    networks: [zamboni]
+
+networks:
+  # The subnet is pinned, not left to Docker, because the S3 endpoint the
+  # warehouse advertises is this network's *gateway* address. That address is
+  # reachable from inside the network (routing to the host) and from the host
+  # itself (the published MinIO port), so one endpoint works for both -- which
+  # is what removes the need to alias `minio` in host DNS.
+  #
+  # 172.31.0.0/24 was free here; change S3_GATEWAY in .env to match if you move it.
+  zamboni:
+    ipam:
+      config:
+        - subnet: 172.31.0.0/24
+          gateway: 172.31.0.1
+
+volumes:
+  pgdata:
+  miniodata:

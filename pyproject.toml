@@ -30,6 +30,7 @@ demo = "himsdemo.cli:main"
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "python-dotenv>=1.2.2",
     "ruff>=0.6",
     "zamboni[bucket,sql,s3]",
 ]
