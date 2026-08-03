@@ -348,3 +348,39 @@ def test_a_negative_age_guard_is_a_usage_error_not_a_crash(warehouse, session, c
     err = capsys.readouterr().err
     assert "older_than_days must be >= 0" in err
     assert "Traceback" not in err
+
+
+def test_every_mutating_verb_says_what_omitting_yes_does(capsys):
+    """Discoverability, not decoration.
+
+    Five verbs treat a missing `--yes` as a dry run, and their help text said only
+    "actually delete" -- so an operator reading --help could not find the safe
+    path. The runbook exposed the gap; this keeps it closed.
+    """
+    for verb in (
+        "expire",
+        "remove-orphans",
+        "remove-dangling-deletes",
+        "rewrite-manifests",
+        "apply-properties",
+    ):
+        with pytest.raises(SystemExit):
+            main([verb, "--help"])
+        # argparse hard-wraps help text, so "dry run" can arrive as
+        # "dry\n                        run". Compare on collapsed whitespace.
+        out = " ".join(capsys.readouterr().out.lower().split())
+        assert "dry run" in out, f"{verb} --help does not mention the dry run"
+
+
+def test_compact_is_the_one_verb_that_refuses_rather_than_previewing(warehouse, session, capsys):
+    """A documented inconsistency, pinned so the runbook stays true.
+
+    `compact` errors without `--yes` or `--dry-run`; the other five preview. Both
+    behaviours are defensible, the difference is not -- tracked as ZMBNI-911. If
+    it is ever reconciled, this test and docs/runbook.md change together.
+    """
+    code = main(["compact", "db.events", "--local-warehouse", warehouse])
+
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "--yes" in err and "--dry-run" in err

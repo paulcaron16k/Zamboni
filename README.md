@@ -151,6 +151,8 @@ bypassed hook is worse than none.
   constraints, and who owns what.
 - **[docs/plan.md](docs/plan.md)** — delivery plan: scope, phasing, requirements
   traceability, verification approach, residual risk.
+- **[docs/runbook.md](docs/runbook.md)** — operator runbook: the order to run the six verbs
+  in, how to derive a cadence, how to size the orphan guard, and what each exit code means.
 - **[docs/tasks.md](docs/tasks.md)** — the ZMBNI backlog: what is done, what is left, and
   what is deliberately not being done.
 - **[docs/table-config.md](docs/table-config.md)** — the `table-config.json` specification.

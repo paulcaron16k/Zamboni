@@ -147,7 +147,11 @@ def _build_parser() -> argparse.ArgumentParser:
     ex = sub.add_parser("expire", help="apply the retention policy and delete the files it orphans")
     ex.add_argument("table")
     ex.add_argument("--table-config", help="path to table-config.json")
-    ex.add_argument("--yes", action="store_true", help="actually expire and delete")
+    ex.add_argument(
+        "--yes",
+        action="store_true",
+        help="actually expire and delete. Without it this is a dry run.",
+    )
     ex.add_argument("--max-snapshot-age-days", type=int)
     ex.add_argument("--min-snapshots-to-keep", type=int)
     _add_catalog_args(ex)
@@ -155,7 +159,11 @@ def _build_parser() -> argparse.ArgumentParser:
     ro = sub.add_parser("remove-orphans", help="delete unreferenced files under the table location")
     ro.add_argument("table")
     ro.add_argument("--table-config", help="path to table-config.json")
-    ro.add_argument("--yes", action="store_true", help="actually delete")
+    ro.add_argument(
+        "--yes",
+        action="store_true",
+        help="actually delete. Without it this is a dry run.",
+    )
     ro.add_argument(
         "--older-than-days",
         type=int,
@@ -170,7 +178,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     dd.add_argument("table")
     dd.add_argument("--table-config", help="path to table-config.json")
-    dd.add_argument("--yes", action="store_true", help="actually commit the removal")
+    dd.add_argument(
+        "--yes",
+        action="store_true",
+        help="actually commit the removal. Without it this is a dry run.",
+    )
     _add_catalog_args(dd)
 
     rm = sub.add_parser(
@@ -178,7 +190,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     rm.add_argument("table")
     rm.add_argument("--table-config", help="path to table-config.json")
-    rm.add_argument("--yes", action="store_true", help="actually commit the rewrite")
+    rm.add_argument(
+        "--yes",
+        action="store_true",
+        help="actually commit the rewrite. Without it this is a dry run.",
+    )
     rm.add_argument("--min-input-manifests", type=int)
     _add_catalog_args(rm)
 
@@ -188,7 +204,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("table")
     ap.add_argument("--table-config", help="path to table-config.json")
-    ap.add_argument("--yes", action="store_true", help="actually set them")
+    ap.add_argument(
+        "--yes",
+        action="store_true",
+        help="actually set them. Without it this is a dry run.",
+    )
     _add_catalog_args(ap)
 
     return parser

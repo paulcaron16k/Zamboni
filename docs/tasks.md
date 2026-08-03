@@ -34,9 +34,9 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-7 | Format-version coverage | V1 refused, V2 full, V3 metadata-only. FR-6.8, FR-9.3–9.5. design §2.1, §6.1 | inproject | |
 | ZMBNI-8 | Environment and dev stack | Locked venv, self-contained executables, Lakekeeper + MinIO stack. design §6.4 | done | 2026-08-03 |
 | ZMBNI-9 | Verification and CI | The suite, live verification, and automation. plan.md §4 | inproject | |
-| ZMBNI-10 | Documentation | HLD, delivery plan, config spec, verification record. See ZMBNI-1007 | inproject | |
+| ZMBNI-10 | Documentation | HLD, delivery plan, config spec, runbook, verification record | done | 2026-08-03 |
 
-**Story counts:** 43 done · 1 inproject · 6 todo · 1 cancelled  (51 stories)
+**Story counts:** 44 done · 1 inproject · 6 todo · 1 cancelled  (52 stories)
 
 ---
 
@@ -135,6 +135,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 | id | title | description | status | completed-at |
 |---|---|---|---|---|
 | ZMBNI-910 | Review the five unreviewed commits | Dev stack, CI, backlog, ZMBNI-908 and ZMBNI-505 had landed with verification but no review pass. Found four defects, all reproduced before fixing: a stale ref reported as dropped while still present, a false soft-delete claim in user-facing output, a queue assertion weaker than the claim it defended, and an untested behaviour change in `S3Settings` | done | 2026-08-03 |
+| ZMBNI-911 | Reconcile the --yes posture | `compact` exits 2 without `--yes` or `--dry-run`; the other five mutating verbs treat a missing `--yes` as a dry run. Both are defensible, the inconsistency is not, and runbook.md has to explain it. Pinned by `test_compact_is_the_one_verb_that_refuses_rather_than_previewing` so the docs and behaviour move together | todo | |
 | ZMBNI-901 | Unit and integration suite | 264 tests against a SQL catalog over a temp directory. plan.md §4 | done | 2026-08-03 |
 | ZMBNI-902 | Safety-by-omission tests | Monkeypatch each reference category away in turn and assert nothing is deleted. Without these, enabling orphan removal by default is unjustified. FR-7.7 | done | 2026-08-03 |
 | ZMBNI-903 | Live verification | Every operation against a real Lakekeeper 0.13.1 and MinIO. Found four bugs the local suite could not. [live-verification.md](live-verification.md) | done | 2026-08-03 |
@@ -157,7 +158,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-1004 | Live-verification record | What a remote-signing warehouse blocks, and the four bugs the run surfaced. [live-verification.md](live-verification.md) | done | 2026-08-03 |
 | ZMBNI-1005 | Dev-stack guide | [../dev-stack/README.md](../dev-stack/README.md) | done | 2026-08-03 |
 | ZMBNI-1006 | This backlog | [tasks.md](tasks.md) | done | 2026-08-03 |
-| ZMBNI-1007 | Operator runbook | The README covers invocation; there is no guidance on cadence — how often to compact, expire and sweep, and how to size the orphan guard against a warehouse's longest write. That sizing decision is currently only explained in passing | todo | |
+| ZMBNI-1007 | Operator runbook | [runbook.md](runbook.md): the six-verb order with why each position matters, cadence derived from the retention windows rather than invented, how to *measure* the orphan guard against your longest compaction, what to watch, all four exit codes, and recovery per failure mode. Writing it surfaced that five verbs dry-run without `--yes` but never said so in `--help` — fixed, with a test | done | 2026-08-03 |
 
 ---
 
@@ -177,7 +178,7 @@ grows the capability. They are tracked so nobody re-investigates from scratch.
 
 | | |
 |---|---|
-| ZMBNI-1007 | No operator runbook: nothing says how often to run any of this |
+| ZMBNI-911 | `compact` refuses without `--yes` while five other verbs preview; runbook.md has to explain it |
 | ZMBNI-907 | No release or versioning convention |
 
 **Closed as a decision — ZMBNI-605.** Splitting one partition across manifests would defeat
