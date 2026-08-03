@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "defaults": {
+    "partition_evolution": {
+      "enabled": true,
+      "rules": [
+        {
+          "from": "day",
+          "to": "month",
+          "older_than_days": 90
+        }
+      ]
+    }
+  },
+  "tables": {
+    "healthims.hims_employees": {
+      "description": "Master data, replaced whole each day. Unpartitioned: small, and no time dimension to prune on. A full replace leaves exactly one live file, so maintenance has nothing to compact here -- included deliberately, as the control case where the right answer is to do nothing.",
+      "partition_evolution": {
+        "enabled": false,
+        "rules": []
+      },
+      "min_input_files": 2
+    },
+    "healthims.hims_discharge": {
+      "description": "Partitioned by created_at, not updated_at: created_at is stable for a row's life, so a next-day restart rewrites inside the original partition instead of moving the row. Z-ordered because there are two independent access paths -- incremental reads filter updated_at, lookups filter process_id -- and a sort would only serve whichever key led.",
+      "partition": [
+        {
+          "column": "created_at",
+          "transform": "day"
+        }
+      ],
+      "ordering": {
+        "mode": "zorder",
+        "zorder": {
+          "columns": ["updated_at", "process_id"],
+          "precision_bits": 16
+        }
+      },
+      "min_input_files": 2
+    },
+    "healthims.hims_events": {
+      "description": "Partitioned by occurred_at so time-range queries prune to a day. Within the day, process-trace lookups filter process_id and sub-day slices filter occurred_at, so both are z-ordered. Alternative worth measuring: z-order(process_id, event_name), which trades sub-day time pruning for funnel-count pruning.",
+      "partition": [
+        {
+          "column": "occurred_at",
+          "transform": "day"
+        }
+      ],
+      "ordering": {
+        "mode": "zorder",
+        "zorder": {
+          "columns": ["process_id", "occurred_at"],
+          "precision_bits": 16
+        }
+      },
+      "min_input_files": 2
+    }
+  }
+}

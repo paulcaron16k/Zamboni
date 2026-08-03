@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "namespace": "healthims",
+  "description": "HIMS in-patient discharge process. Logical schema only -- physical layout (partitioning, ordering, evolution) lives in table-config.json.",
+  "tables": {
+    "hims_employees": {
+      "description": "Staff master data. Replicated as a full-table snapshot each day; no incremental key exists in the source.",
+      "primary_key": ["employee_id"],
+      "replication": {
+        "mode": "full_table",
+        "key": null
+      },
+      "columns": [
+        { "name": "employee_id", "type": "string", "required": true, "doc": "Stable staff identifier" },
+        { "name": "role", "type": "string", "required": true, "doc": "doctor | nurse-staff | nurse-mgr | pharma-mgr | billing-mgr | transport-staff | evs-staff" },
+        { "name": "full_name", "type": "string", "required": true }
+      ]
+    },
+    "hims_discharge": {
+      "description": "One row per discharge process instance. Updated in place as the process advances; a cancelled discharge is restarted the next day under the same process_id.",
+      "primary_key": ["process_id"],
+      "replication": {
+        "mode": "incremental",
+        "key": "updated_at"
+      },
+      "columns": [
+        { "name": "process_type", "type": "string", "required": true, "doc": "Constant 'discharge'. Present so the table can later hold other process types." },
+        { "name": "process_id", "type": "string", "required": true, "doc": "= discharge_id. UUIDv7, so it is time-ordered." },
+        { "name": "status", "type": "string", "required": true, "doc": "pending | initiated | nurse_cleared | pharma_cleared | billing_pending | billing_cleared | cancelled | discharged. 'discharged' is terminal -- EVS events continue against it." },
+        { "name": "patient_id", "type": "string", "required": true },
+        { "name": "attending_doctor_id", "type": "string", "required": true, "doc": "-> hims_employees.employee_id" },
+        { "name": "room_id", "type": "string", "required": false, "doc": "Bed the patient occupies; the room EVS later cleans." },
+        { "name": "scheduled_at", "type": "timestamp", "required": false, "doc": "Planned departure. Null for unplanned discharges." },
+        { "name": "created_at", "type": "timestamp", "required": true, "doc": "When the row first appeared. Stable for the row's life, which is why it is the partition key." },
+        { "name": "updated_at", "type": "timestamp", "required": true, "doc": "Replication key. Moves on every status change, including a next-day restart." },
+        { "name": "initiated_at", "type": "timestamp", "required": false, "doc": "Set by attending_doctor_initiated." },
+        { "name": "completed_at", "type": "timestamp", "required": false, "doc": "Set by patient_displaced_discharged." }
+      ]
+    },
+    "hims_events": {
+      "description": "Discharge process event stream. See HIMS_Discharge_Process_Events.md for the event catalogue.",
+      "primary_key": ["event_id"],
+      "replication": {
+        "mode": "incremental",
+        "key": "occurred_at"
+      },
+      "columns": [
+        { "name": "event_id", "type": "string", "required": true, "doc": "UUIDv7" },
+        { "name": "occurred_at", "type": "timestamp", "required": true, "doc": "Replication key" },
+        { "name": "event_name", "type": "string", "required": true },
+        { "name": "actor_id", "type": "string", "required": false, "doc": "-> hims_employees.employee_id. Null for system-generated events such as bed_cleaning_required." },
+        { "name": "process_type", "type": "string", "required": true, "doc": "Added beyond the original brief: needed as a column so events can be partitioned and z-ordered by the process they belong to." },
+        { "name": "process_id", "type": "string", "required": true, "doc": "-> hims_discharge.process_id. Added beyond the original brief for the same reason." },
+        { "name": "data", "type": "string", "required": false, "doc": "Event-specific properties as JSON text. VARCHAR rather than VARIANT because PyIceberg 0.11.1 has no VariantType." }
+      ]
+    }
+  }
+}

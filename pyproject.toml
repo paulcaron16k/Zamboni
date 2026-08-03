@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "icemaint"
+version = "0.1.0"
+description = "Iceberg table maintenance (compaction) for MinIO + Lakekeeper, without Trino or Spark"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pyiceberg[pyarrow]>=0.11.1",
+    "duckdb>=1.5.0",
+    "pyarrow>=18",
+]
+
+[project.optional-dependencies]
+# Object-store access for a real MinIO/Lakekeeper warehouse.
+s3 = ["s3fs>=2024.6.0"]
+# Required only for bucket-partitioned tables: PyIceberg delegates the bucket
+# transform to its Rust core when writing.
+bucket = ["pyiceberg-core>=0.5.0"]
+# Local SQL catalog, used by the test suite and handy for dry runs.
+sql = ["pyiceberg[sql-sqlite]>=0.11.1"]
+
+[project.scripts]
+icemaint = "icemaint.cli:main"
+demo = "himsdemo.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "icemaint[bucket,sql,s3]",
+]
+
+[tool.uv]
+# The whole point of this project's environment: never resolve against whatever
+# happens to be installed globally. `uv sync` builds .venv from uv.lock alone.
+default-groups = ["dev"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/icemaint", "src/himsdemo"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "RUF", "ISC", "PIE"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests reach into private helpers on purpose to pin internal behaviour.
+"tests/*" = ["SLF001"]
