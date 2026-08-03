@@ -26,7 +26,8 @@ multi-object `DELETE`, so `expire` will commit and free nothing while
 [live-verification.md](live-verification.md). The fix is a warehouse with
 `sts-enabled: true`, or direct S3 credentials.
 
-**Then dry-run everything.** Every mutating verb except `compact` previews without `--yes`:
+**Then dry-run everything.** One rule, no exceptions: **without `--yes`, nothing is
+committed.** Every mutating verb previews and says so.
 
 ```bash
 zamboni describe  your.table          # read-only: layout, blockers, warnings
@@ -34,11 +35,6 @@ zamboni plan      your.table          # what compaction would rewrite, and what 
 zamboni expire    your.table          # what retention would expire and delete
 zamboni remove-orphans your.table     # what is unreferenced, and what the guard holds back
 ```
-
-> **One inconsistency to know.** `compact` *refuses* to run without either
-> `--yes` or `--dry-run` and exits 2. The other five mutating verbs treat a
-> missing `--yes` as a dry run. So `zamboni compact your.table` errors, while
-> `zamboni expire your.table` previews. Tracked as ZMBNI-911.
 
 ---
 
@@ -166,7 +162,7 @@ reasoning so you can adapt them:
 | Code | Means | Do |
 |---|---|---|
 | 0 | Success | — |
-| 2 | Usage error: bad flag, missing `--uri`/`--warehouse`, negative guard, or `compact` without `--yes`/`--dry-run` | Fix the invocation |
+| 2 | Usage error: bad flag, missing `--uri`/`--warehouse`, negative guard | Fix the invocation |
 | 3 | The table is **blocked**: format version 1 or 3, equality deletes, or an unsafe PyIceberg build | Read the reason. These are refusals, not failures — see [design.md §6](design.md#6-constraints) |
 | 4 | A **safety check aborted** the run. Nothing was deleted | Investigate before retrying. This is the interesting one |
 

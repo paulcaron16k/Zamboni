@@ -36,7 +36,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-9 | Verification and CI | The suite, live verification, and automation. plan.md §4 | inproject | |
 | ZMBNI-10 | Documentation | HLD, delivery plan, config spec, runbook, verification record | done | 2026-08-03 |
 
-**Story counts:** 44 done · 1 inproject · 6 todo · 1 cancelled  (52 stories)
+**Story counts:** 46 done · 1 inproject · 5 todo · 1 cancelled  (53 stories)
 
 ---
 
@@ -135,8 +135,9 @@ has not been specified yet — that is deliberate signal, not an omission.
 | id | title | description | status | completed-at |
 |---|---|---|---|---|
 | ZMBNI-910 | Review the five unreviewed commits | Dev stack, CI, backlog, ZMBNI-908 and ZMBNI-505 had landed with verification but no review pass. Found four defects, all reproduced before fixing: a stale ref reported as dropped while still present, a false soft-delete claim in user-facing output, a queue assertion weaker than the claim it defended, and an untested behaviour change in `S3Settings` | done | 2026-08-03 |
-| ZMBNI-911 | Reconcile the --yes posture | `compact` exits 2 without `--yes` or `--dry-run`; the other five mutating verbs treat a missing `--yes` as a dry run. Both are defensible, the inconsistency is not, and runbook.md has to explain it. Pinned by `test_compact_is_the_one_verb_that_refuses_rather_than_previewing` so the docs and behaviour move together | todo | |
-| ZMBNI-901 | Unit and integration suite | 264 tests against a SQL catalog over a temp directory. plan.md §4 | done | 2026-08-03 |
+| ZMBNI-911 | Reconcile the --yes posture | One rule for all six verbs: without `--yes`, nothing is committed, and each says it is previewing. `compact` previews instead of exiting 2, and the notice is now unconditional — three verbs printed it only when they found work, so the rule was visible on some runs and not others. FR-6.2 | done | 2026-08-03 |
+| ZMBNI-912 | Make the CLI tests hermetic | `test_rest_catalog_requires_uri_and_warehouse` asserted the CLI errors without `--uri`/`--warehouse`, but every catalog flag also reads a `ZAMBONI_*` variable — and dev-stack/README.md tells developers to export two of them. It passed on a clean shell and failed on the shell of anyone who followed the instructions. Now clears them explicitly | done | 2026-08-03 |
+| ZMBNI-901 | Unit and integration suite | 313 tests against a SQL catalog over a temp directory. plan.md §4 | done | 2026-08-03 |
 | ZMBNI-902 | Safety-by-omission tests | Monkeypatch each reference category away in turn and assert nothing is deleted. Without these, enabling orphan removal by default is unjustified. FR-7.7 | done | 2026-08-03 |
 | ZMBNI-903 | Live verification | Every operation against a real Lakekeeper 0.13.1 and MinIO. Found four bugs the local suite could not. [live-verification.md](live-verification.md) | done | 2026-08-03 |
 | ZMBNI-904 | Dev-stack tests | 12 tests asserting the stack is configured such that reclamation *can* work, skipping cleanly when it is down | done | 2026-08-03 |
@@ -164,7 +165,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 
 ## What is actually left
 
-One story is in flight, 6 are open, and one is closed as a decision rather than a gap.
+One story is in flight, 5 are open, and one is closed as a decision rather than a gap.
 
 **In flight — ZMBNI-905.** The CI workflow exists and every command in it was run locally,
 but GitHub has never executed it: this repository has no remote. That is the single item
@@ -174,11 +175,10 @@ standing between "tests pass on my machine" and "tests pass". Nothing else is st
 capability probe or a named upstream limitation, and each lifts on its own when PyIceberg
 grows the capability. They are tracked so nobody re-investigates from scratch.
 
-**Ours to schedule — two.** In rough order of what would bite first:
+**Ours to schedule — one.**
 
 | | |
 |---|---|
-| ZMBNI-911 | `compact` refuses without `--yes` while five other verbs preview; runbook.md has to explain it |
 | ZMBNI-907 | No release or versioning convention |
 
 **Closed as a decision — ZMBNI-605.** Splitting one partition across manifests would defeat

@@ -7,7 +7,7 @@ Day-to-day operation is [runbook.md](runbook.md). Outstanding work is tracked in
 
 | | |
 |---|---|
-| Status | All planned operations implemented. 264 tests passing. Verified against a live Lakekeeper 0.13.1 + MinIO — [live-verification.md](live-verification.md) |
+| Status | All planned operations implemented. 313 tests passing. Verified against a live Lakekeeper 0.13.1 + MinIO — [live-verification.md](live-verification.md) |
 | In scope | Data-file compaction, layout ordering, partition evolution, dangling-delete removal, manifest rewriting, snapshot expiry, orphan-file removal, metadata retention |
 | Out of scope | Rewriting a *partially* dangling delete manifest; splitting one partition across manifests; format-version 3 row rewriting |
 | Demo | [../data/healthims](../data/healthims) — five days of simulated hospital discharge ingest |
@@ -132,7 +132,7 @@ test stops existing, so this table cannot rot silently.
 | ID | Requirement | Verified by |
 |---|---|---|
 | FR-6.1 | `describe` and `plan` change nothing | `test_describe_is_read_only`, `test_plan_is_read_only` |
-| FR-6.2 | `compact` requires explicit `--yes`; `--dry-run` previews | `test_compact_refuses_without_consent`, `test_compact_dry_run_changes_nothing` |
+| FR-6.2 | No mutating verb commits without `--yes`, and each says it is previewing | `test_no_verb_mutates_without_yes`, `test_compact_previews_without_consent`, `test_compact_dry_run_changes_nothing`, `test_every_mutating_verb_says_what_omitting_yes_does` |
 | FR-6.3 | Bounded memory: peak ≈ one output file | `test_chunked_mode_splits_output_by_target_size`, `test_chunked_mode_with_sort_routes_through_duckdb` |
 | FR-6.4 | Refuse to run on a PyIceberg build that would corrupt a table | `test_pruning_without_derivation_is_refused`, `test_missing_operation_argument_is_refused` |
 | FR-6.5 | Non-zero exit on a blocked table | `test_blocked_table_exits_nonzero` |
@@ -194,8 +194,8 @@ test stops existing, so this table cannot rot silently.
 
 Three layers, because each catches what the others cannot.
 
-**Unit and integration** — 264 tests against a SQL catalog over a temporary directory. Fast,
-hermetic, and where every logic branch is exercised. Blind to anything about object storage.
+**Unit and integration** — 300 of the 313 tests, against a SQL catalog over a temporary
+directory. Fast, hermetic, and where every logic branch is exercised. Blind to anything about object storage.
 
 **Safety by omission** — the tests that matter most assert the tool **refuses**.
 `tests/test_orphans.py` monkeypatches each reference category away in turn and asserts

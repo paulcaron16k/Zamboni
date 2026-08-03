@@ -289,7 +289,7 @@ you ship on a Python you never tested.
 ```console
 $ zamboni describe default.events --uri http://localhost:8181/catalog --warehouse demo
 $ zamboni plan     default.events ...
-$ zamboni compact  default.events ... --yes          # --yes required; --dry-run to preview
+$ zamboni compact  default.events ... --yes          # without --yes, every verb previews
 $ zamboni expire   default.events ... --yes          # apply retention, delete what it orphans
 $ zamboni remove-orphans default.events ... --yes    # sweep unreferenced files
 $ zamboni remove-dangling-deletes default.events ... --yes   # drop deletes that apply to nothing

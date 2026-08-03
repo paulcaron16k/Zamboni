@@ -1,11 +1,32 @@
 """Command-line entry point.
 
-Three verbs, deliberately ordered by how much they change:
+The verbs, ordered by how much they change:
 
-* ``doctor``   -- reports the installed PyIceberg's capabilities. Changes nothing.
-* ``describe`` -- profiles a table: layout, blockers, warnings. Changes nothing.
-* ``plan``     -- shows what would be rewritten and what is skipped. Changes nothing.
-* ``compact``  -- rewrites and commits. Requires ``--yes``.
+Never touch a table -- these take no ``--yes``:
+
+* ``doctor``          -- reports the installed PyIceberg's capabilities.
+* ``describe``        -- profiles a table: layout, blockers, warnings.
+* ``plan``            -- shows what compaction would rewrite, and what it skips.
+* ``validate-config`` -- loads a ``table-config.json`` and reports what it means.
+* ``from-catalog``    -- derives a starting config from a Singer catalog. Opens no
+  catalog connection and reads no table; it does write a local file, defaulting to
+  ``table-config.json``.
+
+Mutating -- **one rule, no exceptions: without ``--yes``, nothing is committed.**
+Every one of these previews instead, and says on stdout that it did. That notice
+is unconditional, including on a run that found nothing to do: three of these
+verbs used to print it only when they had work, which made the rule visible on
+some runs and not others.
+
+* ``compact``                 -- rewrites data files into target-sized ones.
+* ``expire``                  -- applies the retention policy, deletes what it orphans.
+* ``remove-orphans``          -- deletes unreferenced files past the age guard.
+* ``remove-dangling-deletes`` -- drops delete files no data file can match.
+* ``rewrite-manifests``       -- regroups manifests without touching data.
+* ``apply-properties``        -- sets the Iceberg table properties from the config.
+
+That rule is why ``compact`` takes both ``--yes`` and ``--dry-run``: the second is
+redundant, kept because scripts pass it to say what they mean.
 
 Connection details come from environment variables or flags so the same
 invocation works from a shell, a cron entry, or a container.
@@ -84,15 +105,15 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "compact":
-            if not args.yes and not args.dry_run:
-                print(
-                    "compact rewrites data files and commits a snapshot. "
-                    "Re-run with --yes, or use --dry-run to see the plan.",
-                    file=sys.stderr,
-                )
-                return 2
-            result = compactor.execute(dry_run=args.dry_run)
+            # A bare invocation never mutates, matching the other five verbs.
+            # `compact` used to exit 2 here instead, which meant the one command
+            # people reach for first behaved unlike everything else -- and the
+            # runbook had to explain the difference rather than state a rule.
+            dry_run = args.dry_run or not args.yes
+            result = compactor.execute(dry_run=dry_run)
             print(result.describe())
+            if dry_run:
+                print("\n  dry run -- re-run with --yes to rewrite and commit.")
             return 0
     except CompactionBlocked as exc:
         print(str(exc), file=sys.stderr)
@@ -141,8 +162,16 @@ def _build_parser() -> argparse.ArgumentParser:
         _add_catalog_args(p)
         _add_config_args(p)
         if name == "compact":
-            p.add_argument("--yes", action="store_true", help="actually commit")
-            p.add_argument("--dry-run", action="store_true", help="plan only")
+            p.add_argument(
+                "--yes",
+                action="store_true",
+                help="actually rewrite and commit. Without it this is a dry run.",
+            )
+            p.add_argument(
+                "--dry-run",
+                action="store_true",
+                help="preview without committing. Omitting --yes does the same; this says it.",
+            )
 
     ex = sub.add_parser("expire", help="apply the retention policy and delete the files it orphans")
     ex.add_argument("table")
@@ -445,7 +474,7 @@ def _remove_dangling_deletes(session: CatalogSession, args: argparse.Namespace) 
         return 4
 
     print(result.describe())
-    if not args.yes and result.removed:
+    if not args.yes:
         print("\n  dry run -- re-run with --yes to commit the removal.")
     return 0
 
@@ -472,7 +501,7 @@ def _rewrite_manifests(session: CatalogSession, args: argparse.Namespace) -> int
         return 4
 
     print(result.describe())
-    if not args.yes and result.plan.worth_doing:
+    if not args.yes:
         print("\n  dry run -- re-run with --yes to commit the rewrite.")
     return 0
 
@@ -496,7 +525,7 @@ def _apply_properties(session: CatalogSession, args: argparse.Namespace) -> int:
                 "delete_after_commit if a single process writes this table."
             )
 
-    if not args.yes and result.changes:
+    if not args.yes:
         print("\n  dry run -- re-run with --yes to set them.")
     return 0
 

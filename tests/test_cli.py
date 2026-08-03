@@ -48,12 +48,18 @@ def test_plan_is_read_only(warehouse, session, capsys):
     assert profile_table(session.table("db.events")).snapshot_id == before
 
 
-def test_compact_refuses_without_consent(warehouse, session, capsys):
+def test_compact_previews_without_consent(warehouse, session, capsys):
+    """A bare invocation changes nothing and says so.
+
+    `compact` used to exit 2 here while the other five verbs previewed, so the
+    command people reach for first behaved unlike everything else. Reconciled
+    toward the safe default: naming a verb never mutates.
+    """
     before = profile_table(session.table("db.events")).snapshot_id
 
-    assert main(["compact", "db.events", "--local-warehouse", warehouse]) == 2
+    assert main(["compact", "db.events", "--local-warehouse", warehouse]) == 0
 
-    assert "Re-run with --yes" in capsys.readouterr().err
+    assert "dry run" in capsys.readouterr().out
     assert profile_table(session.table("db.events")).snapshot_id == before
 
 
@@ -93,7 +99,23 @@ def test_blocked_table_exits_nonzero(tmp_path, session, capsys):
     assert "format-version-1" in capsys.readouterr().err
 
 
-def test_rest_catalog_requires_uri_and_warehouse(capsys):
+def test_rest_catalog_requires_uri_and_warehouse(capsys, monkeypatch):
+    """Hermetic on purpose.
+
+    Every catalog flag also reads a ZAMBONI_* variable, and dev-stack/README.md
+    tells developers to export ZAMBONI_URI and ZAMBONI_WAREHOUSE. Without
+    clearing them this test passes on a clean shell and fails on the shell of
+    anyone who followed the instructions -- which is exactly what happened.
+    """
+    for var in (
+        "ZAMBONI_URI",
+        "ZAMBONI_WAREHOUSE",
+        "ZAMBONI_CREDENTIAL",
+        "ZAMBONI_TOKEN",
+        "ZAMBONI_LOCAL_WAREHOUSE",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
     with pytest.raises(SystemExit):
         main(["describe", "db.events"])
     assert "--uri and --warehouse" in capsys.readouterr().err
@@ -353,11 +375,16 @@ def test_a_negative_age_guard_is_a_usage_error_not_a_crash(warehouse, session, c
 def test_every_mutating_verb_says_what_omitting_yes_does(capsys):
     """Discoverability, not decoration.
 
-    Five verbs treat a missing `--yes` as a dry run, and their help text said only
+    All six treat a missing `--yes` as a dry run, and their help text said only
     "actually delete" -- so an operator reading --help could not find the safe
     path. The runbook exposed the gap; this keeps it closed.
+
+    `compact` belongs here now that it previews like the rest (ZMBNI-911). It was
+    absent while it still exited 2, which is worth saying: this check and the
+    behaviour it guards have drifted apart once already.
     """
     for verb in (
+        "compact",
         "expire",
         "remove-orphans",
         "remove-dangling-deletes",
@@ -372,15 +399,28 @@ def test_every_mutating_verb_says_what_omitting_yes_does(capsys):
         assert "dry run" in out, f"{verb} --help does not mention the dry run"
 
 
-def test_compact_is_the_one_verb_that_refuses_rather_than_previewing(warehouse, session, capsys):
-    """A documented inconsistency, pinned so the runbook stays true.
+def test_no_verb_mutates_without_yes(warehouse, session, capsys):
+    """One rule for all six, which is what makes it stateable.
 
-    `compact` errors without `--yes` or `--dry-run`; the other five preview. Both
-    behaviours are defensible, the difference is not -- tracked as ZMBNI-911. If
-    it is ever reconciled, this test and docs/runbook.md change together.
+    Previously five previewed and `compact` exited 2, so runbook.md had to explain
+    the exception instead of giving a rule. Every mutating verb is now checked
+    here, so the rule cannot quietly acquire another exception.
     """
-    code = main(["compact", "db.events", "--local-warehouse", warehouse])
+    before = profile_table(session.table("db.events")).snapshot_id
 
-    assert code == 2
-    err = capsys.readouterr().err
-    assert "--yes" in err and "--dry-run" in err
+    for verb in (
+        "compact",
+        "expire",
+        "remove-orphans",
+        "remove-dangling-deletes",
+        "rewrite-manifests",
+        "apply-properties",
+    ):
+        code = main([verb, "db.events", "--local-warehouse", warehouse])
+        out = capsys.readouterr().out
+        assert code == 0, f"{verb} exited {code} on a bare invocation"
+        assert "dry run" in out, f"{verb} did not say it was a dry run:\n{out}"
+
+    assert profile_table(session.table("db.events")).snapshot_id == before, (
+        "a bare invocation committed something"
+    )
