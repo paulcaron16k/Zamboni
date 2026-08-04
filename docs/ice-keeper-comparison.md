@@ -10,7 +10,8 @@ named where it matters.
 
 **It found a defect in Zamboni.** §4 — ice-keeper refuses to run orphan removal on
 a table whose location is shared with another table, and Zamboni does not. That
-is a data-loss path in shipped `v0.1.0`, raised as ZMBNI-507.
+is a data-loss path in shipped `v0.1.0`, raised as ZMBNI-507 and **since fixed** —
+reproduced end to end first, where it destroyed the colocated table outright.
 
 ---
 
@@ -122,9 +123,15 @@ shared prefix; a second table whose `write.data.path` points inside the first;
 two tables pointed at one location after a `register_table` mistake.
 
 The claim "by construction" is the specific thing that is wrong — the code is
-protecting against a different failure than the comment says it is. Raised as
-**ZMBNI-507**, and it deserves the same treatment as the other reclaim
-invariants: abort, do not delete.
+protecting against a different failure than the comment says it is. Raised as **ZMBNI-507** and fixed: `colocated_tables()` enumerates the catalog and
+refuses when any other table's location overlaps ours, before the listing runs.
+It is now the fourth checked invariant in design.md §6.6.
+
+Reproduced before fixing, with four ordinary catalog calls and no explicit
+`location=` argument: create `db.orders`, append twice, rename it to
+`db.orders_v2`, create `db.orders` again. Maintaining the new table deleted all
+nine files of the renamed one, including its current metadata, and it could no
+longer be read.
 
 ---
 

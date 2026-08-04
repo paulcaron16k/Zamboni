@@ -274,3 +274,73 @@ def test_an_io_that_can_neither_list_nor_be_understood_aborts(table, monkeypatch
 
     with pytest.raises(OrphanCleanupAborted, match="neither a pyarrow nor an fsspec"):
         list_storage(table, ["s3://warehouse/acme/tbl"])
+
+
+# -- ZMBNI-507: another table's files inside this table's location -------
+
+
+def _rename_then_recreate(session):
+    """Two live tables, different names, one location -- via ordinary calls.
+
+    No misconfiguration and no explicit `location=` argument. A table's default
+    location is derived from its name *at creation time*; `rename_table` rewrites
+    the catalog entry and moves no files; creating the freed name derives the
+    same default location again. Four calls, and the warehouse now has two
+    tables pointing at one directory.
+    """
+    old = session.catalog.create_table(
+        "db.orders", schema=SCHEMA, properties={"format-version": "2"}
+    )
+    old.append(batch(0, 5))
+    old.append(batch(5, 5))
+    session.catalog.rename_table("db.orders", "db.orders_v2")
+    old = session.catalog.load_table("db.orders_v2")
+
+    new = session.catalog.create_table(
+        "db.orders", schema=SCHEMA, properties={"format-version": "2"}
+    )
+    new.append(batch(100, 5))
+    return old, new
+
+
+def test_rename_then_recreate_really_does_collide(session):
+    """Pins the premise. If a catalog ever stops doing this, the guard below
+    still holds but this test explains why it was written."""
+    old, new = _rename_then_recreate(session)
+
+    assert old.location() == new.location()
+    assert old.name() != new.name()
+
+
+def test_maintaining_one_table_refuses_to_delete_a_colocated_table(session):
+    """The defect: without the guard this deleted every file of `db.orders_v2`,
+    including its current metadata, leaving it unreadable."""
+    old, new = _rename_then_recreate(session)
+    victim_files = {f["file_path"] for f in old.inspect.files().to_pylist()}
+    assert victim_files
+
+    with pytest.raises(OrphanCleanupAborted, match=r"db\.orders_v2"):
+        OrphanCleaner(older_than_days=0).run(new)
+
+    for path in victim_files:
+        assert Path(path.replace("file://", "")).exists(), f"deleted a live file: {path}"
+    assert old.scan().to_arrow().num_rows == 10
+
+
+def test_the_colocation_guard_names_what_to_do(session):
+    _, new = _rename_then_recreate(session)
+
+    with pytest.raises(OrphanCleanupAborted) as exc:
+        OrphanCleaner(older_than_days=0).run(new)
+
+    message = str(exc.value)
+    assert "shares" in message or "share" in message
+    assert "db.orders_v2" in message
+
+
+def test_a_table_alone_in_its_location_is_unaffected(table):
+    """The guard must not fire on the ordinary case, which is every other test
+    in this file -- asserted once explicitly so a too-broad guard is obvious."""
+    result = OrphanCleaner(older_than_days=0, dry_run=True).run(table)
+
+    assert result.scanned > 0

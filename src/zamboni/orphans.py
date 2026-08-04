@@ -25,6 +25,7 @@ import logging
 from dataclasses import dataclass, field
 
 from pyarrow.fs import FileSelector
+from pyiceberg.catalog import Catalog
 from pyiceberg.io.pyarrow import PyArrowFileIO
 from pyiceberg.table import Table
 
@@ -94,8 +95,13 @@ def storage_roots(tbl: Table) -> list[str]:
     """Locations this table may own files in.
 
     The table location, plus the data and metadata paths when a table redirects
-    them elsewhere. Never a warehouse-wide sweep: files belonging to a sibling
-    table must be out of reach by construction.
+    them elsewhere. Never a warehouse-wide sweep.
+
+    Scoping to these roots is what stops a warehouse-wide sweep. It is *not*
+    what stops another table's files being deleted, which was the mistake this
+    docstring used to make: a second table can live inside these roots, and then
+    its files are listed here, found unreferenced by this table, and deleted.
+    :func:`colocated_tables` is the guard for that -- see ZMBNI-507.
     """
     roots = {tbl.location().rstrip("/")}
     for prop in ("write.data.path", "write.metadata.path"):
@@ -104,6 +110,79 @@ def storage_roots(tbl: Table) -> list[str]:
     # Drop any root nested inside another so files are not visited twice.
     ordered = sorted(roots, key=len)
     return [r for i, r in enumerate(ordered) if not any(r.startswith(o + "/") for o in ordered[:i])]
+
+
+def _overlaps(a: str, b: str) -> bool:
+    """Whether two locations can hold each other's files."""
+    a, b = a.rstrip("/"), b.rstrip("/")
+    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+
+
+def _all_table_identifiers(catalog: Catalog) -> list[tuple[str, ...]]:
+    """Every table in the catalog, descending into nested namespaces."""
+    found: list[tuple[str, ...]] = []
+    pending: list[tuple[str, ...]] = [()]
+    seen: set[tuple[str, ...]] = set()
+    while pending:
+        namespace = pending.pop()
+        for child in catalog.list_namespaces(namespace):
+            if child not in seen:
+                seen.add(child)
+                pending.append(child)
+        if namespace:
+            found.extend(tuple(ident) for ident in catalog.list_tables(namespace))
+    return found
+
+
+def colocated_tables(tbl: Table, roots: list[str]) -> list[tuple[str, str]]:
+    """Other tables in the catalog whose location overlaps ``roots``.
+
+    Two live tables can share a directory without anyone misconfiguring
+    anything. A table's default location is derived from its name *at creation
+    time*; renaming rewrites the catalog entry and moves no files; creating the
+    freed name derives the same default location again. Four ordinary calls and
+    the warehouse has two tables pointing at one directory -- demonstrated in
+    ``test_rename_then_recreate_really_does_collide``.
+
+    Cost: one metadata read per table in the catalog, because a location is only
+    knowable by loading the table. That is real, and it is the price of the
+    guard; orphan removal already lists every object under the table.
+    """
+    catalog = getattr(tbl, "catalog", None)
+    if catalog is None:  # pragma: no cover - every catalog-loaded table has one
+        raise OrphanCleanupAborted(
+            "the table was not loaded from a catalog, so tables sharing its "
+            "location cannot be ruled out."
+        )
+
+    mine = tuple(tbl.name())
+    try:
+        identifiers = _all_table_identifiers(catalog)
+    except Exception as exc:
+        # Abort-on-doubt, as everywhere else here. A catalog that will not
+        # enumerate leaves us unable to tell a stale file of ours from a live
+        # file of somebody else's.
+        raise OrphanCleanupAborted(
+            f"could not list the catalog's tables, so tables sharing this "
+            f"location cannot be ruled out: {exc}"
+        ) from exc
+
+    sharing: list[tuple[str, str]] = []
+    for identifier in identifiers:
+        if identifier == mine:
+            continue
+        try:
+            other = catalog.load_table(identifier)
+        except Exception as exc:
+            raise OrphanCleanupAborted(
+                f"could not load {'.'.join(identifier)} while checking for tables "
+                f"sharing this location: {exc}"
+            ) from exc
+        for other_root in storage_roots(other):
+            if any(_overlaps(other_root, root) for root in roots):
+                sharing.append((".".join(identifier), other_root))
+                break
+    return sharing
 
 
 def list_storage(tbl: Table, roots: list[str]) -> dict[str, StorageFile]:
@@ -215,6 +294,17 @@ class OrphanCleaner:
         cutoff = now - dt.timedelta(days=self._older_than_days)
         identifier = ".".join(tbl.name())
         roots = storage_roots(tbl)
+
+        # Before the listing, because it is cheaper to refuse than to list every
+        # object under the table and then refuse.
+        if sharing := colocated_tables(tbl, roots):
+            named = ", ".join(f"{name} at {loc}" for name, loc in sorted(sharing))
+            raise OrphanCleanupAborted(
+                f"{identifier}: {len(sharing)} other table(s) share this table's "
+                f"location, so files unreferenced here may be live there: {named}. "
+                "Give each table its own location, or exclude this one from orphan "
+                "removal."
+            )
 
         # ORDER MATTERS. List first, then compute reachable -- see the module
         # docstring. Do not reorder these two lines.

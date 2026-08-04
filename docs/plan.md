@@ -162,6 +162,7 @@ test stops existing, so this table cannot rot silently.
 | FR-7.15 | A ref past `max-ref-age-ms` is dropped, so its snapshots stop being pinned | `test_a_stale_ref_is_dropped_and_stops_pinning_its_snapshots`, `test_a_stale_tag_is_dropped_and_its_snapshot_expires`, `test_a_stale_branch_is_dropped_too` |
 | FR-7.16 | A ref's own `max-ref-age-ms` beats the table property, including when the table sets none | `test_a_refs_own_max_ref_age_beats_the_table_policy`, `test_a_refs_own_max_ref_age_applies_with_no_table_property` |
 | FR-7.17 | No ref is dropped unless the age is configured, and `main` never is | `test_an_unconfigured_max_ref_age_never_drops_a_ref`, `test_an_unconfigured_policy_leaves_every_ref_alone`, `test_main_survives_however_stale_the_policy`, `test_dry_run_drops_no_refs` |
+| FR-7.18 | Orphan removal refuses when another table shares this table's location | `test_maintaining_one_table_refuses_to_delete_a_colocated_table`, `test_the_colocation_guard_names_what_to_do`, `test_rename_then_recreate_really_does_collide`, `test_a_table_alone_in_its_location_is_unaffected` |
 
 ### FR-8 — Dangling deletes and manifests
 

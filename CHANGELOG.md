@@ -21,7 +21,32 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
-Nothing yet.
+### SAFETY
+
+- **Orphan removal now refuses when another table shares this table's location.**
+  Previously it deleted that table's files. `0.1.0` scoped the sweep to the
+  table's own roots, which prevents a warehouse-wide sweep but does not prevent a
+  second table living *inside* those roots — its files are then unreferenced here
+  and live there, and were deleted once past the age guard.
+
+  **This needs no misconfiguration.** A default location is derived from the table
+  name *at creation time*; `rename_table` rewrites the catalog entry and moves no
+  files; creating the freed name derives the same location again. In the
+  reproduction, renaming `db.orders` to `db.orders_v2` and re-creating
+  `db.orders` left two live tables in one directory, and maintaining the new one
+  deleted all nine files of the old one, including its current metadata — the
+  table became unreadable.
+
+  **If you have run `remove-orphans` on a warehouse where any two tables share or
+  nest locations, check those tables before upgrading is any comfort:** the data
+  is already gone, and `expire` is unaffected (it never lists storage). Catalogs
+  that derive locations from a table UUID rather than its name — Lakekeeper does —
+  cannot produce the rename collision, though an explicit `location` or a
+  `write.data.path` pointing into another table still can.
+
+  The check costs one metadata read per table in the catalog and runs before the
+  listing. A catalog that cannot be enumerated now aborts the run rather than
+  proceeding blind. ZMBNI-507, design.md §6.6 invariant 4, FR-7.18.
 
 ## [0.1.0] - 2026-08-03
 

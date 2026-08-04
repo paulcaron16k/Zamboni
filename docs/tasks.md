@@ -29,7 +29,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-2 | Query-shaped layout | Declared sort and multi-key Z-order, with honest `sort_order_id`. FR-3. design §2.2 | done | 2026-08-03 |
 | ZMBNI-3 | Partition evolution | Condense aged fine-grained partitions without moving where new data lands. FR-4. design §5.3 | done | 2026-08-03 |
 | ZMBNI-4 | Declarative configuration | `table-config.json` and its Meltano authoring surface. FR-5. design §4, §5.1 | done | 2026-08-03 |
-| ZMBNI-5 | Storage reclamation | Snapshot expiry and orphan-file removal, fenced by hard invariants. FR-7. design §2.4, §5.4, §6.6 | inproject | |
+| ZMBNI-5 | Storage reclamation | Snapshot expiry and orphan-file removal, fenced by hard invariants. FR-7. design §2.4, §5.4, §6.6 | done | 2026-08-03 |
 | ZMBNI-6 | Metadata hygiene | Dangling deletes, manifest regrouping, `metadata.json` retention. FR-8, FR-9.1–9.2. design §2.1, §2.3 | inproject | |
 | ZMBNI-7 | Format-version coverage | V1 refused, V2 full, V3 metadata-only. FR-6.8, FR-9.3–9.5. design §2.1, §6.1 | inproject | |
 | ZMBNI-8 | Environment and dev stack | Locked venv, self-contained executables, Lakekeeper + MinIO stack. design §6.4 | done | 2026-08-03 |
@@ -47,7 +47,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 > order. The numbers follow [roadmap.md](roadmap.md)'s RM-1…RM-6 so the two documents agree on
 > identity; the sequence is explained in each section's subtitle.
 
-**Story counts:** 56 done · 1 inproject · 30 todo · 1 cancelled  (88 stories)
+**Story counts:** 57 done · 1 inproject · 29 todo · 1 cancelled  (88 stories)
 
 ---
 
@@ -100,7 +100,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-502 | Snapshot expiry | The spec's retention algorithm, then delete the set difference. PyIceberg implements almost none of it and deletes no files. FR-7.2–7.4, FR-7.9. design §5.4 | done | 2026-08-03 |
 | ZMBNI-503 | Orphan-file removal | List-before-reachable ordering, a 3-day mtime guard, and abort-on-doubt invariants. FR-7.5–7.8, FR-7.11. design §6.6 | done | 2026-08-03 |
 | ZMBNI-504 | FileIO-agnostic listing | Works on whichever FileIO the deployment forces; the listing form and the delete form differ on object storage. FR-7.12–7.14 | done | 2026-08-03 |
-| ZMBNI-507 | Refuse orphan removal on a shared table location | **Data-loss path in shipped v0.1.0.** `storage_roots()` scopes the sweep to the table's own location and its docstring claims sibling files are out of reach "by construction" — but that construction prevents a warehouse-wide sweep, not another table's files living *inside* this table's location. Those get listed, found unreferenced by this table, and deleted. Reachable via an explicit `location` under a shared prefix, a second table whose `write.data.path` points inside the first, or two tables pointed at one location after a `register_table` mistake. ice-keeper guards this explicitly (`check_table_location_is_unique`); we do not. Found by ZMBNI-1601. Should abort like the other reclaim invariants. [ice-keeper-comparison.md §4](ice-keeper-comparison.md) | todo | |
+| ZMBNI-507 | Refuse orphan removal on a shared table location | **Data-loss path in shipped v0.1.0.** `storage_roots()` scopes the sweep to the table's own location and its docstring claims sibling files are out of reach "by construction" — but that construction prevents a warehouse-wide sweep, not another table's files living *inside* this table's location. Those get listed, found unreferenced by this table, and deleted. Reachable via an explicit `location` under a shared prefix, a second table whose `write.data.path` points inside the first, or two tables pointed at one location after a `register_table` mistake. ice-keeper guards this explicitly (`check_table_location_is_unique`); we do not. Found by ZMBNI-1601. Should abort like the other reclaim invariants. [ice-keeper-comparison.md §4](ice-keeper-comparison.md) **Fixed.** `colocated_tables()` enumerates every table in the catalog and refuses when any location overlaps ours; the check runs before the listing, since it is cheaper to refuse than to list first. Reproduced before fixing: rename `db.orders` to `db.orders_v2`, recreate `db.orders`, maintain it — all 9 of the renamed table's files were deleted and it became unreadable. FR-7.18 | done | 2026-08-03 |
 | ZMBNI-505 | Apply `max-ref-age-ms` | Spec step 2 now applies: a stale non-main ref is dropped in the same transaction as the expiry, so its snapshots stop being pinned. Fixed two detection defects on the way — a ref's own `max-ref-age-ms` was ignored, and the step was skipped entirely when the table set no property, so a ref carrying its own age was never evaluated. Off unless configured. FR-7.15–7.17. design §6.5 | done | 2026-08-03 |
 
 ---
@@ -284,11 +284,12 @@ grows the capability. They are tracked so nobody re-investigates from scratch. W
 that **PyIceberg 0.12 does not lift any of them** — verified against `main`, see ZMBNI-1105 —
 so they are not waiting on ZMBNI-11.
 
-**A defect, and it outranks everything below — ZMBNI-507.** Orphan removal does not refuse a
-table whose location is shared with another table, so another table's files can be listed,
-found unreferenced by this one, and deleted. Found by ZMBNI-1601 comparing against ice-keeper,
-which guards exactly this. It is a data-loss path in shipped `v0.1.0`, which is why epic
-ZMBNI-5 is open again.
+**ZMBNI-507 is fixed.** Orphan removal refused nothing when another table shared this table's
+location, so another table's files were listed, found unreferenced by this one, and deleted —
+reproduced end to end before the fix. Found by ZMBNI-1601 comparing against ice-keeper, which
+guards exactly this. The fix is the fourth checked invariant in design.md §6.6. It shipped in
+`v0.1.0`, so the next release carries a **SAFETY** entry per
+[releasing.md §1](releasing.md).
 
 **The roadmap — ZMBNI-11 … 16.** Six features, defined in [roadmap.md](roadmap.md). The theme
 is to stop being one implementation: three engines can do this work, and Zamboni should be one

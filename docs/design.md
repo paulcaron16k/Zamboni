@@ -553,6 +553,16 @@ All of them **abort the run** rather than delete:
    computation, not an empty table.
 3. **Current metadata is sacred.** `metadata_location` is never a deletion candidate,
    whatever the diff says.
+4. **No other table shares this location.** Every other table in the catalog is checked, and
+   the run refuses if any of their locations overlaps ours. Scoping the sweep to the table's
+   own roots prevents a warehouse-wide sweep; it does *not* prevent a second table living
+   *inside* those roots, whose files are then unreferenced here and live there. Two tables
+   reach one directory without anyone misconfiguring anything: a default location is derived
+   from the table name **at creation time**, renaming rewrites the catalog entry and moves no
+   files, and re-creating the freed name derives the same location again. In a reproduction
+   this destroyed the renamed table outright — every file, including its current metadata
+   (ZMBNI-507). The check costs one metadata read per table in the catalog, because a
+   location is only knowable by loading the table.
 
 Two further properties are structural rather than checked:
 
