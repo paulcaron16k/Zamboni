@@ -355,10 +355,27 @@ def test_dropping_retain_last_is_reported_not_silent():
     assert "retain_last" in problems[0] and "479" in problems[0]
 
 
-def test_identifiers_are_quoted_against_hostile_names():
-    sql = trino().statement_for(Operation.REWRITE_MANIFESTS, 'we"ird.ta-ble', full_retention())
+@pytest.mark.parametrize(
+    ("identifier", "expected_target"),
+    [
+        ("db.events", '"iceberg"."db"."events"'),
+        # A quote in the name, doubled; a hyphen, which breaks unquoted.
+        ('we"ird.ta-ble', '"iceberg"."we""ird"."ta-ble"'),
+        # A multi-level namespace. Not a feature Zamboni endorses -- they are
+        # unevenly supported, and they do not map onto Postgres or Snowflake,
+        # which stop at catalog.schema.table. It is here because *quoting* is
+        # what makes such a name usable at all, and that is measured, not
+        # assumed: against Trino 483, `"iceberg"."nstest.inner"."t"` returns a
+        # row count, while the bare `iceberg.nstest.inner.t` fails with
+        # "mismatched input 'inner'". The rule the row pins is "always quote",
+        # which is the same rule that handles the hyphen above.
+        ("a.b.events", '"iceberg"."a.b"."events"'),
+    ],
+)
+def test_identifiers_are_always_quoted(identifier, expected_target):
+    sql = trino().statement_for(Operation.REWRITE_MANIFESTS, identifier, full_retention())
 
-    assert sql.startswith('ALTER TABLE "iceberg"."we""ird"."ta-ble"')
+    assert sql == f"ALTER TABLE {expected_target} EXECUTE optimize_manifests"
 
 
 def test_a_table_without_a_namespace_is_rejected():

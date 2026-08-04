@@ -162,7 +162,7 @@ test stops existing, so this table cannot rot silently.
 | FR-7.15 | A ref past `max-ref-age-ms` is dropped, so its snapshots stop being pinned | `test_a_stale_ref_is_dropped_and_stops_pinning_its_snapshots`, `test_a_stale_tag_is_dropped_and_its_snapshot_expires`, `test_a_stale_branch_is_dropped_too` |
 | FR-7.16 | A ref's own `max-ref-age-ms` beats the table property, including when the table sets none | `test_a_refs_own_max_ref_age_beats_the_table_policy`, `test_a_refs_own_max_ref_age_applies_with_no_table_property` |
 | FR-7.17 | No ref is dropped unless the age is configured, and `main` never is | `test_an_unconfigured_max_ref_age_never_drops_a_ref`, `test_an_unconfigured_policy_leaves_every_ref_alone`, `test_main_survives_however_stale_the_policy`, `test_dry_run_drops_no_refs` |
-| FR-7.18 | Orphan removal refuses when another table shares this table's location | `test_maintaining_one_table_refuses_to_delete_a_colocated_table`, `test_the_colocation_guard_names_what_to_do`, `test_rename_then_recreate_really_does_collide`, `test_a_table_alone_in_its_location_is_unaffected` |
+| FR-7.18 | Orphan removal refuses when another table shares this table's location | `test_maintaining_one_table_refuses_to_delete_a_colocated_table`, `test_the_colocation_guard_names_what_to_do`, `test_rename_then_recreate_really_does_collide`, `test_a_table_alone_in_its_location_is_unaffected`, `test_the_colocation_guard_sees_a_table_in_a_nested_namespace` |
 
 ### FR-8 — Dangling deletes and manifests
 
@@ -202,7 +202,7 @@ test stops existing, so this table cannot rot silently.
 | FR-11.5 | An unsupported operation is refused, with exit 3 | `test_trino_cannot_remove_dangling_deletes_at_all`, `test_an_unsupported_operation_exits_three` |
 | FR-11.6 | Config is validated per engine at plan time, not passed through | `test_trino_rejects_our_default_retention_at_plan_time`, `test_trino_rejects_a_short_orphan_guard`, `test_a_config_below_trinos_floor_is_a_usage_error`, `test_the_local_engine_imposes_no_floors` |
 | FR-11.7 | An operation may be fulfilled by another operation | `test_spark_fulfils_dangling_deletes_through_compaction`, `test_describe_says_when_an_operation_rides_on_another` |
-| FR-11.8 | The declarations match the analysis they came from | `test_declarations_match_the_engine_comparison`, `test_describe_reports_limitations_so_they_are_discoverable` |
+| FR-11.8 | The declarations match the analysis they came from | `test_declarations_match_the_engine_comparison`, `test_describe_reports_limitations_so_they_are_discoverable`, `test_identifiers_are_always_quoted` |
 | FR-11.9 | The default engine is local, and every mutating verb accepts `--engine` | `test_the_default_engine_is_local`, `test_every_mutating_verb_accepts_an_engine`, `test_engines_reports_what_each_one_refuses` |
 
 ### FR-10 — Versioning and releases

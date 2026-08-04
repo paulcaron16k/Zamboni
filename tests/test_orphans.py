@@ -344,3 +344,38 @@ def test_a_table_alone_in_its_location_is_unaffected(table):
     result = OrphanCleaner(older_than_days=0, dry_run=True).run(table)
 
     assert result.scanned > 0
+
+
+def test_the_colocation_guard_sees_a_table_in_a_nested_namespace(session):
+    """Pins the recursion in `_all_table_identifiers`, not nested namespaces.
+
+    Zamboni does not endorse multi-level namespaces and the demo does not use
+    them: they are unevenly supported across engines, bare dot notation is
+    ambiguous, and they do not map onto Postgres or Snowflake, which stop at
+    catalog.schema.table.
+
+    The guard enumerates them anyway, because it has to -- it claims to check
+    *every* table in the catalog before deleting anything. If that recursion is
+    ever flattened to the top-level namespaces, this guard would silently
+    enumerate fewer tables and still report success, which is worse than having
+    no guard: it reads as protection. So the recursion is pinned here even though
+    the feature it traverses is one we would advise against using.
+    """
+    victim_home = session.catalog.create_table(
+        "db.host", schema=SCHEMA, properties={"format-version": "2"}
+    )
+    victim_home.append(batch(0, 5))
+
+    # A second table, in a *nested* namespace, whose files live inside the first
+    # table's location -- the ZMBNI-507 shape, one level deeper.
+    session.catalog.create_namespace(("deep",))
+    session.catalog.create_namespace(("deep", "inner"))
+    session.catalog.create_table(
+        ("deep", "inner", "guest"),
+        schema=SCHEMA,
+        location=f"{victim_home.location().rstrip('/')}/guest",
+        properties={"format-version": "2"},
+    )
+
+    with pytest.raises(OrphanCleanupAborted, match=r"deep\.inner\.guest"):
+        OrphanCleaner(older_than_days=0).run(session.table("db.host"))
