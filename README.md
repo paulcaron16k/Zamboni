@@ -153,6 +153,9 @@ bypassed hook is worse than none.
   traceability, verification approach, residual risk.
 - **[docs/runbook.md](docs/runbook.md)** — operator runbook: the order to run the six verbs
   in, how to derive a cadence, how to size the orphan guard, and what each exit code means.
+- **[docs/devops.md](docs/devops.md)** — running it in production: the cron line, `zamboni.yml`
+  and `.env`, why there is no shell wrapper, and the multi-tenant layout for one
+  warehouse per customer.
 - **[docs/tasks.md](docs/tasks.md)** — the ZMBNI backlog: what is done, what is left, and
   what is deliberately not being done.
 - **[docs/roadmap.md](docs/roadmap.md)** — the six features beyond `v0.1.0`, and why they are
@@ -308,6 +311,17 @@ $ zamboni rewrite-manifests default.events ... --yes  # regroup manifests by par
 $ zamboni apply-properties default.events ... --yes   # metadata-retention table properties
 $ zamboni engines                                     # what each engine supports, and refuses
 ```
+
+For daily operation none of that is the interface. One command runs the six in the right
+order over every configured table:
+
+```console
+$ zamboni maintenance --warehouse acme --status --yes
+```
+
+With `./zamboni.yml` and `./.env` present that is the whole cron line — see
+**[docs/devops.md](docs/devops.md)**, which also covers why there is deliberately no shell
+wrapper and how a multi-tenant fleet is scheduled.
 
 Each mutating verb takes `--engine` (default `local`, the PyIceberg one). **Trino works**
 (`pip install zamboni[trino]`, then `--engine trino --trino-host …`) for five of the six

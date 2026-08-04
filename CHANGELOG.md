@@ -23,6 +23,21 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **`zamboni maintenance`** — one command that runs the six operations in the
+  runbook order over every configured table, exiting with the worst code any of
+  them produced. This is the DevOps entry point: with `./zamboni.yml` and
+  `./.env` present, a cron line is a `cd` and a command. `--status` reports file
+  counts and bytes before and after.
+- **`--profile` and `--env`** — non-secret configuration in `zamboni.yml`,
+  credentials in `.env`, both discovered in the working directory. Templates are
+  committed as `zamboni.yml.sample` and `env.sample`. Unknown profile keys are
+  refused rather than ignored.
+- **`zamboni warehouses`** — the catalog's warehouses, one per line, as input to
+  a crontab generator. Zamboni does not schedule anything, and
+  [docs/devops.md](docs/devops.md) explains why that boundary is deliberate.
+- **[docs/devops.md](docs/devops.md)** — the cron line, the multi-tenant layout
+  (`$ZAMBONI_ROOT/configs/{warehouse}/table-config.json`), and why per-warehouse
+  invocation beats one loop over the fleet.
 - **A maintainer interface, and `--engine`.** The six operations are Iceberg's,
   not Zamboni's; Trino and Spark implement most of them already. `LocalMaintainer`
   is the PyIceberg engine, extracted with no behaviour change. `TrinoMaintainer`

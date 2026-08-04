@@ -16,7 +16,10 @@ data/healthims/.spill/
 # Rendered docs -- regenerate from docs/*.md
 *.html
 
-# Dev-stack secrets. dev-stack/.env.sample IS committed.
+# Secrets. env.sample and dev-stack/.env.sample ARE committed; no .env is.
+# The root .env is what `zamboni --env` reads by default, so it holds catalog
+# credentials -- see docs/devops.md §3.
+.env
 dev-stack/.env
 
 # Editor scratch. Vim leaves .*.swp behind on a crashed session; one was very

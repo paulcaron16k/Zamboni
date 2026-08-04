@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from . import (
+    EngineConfigProblem,
     Maintainer,
     MaintainerCapabilities,
     MaintenanceRequest,
@@ -141,7 +142,13 @@ class LocalMaintainer(Maintainer):
     def _compact(self, table: str, request: MaintenanceRequest, dry_run: bool) -> Reportable:
         from ..compactor import TableCompactor
 
-        assert request.compaction is not None, "compaction config is required to compact"
+        if request.compaction is None:
+            # An assert here vanished under -O and, worse, surfaced as a
+            # traceback rather than a message a cron log could act on.
+            raise EngineConfigProblem(
+                "compact needs a compaction config, and the request carried none. "
+                "This is a caller bug: build the request with _request_for()."
+            )
         if request.table_config is None:
             compactor = TableCompactor(self._session, table, request.compaction)
         else:

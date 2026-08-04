@@ -1,0 +1,47 @@
+# Zamboni profile: everything that is not a secret.
+#
+#   cp zamboni.yml.sample zamboni.yml
+#
+# Found automatically at ./zamboni.yml, then $ZAMBONI_ROOT/zamboni.yml.
+# `--profile path/to/file.yml` points elsewhere.
+#
+# Resolution order, highest first: a command-line flag, a ZAMBONI_* environment
+# variable, this file, $ZAMBONI_ROOT/zamboni.yml, the built-in default. A flag
+# always wins, so a one-off run overrides this file without editing it.
+#
+# Credentials do NOT belong here -- this file is meant to be committed. See
+# env.sample and docs/devops.md §3.
+
+# --- catalog ---------------------------------------------------------------
+uri: https://lakekeeper.internal/catalog
+warehouse: acme
+
+# --- engine ----------------------------------------------------------------
+# `local` is PyIceberg + DuckDB. `zamboni engines` reports what each supports
+# and, more usefully, what each refuses.
+engine: local
+
+# --- layout ----------------------------------------------------------------
+# Per-warehouse table configuration is read from
+#   {root}/configs/{warehouse}/table-config.json
+# Defaults to ~/.zamboni. See docs/devops.md §5 for the multi-tenant layout.
+root: /srv/zamboni
+
+# --- what maintenance runs -------------------------------------------------
+# The runbook order (docs/runbook.md §1), which is load-bearing: three of the
+# five gaps between these are real constraints rather than preference. Omit the
+# key entirely to run all six. List them to disable one without editing a cron
+# line -- but do not reorder them.
+operations:
+  - compact
+  - apply-properties
+  - remove-dangling-deletes
+  - rewrite-manifests
+  - expire
+  - remove-orphans
+
+# --- table selection -------------------------------------------------------
+# Default is every table in table-config.json. Narrow it only when you mean to.
+#tables:
+#  - acme.events
+#  - acme.discharges

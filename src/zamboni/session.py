@@ -38,6 +38,36 @@ class CatalogSession:
         """Load a table by ``namespace.name`` identifier."""
         return self.catalog.load_table(identifier)
 
+    def warehouses(self) -> list[str]:
+        """Warehouse names this catalog knows about, sorted.
+
+        **Not part of the Iceberg REST specification.** A warehouse is a concept
+        the catalog implementation owns, so this asks Lakekeeper's management
+        API and returns an empty list against anything that does not expose one.
+        Empty means "cannot tell", not "none exist" -- the caller says so rather
+        than presenting an empty fleet as fact.
+        """
+        properties = getattr(self.catalog, "properties", {}) or {}
+        uri = properties.get("uri")
+        if not uri:
+            return []
+
+        import requests
+
+        # `.../catalog` -> `.../management/v1/warehouse`, the sibling endpoint.
+        base = uri.rstrip("/")
+        base = base[: -len("/catalog")] if base.endswith("/catalog") else base
+        try:
+            response = requests.get(f"{base}/management/v1/warehouse", timeout=10)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            logger.debug("warehouse listing unavailable at %s: %s", base, exc)
+            return []
+        return sorted(
+            w["name"] for w in payload.get("warehouses", []) if isinstance(w, dict) and "name" in w
+        )
+
     def close(self) -> None:
         try:
             self.con.close()

@@ -12,6 +12,9 @@ dependencies = [
     "pyiceberg[pyarrow]>=0.11.1",
     "duckdb>=1.5.0",
     "pyarrow>=18",
+    # zamboni.yml and .env: the DevOps surface (docs/devops.md), not optional.
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]

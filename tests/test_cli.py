@@ -511,3 +511,124 @@ def test_every_mutating_verb_accepts_an_engine(warehouse, session):
     ):
         code = main([verb, "db.events", "--local-warehouse", warehouse, "--engine", "local"])
         assert code == 0, f"{verb} rejected --engine local"
+
+
+# -- ZMBNI-17: the DevOps entry point -------------------------------------
+
+
+@pytest.fixture
+def devops_dir(tmp_path, warehouse, monkeypatch):
+    """A working directory shaped like docs/devops.md §5, cd'd into.
+
+    The point of the layout is that a cron line is a `cd` and a command, so the
+    test has to actually change directory -- discovery of ./zamboni.yml is the
+    behaviour under test, not an implementation detail.
+    """
+    root = tmp_path / "srv"
+    (root / "configs" / "acme").mkdir(parents=True)
+    (root / "configs" / "acme" / "table-config.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "tables": {
+                    "db.events": {
+                        "retention": {
+                            "expire_snapshots": {
+                                "enabled": True,
+                                "max_snapshot_age_days": 0,
+                                "min_snapshots_to_keep": 1,
+                            },
+                            "remove_orphan_files": {"enabled": True, "older_than_days": 0},
+                        }
+                    }
+                },
+            }
+        )
+    )
+    (root / "zamboni.yml").write_text(f"warehouse: acme\nengine: local\nroot: {root}\n")
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("ZAMBONI_LOCAL_WAREHOUSE", warehouse)
+    return root
+
+
+def test_maintenance_runs_every_operation_in_the_runbook_order(devops_dir, session, capsys):
+    """One command, one exit code. The order is load-bearing (runbook.md §1),
+    which is the reason it lives in the tool rather than in a shell script."""
+    assert main(["maintenance", "--yes"]) == 0
+
+    out = capsys.readouterr().out
+    # Each operation reported something for the one configured table.
+    assert "rewrote 6 file(s)" in out
+    assert "expired" in out
+    assert "unreferenced" in out
+
+
+def test_maintenance_finds_its_profile_and_per_warehouse_config(devops_dir, session, capsys):
+    """No --table, no --table-config, no --warehouse: all three come from
+    ./zamboni.yml and $ROOT/configs/{warehouse}/table-config.json."""
+    assert main(["maintenance", "--yes"]) == 0
+
+    assert "db.events" in capsys.readouterr().out
+
+
+def test_maintenance_previews_without_yes(devops_dir, session, capsys):
+    """The one rule holds here too, and this is the verb most likely to be run
+    by someone who has not read the docs."""
+    before = profile_table(session.table("db.events")).snapshot_id
+
+    assert main(["maintenance"]) == 0
+
+    assert "dry run" in capsys.readouterr().out
+    assert profile_table(session.table("db.events")).snapshot_id == before
+
+
+def test_maintenance_preserves_every_row(devops_dir, session):
+    """The property that matters more than any count."""
+    before = session.table("db.events").scan().to_arrow().num_rows
+
+    assert main(["maintenance", "--yes"]) == 0
+
+    assert session.table("db.events").scan().to_arrow().num_rows == before
+
+
+def test_status_reports_before_and_after(devops_dir, session, capsys):
+    assert main(["maintenance", "--yes", "--status"]) == 0
+
+    out = capsys.readouterr().out
+    assert "status" in out
+    assert "6 -> 1" in out, f"expected a file-count delta:\n{out}"
+
+
+def test_maintenance_with_no_tables_is_a_usage_error(tmp_path, warehouse, monkeypatch, capsys):
+    """Silence would be worse: a cron job that maintains nothing every night and
+    exits 0 looks exactly like one that is working."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ZAMBONI_LOCAL_WAREHOUSE", warehouse)
+
+    assert main(["maintenance"]) == 2
+    assert "no tables to maintain" in capsys.readouterr().out
+
+
+def test_a_named_table_overrides_the_configured_set(devops_dir, session, capsys):
+    assert main(["maintenance", "db.events", "--yes"]) == 0
+
+    assert "db.events" in capsys.readouterr().out
+
+
+def test_help_points_at_the_devops_guide(capsys):
+    """Discoverability for whoever inherits the cron entry."""
+    with pytest.raises(SystemExit):
+        main(["--help"])
+
+    out = capsys.readouterr().out
+    assert "docs/devops.md" in out
+    assert "docs/runbook.md" in out
+    assert "maintenance" in out
+
+
+def test_an_explicit_missing_profile_is_a_usage_error(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit):
+        main(["--profile", str(tmp_path / "absent.yml"), "doctor"])
+    assert "no such file" in capsys.readouterr().err

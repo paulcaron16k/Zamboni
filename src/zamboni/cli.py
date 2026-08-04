@@ -46,7 +46,7 @@ import os
 import sys
 from dataclasses import replace
 
-from . import maintainers, version_banner
+from . import maintainers, settings, version_banner
 from .capabilities import detect
 from .catalog_import import config_from_catalog, load_catalog
 from .compactor import CompactionBlocked, TableCompactor
@@ -61,6 +61,70 @@ from .maintainers import (
 from .session import CatalogSession, S3Settings
 from .tableconfig import DEFAULT_SETTINGS, PartitionEvolution, TableConfig
 
+USAGE = """\
+getting started
+  zamboni doctor                          is this PyIceberg build usable?
+  zamboni describe  acme.events           profile a table, change nothing
+  zamboni maintenance acme.events         preview every operation on one table
+
+daily operation -- see docs/devops.md
+  zamboni maintenance --warehouse acme --status --yes
+
+  With ./zamboni.yml and ./.env present, that is the whole cron line:
+
+    17 2 * * *  cd /srv/zamboni && zamboni maintenance --warehouse acme --status \\
+                  --yes >> /var/log/zamboni/acme.log 2>&1
+
+  `maintenance` runs the six operations in the order docs/runbook.md
+  establishes, over every configured table, and exits with the worst code any
+  of them produced.
+
+one rule, no exceptions
+  Without --yes nothing is committed. Every mutating verb previews instead and
+  says so. Where an engine cannot preview -- Trino previews nothing -- the run
+  is refused rather than executed.
+
+exit codes
+  0 success   2 usage   3 refused (blocked table or unsupported operation)
+  4 a safety check aborted the run; nothing was deleted. Investigate.
+
+further reading
+  docs/devops.md    cron, zamboni.yml, .env, multi-tenant warehouses
+  docs/runbook.md   the six-verb order, cadence, sizing the orphan guard
+  zamboni engines   what each engine supports, and what it refuses
+"""
+
+
+def _apply_profile(args: argparse.Namespace, profile) -> None:
+    """Fill in what neither a flag nor the environment supplied.
+
+    Only ever fills gaps. A flag beats the profile because a one-off run has to
+    be able to override a committed file without editing it, and the flag
+    defaults already carry the ZAMBONI_* values -- so anything still None here
+    was specified nowhere else.
+    """
+    # uri and warehouse: fill only when unset. Their flag defaults already carry
+    # ZAMBONI_URI / ZAMBONI_WAREHOUSE, so None here means nobody said.
+    for attribute in ("uri", "warehouse"):
+        if not getattr(args, attribute, None) and (value := getattr(profile, attribute)):
+            setattr(args, attribute, value)
+
+    # engine is different: its flag default is the literal "local", not None, so
+    # "unset" and "explicitly local" are indistinguishable on the namespace. A
+    # profile may therefore only *raise* it off the default -- which means
+    # `--engine local` cannot override a profile that says trino. Acceptable:
+    # the profile is the deployment's choice, and the flag can still name any
+    # other engine. Recorded here because the asymmetry is not obvious.
+    if getattr(args, "engine", None) == "local" and profile.engine != "local":
+        args.engine = profile.engine
+
+    # Per-warehouse table configuration, the multi-tenant layout in
+    # docs/devops.md section 5: $ZAMBONI_ROOT/configs/{warehouse}/table-config.json
+    if getattr(args, "table_config", None) is None and getattr(args, "warehouse", None):
+        candidate = profile.table_config_for(args.warehouse)
+        if candidate.is_file():
+            args.table_config = str(candidate)
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
@@ -70,6 +134,22 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
+
+    # Before anything reads an environment variable or a flag default: the
+    # dotenv file has to be in os.environ first, and the profile supplies what
+    # neither a flag nor the environment did.
+    try:
+        args.zamboni_profile, env_file = settings.resolve(
+            profile_path=args.profile, env_path=args.env
+        )
+    except settings.ProfileError as exc:
+        parser.error(str(exc))
+        return 2
+    _apply_profile(args, args.zamboni_profile)
+    if args.verbose:
+        logging.getLogger(__name__).debug(
+            "profile: %s, env: %s", args.zamboni_profile.source, env_file
+        )
 
     if args.command == "doctor":
         caps = detect()
@@ -99,6 +179,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # The reclaim verbs take no compaction arguments, so they dispatch
         # before a compactor is built from flags they do not have.
+        if args.command == "maintenance":
+            return _maintenance(session, args)
+
+        if args.command == "warehouses":
+            return _warehouses(session, args)
+
         if args.command == "expire":
             return _expire(session, args)
 
@@ -161,8 +247,23 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="zamboni", description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(
+        prog="zamboni",
+        description=__doc__.splitlines()[0],
+        epilog=USAGE,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument(
+        "--profile",
+        help="non-secret configuration. Default: ./zamboni.yml, then "
+        "$ZAMBONI_ROOT/zamboni.yml. See docs/devops.md.",
+    )
+    parser.add_argument(
+        "--env",
+        help="dotenv file holding credentials. Default: ./.env. Cron gives a job "
+        "almost no environment, and a crontab is a poor place for a secret.",
+    )
     parser.add_argument("--version", action="version", version=version_banner())
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -210,6 +311,49 @@ def _build_parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="preview without committing. Omitting --yes does the same; this says it.",
             )
+
+    mt = sub.add_parser(
+        "maintenance",
+        help="run every operation, in the runbook order, over every configured table",
+        description=(
+            "The DevOps entry point: one command a cron line can call. Runs the six "
+            "operations in the order docs/runbook.md establishes, over every table in "
+            "the configuration, and exits with the worst code any of them produced. "
+            "See docs/devops.md for the crontab line and the multi-tenant layout."
+        ),
+    )
+    mt.add_argument("table", nargs="?", help="one table; default is every configured table")
+    mt.add_argument("--table-config", help="path to table-config.json")
+    mt.add_argument(
+        "--status",
+        action="store_true",
+        help="report file counts and bytes before and after, so a nightly log answers "
+        "'did it help' without a second tool",
+    )
+    mt.add_argument(
+        "--yes",
+        action="store_true",
+        help="actually commit every operation. Without it this is a dry run.",
+    )
+    mt.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
+    mt.add_argument("--max-snapshot-age-days", type=int)
+    mt.add_argument("--min-snapshots-to-keep", type=int)
+    mt.add_argument("--older-than-days", type=int)
+    mt.add_argument("--min-input-manifests", type=int)
+    _add_engine_arg(mt)
+    _add_catalog_args(mt)
+    _add_config_args(mt)
+
+    wh = sub.add_parser(
+        "warehouses",
+        help="list the warehouses this catalog knows about, one per line",
+        description=(
+            "Plain output on purpose: its job is to be input to something else -- "
+            "generating a crontab, a CronJob per tenant, an Airflow DAG. Zamboni does "
+            "not schedule anything; see docs/devops.md section 5."
+        ),
+    )
+    _add_catalog_args(wh)
 
     ex = sub.add_parser("expire", help="apply the retention policy and delete the files it orphans")
     ex.add_argument("table")
@@ -473,7 +617,7 @@ def _request_for(args: argparse.Namespace) -> MaintenanceRequest:
     # layout and only the operational half comes from the flags. Only compact
     # needs either -- the reclaim verbs take no compaction arguments at all.
     compaction = None
-    if args.command == "compact":
+    if args.command in ("compact", "maintenance"):
         compaction = _operational_config(args) if table_config else _config_from(args)
     return MaintenanceRequest(
         retention=_retention_for(args),
@@ -646,6 +790,171 @@ def _apply_properties(session: CatalogSession, args: argparse.Namespace) -> int:
 
     if not args.yes:
         print("\n  dry run -- re-run with --yes to set them.")
+    return 0
+
+
+def _maintenance(session: CatalogSession, args: argparse.Namespace) -> int:
+    """Every operation, in the runbook order, over every configured table.
+
+    One exit code: the **worst** any operation produced, so a partial failure is
+    never reported as success. That matters more here than anywhere else in the
+    CLI, because this is the entry point a cron line calls and nobody reads.
+    """
+    from .maintainers import Operation
+
+    profile = args.zamboni_profile
+    tables = _tables_to_maintain(args, profile)
+    if not tables:
+        print(
+            "no tables to maintain. Name one on the command line, list them in "
+            f"{profile.source or 'zamboni.yml'}, or point --table-config at a config "
+            "that declares some."
+        )
+        return 2
+
+    operations = [Operation(name) for name in profile.operations]
+    before = _status_snapshot(session, tables) if args.status else None
+
+    worst = 0
+    failures: list[str] = []
+    for table in tables:
+        print(f"\n{table}")
+        print("  " + "-" * 68)
+        for operation in operations:
+            code = _run_one(session, args, operation, table)
+            worst = max(worst, code)
+            if code:
+                failures.append(f"{table} {operation.value} (exit {code})")
+                if code == 4:
+                    # A safety check aborted. Everything after it on this table
+                    # reads the same state, so continuing would be doing more
+                    # work on a warehouse we have just said we do not trust.
+                    print(f"  stopping this table: {operation.value} aborted")
+                    break
+
+    if before is not None:
+        _print_status_delta(session, tables, before)
+
+    if failures:
+        print("\nfailed:", file=sys.stderr)
+        for failure in failures:
+            print(f"  {failure}", file=sys.stderr)
+    return worst
+
+
+def _tables_to_maintain(args: argparse.Namespace, profile) -> list[str]:
+    """Explicit argument, then the profile, then everything in table-config."""
+    if getattr(args, "table", None):
+        return [args.table]
+    if profile.tables:
+        return list(profile.tables)
+    if args.table_config:
+        return sorted(TableConfig.load(args.table_config).tables)
+    return []
+
+
+def _run_one(session: CatalogSession, args: argparse.Namespace, operation, table: str) -> int:
+    """One operation, reusing the single-verb handler so behaviour cannot drift.
+
+    Dispatching to the same functions the individual verbs use is the point: a
+    second implementation of "expire" that maintenance calls would be a second
+    thing to keep correct.
+    """
+    handlers = {
+        "compact": _compact_one,
+        "expire": _expire,
+        "remove-orphans": _remove_orphans,
+        "remove-dangling-deletes": _remove_dangling_deletes,
+        "rewrite-manifests": _rewrite_manifests,
+        "apply-properties": _apply_properties,
+    }
+    scoped = argparse.Namespace(**vars(args))
+    scoped.table = table
+    try:
+        return handlers[operation.value](session, scoped)
+    except CompactionBlocked as exc:
+        print(f"  {operation.value}: {exc}", file=sys.stderr)
+        return 3
+    except UnsupportedOperation as exc:
+        # Declared, not a failure: Trino cannot remove dangling deletes, and a
+        # fleet run should skip that rather than fail every night over it.
+        print(f"  {operation.value}: skipped -- {exc}")
+        return 0
+    except (PreviewUnavailable, EngineConfigProblem) as exc:
+        print(f"  {operation.value}: {exc}", file=sys.stderr)
+        return 2
+
+
+def _compact_one(session: CatalogSession, args: argparse.Namespace) -> int:
+    from .maintainers import Operation
+
+    dry_run = args.dry_run or not args.yes
+    maintainer, request = _prepare(session, args, Operation.COMPACT)
+    result = maintainer.execute(Operation.COMPACT, args.table, request=request, dry_run=dry_run)
+    print(result.describe())
+    if dry_run:
+        print("\n  dry run -- re-run with --yes to rewrite and commit.")
+    return 0
+
+
+def _status_snapshot(session: CatalogSession, tables: list[str]) -> dict[str, tuple]:
+    from .profile import profile_table
+
+    snapshot = {}
+    for table in tables:
+        try:
+            p = profile_table(session.table(table))
+            snapshot[table] = (len(p.live_files), p.total_bytes, p.total_records)
+        except Exception as exc:
+            # Status is reporting, not the job. A table it cannot read must not
+            # turn a successful maintenance run into a failure.
+            logging.getLogger(__name__).debug("status unavailable for %s: %s", table, exc)
+    return snapshot
+
+
+def _print_status_delta(
+    session: CatalogSession, tables: list[str], before: dict[str, tuple]
+) -> None:
+    from .units import human_bytes
+
+    after = _status_snapshot(session, tables)
+    print("\nstatus")
+    print("  " + "-" * 68)
+    print(f"  {'table':<34} {'files':>14} {'bytes':>18}")
+    for table in tables:
+        was, now = before.get(table), after.get(table)
+        if not was or not now:
+            continue
+        print(
+            f"  {table:<34} {was[0]:>6} -> {now[0]:<6} "
+            f"{human_bytes(was[1]):>8} -> {human_bytes(now[1]):<8}"
+        )
+        if was[2] != now[2]:
+            # Row counts must not move. Saying so loudly beats a silent diff.
+            print(
+                f"    ROW COUNT CHANGED: {was[2]} -> {now[2]}. Maintenance must never "
+                "do this; investigate before running again.",
+                file=sys.stderr,
+            )
+
+
+def _warehouses(session: CatalogSession, args: argparse.Namespace) -> int:
+    """List the catalog's warehouses, one per line.
+
+    Deliberately plain: no header, no counts, no formatting. This is the input
+    to a crontab generator or a CronJob template, and anything decorative here
+    becomes something the caller has to strip.
+    """
+    names = session.warehouses()
+    if not names:
+        print(
+            "no warehouses reported. This catalog may not expose a management API; "
+            "list them from your provisioning system instead.",
+            file=sys.stderr,
+        )
+        return 0
+    for name in names:
+        print(name)
     return 0
 
 

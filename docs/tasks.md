@@ -41,13 +41,14 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-14 | Trino maintainer | `ALTER TABLE … EXECUTE` for five of six verbs, refusing dangling-delete removal. Verified against a live Trino 483 in the dev stack. [roadmap.md RM-4](roadmap.md) | done | 2026-08-04 |
 | ZMBNI-15 | Spark maintainer | Iceberg Spark procedures, including the one operation we cannot do locally. [roadmap.md RM-5](roadmap.md) | todo | |
 | ZMBNI-16 | Zamboni vs ice-keeper | Delivered as [ice-keeper-comparison.md](ice-keeper-comparison.md). Found ZMBNI-507, a data-loss path in shipped code. [roadmap.md RM-6](roadmap.md) | done | 2026-08-03 |
+| ZMBNI-17 | DevOps CLI and operations | One command a cron line can call, config that is not twenty flags, and a fleet story for multi-tenant warehouses. [devops.md](devops.md) | done | 2026-08-04 |
 
 > **On section order.** Epics ZMBNI-1…10 appear below in numeric order; the roadmap epics
 > ZMBNI-11…16 appear in *delivery* order (13, 16, 12, 14, 11, 15), which is not their numeric
 > order. The numbers follow [roadmap.md](roadmap.md)'s RM-1…RM-6 so the two documents agree on
 > identity; the sequence is explained in each section's subtitle.
 
-**Story counts:** 70 done · 1 inproject · 16 todo · 1 cancelled  (88 stories)
+**Story counts:** 78 done · 1 inproject · 16 todo · 1 cancelled  (96 stories)
 
 ---
 
@@ -265,6 +266,25 @@ Last: the largest dependency footprint for the engine that overlaps us most.
 | ZMBNI-1504 | `remove-orphans` | `remove_orphan_files`, with the same guarantee caveat as Trino's | todo | |
 | ZMBNI-1505 | Dangling deletes via `rewrite_position_delete_files` | The case that justifies the interface carrying capability in both directions: Spark rewrites *partially* dangling delete files, which is ZMBNI-604 — blocked for us on PyIceberg, available here | todo | |
 | ZMBNI-1506 | Live verification | Against a real Spark. Open question 3 | todo | |
+
+---
+
+## ZMBNI-17 — DevOps CLI and operations
+
+The runbook is right and too long to be a daily interface. Six invocations in a fixed order,
+each needing catalog flags, is a shell wrapper waiting to be written badly. This epic makes
+the tool the wrapper. [devops.md](devops.md)
+
+| id | title | description | status | completed-at |
+|---|---|---|---|---|
+| ZMBNI-1701 | A `maintenance` command | `zamboni maintenance` runs the six operations in the runbook order over every configured table, reusing the single-verb handlers so behaviour cannot drift between the two entry points. Returns the **worst** exit code any operation produced, and stops a table after an exit-4 abort — everything after it reads the same state, so continuing would be more work on a warehouse we have just said we do not trust | done | 2026-08-04 |
+| ZMBNI-1702 | `--profile zamboni.yml` | `--profile`, defaulting to `./zamboni.yml` then `$ZAMBONI_ROOT/zamboni.yml`. Unknown keys and unknown operations are refused at load, matching table-config.json: a silently ignored key is a setting the operator believes is in force and is not. `zamboni.yml.sample` is committed | done | 2026-08-04 |
+| ZMBNI-1703 | `--env` and `env.sample` | `--env`, defaulting to `./.env`. A real environment variable beats the file, so a container injecting secrets properly is not overridden by a stale dotenv. `env.sample` lists every variable including the ones most users will not need, so there is one place to look. Root `.env` added to .gitignore — it was not covered before | done | 2026-08-04 |
+| ZMBNI-1704 | `--status` | `--status` reports file counts and bytes per table before and after. Row counts are compared too, and a change is printed to stderr as an alarm: maintenance must never move them | done | 2026-08-04 |
+| ZMBNI-1705 | Usable `--help` | A worked example at the top of `--help` — the cron line, the one `--yes` rule, all four exit codes, and pointers to devops.md and runbook.md. For whoever inherits the cron entry without reading the docs | done | 2026-08-04 |
+| ZMBNI-1706 | Per-warehouse configuration layout | `{root}/configs/{warehouse}/table-config.json`, resolved automatically from `--warehouse`, with `ZAMBONI_ROOT` defaulting to `~/.zamboni`. One file per customer in a predictable place | done | 2026-08-04 |
+| ZMBNI-1707 | Warehouse discovery | `zamboni warehouses`, one name per line, from Lakekeeper's management API. Warehouse listing is not in the Iceberg REST spec, so an empty result means "cannot tell" and says so rather than presenting an empty fleet as fact. Output is deliberately plain because its job is to be input to a crontab generator | done | 2026-08-04 |
+| ZMBNI-1708 | The DevOps guide | [devops.md](devops.md): the cron line, why there is no shell wrapper, the zamboni.yml/.env split, the multi-tenant layout, and why per-warehouse invocation beats one loop | done | 2026-08-04 |
 
 ---
 
