@@ -201,7 +201,10 @@ def test_stubs_refuse_to_pretend_they_ran():
 def test_describe_reports_limitations_so_they_are_discoverable():
     text = TrinoMaintainer.capabilities().describe()
 
-    assert "no sort and no Z-order" in text
+    assert "no Z-order" in text
+    # Trino *does* sort -- an earlier declaration said it did not. The distinction
+    # matters: the gap is lexicographic-only ordering, not absent ordering.
+    assert "identity transforms only" in text
     assert "unsupported" in text
     assert "cannot preview" in text
 

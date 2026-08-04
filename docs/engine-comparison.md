@@ -108,6 +108,42 @@ operation is not the same operation.
 | 11 | **Partition selection differs in kind.** Trino filters with `WHERE` on partition columns; Spark takes a `where` predicate string; Zamboni selects from declarative rules in `table-config.json` | The config-to-engine translation is a real component (ZMBNI-1205), not a formatting step |
 | 12 | **`partial-progress.enabled` defaults to false in Spark**, as it does in Zamboni after ZMBNI-106; Trino does not expose it | Agreement worth recording — Zamboni's choice matches Iceberg's own default |
 
+### 3a. What the missing Z-order actually costs
+
+The largest single gap, so it is worth quantifying rather than asserting. Iceberg
+skips a file when its per-column min/max cannot match the predicate, so skipping
+quality is *how tightly clustered that column is within each file*.
+
+A lexicographic sort on `(x, y)` clusters `x` perfectly and scatters `y`.
+Z-order interleaves the bits of both, giving each moderate clustering. Measured
+with Zamboni's own Z-order — files touched by a single-value filter, averaged
+over every value:
+
+| files | sort, filter on x | sort, filter on y | z-order, x | z-order, y |
+|---|---|---|---|---|
+| 8 | 1.0 | 8.0 | 4.0 | 2.0 |
+| 32 | 1.0 | 32.0 | 8.0 | 4.0 |
+| 64 | 1.0 | 64.0 | 8.0 | 8.0 |
+| 128 | 1.0 | **128.0** | 16.0 | 8.0 |
+
+A single-column sort is **optimal for the leading column and useless for every
+other one** — filtering on `y` reads every file. Z-order costs the leading column
+its perfect pruning and buys ~**√N** on both. The gap widens with table size: 16×
+at 128 files, and it keeps growing, because it is N versus √N.
+
+So Trino's limitation is not "compaction is worse". It is that **only the first
+`sorted_by` column gets file skipping**, and a query whose selective predicate is
+any other column reads every file in every partition it reaches.
+
+**This is independent of partition pruning, and the two are often conflated.**
+Partitioning skips whole partitions; sort order skips files within the ones that
+survive. A query with no time filter but a filter on a clustered column still
+skips files inside every partition — it reads more *manifests*, not more data
+files. A query with a time filter but a predicate on a non-leading sort column
+prunes partitions and then reads everything inside them. A full scan needs
+*neither* mechanism to apply. Z-order earns its keep exactly where the selective
+predicate is not the partition column.
+
 ---
 
 ## 4. Which safety invariants survive delegation

@@ -436,7 +436,7 @@ def test_engines_reports_what_each_one_refuses(capsys):
     assert "engine: local" in out and "engine: trino" in out and "engine: spark" in out
     # The point of the verb: the refusals are visible before anything runs.
     assert "unsupported" in out
-    assert "no sort and no Z-order" in out
+    assert "no Z-order" in out
 
 
 def test_an_unsupported_operation_exits_three(warehouse, session, capsys):

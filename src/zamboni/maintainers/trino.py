@@ -11,6 +11,11 @@ Two declarations here are the reason the interface has the shape it does:
 * ``remove-dangling-deletes`` is UNSUPPORTED. Trino has no procedure for it and
   no option that achieves it, so this is the one operation missing from an
   engine entirely.
+* ``compact`` is PARTIAL rather than UNSUPPORTED for ordering, because Trino
+  *does* sort -- ``optimize`` carries the table's sort order through to the
+  writer. An earlier draft of this file said "no sort and no Z-order", which was
+  wrong on the first half and would have had ZMBNI-14 build a translation that
+  discarded a capability Trino has.
 * nothing previews. Trino's procedures have no ``dry_run``, which is what forces
   ``can_preview`` to be per operation and what
   :meth:`~zamboni.maintainers.Maintainer.check_consent` refuses on.
@@ -58,7 +63,18 @@ class TrinoMaintainer(Maintainer):
                     Support.PARTIAL,
                     can_preview=False,
                     limitations=(
-                        "no sort and no Z-order: `optimize` compacts only",
+                        (
+                            "no Z-order. Verified against the connector source: zero "
+                            "occurrences of zorder/z-order/morton/interleave in all 474 "
+                            "files, and no open issue proposing it. Only the leading sort "
+                            "column gets file skipping, so a filter on any other column "
+                            "reads every file in every surviving partition"
+                        ),
+                        (
+                            "sorts by identity transforms only -- IcebergMetadata."
+                            "getSupportedSortFields skips non-identity sort fields, and "
+                            "stamps sort_order_id=unsorted when any was skipped"
+                        ),
                         (
                             "`file_size_threshold` selects which files to merge; there is "
                             "no control over output file size"
