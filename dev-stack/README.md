@@ -96,9 +96,40 @@ the gateway address has to be knowable in advance to go in `.env`. If
 | `.env.sample` | Committed template. Every value is dev-only |
 | `.env` | Yours; **gitignored**. `cp .env.sample .env` |
 | `bootstrap.py` | Bootstraps Lakekeeper and creates the warehouse. Idempotent; `--show` prints config without changing anything |
+| `trino/iceberg.properties` | Trino's Iceberg catalog, pointed at this Lakekeeper. Mounted read-only |
 
 `tests/test_dev_stack.py::test_env_sample_and_env_declare_the_same_keys` fails if
 the two `.env` files drift apart, so the template stays usable.
+
+## Trino (optional)
+
+Trino is in the `trino` compose profile, so it does **not** start with the rest of
+the stack — it is a JVM, it is the heaviest thing here, and nothing else needs it:
+
+```bash
+docker compose --profile trino up -d trino     # ~30-60s to become healthy
+docker exec zamboni-dev-trino-1 trino --execute "SHOW SCHEMAS FROM iceberg"
+```
+
+It exists so `--engine trino` can be verified against a real engine rather than
+against our reading of the documentation, which has already been wrong once.
+`tests/test_dev_stack.py` skips its Trino checks when port `TRINO_PORT` is
+closed, the same way the whole suite skips when the stack is down.
+
+Two settings in `trino/iceberg.properties` are worth knowing:
+
+- **`iceberg.rest-catalog.vended-credentials-enabled=true`** — defaults to false.
+  Without it Trino needs its own S3 credentials rather than asking Lakekeeper for
+  per-table ones, which defeats the point of an STS-vending warehouse.
+- **`s3.endpoint` is the compose gateway**, matching `S3_GATEWAY` in `.env` and
+  *not* `minio:9000`. Trino runs inside the network and could reach `minio`
+  directly, but the warehouse advertises the gateway address to every client, and
+  per-table storage config beats client config — so the client that disagrees is
+  the one that breaks.
+
+Verified working end to end: a table written by PyIceberg through Lakekeeper is
+readable from Trino, and `ALTER TABLE … EXECUTE optimize` compacted it from six
+data files to one.
 
 ---
 

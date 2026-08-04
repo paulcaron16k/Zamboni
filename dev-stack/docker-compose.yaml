@@ -95,6 +95,37 @@ services:
       "
     networks: [zamboni]
 
+  # Trino, for ZMBNI-14. Optional by design: it is the heaviest thing here (a
+  # JVM), and nothing else in the stack needs it, so it sits in the `trino`
+  # profile and only starts when asked for --
+  #
+  #   docker compose --profile trino up -d
+  #
+  # tests/test_dev_stack.py skips its Trino checks when the port is closed,
+  # exactly as the whole suite skips when the stack is down.
+  trino:
+    image: trinodb/trino:${TRINO_VERSION}
+    profiles: [trino]
+    healthcheck:
+      # `trino --execute` exits non-zero until the coordinator is serving, which
+      # is later than the container being up. A JVM start is slow, hence the
+      # long start_period; without it the first few probes fail noisily.
+      test: ["CMD", "trino", "--execute", "SELECT 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    depends_on:
+      lakekeeper:
+        condition: service_healthy
+      createbucket:
+        condition: service_completed_successfully
+    ports:
+      - "${TRINO_PORT}:8080"
+    volumes:
+      - ./trino/iceberg.properties:/etc/trino/catalog/iceberg.properties:ro
+    networks: [zamboni]
+
 networks:
   # The subnet is pinned, not left to Docker, because the S3 endpoint the
   # warehouse advertises is this network's *gateway* address. That address is

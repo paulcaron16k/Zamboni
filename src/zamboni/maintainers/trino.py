@@ -39,8 +39,11 @@ from . import (
 if TYPE_CHECKING:
     from ..session import CatalogSession
 
-#: Documented defaults for the catalog properties that impose a floor. A
-#: deployment may raise these; it cannot be assumed to have lowered them.
+#: Default for the catalog properties that impose a floor. Confirmed against a
+#: running Trino 476: a 1d retention is refused with "Retention specified (1.00d)
+#: is shorter than the minimum retention configured in the system (7.00d)". A
+#: deployment may lower it via a session or catalog property, so this is the
+#: default to warn against rather than a hard limit.
 DEFAULT_MIN_RETENTION_DAYS = 7
 
 SERVER_SIDE = ("runs server-side, so none of Zamboni's client-side reclaim invariants apply",)
@@ -162,10 +165,12 @@ class TrinoMaintainer(Maintainer):
             )
             if days is not None and days < DEFAULT_MIN_RETENTION_DAYS:
                 problems.append(
-                    f"max_snapshot_age_days is {days}, below Trino's documented "
-                    f"`iceberg.expire-snapshots.min-retention` default of "
+                    f"max_snapshot_age_days is {days}, below Trino's "
+                    f"`iceberg.expire-snapshots.min-retention`, which defaults to "
                     f"{DEFAULT_MIN_RETENTION_DAYS}d. Trino fails the procedure rather "
-                    "than clamping. Raise the value, or lower the server setting."
+                    "than clamping -- verified live. Raise the value, or lower the "
+                    "floor with the `iceberg.expire_snapshots_min_retention` session "
+                    "property or the catalog property of the same name."
                 )
         if operation is Operation.REMOVE_ORPHANS:
             days = (
@@ -175,10 +180,12 @@ class TrinoMaintainer(Maintainer):
             )
             if days is not None and days < DEFAULT_MIN_RETENTION_DAYS:
                 problems.append(
-                    f"older_than_days is {days}, below Trino's documented "
-                    f"`iceberg.remove-orphan-files.min-retention` default of "
+                    f"older_than_days is {days}, below Trino's "
+                    f"`iceberg.remove-orphan-files.min-retention`, which defaults to "
                     f"{DEFAULT_MIN_RETENTION_DAYS}d. Trino fails the procedure rather "
-                    "than clamping. Raise the value, or lower the server setting."
+                    "than clamping -- verified live. Raise the value, or lower the "
+                    "floor with the `iceberg.remove_orphan_files_min_retention` session "
+                    "property or the catalog property of the same name."
                 )
         return tuple(problems)
 
