@@ -424,3 +424,90 @@ def test_no_verb_mutates_without_yes(warehouse, session, capsys):
     assert profile_table(session.table("db.events")).snapshot_id == before, (
         "a bare invocation committed something"
     )
+
+
+# -- ZMBNI-12: the engine seam -------------------------------------------
+
+
+def test_engines_reports_what_each_one_refuses(capsys):
+    assert main(["engines"]) == 0
+
+    out = capsys.readouterr().out
+    assert "engine: local" in out and "engine: trino" in out and "engine: spark" in out
+    # The point of the verb: the refusals are visible before anything runs.
+    assert "unsupported" in out
+    assert "no sort and no Z-order" in out
+
+
+def test_an_unsupported_operation_exits_three(warehouse, session, capsys):
+    """A refusal, like a blocked table -- not a usage error and not a crash."""
+    code = main(
+        [
+            "remove-dangling-deletes",
+            "db.events",
+            "--local-warehouse",
+            warehouse,
+            "--engine",
+            "trino",
+            "--yes",
+        ]
+    )
+
+    assert code == 3
+    assert "cannot remove-dangling-deletes" in capsys.readouterr().err
+
+
+def test_an_engine_that_cannot_preview_refuses_without_yes(warehouse, session, capsys):
+    """The --yes rule holds on every engine. Where an engine cannot preview it
+    is kept by refusing, so the rule acquires no exception -- and crucially the
+    CLI never prints a dry-run notice over an engine about to delete."""
+    before = profile_table(session.table("db.events")).snapshot_id
+
+    code = main(["compact", "db.events", "--local-warehouse", warehouse, "--engine", "trino"])
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert "cannot preview" in captured.err
+    assert "dry run" not in captured.out
+    assert profile_table(session.table("db.events")).snapshot_id == before
+
+
+def test_a_config_below_trinos_floor_is_a_usage_error(warehouse, session, capsys):
+    """Caught at plan time, naming the server setting -- not surfaced as a
+    server error part-way through a fleet run."""
+    code = main(
+        [
+            "expire",
+            "db.events",
+            "--local-warehouse",
+            warehouse,
+            "--engine",
+            "trino",
+            "--max-snapshot-age-days",
+            "1",
+            "--yes",
+        ]
+    )
+
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "min-retention" in err and "trino" in err
+
+
+def test_the_default_engine_is_local(warehouse, session, capsys):
+    """Nobody has to know the seam exists to use the tool."""
+    assert main(["compact", "db.events", "--local-warehouse", warehouse]) == 0
+    assert "dry run" in capsys.readouterr().out
+
+
+def test_every_mutating_verb_accepts_an_engine(warehouse, session):
+    for verb in (
+        "compact",
+        "expire",
+        "remove-orphans",
+        "remove-dangling-deletes",
+        "rewrite-manifests",
+        "apply-properties",
+    ):
+        code = main([verb, "db.events", "--local-warehouse", warehouse, "--engine", "local"])
+        assert code == 0, f"{verb} rejected --engine local"

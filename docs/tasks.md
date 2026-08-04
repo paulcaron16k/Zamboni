@@ -36,7 +36,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-9 | Verification and CI | The suite, live verification, and automation. plan.md §4 | inproject | |
 | ZMBNI-10 | Documentation | HLD, delivery plan, config spec, runbook, release convention, verification record | done | 2026-08-03 |
 | ZMBNI-11 | PyIceberg 0.12 | Develop against unreleased 0.12 on a branch; three of seven capability probes flip, neither waited-on blocker lifts. [roadmap.md RM-1](roadmap.md) | todo | |
-| ZMBNI-12 | Maintainer interface | `Maintainer` ABC, `LocalMaintainer` extracted, Trino and Spark stubs, capabilities that refuse rather than degrade. [roadmap.md RM-2](roadmap.md) | todo | |
+| ZMBNI-12 | Maintainer interface | `Maintainer` ABC, `LocalMaintainer` extracted with no behaviour change, Trino and Spark stubs carrying real capability declarations, and `--engine` / `zamboni engines`. [roadmap.md RM-2](roadmap.md) | done | 2026-08-03 |
 | ZMBNI-13 | Zamboni vs Trino vs Spark | Delivered as [engine-comparison.md](engine-comparison.md): three surfaces, a twelve-row semantic-difference register, and the seam it forces. [roadmap.md RM-3](roadmap.md) | done | 2026-08-03 |
 | ZMBNI-14 | Trino maintainer | `ALTER TABLE … EXECUTE` for four of six verbs, refusing the other two. [roadmap.md RM-4](roadmap.md) | todo | |
 | ZMBNI-15 | Spark maintainer | Iceberg Spark procedures, including the one operation we cannot do locally. [roadmap.md RM-5](roadmap.md) | todo | |
@@ -47,7 +47,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 > order. The numbers follow [roadmap.md](roadmap.md)'s RM-1…RM-6 so the two documents agree on
 > identity; the sequence is explained in each section's subtitle.
 
-**Story counts:** 57 done · 1 inproject · 29 todo · 1 cancelled  (88 stories)
+**Story counts:** 63 done · 1 inproject · 23 todo · 1 cancelled  (88 stories)
 
 ---
 
@@ -210,12 +210,12 @@ The class hierarchy everything after it plugs into. [roadmap.md RM-2](roadmap.md
 
 | id | title | description | status | completed-at |
 |---|---|---|---|---|
-| ZMBNI-1201 | The `Maintainer` ABC | The six operations plus `describe`/`plan`, returning the existing result objects so `describe()` output stays engine-independent | todo | |
-| ZMBNI-1202 | Declared capabilities | Per-operation support *and* guarantee level, following `capabilities.py`'s existing posture: refuse rather than silently degrade. An unsupported option must be an error, not an ignored argument | todo | |
-| ZMBNI-1203 | Extract `LocalMaintainer` | A refactor with no behaviour change; the 327 existing tests are the regression net that proves it | todo | |
-| ZMBNI-1204 | Trino and Spark stubs | Registered so `--engine` can list them, each raising with the reason it is not implemented rather than failing obscurely | todo | |
-| ZMBNI-1205 | Config translation | `table-config.json` to each engine's parameter vocabulary, validating floors and unsupported options at plan time rather than at commit time | todo | |
-| ZMBNI-1206 | Reconcile the `--yes` contract | The hardest part. "Without `--yes`, nothing is committed" has no counterpart in `ALTER TABLE … EXECUTE` or a Spark `CALL`. A maintainer that cannot preview must say so, and the CLI must not print a dry-run notice over an engine that has no such mode — that would turn the one rule we made exceptionless back into a lie. Open question 2 in roadmap.md | todo | |
+| ZMBNI-1201 | The `Maintainer` ABC | `Maintainer` in `src/zamboni/maintainers/`, with the six operations plus a `capabilities()` classmethod — a classmethod because what an engine supports is a property of the engine, not of a connected instance, so `zamboni engines` reports it without a catalog. Operations return the existing result objects via a `Reportable` protocol, so `describe()` output is unchanged | done | 2026-08-03 |
+| ZMBNI-1202 | Declared capabilities | `Support` is three-valued and `OperationSupport` **refuses to construct** a PARTIAL or UNSUPPORTED that names no limitation; `MaintainerCapabilities` refuses to construct at all if an operation is undeclared, since silence reads as unsupported to a caller and as an oversight to a reviewer. `can_preview` is per operation, `invariants` carries the guarantee level, and `fulfilled_by` records an operation achieved as part of another | done | 2026-08-03 |
+| ZMBNI-1203 | Extract `LocalMaintainer` | `LocalMaintainer` holds what the six CLI handlers held, translated not rewritten. The 331 existing tests are the regression net and all still pass; the handlers now parse arguments, map exceptions to exit codes, and print | done | 2026-08-03 |
+| ZMBNI-1204 | Trino and Spark stubs | Both stubs carry **real** capability declarations taken from ZMBNI-13, so `zamboni engines` answers what Trino and Spark would refuse before either is written, and ZMBNI-14/15 have an executable specification rather than a prose one. `execute()` raises naming its story | done | 2026-08-03 |
+| ZMBNI-1205 | Config translation | `MaintenanceRequest` carries the declarative settings, never a built compactor or a resolved `RetentionPolicy` — otherwise every other engine would translate *out of* the local vocabulary instead of *from* the config. `validate()` runs at plan time: Trino refuses our 5-day and 3-day defaults against its documented 7-day floors, reported as a usage error naming the server setting | done | 2026-08-03 |
+| ZMBNI-1206 | Reconcile the `--yes` contract | **Answered:** where an engine cannot preview, the rule is kept by *refusing*, not by executing and not by printing a dry-run notice over an engine about to delete. Refusing commits nothing, so "without `--yes`, nothing is committed" holds on every engine and still has no exceptions. Closes roadmap.md open question 2 | done | 2026-08-03 |
 
 ---
 

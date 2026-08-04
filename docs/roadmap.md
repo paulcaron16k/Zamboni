@@ -137,9 +137,9 @@ backend cannot do. Concretely, it must express:
   carry the strength of the guarantee, because that is what an operator is
   actually choosing between.
 
-**Extraction is a refactor, not a rewrite.** `LocalMaintainer` should come out of
-the current code with no behaviour change, and the 327 existing tests are the
-regression net that proves it.
+**Delivered** in `src/zamboni/maintainers/`. Extraction was a refactor, not a
+rewrite: `LocalMaintainer` came out of the CLI handlers with no behaviour change,
+and the existing tests passing unchanged is what proves it.
 
 ---
 
@@ -271,10 +271,13 @@ recorded here rather than discovered mid-implementation:
 1. **Does Zamboni support two PyIceberg lines at once?** RM-1 can either keep
    0.11.1 working alongside 0.12 or move the floor. The probes make both
    technically possible; the cost is a test matrix that doubles.
-2. **What does `--engine trino` do about `--yes`?** Either the flag means
-   something weaker for non-local maintainers, or non-previewable operations
-   require a distinct opt-in. This is a user-visible contract decision, not an
-   implementation detail — see [releasing.md §1](releasing.md).
+2. ~~**What does `--engine trino` do about `--yes`?**~~ **Answered by ZMBNI-1206.**
+   Neither option in the original framing was taken. Where an engine cannot
+   preview an operation, a run without `--yes` **refuses** — it does not execute,
+   and it does not print a dry-run notice over an engine that is about to delete.
+   Refusing commits nothing, so *without `--yes`, nothing is committed* holds on
+   every engine and still has no exceptions. The rule needed no weakening and no
+   second opt-in; it needed the third option.
 3. **Does the dev stack grow a Trino and a Spark?** RM-4 and RM-5 need live
    verification, and the existing stack pattern (shifted ports, `.env.sample`)
    would extend to both — at a cost in start-up time for everyone.

@@ -268,10 +268,44 @@ flowchart TB
 
 Every version-dependent decision routes through `capabilities.detect()`, which asks the
 installed PyIceberg structurally (does this function exist, what does this signature
-accept). This is not defensiveness — three of six probes flip between 0.11.1 and
+accept). This is not defensiveness — three of the seven probes flip between 0.11.1 and
 unreleased `main`, so a version comparison would need hand-revisiting on each release. On a
-0.12 build the tool will automatically use PyIceberg's native streaming writes, and the
-equality-delete blocker lifts on its own.
+0.12 build the tool will automatically use PyIceberg's native streaming writes, and manifest
+pruning becomes both available and safe, because the pruning and the predicate derivation it
+requires land together.
+
+What 0.12 does **not** lift, verified against `main` rather than assumed: the
+equality-delete guard is still present, `ManifestWriterV2.content()` still returns `DATA`
+unconditionally, and there is still no `ManifestWriterV3`. An earlier version of this
+paragraph claimed the equality-delete blocker would lift on its own; it does not. The full
+delta is in [roadmap.md RM-1](roadmap.md).
+
+### Key design decision: the seam between operations and engines
+
+The six mutating operations are Iceberg's, not Zamboni's, and Trino and Spark implement most
+of them already. `zamboni.maintainers` is the seam that lets an operator ask for "maintain
+this table" instead of "maintain this table with PyIceberg". `LocalMaintainer` is the
+PyIceberg engine; Trino and Spark are declared but not implemented.
+
+The seam sits at the *operation*, and that is forced rather than chosen. Generating SQL is
+unavailable to us — we drive metadata through PyIceberg and are the only one of the three
+that is not a query engine. Driving manifest writers is unavailable to them — they expose
+procedures. Operation-level is the only level all three implement.
+[engine-comparison.md §5](engine-comparison.md) records the alternatives and why each fails.
+
+**The interface exists to prevent papering over differences, not to hide them.** Its whole
+surface is shaped by that: support is three-valued, and an `OperationSupport` that is
+`PARTIAL` or `UNSUPPORTED` without naming a limitation **refuses to construct**;
+previewability is per operation, because Spark's `remove_orphan_files` takes `dry_run` and no
+other Spark procedure does; each declaration carries the *guarantees* a run makes, because
+"both support remove-orphans" is true and misleading when ours aborts on four checked
+conditions and a server-side procedure does its own thing; and config is validated per engine
+at plan time, since a valid `table-config.json` can be unusable against a default Trino,
+whose retention floors reject our defaults outright.
+
+**Where an engine cannot preview, a run without `--yes` is refused** — not executed, and not
+dressed up as a dry run it did not perform. Refusing commits nothing, so the rule in §6 that
+nothing is committed without `--yes` holds on every engine and keeps its zero exceptions.
 
 ---
 

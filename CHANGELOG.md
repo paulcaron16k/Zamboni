@@ -21,6 +21,17 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### Added
+
+- **A maintainer interface, and `--engine`.** The six operations are Iceberg's,
+  not Zamboni's; Trino and Spark implement most of them already. `LocalMaintainer`
+  is the PyIceberg engine, extracted with no behaviour change. `TrinoMaintainer`
+  and `SparkMaintainer` are not implemented, but their declared capabilities are
+  real — `zamboni engines` reports what each would refuse, and why, before either
+  is written.
+- **`zamboni engines`** — per-engine, per-operation support, previewability and
+  limitations.
+
 ### SAFETY
 
 - **Orphan removal now refuses when another table shares this table's location.**

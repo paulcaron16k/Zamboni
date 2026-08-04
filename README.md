@@ -306,7 +306,14 @@ $ zamboni remove-orphans default.events ... --yes    # sweep unreferenced files
 $ zamboni remove-dangling-deletes default.events ... --yes   # drop deletes that apply to nothing
 $ zamboni rewrite-manifests default.events ... --yes  # regroup manifests by partition
 $ zamboni apply-properties default.events ... --yes   # metadata-retention table properties
+$ zamboni engines                                     # what each engine supports, and refuses
 ```
+
+Each mutating verb takes `--engine` (default `local`, the PyIceberg one). Trino and Spark are
+declared but not yet implemented — `zamboni engines` reports exactly what each would and would
+not do, which is worth reading before planning a migration. The `--yes` rule holds on every
+engine: where one cannot preview an operation, a run without `--yes` is *refused* rather than
+executed or dressed up as a dry run it did not perform.
 
 `expire` and `remove-orphans` are dry-run without `--yes`, like `compact`. Both take
 `--table-config` for the [`retention`](docs/table-config.md#retention) block, and both

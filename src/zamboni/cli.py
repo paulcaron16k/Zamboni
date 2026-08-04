@@ -5,6 +5,7 @@ The verbs, ordered by how much they change:
 Never touch a table -- these take no ``--yes``:
 
 * ``doctor``          -- reports the installed PyIceberg's capabilities.
+* ``engines``         -- reports what each engine supports, and what it refuses.
 * ``describe``        -- profiles a table: layout, blockers, warnings.
 * ``plan``            -- shows what compaction would rewrite, and what it skips.
 * ``validate-config`` -- loads a ``table-config.json`` and reports what it means.
@@ -28,6 +29,11 @@ some runs and not others.
 That rule is why ``compact`` takes both ``--yes`` and ``--dry-run``: the second is
 redundant, kept because scripts pass it to say what they mean.
 
+Each mutating verb takes ``--engine`` (default ``local``). The rule above holds on
+every engine: where one cannot preview an operation -- Trino previews nothing --
+a run without ``--yes`` is *refused*, rather than executed or dressed up as a dry
+run it did not perform. See :mod:`zamboni.maintainers`.
+
 Connection details come from environment variables or flags so the same
 invocation works from a shell, a cron entry, or a container.
 """
@@ -40,11 +46,18 @@ import os
 import sys
 from dataclasses import replace
 
-from . import version_banner
+from . import maintainers, version_banner
 from .capabilities import detect
 from .catalog_import import config_from_catalog, load_catalog
 from .compactor import CompactionBlocked, TableCompactor
 from .config import CompactionConfig, MemoryMode
+from .maintainers import (
+    EngineConfigProblem,
+    MaintenanceRequest,
+    Operation,
+    PreviewUnavailable,
+    UnsupportedOperation,
+)
 from .session import CatalogSession, S3Settings
 from .tableconfig import DEFAULT_SETTINGS, PartitionEvolution, TableConfig
 
@@ -64,6 +77,12 @@ def main(argv: list[str] | None = None) -> int:
         reason = caps.unsupported_reason()
         print(f"\nusable: {reason is None}" + (f"\nreason: {reason}" if reason else ""))
         return 0 if reason is None else 1
+
+    if args.command == "engines":
+        for name in maintainers.available():
+            print(maintainers.get(name).capabilities().describe())
+            print()
+        return 0
 
     # These two need no catalog connection: they operate on files.
     if args.command == "from-catalog":
@@ -95,7 +114,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "apply-properties":
             return _apply_properties(session, args)
 
-        compactor = _compactor_for(session, args)
+        if args.command in ("describe", "plan"):
+            # Still built directly: both are read-only profiling of the local
+            # table state, not operations an engine performs.
+            compactor = _compactor_for(session, args)
 
         if args.command == "describe":
             print(compactor.describe().summary())
@@ -111,7 +133,10 @@ def main(argv: list[str] | None = None) -> int:
             # people reach for first behaved unlike everything else -- and the
             # runbook had to explain the difference rather than state a rule.
             dry_run = args.dry_run or not args.yes
-            result = compactor.execute(dry_run=dry_run)
+            maintainer, request = _prepare(session, args, Operation.COMPACT)
+            result = maintainer.execute(
+                Operation.COMPACT, args.table, request=request, dry_run=dry_run
+            )
             print(result.describe())
             if dry_run:
                 print("\n  dry run -- re-run with --yes to rewrite and commit.")
@@ -119,6 +144,15 @@ def main(argv: list[str] | None = None) -> int:
     except CompactionBlocked as exc:
         print(str(exc), file=sys.stderr)
         return 3
+    except UnsupportedOperation as exc:
+        # A refusal, not a failure -- same class as a blocked table, so the
+        # same exit code and the same operator response: read the reason.
+        print(str(exc), file=sys.stderr)
+        return 3
+    except (PreviewUnavailable, EngineConfigProblem) as exc:
+        # Fixable by changing the invocation or the config, so a usage error.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     finally:
         session.close()
 
@@ -133,6 +167,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("doctor", help="report the installed PyIceberg's capabilities")
+    sub.add_parser("engines", help="report what each engine supports, and what it refuses to do")
 
     fc = sub.add_parser(
         "from-catalog", help="generate table-config.json from a Meltano/Singer catalog"
@@ -164,6 +199,7 @@ def _build_parser() -> argparse.ArgumentParser:
         _add_catalog_args(p)
         _add_config_args(p)
         if name == "compact":
+            _add_engine_arg(p)
             p.add_argument(
                 "--yes",
                 action="store_true",
@@ -178,6 +214,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ex = sub.add_parser("expire", help="apply the retention policy and delete the files it orphans")
     ex.add_argument("table")
     ex.add_argument("--table-config", help="path to table-config.json")
+    _add_engine_arg(ex)
     ex.add_argument(
         "--yes",
         action="store_true",
@@ -190,6 +227,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ro = sub.add_parser("remove-orphans", help="delete unreferenced files under the table location")
     ro.add_argument("table")
     ro.add_argument("--table-config", help="path to table-config.json")
+    _add_engine_arg(ro)
     ro.add_argument(
         "--yes",
         action="store_true",
@@ -209,6 +247,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     dd.add_argument("table")
     dd.add_argument("--table-config", help="path to table-config.json")
+    _add_engine_arg(dd)
     dd.add_argument(
         "--yes",
         action="store_true",
@@ -221,6 +260,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     rm.add_argument("table")
     rm.add_argument("--table-config", help="path to table-config.json")
+    _add_engine_arg(rm)
     rm.add_argument(
         "--yes",
         action="store_true",
@@ -235,6 +275,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("table")
     ap.add_argument("--table-config", help="path to table-config.json")
+    _add_engine_arg(ap)
     ap.add_argument(
         "--yes",
         action="store_true",
@@ -243,6 +284,16 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_catalog_args(ap)
 
     return parser
+
+
+def _add_engine_arg(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--engine",
+        default="local",
+        choices=maintainers.available(),
+        help="which engine performs the operation. `zamboni engines` reports what "
+        "each one supports, and what it refuses.",
+    )
 
 
 def _add_catalog_args(p: argparse.ArgumentParser) -> None:
@@ -375,6 +426,59 @@ def _compactor_for(session: CatalogSession, args: argparse.Namespace) -> TableCo
     )
 
 
+def _maintainer_for(session: CatalogSession, args: argparse.Namespace):
+    """The engine named by ``--engine``, defaulting to the local one."""
+    return maintainers.get(getattr(args, "engine", "local"))(session)
+
+
+def _request_for(args: argparse.Namespace) -> MaintenanceRequest:
+    """Engine-neutral inputs: the declarative settings plus the CLI overrides.
+
+    Deliberately not a built compactor or a resolved RetentionPolicy -- those
+    are the local engine's vocabulary, and handing them to a maintainer would
+    make every other engine translate *out of* ours instead of *from* the
+    config.
+    """
+    table_config = TableConfig.load(args.table_config) if args.table_config else None
+    # Mirrors what _compactor_for did: without a config file the flags *are* the
+    # layout, so the full flag-derived config is used; with one, the file owns
+    # layout and only the operational half comes from the flags. Only compact
+    # needs either -- the reclaim verbs take no compaction arguments at all.
+    compaction = None
+    if args.command == "compact":
+        compaction = _operational_config(args) if table_config else _config_from(args)
+    return MaintenanceRequest(
+        retention=_retention_for(args),
+        compaction=compaction,
+        table_config=table_config,
+        max_snapshot_age_days=getattr(args, "max_snapshot_age_days", None),
+        min_snapshots_to_keep=getattr(args, "min_snapshots_to_keep", None),
+        older_than_days=getattr(args, "older_than_days", None),
+        min_input_manifests=getattr(args, "min_input_manifests", None),
+    )
+
+
+def _prepare(session: CatalogSession, args: argparse.Namespace, operation: Operation):
+    """Everything that must hold before an engine is allowed to run.
+
+    In this order deliberately: an unsupported operation is refused before its
+    config is validated, and both happen before consent is considered, so the
+    message an operator gets names the most fundamental problem rather than the
+    first one a code path happens to reach.
+    """
+    maintainer = _maintainer_for(session, args)
+    request = _request_for(args)
+
+    maintainer.check_supported(operation)
+    if problems := maintainer.validate(operation, request):
+        raise EngineConfigProblem(
+            f"this configuration cannot run {operation.value} on {maintainer.name}:\n  - "
+            + "\n  - ".join(problems)
+        )
+    maintainer.check_consent(operation, yes=args.yes)
+    return maintainer, request
+
+
 def _retention_for(args: argparse.Namespace):
     """Retention settings from table-config.json, or the built-in defaults."""
     from .tableconfig import Retention
@@ -385,31 +489,17 @@ def _retention_for(args: argparse.Namespace):
 
 
 def _expire(session: CatalogSession, args: argparse.Namespace) -> int:
-    from .expire import ExpiryAborted, RetentionPolicy, SnapshotExpirer
+    from .expire import ExpiryAborted
 
-    settings = _retention_for(args).expire_snapshots
-    if not settings.enabled:
+    if not _retention_for(args).expire_snapshots.enabled:
         print(f"{args.table}: expire_snapshots is disabled in the table config")
         return 0
 
-    tbl = session.table(args.table)
-    policy = RetentionPolicy.resolve(
-        dict(tbl.properties),
-        max_snapshot_age_days=(
-            args.max_snapshot_age_days
-            if args.max_snapshot_age_days is not None
-            else settings.max_snapshot_age_days
-        ),
-        min_snapshots_to_keep=(
-            args.min_snapshots_to_keep
-            if args.min_snapshots_to_keep is not None
-            else settings.min_snapshots_to_keep
-        ),
-        max_ref_age_days=settings.max_ref_age_days,
-    )
-
+    maintainer, request = _prepare(session, args, Operation.EXPIRE)
     try:
-        result = SnapshotExpirer(policy, dry_run=not args.yes).run(tbl)
+        result = maintainer.execute(
+            Operation.EXPIRE, args.table, request=request, dry_run=not args.yes
+        )
     except ExpiryAborted as exc:
         # The post-commit check found a doomed file still referenced. Snapshots
         # are gone, but no file was touched -- same exit code as the orphan
@@ -424,7 +514,7 @@ def _expire(session: CatalogSession, args: argparse.Namespace) -> int:
 
 
 def _remove_orphans(session: CatalogSession, args: argparse.Namespace) -> int:
-    from .orphans import OrphanCleaner, OrphanCleanupAborted
+    from .orphans import OrphanCleanupAborted
 
     settings = _retention_for(args).remove_orphan_files
     if not settings.enabled:
@@ -441,16 +531,16 @@ def _remove_orphans(session: CatalogSession, args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
+    maintainer, request = _prepare(session, args, Operation.REMOVE_ORPHANS)
     try:
-        cleaner = OrphanCleaner(older_than_days=older_than, dry_run=not args.yes)
+        result = maintainer.execute(
+            Operation.REMOVE_ORPHANS, args.table, request=request, dry_run=not args.yes
+        )
     except ValueError as exc:
         # A bad guard is a usage error, not a crash. argparse accepts negative
         # ints happily, so this is the only place it can be caught.
         print(f"error: {exc}", file=sys.stderr)
         return 2
-
-    try:
-        result = cleaner.run(session.table(args.table))
     except OrphanCleanupAborted as exc:
         print(f"aborted, nothing deleted: {exc}", file=sys.stderr)
         return 4
@@ -462,15 +552,17 @@ def _remove_orphans(session: CatalogSession, args: argparse.Namespace) -> int:
 
 
 def _remove_dangling_deletes(session: CatalogSession, args: argparse.Namespace) -> int:
-    from .deletes import DanglingDeleteCleaner, DanglingDeleteError
+    from .deletes import DanglingDeleteError
 
-    settings = _retention_for(args).remove_dangling_deletes
-    if not settings.enabled:
+    if not _retention_for(args).remove_dangling_deletes.enabled:
         print(f"{args.table}: remove_dangling_deletes is disabled in the table config")
         return 0
 
+    maintainer, request = _prepare(session, args, Operation.REMOVE_DANGLING_DELETES)
     try:
-        result = DanglingDeleteCleaner(dry_run=not args.yes).run(session.table(args.table))
+        result = maintainer.execute(
+            Operation.REMOVE_DANGLING_DELETES, args.table, request=request, dry_run=not args.yes
+        )
     except DanglingDeleteError as exc:
         print(f"aborted, nothing removed: {exc}", file=sys.stderr)
         return 4
@@ -482,21 +574,16 @@ def _remove_dangling_deletes(session: CatalogSession, args: argparse.Namespace) 
 
 
 def _rewrite_manifests(session: CatalogSession, args: argparse.Namespace) -> int:
-    from .manifests import ManifestRewriteError, ManifestRewriter
+    from .manifests import ManifestRewriteError
 
-    settings = _retention_for(args).rewrite_manifests
-    if not settings.enabled:
+    if not _retention_for(args).rewrite_manifests.enabled:
         print(f"{args.table}: rewrite_manifests is disabled in the table config")
         return 0
 
-    minimum = (
-        args.min_input_manifests
-        if args.min_input_manifests is not None
-        else settings.min_input_manifests
-    )
+    maintainer, request = _prepare(session, args, Operation.REWRITE_MANIFESTS)
     try:
-        result = ManifestRewriter(min_input_manifests=minimum, dry_run=not args.yes).run(
-            session.table(args.table)
+        result = maintainer.execute(
+            Operation.REWRITE_MANIFESTS, args.table, request=request, dry_run=not args.yes
         )
     except ManifestRewriteError as exc:
         print(f"aborted, nothing rewritten: {exc}", file=sys.stderr)
@@ -509,11 +596,13 @@ def _rewrite_manifests(session: CatalogSession, args: argparse.Namespace) -> int
 
 
 def _apply_properties(session: CatalogSession, args: argparse.Namespace) -> int:
-    from .properties import apply_metadata_properties, unreferenced_metadata_files
+    from .properties import unreferenced_metadata_files
 
     settings = _retention_for(args).metadata
-    tbl = session.table(args.table)
-    result = apply_metadata_properties(tbl, settings, dry_run=not args.yes)
+    maintainer, request = _prepare(session, args, Operation.APPLY_PROPERTIES)
+    result = maintainer.execute(
+        Operation.APPLY_PROPERTIES, args.table, request=request, dry_run=not args.yes
+    )
     print(result.describe())
 
     if settings.previous_versions_max is not None and not settings.delete_after_commit:

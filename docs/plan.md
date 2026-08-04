@@ -189,6 +189,22 @@ test stops existing, so this table cannot rot silently.
 | FR-9.4 | Metadata-only operations stay allowed on V3 | `test_metadata_only_operations_are_not_blocked_by_v3`, `test_manifest_rewriting_preserves_the_v3_row_lineage_field` |
 | FR-9.5 | The upstream V3 guard is serialisation-only, so ours is needed | `test_the_upstream_block_is_serialisation_only`, `test_pyiceberg_cannot_write_v3_at_all` |
 
+### FR-11 — The maintainer interface
+
+[roadmap.md RM-2](roadmap.md), specified by [engine-comparison.md §6](engine-comparison.md).
+
+| ID | Requirement | Verified by |
+|---|---|---|
+| FR-11.1 | Every engine declares support for every operation; an undeclared one is a construction error | `test_every_engine_declares_every_operation`, `test_capabilities_reject_a_missing_operation` |
+| FR-11.2 | Support is three-valued, and a caveat that is not explained is refused | `test_a_partial_support_must_say_why`, `test_an_unsupported_operation_must_say_why`, `test_support_is_three_valued_in_practice_not_just_in_theory` |
+| FR-11.3 | Previewability is per operation, not per engine | `test_preview_is_per_operation_not_per_engine`, `test_the_local_engine_previews_everything`, `test_trino_previews_nothing` |
+| FR-11.4 | An engine that cannot preview refuses without `--yes` rather than running or claiming a dry run | `test_an_engine_that_cannot_preview_refuses_rather_than_running`, `test_an_engine_that_cannot_preview_refuses_without_yes`, `test_consent_makes_a_non_previewing_engine_runnable` |
+| FR-11.5 | An unsupported operation is refused, with exit 3 | `test_trino_cannot_remove_dangling_deletes_at_all`, `test_an_unsupported_operation_exits_three` |
+| FR-11.6 | Config is validated per engine at plan time, not passed through | `test_trino_rejects_our_default_retention_at_plan_time`, `test_trino_rejects_a_short_orphan_guard`, `test_a_config_below_trinos_floor_is_a_usage_error`, `test_the_local_engine_imposes_no_floors` |
+| FR-11.7 | An operation may be fulfilled by another operation | `test_spark_fulfils_dangling_deletes_through_compaction`, `test_describe_says_when_an_operation_rides_on_another` |
+| FR-11.8 | The declarations match the analysis they came from | `test_declarations_match_the_engine_comparison`, `test_describe_reports_limitations_so_they_are_discoverable` |
+| FR-11.9 | The default engine is local, and every mutating verb accepts `--engine` | `test_the_default_engine_is_local`, `test_every_mutating_verb_accepts_an_engine`, `test_engines_reports_what_each_one_refuses` |
+
 ### FR-10 — Versioning and releases
 
 The contract is in [releasing.md](releasing.md). Its substance is FR-10.5: for a
