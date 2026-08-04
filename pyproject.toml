@@ -22,6 +22,9 @@ s3 = ["s3fs>=2024.6.0"]
 bucket = ["pyiceberg-core>=0.5.0"]
 # Local SQL catalog, used by the test suite and handy for dry runs.
 sql = ["pyiceberg[sql-sqlite]>=0.11.1"]
+# Only needed for `--engine trino`. Optional so nobody installs a query-engine
+# client to compact a table locally.
+trino = ["trino>=0.330.0"]
 
 [project.scripts]
 zamboni = "zamboni.cli:main"
@@ -34,7 +37,7 @@ dev = [
     "pytest>=8",
     "python-dotenv>=1.2.2",
     "ruff>=0.6",
-    "zamboni[bucket,sql,s3]",
+    "zamboni[bucket,sql,s3,trino]",
 ]
 
 [tool.uv]

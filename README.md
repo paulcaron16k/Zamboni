@@ -309,9 +309,12 @@ $ zamboni apply-properties default.events ... --yes   # metadata-retention table
 $ zamboni engines                                     # what each engine supports, and refuses
 ```
 
-Each mutating verb takes `--engine` (default `local`, the PyIceberg one). Trino and Spark are
-declared but not yet implemented — `zamboni engines` reports exactly what each would and would
-not do, which is worth reading before planning a migration. The `--yes` rule holds on every
+Each mutating verb takes `--engine` (default `local`, the PyIceberg one). **Trino works**
+(`pip install zamboni[trino]`, then `--engine trino --trino-host …`) for five of the six
+operations; Spark is declared but not yet implemented. `zamboni engines` reports exactly what
+each one does and does not do, which is worth reading before planning a migration —
+particularly that Trino cannot Z-order, so only your leading `sorted_by` column gets file
+skipping. The `--yes` rule holds on every
 engine: where one cannot preview an operation, a run without `--yes` is *refused* rather than
 executed or dressed up as a dry run it did not perform.
 

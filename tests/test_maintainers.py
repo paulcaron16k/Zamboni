@@ -192,10 +192,22 @@ def test_an_unknown_engine_names_the_ones_that_exist():
         maintainers.get("presto")
 
 
-def test_stubs_refuse_to_pretend_they_ran():
-    for engine in (TrinoMaintainer, SparkMaintainer):
-        with pytest.raises(NotImplementedError, match="not implemented yet"):
-            engine(None).execute(Operation.COMPACT, "db.events", request=request(), dry_run=False)
+def test_the_spark_stub_refuses_to_pretend_it_ran():
+    """Trino is implemented (ZMBNI-14); Spark is not (ZMBNI-15). A stub that
+    returned a plausible-looking result would be the worst outcome here."""
+    with pytest.raises(NotImplementedError, match="not implemented yet"):
+        SparkMaintainer(None).execute(
+            Operation.COMPACT, "db.events", request=request(), dry_run=False
+        )
+
+
+def test_trino_refuses_to_return_a_preview_it_cannot_produce():
+    """Belt and braces below the CLI: `execute(dry_run=True)` on an engine that
+    cannot preview must raise, not return something that reads like a plan."""
+    with pytest.raises(PreviewUnavailable, match="cannot preview"):
+        TrinoMaintainer(None).execute(
+            Operation.COMPACT, "db.events", request=request(), dry_run=True
+        )
 
 
 def test_describe_reports_limitations_so_they_are_discoverable():
@@ -240,3 +252,120 @@ def test_an_engine_config_problem_is_distinct_from_a_refusal():
     editing the invocation (2), an unsupported operation is a refusal (3)."""
     assert issubclass(EngineConfigProblem, ValueError)
     assert not issubclass(EngineConfigProblem, UnsupportedOperation)
+
+
+# -- ZMBNI-14: the statements Trino actually receives ---------------------
+
+TRINO_479 = {"catalog": "iceberg", "version": "483"}
+
+
+def trino(**overrides):
+    return TrinoMaintainer(None, {**TRINO_479, **overrides})
+
+
+def full_retention() -> MaintenanceRequest:
+    from zamboni.tableconfig import (
+        ExpireSnapshotsSettings,
+        MetadataSettings,
+        RemoveOrphanFilesSettings,
+    )
+
+    return MaintenanceRequest(
+        retention=Retention(
+            expire_snapshots=ExpireSnapshotsSettings(
+                enabled=True, max_snapshot_age_days=7, min_snapshots_to_keep=2
+            ),
+            remove_orphan_files=RemoveOrphanFilesSettings(enabled=True, older_than_days=7),
+            metadata=MetadataSettings(previous_versions_max=3, delete_after_commit=True),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected"),
+    [
+        (Operation.COMPACT, 'ALTER TABLE "iceberg"."db"."events" EXECUTE optimize'),
+        (
+            Operation.EXPIRE,
+            (
+                'ALTER TABLE "iceberg"."db"."events" EXECUTE expire_snapshots('
+                "retention_threshold => '7d', retain_last => 2)"
+            ),
+        ),
+        (
+            Operation.REMOVE_ORPHANS,
+            (
+                'ALTER TABLE "iceberg"."db"."events" EXECUTE remove_orphan_files('
+                "retention_threshold => '7d')"
+            ),
+        ),
+        (
+            Operation.REWRITE_MANIFESTS,
+            'ALTER TABLE "iceberg"."db"."events" EXECUTE optimize_manifests',
+        ),
+        (
+            Operation.APPLY_PROPERTIES,
+            (
+                'ALTER TABLE "iceberg"."db"."events" SET PROPERTIES '
+                "max_previous_versions = 3, delete_after_commit_enabled = true"
+            ),
+        ),
+    ],
+)
+def test_the_exact_statement_for_each_operation(operation, expected):
+    """Pinned exactly, because every one of these has been run against a live
+    Trino 483 -- so a change here is a change to something known to work."""
+    assert trino().statement_for(operation, "db.events", full_retention()) == expected
+
+
+def test_apply_properties_translates_the_names_rather_than_passing_them_through():
+    """Trino refuses the Iceberg names outright: its table properties are an
+    allowlist, and `write.metadata.*` is rejected even through
+    `extra_properties` ("Illegal keys"). Found by running it."""
+    sql = trino().statement_for(Operation.APPLY_PROPERTIES, "db.events", full_retention())
+
+    assert "write.metadata" not in sql
+    assert "max_previous_versions" in sql
+    assert "delete_after_commit_enabled" in sql
+
+
+def test_retain_last_is_omitted_on_a_trino_that_lacks_it():
+    """Added in Trino 479. Emitting it against 476 fails outright with
+    "property 'retain_last' does not exist" -- verified."""
+    sql = trino(version="476").statement_for(Operation.EXPIRE, "db.events", full_retention())
+
+    assert "retain_last" not in sql
+    assert "retention_threshold => '7d'" in sql
+
+
+def test_an_unknown_trino_version_assumes_the_older_behaviour():
+    """Guessing the other way turns a working expiry into a hard failure."""
+    maintainer = TrinoMaintainer(None, {"catalog": "iceberg"})
+
+    assert not maintainer.supports_retain_last
+    assert "retain_last" not in maintainer.statement_for(
+        Operation.EXPIRE, "db.events", full_retention()
+    )
+
+
+def test_dropping_retain_last_is_reported_not_silent():
+    problems = trino(version="476").validate(Operation.EXPIRE, full_retention())
+
+    assert len(problems) == 1
+    assert "retain_last" in problems[0] and "479" in problems[0]
+
+
+def test_identifiers_are_quoted_against_hostile_names():
+    sql = trino().statement_for(Operation.REWRITE_MANIFESTS, 'we"ird.ta-ble', full_retention())
+
+    assert sql.startswith('ALTER TABLE "iceberg"."we""ird"."ta-ble"')
+
+
+def test_a_table_without_a_namespace_is_rejected():
+    with pytest.raises(ValueError, match="no namespace"):
+        trino().statement_for(Operation.COMPACT, "events", full_retention())
+
+
+def test_trino_refuses_an_operation_it_cannot_do_before_building_sql():
+    with pytest.raises(UnsupportedOperation):
+        trino().statement_for(Operation.REMOVE_DANGLING_DELETES, "db.events", full_retention())

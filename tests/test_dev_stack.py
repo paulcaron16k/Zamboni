@@ -462,3 +462,148 @@ def test_selecting_lakekeeper_without_config_explains_itself(tmp_path, monkeypat
 
     with pytest.raises(catalogs.CatalogUnavailable, match="docker compose up"):
         catalogs.build("lakekeeper", DemoState(root=tmp_path))
+
+
+# -- Trino (ZMBNI-14) -----------------------------------------------------
+#
+# Optional: Trino is in its own compose profile and does not start with the rest
+# of the stack. These skip when its port is closed, even under
+# ZAMBONI_REQUIRE_DEV_STACK -- requiring a JVM for every dev-stack run would
+# make the common case slower to serve the rarer one.
+
+
+def trino_up(env: dict[str, str]) -> bool:
+    port = env.get("TRINO_PORT")
+    if not port:
+        return False
+    try:
+        return requests.get(f"http://localhost:{port}/v1/info", timeout=3).ok
+    except Exception:
+        return False
+
+
+@pytest.fixture(scope="module")
+def trino_env(env: dict[str, str]) -> dict[str, str]:
+    if not trino_up(env):
+        pytest.skip(
+            "Trino not running -- cd dev-stack && docker compose --profile trino up -d trino"
+        )
+    return env
+
+
+@pytest.fixture
+def trino_table(trino_env, session, request):
+    """A table with six data files, in a namespace unique to this run.
+
+    Same addfinalizer-before-the-appends discipline as the `table` fixture, and
+    for the same reason recorded there.
+    """
+    namespace = f"zt14_{uuid.uuid4().hex[:8]}"
+    session.catalog.create_namespace(namespace)
+    request.addfinalizer(lambda: _drop_namespace(session, namespace))
+
+    identifier = f"{namespace}.events"
+    tbl = session.catalog.create_table(
+        identifier, schema=SCHEMA, properties={"format-version": "2"}
+    )
+    for i in range(6):
+        tbl.append(
+            pa.table(
+                {
+                    "id": pa.array([i * 2, i * 2 + 1], type=pa.int32()),
+                    "category": pa.array(["a", "b"], type=pa.string()),
+                },
+                schema=ARROW,
+            )
+        )
+    return identifier
+
+
+def maintainer(trino_env, session):
+    from zamboni.maintainers.trino import TrinoMaintainer
+
+    return TrinoMaintainer(
+        session,
+        {
+            "host": "localhost",
+            "port": trino_env["TRINO_PORT"],
+            "catalog": "iceberg",
+            "version": trino_env.get("TRINO_VERSION"),
+        },
+    )
+
+
+def live_request():
+    from zamboni.maintainers import MaintenanceRequest
+    from zamboni.tableconfig import (
+        ExpireSnapshotsSettings,
+        MetadataSettings,
+        RemoveOrphanFilesSettings,
+        Retention,
+    )
+
+    # 7 days for both, because Trino refuses anything below its configured
+    # min-retention floor -- which is the point of the config-translation check
+    # in test_maintainers.py, exercised here against the server that enforces it.
+    return MaintenanceRequest(
+        retention=Retention(
+            expire_snapshots=ExpireSnapshotsSettings(
+                enabled=True, max_snapshot_age_days=7, min_snapshots_to_keep=2
+            ),
+            remove_orphan_files=RemoveOrphanFilesSettings(enabled=True, older_than_days=7),
+            metadata=MetadataSettings(previous_versions_max=3, delete_after_commit=True),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "operation_name",
+    ["compact", "rewrite-manifests", "apply-properties", "expire", "remove-orphans"],
+)
+def test_trino_accepts_every_statement_we_generate(trino_env, session, trino_table, operation_name):
+    """The claim the unit tests cannot make.
+
+    They assert we emit the SQL we intended; only a server can say whether it is
+    accepted. Two defects were found exactly here and nowhere else: the Iceberg
+    metadata property names are refused by Trino outright, and `retain_last` did
+    not exist before Trino 479.
+    """
+    from zamboni.maintainers import Operation
+
+    operation = Operation(operation_name)
+    result = maintainer(trino_env, session).execute(
+        operation, trino_table, request=live_request(), dry_run=False
+    )
+
+    assert operation.value in result.describe()
+
+
+def test_trino_compaction_actually_compacts(trino_env, session, trino_table):
+    """Not just accepted -- effective."""
+    from zamboni.maintainers import Operation
+
+    before = len(session.table(trino_table).inspect.files().to_pylist())
+    assert before == 6
+
+    maintainer(trino_env, session).execute(
+        Operation.COMPACT, trino_table, request=live_request(), dry_run=False
+    )
+
+    tbl = session.table(trino_table)
+    assert len(tbl.inspect.files().to_pylist()) == 1
+    assert tbl.scan().to_arrow().num_rows == 12, "compaction changed the data"
+
+
+def test_trino_enforces_the_retention_floor_we_validate_against(trino_env, session, trino_table):
+    """Pins the premise of TrinoMaintainer.validate(). If a deployment lowers
+    the floor this fails, which is the right outcome: the guidance would then be
+    wrong for that deployment."""
+    from trino.exceptions import TrinoUserError
+
+    from zamboni.maintainers.trino import qualified
+
+    target = qualified(trino_table, catalog="iceberg")
+    statement = f"ALTER TABLE {target} EXECUTE expire_snapshots(retention_threshold => '1d')"
+
+    with pytest.raises(TrinoUserError, match="minimum retention"):
+        maintainer(trino_env, session).connect().cursor().execute(statement)

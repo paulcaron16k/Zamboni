@@ -38,6 +38,8 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from ..config import CompactionConfig
     from ..session import CatalogSession
     from ..tableconfig import Retention, TableConfig
@@ -187,8 +189,13 @@ class Maintainer(ABC):
     #: Value accepted by ``--engine``.
     name: ClassVar[str]
 
-    def __init__(self, session: CatalogSession) -> None:
+    def __init__(self, session: CatalogSession, options: Mapping[str, str] | None = None) -> None:
         self._session = session
+        #: Engine-specific connection settings from the CLI or environment.
+        #: Deliberately a plain mapping: what Trino needs (host, port, catalog)
+        #: and what Spark will need (a master URL, a JVM) have nothing in common,
+        #: so a shared typed shape would be a union pretending to be a contract.
+        self._options = dict(options or {})
 
     @classmethod
     @abstractmethod

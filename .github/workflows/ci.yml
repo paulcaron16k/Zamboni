@@ -121,7 +121,7 @@ jobs:
         working-directory: dev-stack
         run: |
           cp .env.sample .env
-          docker compose up -d --wait
+          docker compose --profile trino up -d --wait
           docker compose ps
 
       - name: Bootstrap Lakekeeper and create the warehouse

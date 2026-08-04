@@ -38,7 +38,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-11 | PyIceberg 0.12 | Develop against unreleased 0.12 on a branch; three of seven capability probes flip, neither waited-on blocker lifts. [roadmap.md RM-1](roadmap.md) | todo | |
 | ZMBNI-12 | Maintainer interface | `Maintainer` ABC, `LocalMaintainer` extracted with no behaviour change, Trino and Spark stubs carrying real capability declarations, and `--engine` / `zamboni engines`. [roadmap.md RM-2](roadmap.md) | done | 2026-08-03 |
 | ZMBNI-13 | Zamboni vs Trino vs Spark | Delivered as [engine-comparison.md](engine-comparison.md): three surfaces, a twelve-row semantic-difference register, and the seam it forces. [roadmap.md RM-3](roadmap.md) | done | 2026-08-03 |
-| ZMBNI-14 | Trino maintainer | `ALTER TABLE … EXECUTE` for four of six verbs, refusing the other two. [roadmap.md RM-4](roadmap.md) | todo | |
+| ZMBNI-14 | Trino maintainer | `ALTER TABLE … EXECUTE` for five of six verbs, refusing dangling-delete removal. Verified against a live Trino 483 in the dev stack. [roadmap.md RM-4](roadmap.md) | done | 2026-08-04 |
 | ZMBNI-15 | Spark maintainer | Iceberg Spark procedures, including the one operation we cannot do locally. [roadmap.md RM-5](roadmap.md) | todo | |
 | ZMBNI-16 | Zamboni vs ice-keeper | Delivered as [ice-keeper-comparison.md](ice-keeper-comparison.md). Found ZMBNI-507, a data-loss path in shipped code. [roadmap.md RM-6](roadmap.md) | done | 2026-08-03 |
 
@@ -47,7 +47,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 > order. The numbers follow [roadmap.md](roadmap.md)'s RM-1…RM-6 so the two documents agree on
 > identity; the sequence is explained in each section's subtitle.
 
-**Story counts:** 63 done · 1 inproject · 23 todo · 1 cancelled  (88 stories)
+**Story counts:** 70 done · 1 inproject · 16 todo · 1 cancelled  (88 stories)
 
 ---
 
@@ -226,13 +226,13 @@ map; the two that do not are the instructive part. [roadmap.md RM-4](roadmap.md)
 
 | id | title | description | status | completed-at |
 |---|---|---|---|---|
-| ZMBNI-1401 | Trino session | Connection and catalog/schema resolution, alongside the existing `CatalogSession` rather than replacing it | todo | |
-| ZMBNI-1402 | `compact` via `optimize` | `file_size_threshold`, and the `WHERE` clause on partition columns or `"$file_modified_time"` as the partition selector. Must refuse a config asking for sort or Z-order | todo | |
-| ZMBNI-1403 | `rewrite-manifests` via `optimize_manifests` | Trino clusters manifests by partitioning columns, which is what ours does; confirm the semantics match before claiming equivalence | todo | |
-| ZMBNI-1404 | `expire` via `expire_snapshots` | `retention_threshold`, `retain_last`, `clean_expired_metadata`. The min-retention floor must be surfaced as a config error naming the server setting, not passed through to fail server-side | todo | |
-| ZMBNI-1405 | `remove-orphans` via `remove_orphan_files` | And report the weaker guarantee honestly: none of our four client-side invariants apply | todo | |
-| ZMBNI-1406 | Declare what it cannot do | Z-order, dangling-delete removal, partition-evolution ageing, and preview. Each an explicit refusal with a reason | todo | |
-| ZMBNI-1407 | Live verification | Against a real Trino. Depends on open question 3 — whether the dev stack grows one | todo | |
+| ZMBNI-1401 | Trino session | `TrinoMaintainer` takes host/port/user/catalog/version via `--trino-*` flags with `ZAMBONI_TRINO_*` fallbacks, alongside the existing `CatalogSession` rather than replacing it. The `trino` client is an optional extra, imported inside `connect()` so `zamboni engines` reports Trino's capabilities on an install that has no client | done | 2026-08-04 |
+| ZMBNI-1402 | `compact` via `optimize` | `optimize`, with `file_size_threshold` from `target_file_size_bytes`. Trino's parameter *selects* files rather than sizing output, so it is translated rather than passed through, and the absent output-size control is declared instead of faked. Verified live: 6 data files to 1, 12 rows unchanged | done | 2026-08-04 |
+| ZMBNI-1403 | `rewrite-manifests` via `optimize_manifests` | `optimize_manifests`. Takes no arguments — output size comes from `commit.manifest.target-size-bytes`, so `min_input_manifests` has no counterpart and is declared missing rather than silently dropped | done | 2026-08-04 |
+| ZMBNI-1404 | `expire` via `expire_snapshots` | `expire_snapshots(retention_threshold, retain_last)`. **`retain_last` was added in Trino 479** — against 476 the statement fails outright with "property 'retain_last' does not exist", found by running it. Gated on `--trino-version`, unknown assumed older, and `validate()` reports the dropped `min_snapshots_to_keep` rather than losing it quietly | done | 2026-08-04 |
+| ZMBNI-1405 | `remove-orphans` via `remove_orphan_files` | `remove_orphan_files(retention_threshold)`, with the weaker guarantee declared: none of the five client-side invariants apply. The 7-day floor is enforced by the server and pinned by a live test | done | 2026-08-04 |
+| ZMBNI-1406 | Declare what it cannot do | Z-order confirmed absent from the connector source (zero hits in 474 files) and no open issue proposes it. Corrected two declarations that only a running engine could disprove: `optimize` *does* sort, and `apply-properties` needs Trino's own property names because the Iceberg ones are refused even via `extra_properties`. FR-11 | done | 2026-08-04 |
+| ZMBNI-1407 | Live verification | Trino 483 in the dev stack behind the `trino` compose profile, and 7 live tests asserting every generated statement is accepted, that compaction actually compacts, and that the retention floor really is enforced. CI's dev-stack job starts it. Two defects were found here and nowhere else | done | 2026-08-04 |
 
 ---
 

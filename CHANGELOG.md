@@ -31,6 +31,19 @@ Two categories beyond the usual set, because this tool deletes files:
   is written.
 - **`zamboni engines`** — per-engine, per-operation support, previewability and
   limitations.
+- **`--engine trino`** — five of the six operations, over `ALTER TABLE … EXECUTE`.
+  Needs the optional `zamboni[trino]` extra. Configure with `--trino-host`,
+  `--trino-port`, `--trino-user`, `--trino-catalog` and `--trino-version`, or the
+  matching `ZAMBONI_TRINO_*` variables. `remove-dangling-deletes` is refused:
+  Trino has no equivalent.
+
+  Two things translate rather than pass through, both found by running against a
+  real Trino rather than by reading its documentation. Metadata retention uses
+  Trino's `max_previous_versions` and `delete_after_commit_enabled`, because the
+  Iceberg property names are refused outright — even through `extra_properties`.
+  And `retain_last` (our `min_snapshots_to_keep`) only exists from **Trino 479**,
+  so it is gated on `--trino-version` and its loss is reported rather than
+  silent.
 
 ### SAFETY
 

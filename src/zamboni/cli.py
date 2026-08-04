@@ -294,6 +294,23 @@ def _add_engine_arg(p: argparse.ArgumentParser) -> None:
         help="which engine performs the operation. `zamboni engines` reports what "
         "each one supports, and what it refuses.",
     )
+    # Connection details for a non-local engine. Environment fallbacks match the
+    # ZAMBONI_* pattern the catalog flags already use, so a cron entry needs no
+    # flags at all.
+    p.add_argument("--trino-host", default=os.environ.get("ZAMBONI_TRINO_HOST"))
+    p.add_argument("--trino-port", default=os.environ.get("ZAMBONI_TRINO_PORT"))
+    p.add_argument("--trino-user", default=os.environ.get("ZAMBONI_TRINO_USER"))
+    p.add_argument(
+        "--trino-version",
+        default=os.environ.get("ZAMBONI_TRINO_VERSION"),
+        help="server version, e.g. 479. Gates arguments that only newer Trino "
+        "accepts; unknown means the tool assumes the older behaviour.",
+    )
+    p.add_argument(
+        "--trino-catalog",
+        default=os.environ.get("ZAMBONI_TRINO_CATALOG"),
+        help="the Trino catalog holding the Iceberg tables. Default `iceberg`.",
+    )
 
 
 def _add_catalog_args(p: argparse.ArgumentParser) -> None:
@@ -428,7 +445,18 @@ def _compactor_for(session: CatalogSession, args: argparse.Namespace) -> TableCo
 
 def _maintainer_for(session: CatalogSession, args: argparse.Namespace):
     """The engine named by ``--engine``, defaulting to the local one."""
-    return maintainers.get(getattr(args, "engine", "local"))(session)
+    options = {
+        key: value
+        for key, value in (
+            ("host", getattr(args, "trino_host", None)),
+            ("port", getattr(args, "trino_port", None)),
+            ("user", getattr(args, "trino_user", None)),
+            ("catalog", getattr(args, "trino_catalog", None)),
+            ("version", getattr(args, "trino_version", None)),
+        )
+        if value
+    }
+    return maintainers.get(getattr(args, "engine", "local"))(session, options)
 
 
 def _request_for(args: argparse.Namespace) -> MaintenanceRequest:

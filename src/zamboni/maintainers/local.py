@@ -26,7 +26,7 @@ from . import (
 )
 
 if TYPE_CHECKING:
-    from ..session import CatalogSession
+    pass
 
 
 PREVIEWS_EVERYTHING = ("previews without committing; without --yes nothing is written",)
@@ -43,9 +43,6 @@ RECLAIM_INVARIANTS = (
 @register
 class LocalMaintainer(Maintainer):
     name = "local"
-
-    def __init__(self, session: CatalogSession) -> None:
-        super().__init__(session)
 
     @classmethod
     def capabilities(cls) -> MaintainerCapabilities:

@@ -34,7 +34,7 @@ from . import (
 )
 
 if TYPE_CHECKING:
-    from ..session import CatalogSession
+    pass
 
 SERVER_SIDE = ("runs server-side, so none of Zamboni's client-side reclaim invariants apply",)
 
@@ -42,9 +42,6 @@ SERVER_SIDE = ("runs server-side, so none of Zamboni's client-side reclaim invar
 @register
 class SparkMaintainer(Maintainer):
     name = "spark"
-
-    def __init__(self, session: CatalogSession) -> None:
-        super().__init__(session)
 
     @classmethod
     def capabilities(cls) -> MaintainerCapabilities:
