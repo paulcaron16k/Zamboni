@@ -193,8 +193,76 @@ class MultiSpecReplaceFiles(_ReplaceFiles):
                 delete_manifests.append(writer.to_manifest_file())
 
         return self._process_manifests(
-            added_manifests + delete_manifests + self._existing_manifests()
+            added_manifests + delete_manifests + self._surviving_manifests()
         )
+
+    def _surviving_manifests(self) -> list[ManifestFile]:
+        """Existing manifests, minus the entries this run is replacing.
+
+        Deliberately *not* ``_existing_manifests()``. From PyIceberg 0.12 that
+        prunes with a partition predicate and appends a non-matching manifest
+        **verbatim** -- entries we are deleting included. The predicate is built
+        from the removed files' partition values as ``EqualTo(Reference('ts'),
+        20455)``: the *source column* compared against a *partition ordinal*.
+        Projected onto one spec that resolves; across the two specs an evolution
+        run has by definition, it does not, so manifests survive untouched and
+        the rows we just rewrote are counted twice.
+
+        Found by ZMBNI-1101: three evolution tests turned ``[3,3,4,4]`` into
+        ``[3,3,3,3,4,4,4,4]`` on 0.12, while single-spec compaction stayed
+        correct because it delegates to ``super()._manifests()``.
+
+        Calling ``_build_delete_files_partition_predicate()`` first is not
+        enough -- verified, the predicate populates and the duplication remains.
+        So this does what 0.11.1 did and what is correct by construction:
+        examine every manifest, since a run that evolves partitions cannot know
+        in advance which spec holds the files it is replacing, and we already
+        know exactly which entries are going.
+        """
+        from pyiceberg.manifest import write_manifest
+
+        surviving: list[ManifestFile] = []
+        snapshot = self._transaction.table_metadata.snapshot_by_name(name=self._target_branch)
+        if snapshot is None:
+            return surviving
+
+        for manifest_file in snapshot.manifests(io=self._io):
+            keep: list[ManifestEntry] = []
+            dropped = 0
+            for entry in manifest_file.fetch_manifest_entry(io=self._io, discard_deleted=True):
+                if entry.data_file in self._deleted_data_files:
+                    dropped += 1
+                else:
+                    keep.append(entry)
+
+            if dropped == 0:
+                surviving.append(manifest_file)
+                continue
+            if not keep:
+                # Every entry replaced; the manifest itself goes.
+                continue
+
+            with write_manifest(
+                format_version=self._transaction.table_metadata.format_version,
+                spec=self._transaction.table_metadata.specs()[manifest_file.partition_spec_id],
+                schema=self._transaction.table_metadata.schema(),
+                output_file=self.new_manifest_output(),
+                snapshot_id=self._snapshot_id,
+                avro_compression=self._compression,
+            ) as writer:
+                for entry in keep:
+                    writer.add_entry(
+                        ManifestEntry.from_args(
+                            status=ManifestEntryStatus.EXISTING,
+                            snapshot_id=entry.snapshot_id,
+                            sequence_number=entry.sequence_number,
+                            file_sequence_number=entry.file_sequence_number,
+                            data_file=entry.data_file,
+                        )
+                    )
+            surviving.append(writer.to_manifest_file())
+
+        return surviving
 
 
 def _spec_id_of(data_file: DataFile, default: int) -> int:
