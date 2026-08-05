@@ -9,7 +9,11 @@ description = "Iceberg table maintenance (compaction) for MinIO + Lakekeeper, wi
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "pyiceberg[pyarrow]>=0.11.1",
+    # BRANCH feature/pyiceberg-0.12: relaxed from >=0.11.1 because the
+    # ../iceberg-python checkout is *newer* than 0.11.1 while still declaring
+    # version 0.11.0 -- main has not been bumped for the 0.12 cycle. The
+    # constraint would otherwise reject the very build we are here to test.
+    "pyiceberg[pyarrow]>=0.11.0",
     "duckdb>=1.5.0",
     "pyarrow>=18",
     # zamboni.yml and .env: the DevOps surface (docs/devops.md), not optional.
@@ -42,6 +46,18 @@ dev = [
     "ruff>=0.6",
     "zamboni[bucket,sql,s3,trino]",
 ]
+
+[tool.uv.sources]
+# BRANCH feature/pyiceberg-0.12 -- MUST NOT REACH main.
+#
+# An editable path dependency on a sibling checkout. `uv.lock` records that
+# path, so the lockfile is reproducible on exactly this machine and nowhere
+# else: CI's `uv sync --frozen` would fail, and so would a colleague's.
+#
+# That is the whole reason this work is on a branch rather than behind a flag.
+# It merges when PyIceberg 0.12 is on PyPI and this block is deleted in favour
+# of a version constraint. See docs/roadmap.md RM-1.
+pyiceberg = { path = "../iceberg-python", editable = true }
 
 [tool.uv]
 # The whole point of this project's environment: never resolve against whatever
@@ -78,6 +94,12 @@ ignore_missing_imports = true
 # here are the ones that catch the errors this codebase actually makes: None
 # reaching an attribute access, and a value used as a type it is not. Two of the
 # four bugs found by live verification were exactly that.
-warn_unused_ignores = true
+# BRANCH feature/pyiceberg-0.12: disabled, and this is the concrete cost of
+# supporting two PyIceberg lines (ZMBNI-1106). Four `type: ignore` comments that
+# 0.11.1 requires are redundant against 0.12's improved hints, so the flag
+# cannot be true for both at once. Deleting them would fail mypy on main.
+# Whoever settles the support window decides: drop this flag, or carry two sets
+# of ignores. Restore to `true` when the floor moves to 0.12.
+warn_unused_ignores = false
 warn_redundant_casts = true
 no_implicit_optional = true

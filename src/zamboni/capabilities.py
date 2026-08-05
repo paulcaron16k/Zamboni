@@ -96,7 +96,6 @@ class PyIcebergCapabilities:
 def detect() -> PyIcebergCapabilities:
     from importlib.metadata import version
 
-    from pyiceberg.table import DataScan
     from pyiceberg.table.snapshots import Operation
     from pyiceberg.table.update.snapshot import _OverwriteFiles, _SnapshotProducer
 
@@ -118,16 +117,41 @@ def detect() -> PyIcebergCapabilities:
         # Unknown -> assume the "unsupported" guard is present, i.e. NOT
         # readable. Failing the other way would drop the equality-delete
         # blocker and let compaction resurrect deleted rows.
-        equality_deletes_readable=not _mentions(
-            DataScan._plan_files_local,
-            "does not yet support equality deletes",
-            if_unavailable=True,
-        ),
+        equality_deletes_readable=not _guard_anywhere_in_scan_planning(),
         # Unknown -> assume NOT writable, which limits dangling-delete removal
         # to whole manifests. Guessing the other way would let us rewrite a
         # delete manifest into one labelled as data.
         delete_manifests_writable=_delete_manifests_writable(),
     )
+
+
+def _guard_anywhere_in_scan_planning() -> bool:
+    """Does *any* of scan planning still refuse equality deletes?
+
+    This looks at the whole ``pyiceberg.table`` module rather than at one
+    function, and that is the second version of this probe. The first inspected
+    ``DataScan._plan_files_local`` alone, which held the guard inline in 0.11.1.
+    On unreleased main the planner was extracted (``BaseScan`` /
+    ``ManifestGroupPlanner``) and that method became a five-line delegation, so
+    the probe found no guard and reported equality deletes as **readable** --
+    while the refusal was alive and well one call deeper. A false positive on
+    the probe whose whole job is preventing compaction from resurrecting
+    deleted rows.
+
+    Searching the module is cruder and far harder to break: the guard has to
+    disappear from the file entirely before this says "readable". The failure
+    mode it leaves is the safe one -- a stray mention in a comment would make us
+    refuse a table we could have compacted, which costs a skipped optimisation
+    rather than data.
+    """
+    needle = "does not yet support equality deletes"
+    try:
+        import pyiceberg.table as table_module
+
+        return needle in inspect.getsource(table_module)
+    except (OSError, TypeError):  # pragma: no cover - source unavailable
+        # Frozen, vendored or zipapp: assume the guard is there.
+        return True
 
 
 def _delete_manifests_writable() -> bool:

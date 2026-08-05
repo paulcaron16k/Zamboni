@@ -1466,8 +1466,8 @@ wheels = [
 
 [[package]]
 name = "pyiceberg"
-version = "0.11.1"
-source = { registry = "https://pypi.org/simple" }
+version = "0.11.0"
+source = { editable = "../iceberg-python" }
 dependencies = [
     { name = "cachetools" },
     { name = "click" },
@@ -1482,39 +1482,104 @@ dependencies = [
     { name = "tenacity" },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ce/f0/7616676603fdbd05ab97816337a9b31be08a5f9e1ffd636260812b217e0f/pyiceberg-0.11.1.tar.gz", hash = "sha256:366fe0d5a74e3cf1d4e7cbf3c49e308da60e7835ea268667be9185388f05d7a5", size = 1076075, upload-time = "2026-03-03T00:10:27.61Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/62/f7/3b7fee2ecc021f0526f23ef4ae5dcc8e0ed26062c35890ad25d39c53fb3b/pyiceberg-0.11.1-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:ba98d6a41ec0b7c81dd85d764f15653d6abbbbd69d92630677c43f92dd50d924", size = 532406, upload-time = "2026-03-03T00:09:59.647Z" },
-    { url = "https://files.pythonhosted.org/packages/94/25/324030b13d91b7b564fb7342bf3fcdbf76eed2672964b273b156bf84d6e5/pyiceberg-0.11.1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:6400774e6820760eb6c322f6feace43fe7267deb9f8d508f10bf258887a9c4d5", size = 533368, upload-time = "2026-03-03T00:10:01.264Z" },
-    { url = "https://files.pythonhosted.org/packages/1c/83/6a43d06a079292c4fc7815b4de3e90a05ded90031c35d0a1b037659f722b/pyiceberg-0.11.1-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:1663d79fc8400903992c63f79b3908b9298c623138e8929bf36c559231e082d3", size = 722886, upload-time = "2026-03-03T00:10:02.558Z" },
-    { url = "https://files.pythonhosted.org/packages/ce/5c/53807036b63bb810f2c56b4b5576e79b721ba93f1c16bd0dd49ecfe41055/pyiceberg-0.11.1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:856c7fca5ed780ed44f60bceb92d6b311ebc008a2249415b8f6045201d4f5530", size = 721212, upload-time = "2026-03-03T00:10:03.694Z" },
-    { url = "https://files.pythonhosted.org/packages/db/11/65e25d6016e3844c516c9f04041853115711f64af1ee184a2320c9ceab4c/pyiceberg-0.11.1-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:6cf94756fb6a822d20a5a64f44840e6633ebf8b1deb3ce01057bff1cc03b01c2", size = 717978, upload-time = "2026-03-03T00:10:05.011Z" },
-    { url = "https://files.pythonhosted.org/packages/52/0b/33b4ea9dc7f0c496900f5fc6da79e8587e94b88e2244ff02b786016cc649/pyiceberg-0.11.1-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:8bd52c1891ae74cee21a4ebe8325953310a2e0af5352d70f47f5461422fcce2d", size = 718747, upload-time = "2026-03-03T00:10:06.269Z" },
-    { url = "https://files.pythonhosted.org/packages/c4/b6/5e133c435efc577afea5be303d7123264a5176a3ce1e2d3dc3a691049eaf/pyiceberg-0.11.1-cp311-cp311-win_amd64.whl", hash = "sha256:65a7ad892a570045b0de2db6af17119162880aebc05a0c125ce2db7dab36f17e", size = 531081, upload-time = "2026-03-03T00:10:07.352Z" },
-    { url = "https://files.pythonhosted.org/packages/8f/84/a140466b7e0841207e6b77042e03d4ab3a4f9d47e00f0bbbcc5420792bbb/pyiceberg-0.11.1-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:cd423b8ee2f75fc9db09158875abe5e2c952a26ae5e521c3265ab2f9d3511ddf", size = 532981, upload-time = "2026-03-03T00:10:08.906Z" },
-    { url = "https://files.pythonhosted.org/packages/17/10/6bedd784010f707680ffd0606d4d11394cf915f4f9f54ae16e8007e00ad4/pyiceberg-0.11.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:e273242cdca56029af694d7ce18075d47a74d034326d663ff6dd2655a6f44825", size = 533188, upload-time = "2026-03-03T00:10:10.086Z" },
-    { url = "https://files.pythonhosted.org/packages/f1/a3/79db617c3cffc963efa8a332707079d3f22fd58067b31a208d358dd89b39/pyiceberg-0.11.1-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:b347d3cc8510f8fbe191956fcda7da372ebb3302789acefca08e352345959003", size = 729546, upload-time = "2026-03-03T00:10:11.413Z" },
-    { url = "https://files.pythonhosted.org/packages/06/64/acc11d230c33817bced80d9d947bb49e7bb3a429d76d906523e3df86faf8/pyiceberg-0.11.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:bba3a35b4648694783aeae5b77c235a57191c8b1b375c8602b03ae56a6cf4fe7", size = 730263, upload-time = "2026-03-03T00:10:13.283Z" },
-    { url = "https://files.pythonhosted.org/packages/8d/1a/fb067d5150c7309fbf5dd126c648a6afed6259e7bc924ba3c65d0f87a333/pyiceberg-0.11.1-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:a0f958cbca18d05846e3081dfff8575e73d45595441d659847479656dc76f91d", size = 724064, upload-time = "2026-03-03T00:10:14.55Z" },
-    { url = "https://files.pythonhosted.org/packages/c1/71/103fdba5b144d55f3bb07347893737cc1d8fd71308108a77b7817c92c544/pyiceberg-0.11.1-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:8c62636a1e9d8a1fc74ffb70383939b9cd93f2c9ee8e12015a50dd75c98a989e", size = 727239, upload-time = "2026-03-03T00:10:16.204Z" },
-    { url = "https://files.pythonhosted.org/packages/18/c3/4db64429304c58c039f8e842cd37a9a1c472f596c2868ed2a5d2907b17ed/pyiceberg-0.11.1-cp312-cp312-win_amd64.whl", hash = "sha256:1d6b6f0c1e7dd8357f1ba56524bfc870d04ad3c00979db291784a7145497ad3b", size = 531309, upload-time = "2026-03-03T00:10:17.561Z" },
-    { url = "https://files.pythonhosted.org/packages/35/4c/a122d80d98cb6125d87024681263406433f0c25c699d503f5633521e6809/pyiceberg-0.11.1-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:b7ec5db19feab98a31fcd5caccf4a9a4e83f96933d1ca393ba7aea665710c2bb", size = 532644, upload-time = "2026-03-03T00:10:18.574Z" },
-    { url = "https://files.pythonhosted.org/packages/10/94/9a8fa5fc580e6dccd34bbbf51e7658cd7b49540e2458783addeff5e22a91/pyiceberg-0.11.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:cec0616d2ba6e7dda6327089a2f34ec723aa9ac2c389857ef0b83f65fb135dd6", size = 532787, upload-time = "2026-03-03T00:10:19.656Z" },
-    { url = "https://files.pythonhosted.org/packages/b3/ab/ab7c88828bc17d77dbbc5a765419dfec2135629e1d74cdd0762cd38ad867/pyiceberg-0.11.1-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:ddb360da76c62c7c23ec3da40e1af48e6712a563905fea2d1a8911ff7a3b6c4d", size = 722202, upload-time = "2026-03-03T00:10:21.012Z" },
-    { url = "https://files.pythonhosted.org/packages/df/38/079cf1c0bf86da315472a926eec0dba10135f43374a2e267336eb98d8c76/pyiceberg-0.11.1-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:4d8790f420ebc484236017edba59182cf2a21bd3e4224a0bd0760a9c7268e96a", size = 724037, upload-time = "2026-03-03T00:10:22.176Z" },
-    { url = "https://files.pythonhosted.org/packages/08/6b/08eaef477debb110438d943ef3f5985096f660ccb735d6344701cbd075a9/pyiceberg-0.11.1-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:ae27ba4d37925d5b2cff192acaa70c8bb114d632bbc527cc91fea0370702b866", size = 716035, upload-time = "2026-03-03T00:10:23.789Z" },
-    { url = "https://files.pythonhosted.org/packages/0b/59/7671d6a630ab1d85c6e7ca8ddf438dc63a0b0dd183bc4be69bf25c0fa5f6/pyiceberg-0.11.1-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:db66a4e0fdfbf4090631d59c3f65e960d9a5561e9259f6f3993cbe91e396837e", size = 720887, upload-time = "2026-03-03T00:10:24.824Z" },
-    { url = "https://files.pythonhosted.org/packages/f0/2b/5c8ad37807efaedb14b20f01f36462684468c80da5b74f4018fb4c1804b5/pyiceberg-0.11.1-cp313-cp313-win_amd64.whl", hash = "sha256:eb3a0a3e630ee89758eb96b39b456f4697732351fb0c080e9498ea578f9b71f9", size = 530923, upload-time = "2026-03-03T00:10:26.196Z" },
-]
 
 [package.optional-dependencies]
 pyarrow = [
     { name = "pyarrow" },
-    { name = "pyiceberg-core" },
 ]
 sql-sqlite = [
     { name = "sqlalchemy" },
 ]
+
+[package.metadata]
+requires-dist = [
+    { name = "adlfs", marker = "extra == 'adlfs'", specifier = ">=2024.7.0" },
+    { name = "azure-identity", marker = "extra == 'entra-auth'", specifier = ">=1.25.1" },
+    { name = "bodo", marker = "extra == 'bodo'", specifier = ">=2025.7.4" },
+    { name = "boto3", marker = "extra == 'dynamodb'", specifier = ">=1.24.59" },
+    { name = "boto3", marker = "extra == 'glue'", specifier = ">=1.24.59" },
+    { name = "boto3", marker = "extra == 'rest-sigv4'", specifier = ">=1.24.59" },
+    { name = "cachetools", specifier = ">=5.5" },
+    { name = "click", specifier = ">=7.1.1" },
+    { name = "daft", marker = "extra == 'daft'", specifier = ">=0.7.10" },
+    { name = "datafusion", marker = "extra == 'datafusion'", specifier = ">=52,<53" },
+    { name = "duckdb", marker = "extra == 'duckdb'", specifier = ">=0.5.0" },
+    { name = "fsspec", specifier = ">=2023.1.0" },
+    { name = "gcsfs", marker = "extra == 'gcsfs'", specifier = ">=2023.1.0" },
+    { name = "geoarrow-pyarrow", marker = "extra == 'geoarrow'", specifier = ">=0.2.0" },
+    { name = "google-auth", marker = "extra == 'gcp-auth'", specifier = ">=2.4.0" },
+    { name = "google-cloud-bigquery", marker = "extra == 'bigquery'", specifier = ">=3.33.0,<4" },
+    { name = "huggingface-hub", marker = "extra == 'hf'", specifier = ">=0.24.0" },
+    { name = "kerberos", marker = "extra == 'hive-kerberos'", specifier = ">=1.3.1" },
+    { name = "mmh3", specifier = ">=4.0.0" },
+    { name = "pandas", marker = "extra == 'pandas'", specifier = ">=1.0.0" },
+    { name = "pandas", marker = "extra == 'ray'", specifier = ">=1.0.0" },
+    { name = "polars", marker = "extra == 'polars'", specifier = ">=1.21.0" },
+    { name = "psycopg2-binary", marker = "extra == 'sql-postgres'", specifier = ">=2.9.6" },
+    { name = "pyarrow", marker = "extra == 'duckdb'", specifier = ">=18.0.0" },
+    { name = "pyarrow", marker = "extra == 'pandas'", specifier = ">=18.0.0" },
+    { name = "pyarrow", marker = "extra == 'pyarrow'", specifier = ">=18.0.0" },
+    { name = "pyarrow", marker = "extra == 'ray'", specifier = ">=18.0.0" },
+    { name = "pydantic", specifier = ">=2.0,!=2.4.0,!=2.4.1,!=2.12.0,!=2.12.1,<3.0" },
+    { name = "pyiceberg-core", marker = "extra == 'pyiceberg-core'", specifier = ">=0.5.1,<0.10.0" },
+    { name = "pyparsing", specifier = ">=3.1.0" },
+    { name = "pyroaring", specifier = ">=1.0.0" },
+    { name = "python-snappy", marker = "extra == 'snappy'", specifier = ">=0.6.0" },
+    { name = "ray", marker = "extra == 'ray'", specifier = ">=2.10.0" },
+    { name = "requests", specifier = ">=2.20.0" },
+    { name = "rich", specifier = ">=10.11.0" },
+    { name = "s3fs", marker = "extra == 's3fs'", specifier = ">=2023.1.0" },
+    { name = "sqlalchemy", marker = "extra == 'sql-postgres'", specifier = ">=2.0.18,<3" },
+    { name = "sqlalchemy", marker = "extra == 'sql-sqlite'", specifier = ">=2.0.18,<3" },
+    { name = "strictyaml", specifier = ">=1.7.0" },
+    { name = "tenacity", specifier = ">=8.2.3" },
+    { name = "thrift", marker = "extra == 'hive'", specifier = ">=0.13.0" },
+    { name = "thrift", marker = "extra == 'hive-kerberos'", specifier = ">=0.13.0" },
+    { name = "thrift-sasl", marker = "extra == 'hive-kerberos'", specifier = ">=0.4.3" },
+    { name = "zstandard", specifier = ">=0.13.0" },
+]
+provides-extras = ["pyarrow", "pandas", "duckdb", "ray", "bodo", "daft", "polars", "snappy", "hive", "hive-kerberos", "s3fs", "glue", "adlfs", "dynamodb", "bigquery", "sql-postgres", "sql-sqlite", "gcsfs", "rest-sigv4", "hf", "pyiceberg-core", "datafusion", "gcp-auth", "entra-auth", "geoarrow"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "coverage", extras = ["toml"], specifier = ">=7.4.2" },
+    { name = "cython", specifier = ">=3.0.0" },
+    { name = "deptry", specifier = ">=0.14" },
+    { name = "docutils", specifier = "!=0.21.post1" },
+    { name = "fastavro", specifier = "==1.12.2" },
+    { name = "google-cloud-bigquery", specifier = ">=3.33.0,<4" },
+    { name = "ipykernel", specifier = ">=6.29.0" },
+    { name = "moto", extras = ["server"], specifier = ">=5.0.2" },
+    { name = "mypy-boto3-dynamodb", specifier = ">=1.28.18" },
+    { name = "mypy-boto3-glue", specifier = ">=1.28.18" },
+    { name = "nbformat", specifier = ">=5.10.0" },
+    { name = "papermill", specifier = ">=2.6.0" },
+    { name = "prek", specifier = ">=0.2.1" },
+    { name = "protobuf", specifier = "==6.33.5" },
+    { name = "pyarrow-stubs", specifier = ">=20.0.0.20251107" },
+    { name = "pyspark", extras = ["connect"], specifier = "==4.0.1" },
+    { name = "pytest", specifier = "==9.1.1" },
+    { name = "pytest-checkdocs", specifier = "==2.14.0" },
+    { name = "pytest-lazy-fixtures", specifier = "==1.4.0" },
+    { name = "pytest-mock", specifier = "==3.15.1" },
+    { name = "requests-mock", specifier = "==1.12.1" },
+    { name = "sqlalchemy", specifier = ">=2.0.18,<3" },
+    { name = "typing-extensions", specifier = "==4.16.0" },
+]
+docs = [
+    { name = "griffe", specifier = "==2.1.0" },
+    { name = "jinja2", specifier = "==3.1.6" },
+    { name = "mkdocs", specifier = "==1.6.1" },
+    { name = "mkdocs-autorefs", specifier = "==1.4.4" },
+    { name = "mkdocs-gen-files", specifier = "==0.6.1" },
+    { name = "mkdocs-literate-nav", specifier = "==0.6.3" },
+    { name = "mkdocs-material", specifier = "==9.7.7" },
+    { name = "mkdocs-material-extensions", specifier = "==1.3.1" },
+    { name = "mkdocs-section-index", specifier = "==0.3.12" },
+    { name = "mkdocstrings", specifier = "==1.0.6" },
+    { name = "mkdocstrings-python", specifier = "==2.0.5" },
+]
+notebook = [{ name = "jupyterlab", specifier = ">=4.0.0" }]
 
 [[package]]
 name = "pyiceberg-core"
@@ -2162,8 +2227,8 @@ dev = [
 requires-dist = [
     { name = "duckdb", specifier = ">=1.5.0" },
     { name = "pyarrow", specifier = ">=18" },
-    { name = "pyiceberg", extras = ["pyarrow"], specifier = ">=0.11.1" },
-    { name = "pyiceberg", extras = ["sql-sqlite"], marker = "extra == 'sql'", specifier = ">=0.11.1" },
+    { name = "pyiceberg", extras = ["pyarrow"], editable = "../iceberg-python" },
+    { name = "pyiceberg", extras = ["sql-sqlite"], marker = "extra == 'sql'", editable = "../iceberg-python" },
     { name = "pyiceberg-core", marker = "extra == 'bucket'", specifier = ">=0.5.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
