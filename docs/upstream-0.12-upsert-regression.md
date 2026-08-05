@@ -118,6 +118,32 @@ most merge-style ingestion.
 
 ---
 
+## Verification record (ZMBNI-1105)
+
+Against `../iceberg-python` @ `154288fb`, with the dev stack live:
+
+| | |
+|---|---|
+| Full suite | **418 passed**, 7 failed, 5 errors |
+| Non-demo failures | **0** — every failure is the demo's ingest |
+| Dev stack (real Lakekeeper + MinIO) | 19 of 20 pass; the one failure is the demo |
+
+So **every maintenance operation works on 0.12**, including against a live
+catalog and object store: compaction, ordering, partition evolution, expiry,
+orphan removal, dangling-delete removal, manifest rewriting, metadata retention.
+What does not work is *ingest*, and only because it upserts.
+
+The two blockers we were waiting on were re-confirmed rather than assumed:
+
+| | On `main` | |
+|---|---|---|
+| `delete_manifests_writable` | False | `ManifestWriterV2.content()` still returns `DATA`; no `ManifestWriterV3` |
+| `equality_deletes_readable` | False | the guard is still present |
+
+ZMBNI-604 and 704–706 stay blocked. 0.12 lifts neither.
+
+---
+
 ## Consequences for ZMBNI-11
 
 0.12 cannot be adopted for a deployment that upserts into partitioned tables

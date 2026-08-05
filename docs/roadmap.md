@@ -311,9 +311,35 @@ inside `LocalMaintainer`, with the interface pinning its observable behaviour.
 These need answers before the epic they belong to can be finished, and are
 recorded here rather than discovered mid-implementation:
 
-1. **Does Zamboni support two PyIceberg lines at once?** RM-1 can either keep
-   0.11.1 working alongside 0.12 or move the floor. The probes make both
-   technically possible; the cost is a test matrix that doubles.
+1. **Does Zamboni support two PyIceberg lines at once?** **Answerable now.**
+   ZMBNI-11 built against 0.12 and the architectural half is settled: with
+   probe-driven capabilities (ZMBNI-1107) there is **no version branching in the
+   source at all**. Every difference is a probe answer.
+
+   What it actually costs, measured rather than estimated — three things, all
+   small:
+
+   - **One mypy flag.** `warn_unused_ignores` cannot be true for both lines:
+     four `type: ignore` comments 0.11.1 requires are redundant against 0.12's
+     better hints. It is off on the branch.
+   - **Two tests skip by build.** The streaming-write cases cannot run where the
+     writer does not exist. They skip with a message naming why, which is
+     honest, but a skip is not a pass.
+   - **A second CI leg**, and the branch cannot use `uv sync --frozen` while the
+     dependency is a local path.
+
+   Against that: **0.12 fixes nothing we are waiting on.** ZMBNI-1105 re-confirmed
+   that `delete_manifests_writable` and `equality_deletes_readable` are both
+   still false, so ZMBNI-604 and 704–706 stay blocked either way. And 0.12
+   currently *breaks* upsert on partitioned tables
+   ([upstream-0.12-upsert-regression.md](upstream-0.12-upsert-regression.md)).
+
+   **The recommendation is therefore: stay on 0.11.1, keep the branch alive, and
+   do not move the floor until 0.12 is released and the upsert regression is
+   fixed.** Supporting two lines is cheap because the probes already do the work
+   — but paying even that is premature while the newer line is the broken one.
+   The decision is a release-timing call, so it stays open until someone makes
+   it deliberately.
 2. ~~**What does `--engine trino` do about `--yes`?**~~ **Answered by ZMBNI-1206.**
    Neither option in the original framing was taken. Where an engine cannot
    preview an operation, a run without `--yes` **refuses** — it does not execute,
