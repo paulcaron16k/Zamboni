@@ -57,11 +57,25 @@ def linking_docs() -> list[Path]:
     ]
 
 
+def without_code_blocks(text: str) -> str:
+    """Markdown minus fenced code.
+
+    A link checker that reads code blocks invents links: Python like
+    ``evaluators[manifest.spec_id](manifest)`` matches the same pattern as
+    ``[text](target)``. The false positive is the smaller problem -- the real
+    risk is that noise trains someone to ignore this test, and it exists to
+    catch a genuinely broken link.
+    """
+    return re.sub(r"^```.*?^```", "", text, flags=re.S | re.M)
+
+
 def test_doc_links_resolve():
     checked = 0
     for doc in linking_docs():
         # Skip absolute URLs and mailto:; strip anchors, which are not paths.
-        for target in re.findall(r"\]\((?!https?:|mailto:)([^)#]+)", doc.read_text()):
+        for target in re.findall(
+            r"\]\((?!https?:|mailto:)([^)#]+)", without_code_blocks(doc.read_text())
+        ):
             resolved = (doc.parent / target).resolve()
             assert resolved.exists(), f"{doc.name} links to missing {target}"
             checked += 1
