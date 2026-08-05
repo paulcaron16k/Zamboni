@@ -48,7 +48,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 > order. The numbers follow [roadmap.md](roadmap.md)'s RM-1…RM-6 so the two documents agree on
 > identity; the sequence is explained in each section's subtitle.
 
-**Story counts:** 78 done · 1 inproject · 16 todo · 1 cancelled  (96 stories)
+**Story counts:** 78 done · 1 inproject · 17 todo · 1 cancelled  (97 stories)
 
 ---
 
@@ -244,12 +244,13 @@ the path dependency makes `uv.lock` unreproducible elsewhere. [roadmap.md RM-1](
 
 | id | title | description | status | completed-at |
 |---|---|---|---|---|
+| ZMBNI-1107 | Make `LocalMaintainer.capabilities()` probe-driven | It hardcodes limitations that are *derived* from `capabilities.detect()` — including a string asserting "ZMBNI-604, still true on 0.12" — so `zamboni engines` reports a static claim about a dynamic property. Wrong on any install whose probes differ, in the one place whose purpose is refusing to overstate capability. **A defect today, not only on 0.12**, and the reason ZMBNI-11 needs no `local-0.12` maintainer: the probes are the version mechanism. [roadmap.md RM-1](roadmap.md) | todo | |
 | ZMBNI-1101 | The branch and the path dependency | `feature/pyiceberg-0.12` against the `../iceberg-python` checkout, with the lock-file consequence documented where someone will hit it | todo | |
 | ZMBNI-1102 | Re-probe and record the delta | Three of seven probes flip: streaming writes, manifest predicate pruning, and derives-delete-predicate, all False → True. The last two are the pair whose *split* would make Zamboni refuse to run; they land together, which is why this migration is lower risk than its size suggests. Assert the `doctor` output rather than describing it | todo | |
 | ZMBNI-1103 | Audit the private APIs we drive | The real work: 397 commits since 0.11.1. Known movers — `_scan_plan_helper` renamed to `_plan_manifest_entries`, `BaseScan`/`ManifestGroupPlanner` extracted, and `ManifestEntry.snapshot_id`'s setter fixed for writing to the wrong index, which `manifests.py` depends on preserving exactly | todo | |
 | ZMBNI-1104 | Adopt streaming writes | `_dataframe_to_data_files` now accepts `pa.RecordBatchReader`, so the writer bin-packs the stream itself. May retire part of the chunked backend; measure before deleting | todo | |
 | ZMBNI-1105 | Re-verify on 0.12 | Full suite plus live verification. Neither waited-on blocker lifts — `ManifestWriterV2.content()` still returns `DATA`, there is still no `ManifestWriterV3`, and the equality-delete guard is still present — so ZMBNI-604 and 704–706 stay blocked and should be re-confirmed, not assumed | todo | |
-| ZMBNI-1106 | Decide the support window | One PyIceberg line or two. Open question 1 in roadmap.md: the probes make both possible, the cost is a doubled test matrix | todo | |
+| ZMBNI-1106 | Decide the support window | One PyIceberg line or two. Settled as an architecture question by ZMBNI-1107: with probe-driven capabilities, supporting both needs no version branching in code at all. What remains is CI spend — a matrix where some expected values differ by install. Open question 1 in roadmap.md | todo | |
 
 ---
 

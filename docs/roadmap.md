@@ -77,6 +77,49 @@ which `manifests.py` depends on preserving exactly.
 is exactly this. The mitigation is already in place: the probes are structural,
 so an incompatible build refuses rather than corrupts.
 
+### Design: no version-specific maintainer
+
+The question this settles, because it is the obvious first guess: should there be
+a `local-0.12` maintainer alongside `local`, selected by the factory?
+
+**No.** The registry's axis is *which engine performs the work* -- PyIceberg plus
+DuckDB, Trino, Spark. A library version is not that axis:
+
+- **It is not selectable.** One `import pyiceberg` per process; 0.11.1 and 0.12
+  cannot be installed together. `--engine local-0.12` would succeed or fail on
+  what happens to be in the virtualenv, so the operator is not choosing anything
+  -- which is what a factory selection is for.
+- **The mechanism already exists.** `capabilities.py` says it in its first
+  paragraph: every version-dependent decision routes through structural probes
+  "rather than through a version comparison". A version-named maintainer *is*
+  that comparison, at a coarser grain and with a flag attached.
+- **It would duplicate the six operations**, which is the argument against a
+  shell wrapper in devops.md §1 pointed back at ourselves. A second
+  implementation of `expire` is a second thing to keep correct.
+
+**Considered and rejected for a real case too.** If 0.12's streaming writes
+justify a materially different compaction path, that is a *strategy* inside
+`LocalMaintainer` chosen by a probe -- the way memory modes and rewrite backends
+already work -- not a registered engine. The operator should not pick it; the
+installed library decides.
+
+**So the change to the maintainer is a deletion, not an addition.**
+`LocalMaintainer.capabilities()` currently hardcodes limitations that are
+*derived* from probes, including a string asserting "ZMBNI-604, still true on
+0.12". Every claim in it corresponds to a probe that is False on 0.11.1:
+`delete_manifests_writable` drives the dangling-delete caveat,
+`equality_deletes_readable` the compaction blocker,
+`streaming_write_supported` the memory behaviour. It must read `detect()`.
+
+That is a defect **today**, not only on 0.12: `zamboni engines` reports a static
+claim about a dynamic property, in the one place whose purpose is refusing to
+overstate capability. Tracked as ZMBNI-1107.
+
+**And it reframes the support window.** With probe-driven capabilities, running
+against both PyIceberg lines needs no version branching in code -- the probes do
+it. The only cost is a test matrix where some expected values differ by install,
+so ZMBNI-1106 is a question about CI spend rather than about architecture.
+
 **Branch.** `feature/pyiceberg-0.12`, with a path dependency on
 `../iceberg-python`. That dependency makes `uv.lock` unreproducible on any other
 machine, so it must **not** reach `main` until 0.12 is on PyPI — which is the
