@@ -139,7 +139,7 @@ test stops existing, so this table cannot rot silently.
 | FR-6.6 | A concurrent write is refused, not lost | `test_concurrent_write_is_refused_not_lost` |
 | FR-6.7 | A row-count mismatch aborts before committing | `test_row_count_mismatch_aborts_before_commit` |
 | FR-6.8 | Format version 1 is blocked | `test_format_version_1_is_blocked` |
-| FR-6.9 | Capabilities are probed, not inferred from a version | `test_probes_the_installed_build`, `test_equality_delete_blocker_follows_the_capability` |
+| FR-6.9 | Capabilities are probed, not inferred from a version | `test_probes_the_installed_build`, `test_equality_delete_blocker_follows_the_capability`, `test_the_equality_delete_probe_agrees_with_the_installed_source`, `test_the_delete_manifest_probe_agrees_with_the_installed_writer`, `test_the_pruning_pair_is_consistent_on_the_installed_build`, `test_doctor_reports_the_installed_version_and_every_probe` |
 
 ### FR-7 — Reclaiming storage
 

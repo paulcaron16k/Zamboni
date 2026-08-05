@@ -91,3 +91,70 @@ def test_equality_delete_blocker_follows_the_capability(session, unpartitioned, 
 
     assert "equality-deletes" in blocked
     assert "equality-deletes" not in allowed
+
+
+# -- ZMBNI-1102: probe answers must match the installed build -------------
+#
+# The tests above check a probe returns *a bool*. These check it returns the
+# *right* one, which is a different property and the one that failed: against
+# unreleased 0.12 `equality_deletes_readable` came back True while PyIceberg was
+# still refusing equality deletes one call deeper. A probe that answers
+# confidently and wrongly is worse than one that cannot answer.
+
+
+def test_the_equality_delete_probe_agrees_with_the_installed_source():
+    """If the refusal exists anywhere in scan planning, we must not claim readable.
+
+    Deliberately checks the *module*, not one function. The first version of
+    this probe inspected `DataScan._plan_files_local` alone; 0.12 extracted the
+    planner and left that method a five-line delegation, so the probe stopped
+    finding a guard that was very much still there. Narrowing it back would
+    reintroduce exactly that, and this fails if anyone does.
+    """
+    import inspect
+
+    import pyiceberg.table as table_module
+
+    guard_present = "does not yet support equality deletes" in inspect.getsource(table_module)
+
+    assert detect().equality_deletes_readable is not guard_present, (
+        "the probe disagrees with the installed PyIceberg: guard "
+        f"{'present' if guard_present else 'absent'}, probe says "
+        f"readable={detect().equality_deletes_readable}"
+    )
+
+
+def test_the_delete_manifest_probe_agrees_with_the_installed_writer():
+    """ZMBNI-604's blocker is `ManifestWriterV2.content()` returning DATA."""
+    from pyiceberg.manifest import ManifestContent, ManifestWriterV2
+
+    writes_data_only = ManifestWriterV2.content(None) is ManifestContent.DATA
+
+    assert detect().delete_manifests_writable is not writes_data_only
+
+
+def test_the_pruning_pair_is_consistent_on_the_installed_build():
+    """Pruning without derivation is the combination that double-counts rows.
+
+    Both flipped together between 0.11.1 and 0.12, which is why the build stays
+    usable across that boundary -- but nothing guarantees a future build does
+    the same, and this is where that would surface.
+    """
+    caps = detect()
+
+    assert caps.manifest_pruning_is_safe, (
+        f"prunes={caps.prunes_manifests_by_predicate} "
+        f"derives={caps.derives_delete_predicate}: this build would double-count rows"
+    )
+
+
+def test_doctor_reports_the_installed_version_and_every_probe():
+    """The output an operator pastes into a bug report has to carry the facts."""
+    caps = detect()
+    text = caps.describe()
+
+    assert caps.version in text
+    for field in dataclasses.fields(caps):
+        if field.name == "version":
+            continue
+        assert str(getattr(caps, field.name)) in text, f"{field.name} missing from doctor output"
