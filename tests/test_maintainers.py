@@ -9,9 +9,12 @@ verified.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from zamboni import maintainers
+from zamboni.capabilities import detect
 from zamboni.maintainers import (
     EngineConfigProblem,
     MaintainerCapabilities,
@@ -386,3 +389,95 @@ def test_a_table_without_a_namespace_is_rejected():
 def test_trino_refuses_an_operation_it_cannot_do_before_building_sql():
     with pytest.raises(UnsupportedOperation):
         trino().statement_for(Operation.REMOVE_DANGLING_DELETES, "db.events", full_retention())
+
+
+# -- ZMBNI-1107: the declaration follows the installed build ---------------
+#
+# These are the point of the story. Asserting the *current* declaration only
+# pins today's install; what was wrong before is that the declaration could not
+# change at all. Each of these flips a probe and requires the claim to follow.
+
+
+def probes(**overrides):
+    """The real probe result with individual answers flipped."""
+    return replace(detect(), **overrides)
+
+
+def local_with(monkeypatch, **overrides):
+    from zamboni.maintainers import local as local_module
+
+    monkeypatch.setattr(local_module, "detect", lambda: probes(**overrides))
+    return LocalMaintainer.capabilities()
+
+
+def test_dangling_deletes_becomes_full_when_the_writer_can_write_one(monkeypatch):
+    """ZMBNI-604's caveat is a property of ManifestWriterV2, not of us. A build
+    that can write a delete manifest must stop being told it cannot."""
+    caps = local_with(monkeypatch, delete_manifests_writable=True)
+    support = caps.of(Operation.REMOVE_DANGLING_DELETES)
+
+    assert support.support is Support.FULL
+    assert not support.limitations
+    assert any("partially dangling" in inv for inv in support.invariants)
+
+
+def test_dangling_deletes_stays_partial_when_it_cannot(monkeypatch):
+    support = local_with(monkeypatch, delete_manifests_writable=False).of(
+        Operation.REMOVE_DANGLING_DELETES
+    )
+
+    assert support.support is Support.PARTIAL
+    assert "ZMBNI-604" in support.limitations[0]
+
+
+def test_compaction_becomes_full_when_equality_deletes_are_readable(monkeypatch):
+    support = local_with(monkeypatch, equality_deletes_readable=True).of(Operation.COMPACT)
+
+    assert support.support is Support.FULL
+    assert not support.limitations
+
+
+def test_compaction_is_partial_while_equality_deletes_are_not(monkeypatch):
+    support = local_with(monkeypatch, equality_deletes_readable=False).of(Operation.COMPACT)
+
+    assert support.support is Support.PARTIAL
+    assert "equality deletes" in support.limitations[0]
+
+
+def test_an_unusable_build_makes_compaction_unsupported(monkeypatch):
+    """Not a caveat on a working operation. `unsupported_reason` is the check
+    that stops a rewrite which would double-count rows, and PARTIAL would
+    understate that."""
+    support = local_with(
+        monkeypatch, prunes_manifests_by_predicate=True, derives_delete_predicate=False
+    ).of(Operation.COMPACT)
+
+    assert support.support is Support.UNSUPPORTED
+    assert not support.can_preview
+    assert "cannot be used" in support.limitations[0]
+
+
+def test_streaming_writes_are_declared_when_available(monkeypatch):
+    with_streaming = local_with(monkeypatch, streaming_write_supported=True).of(Operation.COMPACT)
+    without = local_with(monkeypatch, streaming_write_supported=False).of(Operation.COMPACT)
+
+    assert any("streaming writer" in inv for inv in with_streaming.invariants)
+    assert not any("streaming writer" in inv for inv in without.invariants)
+
+
+def test_the_declaration_names_the_installed_version(monkeypatch):
+    """So a bug report quoting `zamboni engines` carries the deciding fact."""
+    caps = local_with(monkeypatch, version="9.9.9", delete_manifests_writable=False)
+
+    assert "9.9.9" in caps.of(Operation.REMOVE_DANGLING_DELETES).limitations[0]
+
+
+def test_the_warehouse_limitation_is_not_probe_derived(monkeypatch):
+    """remove-orphans needs a bucket listing whatever PyIceberg is installed --
+    that is a property of the warehouse. Pinned so a later refactor does not
+    sweep it into the probe-driven set and make it disappear on 0.12."""
+    caps = local_with(monkeypatch, delete_manifests_writable=True, equality_deletes_readable=True)
+    support = caps.of(Operation.REMOVE_ORPHANS)
+
+    assert support.support is Support.PARTIAL
+    assert "remote-signing" in support.limitations[0]

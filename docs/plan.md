@@ -203,6 +203,7 @@ test stops existing, so this table cannot rot silently.
 | FR-11.6 | Config is validated per engine at plan time, not passed through | `test_trino_rejects_our_default_retention_at_plan_time`, `test_trino_rejects_a_short_orphan_guard`, `test_a_config_below_trinos_floor_is_a_usage_error`, `test_the_local_engine_imposes_no_floors` |
 | FR-11.7 | An operation may be fulfilled by another operation | `test_spark_fulfils_dangling_deletes_through_compaction`, `test_describe_says_when_an_operation_rides_on_another` |
 | FR-11.8 | The declarations match the analysis they came from | `test_declarations_match_the_engine_comparison`, `test_describe_reports_limitations_so_they_are_discoverable`, `test_identifiers_are_always_quoted` |
+| FR-11.10 | The local engine's declaration follows the installed PyIceberg rather than a constant | `test_dangling_deletes_becomes_full_when_the_writer_can_write_one`, `test_compaction_becomes_full_when_equality_deletes_are_readable`, `test_an_unusable_build_makes_compaction_unsupported`, `test_streaming_writes_are_declared_when_available`, `test_the_warehouse_limitation_is_not_probe_derived` |
 | FR-11.9 | The default engine is local, and every mutating verb accepts `--engine` | `test_the_default_engine_is_local`, `test_every_mutating_verb_accepts_an_engine`, `test_engines_reports_what_each_one_refuses` |
 
 ### FR-10 — Versioning and releases

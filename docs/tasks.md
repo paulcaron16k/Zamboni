@@ -48,7 +48,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 > order. The numbers follow [roadmap.md](roadmap.md)'s RM-1…RM-6 so the two documents agree on
 > identity; the sequence is explained in each section's subtitle.
 
-**Story counts:** 78 done · 1 inproject · 17 todo · 1 cancelled  (97 stories)
+**Story counts:** 79 done · 1 inproject · 16 todo · 1 cancelled  (97 stories)
 
 ---
 
@@ -244,7 +244,7 @@ the path dependency makes `uv.lock` unreproducible elsewhere. [roadmap.md RM-1](
 
 | id | title | description | status | completed-at |
 |---|---|---|---|---|
-| ZMBNI-1107 | Make `LocalMaintainer.capabilities()` probe-driven | It hardcodes limitations that are *derived* from `capabilities.detect()` — including a string asserting "ZMBNI-604, still true on 0.12" — so `zamboni engines` reports a static claim about a dynamic property. Wrong on any install whose probes differ, in the one place whose purpose is refusing to overstate capability. **A defect today, not only on 0.12**, and the reason ZMBNI-11 needs no `local-0.12` maintainer: the probes are the version mechanism. [roadmap.md RM-1](roadmap.md) | todo | |
+| ZMBNI-1107 | Make `LocalMaintainer.capabilities()` probe-driven | It hardcodes limitations that are *derived* from `capabilities.detect()` — including a string asserting "ZMBNI-604, still true on 0.12" — so `zamboni engines` reports a static claim about a dynamic property. Wrong on any install whose probes differ, in the one place whose purpose is refusing to overstate capability. **A defect today, not only on 0.12**, and the reason ZMBNI-11 needs no `local-0.12` maintainer: the probes are the version mechanism. [roadmap.md RM-1](roadmap.md) **Fixed.** `capabilities()` reads `detect()`. Compaction is UNSUPPORTED on a build `unsupported_reason()` rejects, PARTIAL while equality deletes are unreadable, FULL otherwise; dangling-delete removal drops the whole-manifest caveat when a build can write a delete manifest; streaming writes are declared when present. The warehouse-derived limitation on `remove-orphans` is deliberately *not* probe-driven and pinned as such. Declarations now name the installed PyIceberg version | done | 2026-08-05 |
 | ZMBNI-1101 | The branch and the path dependency | `feature/pyiceberg-0.12` against the `../iceberg-python` checkout, with the lock-file consequence documented where someone will hit it | todo | |
 | ZMBNI-1102 | Re-probe and record the delta | Three of seven probes flip: streaming writes, manifest predicate pruning, and derives-delete-predicate, all False → True. The last two are the pair whose *split* would make Zamboni refuse to run; they land together, which is why this migration is lower risk than its size suggests. Assert the `doctor` output rather than describing it | todo | |
 | ZMBNI-1103 | Audit the private APIs we drive | The real work: 397 commits since 0.11.1. Known movers — `_scan_plan_helper` renamed to `_plan_manifest_entries`, `BaseScan`/`ManifestGroupPlanner` extracted, and `ManifestEntry.snapshot_id`'s setter fixed for writing to the wrong index, which `manifests.py` depends on preserving exactly | todo | |

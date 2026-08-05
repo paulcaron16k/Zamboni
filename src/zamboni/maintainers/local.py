@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ..capabilities import detect
 from . import (
     EngineConfigProblem,
     Maintainer,
@@ -47,20 +48,25 @@ class LocalMaintainer(Maintainer):
 
     @classmethod
     def capabilities(cls) -> MaintainerCapabilities:
+        """Derived from the installed PyIceberg, not hardcoded.
+
+        Three of these claims are properties of the *library*, not of this
+        package: whether a delete manifest can be written, whether equality
+        deletes can be read, whether the writer bin-packs a stream. They were
+        written out as constants here, which made ``zamboni engines`` a static
+        assertion about a dynamic thing -- wrong on any install whose probes
+        differ, in the one place whose purpose is refusing to overstate
+        capability (ZMBNI-1107).
+
+        This is also the reason there is no ``local-0.12`` maintainer. The probes
+        are the version mechanism; a version-named engine would be the version
+        comparison ``capabilities.py`` exists to avoid. See docs/roadmap.md RM-1.
+        """
+        probes = detect()
         return MaintainerCapabilities(
             engine=cls.name,
             operations={
-                Operation.COMPACT: OperationSupport(
-                    Operation.COMPACT,
-                    Support.FULL,
-                    can_preview=True,
-                    invariants=(
-                        *PREVIEWS_EVERYTHING,
-                        "commits the whole run in one snapshot unless --partial-progress",
-                        "aborts on a row-count mismatch before committing",
-                        "refuses a PyIceberg build that would corrupt the table",
-                    ),
-                ),
+                Operation.COMPACT: cls._compact_support(probes),
                 Operation.EXPIRE: OperationSupport(
                     Operation.EXPIRE,
                     Support.FULL,
@@ -75,6 +81,9 @@ class LocalMaintainer(Maintainer):
                     Operation.REMOVE_ORPHANS,
                     Support.PARTIAL,
                     can_preview=True,
+                    # Not probe-derived: this is a property of the *warehouse*,
+                    # not the library. A remote-signing Lakekeeper refuses the
+                    # listing however new PyIceberg is.
                     limitations=(
                         (
                             "needs a bucket listing, which a remote-signing warehouse "
@@ -83,20 +92,7 @@ class LocalMaintainer(Maintainer):
                     ),
                     invariants=RECLAIM_INVARIANTS,
                 ),
-                Operation.REMOVE_DANGLING_DELETES: OperationSupport(
-                    Operation.REMOVE_DANGLING_DELETES,
-                    Support.PARTIAL,
-                    can_preview=True,
-                    limitations=(
-                        (
-                            "drops whole delete manifests only; a partially dangling "
-                            "manifest is left alone because ManifestWriterV2.content() "
-                            "returns DATA unconditionally, so PyIceberg cannot write a "
-                            "delete manifest (ZMBNI-604, still true on 0.12)"
-                        ),
-                    ),
-                    invariants=PREVIEWS_EVERYTHING,
-                ),
+                Operation.REMOVE_DANGLING_DELETES: cls._dangling_support(probes),
                 Operation.REWRITE_MANIFESTS: OperationSupport(
                     Operation.REWRITE_MANIFESTS,
                     Support.FULL,
@@ -116,6 +112,85 @@ class LocalMaintainer(Maintainer):
                     ),
                 ),
             },
+        )
+
+    @staticmethod
+    def _compact_support(probes) -> OperationSupport:
+        """Compaction is the operation the probes actually gate.
+
+        An unusable build is UNSUPPORTED rather than PARTIAL: ``unsupported_reason``
+        is the check that stops a rewrite which would double-count rows, and
+        declaring that as a caveat on a working operation would understate it.
+        """
+        invariants = [
+            *PREVIEWS_EVERYTHING,
+            "commits the whole run in one snapshot unless --partial-progress",
+            "aborts on a row-count mismatch before committing",
+            "refuses a PyIceberg build that would corrupt the table",
+        ]
+        if probes.streaming_write_supported:
+            invariants.append("delegates bin-packing to PyIceberg's streaming writer")
+
+        if reason := probes.unsupported_reason():
+            return OperationSupport(
+                Operation.COMPACT,
+                Support.UNSUPPORTED,
+                can_preview=False,
+                limitations=(f"this PyIceberg build cannot be used: {reason}",),
+            )
+        if not probes.equality_deletes_readable:
+            return OperationSupport(
+                Operation.COMPACT,
+                Support.PARTIAL,
+                can_preview=True,
+                limitations=(
+                    (
+                        f"PyIceberg {probes.version} cannot read equality deletes, so a "
+                        "table carrying them is refused rather than compacted without "
+                        "them -- doing otherwise would resurrect deleted rows"
+                    ),
+                ),
+                invariants=tuple(invariants),
+            )
+        return OperationSupport(
+            Operation.COMPACT,
+            Support.FULL,
+            can_preview=True,
+            invariants=tuple(invariants),
+        )
+
+    @staticmethod
+    def _dangling_support(probes) -> OperationSupport:
+        """Whole-manifest-only is a property of the installed writer.
+
+        ``ManifestWriterV2.content()`` returning DATA unconditionally is what
+        limits this to dropping entire delete manifests. When a build can write
+        a delete manifest, the limitation is gone and this must stop claiming it
+        (ZMBNI-604).
+        """
+        if probes.delete_manifests_writable:
+            return OperationSupport(
+                Operation.REMOVE_DANGLING_DELETES,
+                Support.FULL,
+                can_preview=True,
+                invariants=(
+                    *PREVIEWS_EVERYTHING,
+                    "rewrites a partially dangling delete manifest rather than leaving it alone",
+                ),
+            )
+        return OperationSupport(
+            Operation.REMOVE_DANGLING_DELETES,
+            Support.PARTIAL,
+            can_preview=True,
+            limitations=(
+                (
+                    "drops whole delete manifests only; a partially dangling manifest "
+                    "is left alone because ManifestWriterV2.content() returns DATA "
+                    f"unconditionally in PyIceberg {probes.version}, so it cannot write "
+                    "a delete manifest (ZMBNI-604)"
+                ),
+            ),
+            invariants=PREVIEWS_EVERYTHING,
         )
 
     def execute(
