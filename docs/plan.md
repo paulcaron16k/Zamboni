@@ -133,7 +133,7 @@ test stops existing, so this table cannot rot silently.
 |---|---|---|
 | FR-6.1 | `describe` and `plan` change nothing | `test_describe_is_read_only`, `test_plan_is_read_only` |
 | FR-6.2 | No mutating verb commits without `--yes`, and each says it is previewing | `test_no_verb_mutates_without_yes`, `test_compact_previews_without_consent`, `test_compact_dry_run_changes_nothing`, `test_every_mutating_verb_says_what_omitting_yes_does` |
-| FR-6.3 | Bounded memory: peak ≈ one output file | `test_chunked_mode_splits_output_by_target_size`, `test_chunked_mode_with_sort_routes_through_duckdb` |
+| FR-6.3 | Bounded memory: peak ≈ one output file | `test_chunked_mode_splits_output_by_target_size`, `test_chunked_mode_with_sort_routes_through_duckdb`, `test_unpartitioned_chunked_output_is_correct_either_way`, `test_streaming_is_only_used_where_pyiceberg_supports_it` |
 | FR-6.4 | Refuse to run on a PyIceberg build that would corrupt a table | `test_pruning_without_derivation_is_refused`, `test_missing_operation_argument_is_refused` |
 | FR-6.5 | Non-zero exit on a blocked table | `test_blocked_table_exits_nonzero` |
 | FR-6.6 | A concurrent write is refused, not lost | `test_concurrent_write_is_refused_not_lost` |

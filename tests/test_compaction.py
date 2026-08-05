@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from zamboni import CompactionConfig, MemoryMode, TableCompactor
@@ -324,3 +326,86 @@ def test_a_failed_atomic_run_leaves_no_referenced_file_missing(session, partitio
     assert referenced <= on_disk, (
         f"{len(referenced - on_disk)} referenced file(s) were deleted by the cleanup"
     )
+
+
+# -- ZMBNI-1104: the streaming write path ---------------------------------
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+def test_unpartitioned_chunked_output_is_correct_either_way(
+    session, unpartitioned, monkeypatch, streaming
+):
+    """Both branches of the chunked write, forced, on whatever is installed.
+
+    An unpartitioned CHUNKED rewrite either hands the reader to PyIceberg's
+    streaming writer or bin-packs locally, decided by
+    `capabilities.streaming_write_supported`. Until PyIceberg 0.12 that probe was
+    always False, so the streaming branch had **never executed** -- and both
+    existing chunked tests use a partitioned table, which takes the local branch
+    regardless. It fires for real on 0.12, so it needs pinning rather than
+    inheriting whichever answer the installed build happens to give.
+    """
+    from zamboni.backends import duckdb_arrow
+    from zamboni.capabilities import detect
+
+    if streaming and not detect().streaming_write_supported:
+        # Forcing the probe True on a build with no streaming writer is not a
+        # configuration that can exist -- PyIceberg raises AttributeError inside
+        # its own writer. Skipping proves the probe is load-bearing rather than
+        # decorative: this branch is unreachable before 0.12.
+        pytest.skip("installed PyIceberg has no streaming write path")
+
+    probes = replace(detect(), streaming_write_supported=streaming)
+    monkeypatch.setattr(duckdb_arrow, "detect", lambda: probes)
+
+    before = rows(unpartitioned)
+    TableCompactor(
+        session,
+        "db.unpartitioned",
+        CompactionConfig(
+            memory_mode=MemoryMode.CHUNKED, target_file_size_bytes=200, rewrite_all=True
+        ),
+    ).execute()
+
+    tbl = session.table("db.unpartitioned")
+    assert rows(tbl) == before, "the streaming path must not change the data"
+    assert profile_table(tbl).live_files, "nothing was written"
+
+
+def test_streaming_is_only_used_where_pyiceberg_supports_it(session, partitioned, monkeypatch):
+    """Partitioned streaming is unsupported upstream (apache/iceberg-python#2152).
+
+    So the local bin-packer cannot be retired even on 0.12 -- which is the
+    answer to ZMBNI-1104's "measure before deleting". Pinned because the
+    temptation on seeing the probe go True is to delete `_bin_pack` entirely.
+    """
+    from zamboni.backends import duckdb_arrow
+    from zamboni.capabilities import detect
+
+    used_local_binpack = False
+    original = duckdb_arrow._bin_pack
+
+    def spy(reader, target_bytes):
+        nonlocal used_local_binpack
+        used_local_binpack = True
+        yield from original(reader, target_bytes)
+
+    if not detect().streaming_write_supported:
+        pytest.skip("installed PyIceberg has no streaming write path")
+
+    monkeypatch.setattr(
+        duckdb_arrow, "detect", lambda: replace(detect(), streaming_write_supported=True)
+    )
+    monkeypatch.setattr(duckdb_arrow, "_bin_pack", spy)
+
+    before = rows(partitioned)
+    TableCompactor(
+        session,
+        "db.partitioned",
+        CompactionConfig(
+            memory_mode=MemoryMode.CHUNKED, target_file_size_bytes=200, rewrite_all=True
+        ),
+    ).execute()
+
+    assert used_local_binpack, "a partitioned table must still bin-pack locally"
+    assert rows(session.table("db.partitioned")) == before
