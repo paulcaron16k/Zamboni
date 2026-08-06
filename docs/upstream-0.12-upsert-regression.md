@@ -1,5 +1,7 @@
 # PyIceberg 0.12: `upsert` duplicates rows on a partitioned table
 
+**Filed upstream as [apache/iceberg-python#3758](https://github.com/apache/iceberg-python/issues/3758)** on 2026-08-06.
+
 **Status: blocks ZMBNI-11, and is why `pyproject.toml` caps PyIceberg at
 `<0.12`.** Found by ZMBNI-1103 while auditing what unreleased PyIceberg
 changes. This is an upstream defect, not ours, and the reproduction below uses
@@ -66,6 +68,11 @@ replacement, and `('b', 1)` — a row the upsert never targeted — is duplicate
 
 **The partition spec is required to reproduce.** The same script on an
 unpartitioned table is correct on both versions.
+
+**Still live at the time of filing.** `origin/main` had moved 19 commits past
+the tested `154288fb`, but `snapshot.py` and `upsert_util.py` are byte-identical
+between the two -- and that newer head is `version = "0.12.0"`, so the release
+is close and would carry this.
 
 ---
 
