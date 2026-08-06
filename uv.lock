@@ -2162,8 +2162,8 @@ dev = [
 requires-dist = [
     { name = "duckdb", specifier = ">=1.5.0" },
     { name = "pyarrow", specifier = ">=18" },
-    { name = "pyiceberg", extras = ["pyarrow"], specifier = ">=0.11.1" },
-    { name = "pyiceberg", extras = ["sql-sqlite"], marker = "extra == 'sql'", specifier = ">=0.11.1" },
+    { name = "pyiceberg", extras = ["pyarrow"], specifier = ">=0.11.1,<0.12" },
+    { name = "pyiceberg", extras = ["sql-sqlite"], marker = "extra == 'sql'", specifier = ">=0.11.1,<0.12" },
     { name = "pyiceberg-core", marker = "extra == 'bucket'", specifier = ">=0.5.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyyaml", specifier = ">=6.0" },

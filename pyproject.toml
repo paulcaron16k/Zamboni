@@ -9,7 +9,16 @@ description = "Iceberg table maintenance (compaction) for MinIO + Lakekeeper, wi
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "pyiceberg[pyarrow]>=0.11.1",
+    # Upper bound deliberate, not caution. PyIceberg 0.12 corrupts data on a
+    # partitioned `upsert` -- it leaves the row it replaced *and* duplicates one
+    # it never touched, silently. Reproduced in 25 lines and recorded in
+    # docs/upstream-0.12-upsert-regression.md.
+    #
+    # Without a cap, the day 0.12 publishes any `uv lock --upgrade` pulls it in
+    # and nobody had to touch our code for that to happen. Lift it when 0.12 is
+    # released *and* the regression is fixed; the feature/pyiceberg-0.12 branch
+    # is where that is being tracked.
+    "pyiceberg[pyarrow]>=0.11.1,<0.12",
     "duckdb>=1.5.0",
     "pyarrow>=18",
     # zamboni.yml and .env: the DevOps surface (docs/devops.md), not optional.
@@ -24,7 +33,7 @@ s3 = ["s3fs>=2024.6.0"]
 # transform to its Rust core when writing.
 bucket = ["pyiceberg-core>=0.5.0"]
 # Local SQL catalog, used by the test suite and handy for dry runs.
-sql = ["pyiceberg[sql-sqlite]>=0.11.1"]
+sql = ["pyiceberg[sql-sqlite]>=0.11.1,<0.12"]
 # Only needed for `--engine trino`. Optional so nobody installs a query-engine
 # client to compact a table locally.
 trino = ["trino>=0.330.0"]

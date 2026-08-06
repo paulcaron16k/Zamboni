@@ -62,6 +62,29 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### SAFETY
 
+- **PyIceberg is now capped at `<0.12`.** 0.12 corrupts data on a partitioned
+  `upsert`: it leaves the row it replaced *and* duplicates one it never touched,
+  with no error. Reproduced in 25 lines — see
+  [docs/upstream-0.12-upsert-regression.md](docs/upstream-0.12-upsert-regression.md).
+  The previous `>=0.11.1` had an open upper bound, so the day 0.12 published,
+  any `uv lock --upgrade` would have pulled it in without anyone touching this
+  code. The cap lifts when 0.12 is released *and* the regression is fixed.
+
+- **The equality-delete capability probe could report a false positive.** It
+  inspected `DataScan._plan_files_local` for PyIceberg's refusal string. That
+  method holds the guard inline in 0.11.1, but newer PyIceberg extracted the
+  planner and left it a five-line delegation — so the probe found nothing and
+  reported equality deletes as *readable* while the refusal was alive one call
+  deeper. On the probe whose job is stopping compaction from resurrecting
+  deleted rows. It now searches the whole `pyiceberg.table` module, and a test
+  fails if it is ever narrowed back.
+
+- **Partition evolution no longer relies on upstream manifest pruning.** Newer
+  PyIceberg appends a manifest its partition-predicate evaluator does not match
+  *verbatim*, entries being deleted included — which duplicated rows on a
+  multi-spec commit. `_surviving_manifests()` matches entries directly instead.
+  Correct on 0.11.1 and on 0.12; no behaviour change on the released line.
+
 - **Orphan removal now refuses when another table shares this table's location.**
   Previously it deleted that table's files. `0.1.0` scoped the sweep to the
   table's own roots, which prevents a warehouse-wide sweep but does not prevent a
