@@ -111,9 +111,7 @@ def detect() -> PyIcebergCapabilities:
         prunes_manifests_by_predicate=_mentions(
             _OverwriteFiles._existing_manifests, "manifest_evaluator", if_unavailable=True
         ),
-        derives_delete_predicate=hasattr(
-            _SnapshotProducer, "_build_delete_files_partition_predicate"
-        ),
+        derives_delete_predicate=_derives_delete_predicate(_SnapshotProducer),
         # Unknown -> assume the "unsupported" guard is present, i.e. NOT
         # readable. Failing the other way would drop the equality-delete
         # blocker and let compaction resurrect deleted rows.
@@ -123,6 +121,30 @@ def detect() -> PyIcebergCapabilities:
         # delete manifest into one labelled as data.
         delete_manifests_writable=_delete_manifests_writable(),
     )
+
+
+#: Names PyIceberg has given the "derive a predicate from the removed files"
+#: step. It was ``_build_delete_files_partition_predicate`` when pruning first
+#: appeared; the fix for the 0.12 upsert regression renames it to
+#: ``_build_delete_files_partition_filters``, because the predicate moved from
+#: the source-column domain to the partition-field domain -- which is what makes
+#: manifest pruning correct across transforms.
+DERIVATION_METHODS = (
+    "_build_delete_files_partition_filters",
+    "_build_delete_files_partition_predicate",
+)
+
+
+def _derives_delete_predicate(producer: type) -> bool:
+    """Does the producer derive its pruning predicate from the removed files?
+
+    Matching a *set* of names rather than one, because the single-name version
+    turned a rename into "this build is unusable". That is the safe direction --
+    Zamboni refuses rather than risking double-counted rows -- but it is still
+    wrong, and it would have refused every build carrying the fix for
+    apache/iceberg-python#3758.
+    """
+    return any(hasattr(producer, name) for name in DERIVATION_METHODS)
 
 
 def _guard_anywhere_in_scan_planning() -> bool:

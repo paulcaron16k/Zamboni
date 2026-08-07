@@ -158,3 +158,26 @@ def test_doctor_reports_the_installed_version_and_every_probe():
         if field.name == "version":
             continue
         assert str(getattr(caps, field.name)) in text, f"{field.name} missing from doctor output"
+
+
+def test_the_derivation_probe_survives_a_rename():
+    """A single-name `hasattr` turned an upstream rename into "unusable".
+
+    PyIceberg called this `_build_delete_files_partition_predicate` when manifest
+    pruning first appeared, and renamed it to
+    `_build_delete_files_partition_filters` in the fix for
+    apache/iceberg-python#3758 -- because the predicate moved from the
+    source-column domain to the partition-field domain, which is what makes
+    pruning correct across transforms.
+
+    Matching one name meant Zamboni refused to run on every build carrying that
+    fix. The safe direction, but still wrong.
+    """
+    from zamboni.capabilities import DERIVATION_METHODS, _derives_delete_predicate
+
+    assert len(DERIVATION_METHODS) >= 2, "a single name is what caused the false negative"
+
+    for name in DERIVATION_METHODS:
+        assert _derives_delete_predicate(type("Producer", (), {name: lambda self: None}))
+
+    assert not _derives_delete_predicate(type("Producer", (), {}))

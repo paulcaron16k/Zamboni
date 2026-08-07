@@ -165,6 +165,33 @@ ZMBNI-604 and 704–706 stay blocked. 0.12 lifts neither.
 
 ---
 
+## Status: a fix exists and it works
+
+A fix was written against `7d0f5031` and verified here on 2026-08-06. It builds
+the pruning filter over **partition field names and transformed values** —
+already in the domain a manifest evaluator binds against — instead of over
+source columns, which is exactly the mismatch above.
+
+Measured against it:
+
+| | |
+|---|---|
+| All seven partition transforms | correct, including the four temporal ones |
+| Zamboni full suite on 0.12.0 | **434 passed, 0 failed**, dev stack live |
+
+That is the first clean run on 0.12. It also means the remaining demo failures
+recorded above were entirely this one defect.
+
+**It renames `_build_delete_files_partition_predicate` to
+`_build_delete_files_partition_filters`**, which broke our derivation probe: a
+single-name `hasattr` reported no derivation, `manifest_pruning_is_safe` went
+false, and Zamboni refused to run on the very build that fixes the bug. The safe
+direction, and still wrong. The probe now matches a set of names
+(`DERIVATION_METHODS`), pinned by
+`test_the_derivation_probe_survives_a_rename`.
+
+---
+
 ## Consequences for ZMBNI-11
 
 0.12 cannot be adopted for a deployment that upserts into partitioned tables
