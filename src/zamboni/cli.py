@@ -618,7 +618,25 @@ def _request_for(args: argparse.Namespace) -> MaintenanceRequest:
     # needs either -- the reclaim verbs take no compaction arguments at all.
     compaction = None
     if args.command in ("compact", "maintenance"):
-        compaction = _operational_config(args) if table_config else _config_from(args)
+        if table_config is None:
+            compaction = _config_from(args)
+        else:
+            # Translate the file's declared *layout* -- ordering, sizing -- on top
+            # of the operational flags. Passing only `_operational_config` here
+            # meant `ordering.mode: zorder` never left the config file for any
+            # non-local engine, because `config_from_table_settings` is otherwise
+            # reached solely through `TableCompactor.from_table_config`. Spark is
+            # the one other engine that can Z-order, so the capability was real
+            # in the maintainer and unreachable from the CLI.
+            from .config import config_from_table_settings
+
+            table = getattr(args, "table", None)
+            settings = (
+                table_config.for_table(table)
+                if table and table in table_config.tables
+                else DEFAULT_SETTINGS
+            )
+            compaction = config_from_table_settings(settings, _operational_config(args))
     return MaintenanceRequest(
         retention=_retention_for(args),
         compaction=compaction,
@@ -857,10 +875,15 @@ def _already_fulfilled(session: CatalogSession, args: argparse.Namespace, operat
     the fulfilling operation actually ran: a profile listing
     `remove-dangling-deletes` without `compact` still gets its work done.
     """
-    try:
-        support = _maintainer_for(session, args).capabilities().of(operation)
-    except Exception:  # pragma: no cover - capability lookup must not fail a run
-        return None
+    # No try/except. An earlier version swallowed everything here with the
+    # comment "capability lookup must not fail a run", which was not true: the
+    # very next step calls the same `capabilities()` through `check_supported`,
+    # unguarded, so a genuine failure surfaced moments later anyway -- with a
+    # worse stack trace, and after silently skipping the skip. Worse, returning
+    # None on error means "not fulfilled", so a lookup failure would cause the
+    # double-run this function exists to prevent: a silent wrong answer where a
+    # refusal belongs.
+    support = _maintainer_for(session, args).capabilities().of(operation)
     if support.fulfilled_by and support.fulfilled_by in done:
         return support.fulfilled_by
     return None

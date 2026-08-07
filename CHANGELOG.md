@@ -61,6 +61,13 @@ Two categories beyond the usual set, because this tool deletes files:
   credentials even though every other operation runs on the catalog's vended
   ones.
 
+  The timestamp carries an **explicit `+00:00` offset**. A bare wall-clock is
+  read in `spark.sql.session.timeZone`, not UTC — measured against a live
+  session in `America/New_York`, every expiry cut four hours deeper than asked,
+  and a 1-day orphan guard fell under Spark's 24-hour floor. Setting the
+  operator's session timezone would have been the wrong fix; the offset makes
+  the literal unambiguous without touching their session.
+
 - **`--engine trino`** — five of the six operations, over `ALTER TABLE … EXECUTE`.
   Needs the optional `zamboni[trino]` extra. Configure with `--trino-host`,
   `--trino-port`, `--trino-user`, `--trino-catalog` and `--trino-version`, or the
@@ -75,7 +82,31 @@ Two categories beyond the usual set, because this tool deletes files:
   so it is gated on `--trino-version` and its loss is reported rather than
   silent.
 
+### Fixed
+
+- **Z-order was unreachable from the CLI on any engine but the local one.**
+  `table-config.json` ordering was translated into a compaction config only on
+  the local path, so `--engine spark --table-config …` silently compacted
+  without the ordering the file asked for. The translation now happens for every
+  engine.
+
 ### SAFETY
+
+- **Spark identifiers containing a backtick could target a different table.**
+  The plain string a Spark procedure takes was derived by stripping every
+  backtick off the quoted form, but `quote()` doubles an embedded backtick to
+  escape it — so ``we`ird.ta-ble`` reached `remove_orphan_files` and
+  `expire_snapshots` as `weird.ta-ble`, a different table, with no error. Found
+  by an independent review before any release carried it. The plain form is now
+  built from the original name and never by unquoting.
+
+- **Spark compaction ignored the dangling-delete settings.** The
+  `remove-dangling-deletes` option was hard-coded `true`, so an operator who
+  disabled that removal in `table-config.json`, or set `dangling_delete_policy:
+  block` specifically so compaction would refuse rather than touch delete files,
+  got them deleted anyway and silently. It now follows the config, and the
+  coupling is declared in `zamboni engines` so the side effect is discoverable
+  from `compact` rather than only from the operation it rides on.
 
 - **PyIceberg is now capped at `<0.12`.** 0.12 corrupts data on a partitioned
   `upsert`: it leaves the row it replaced *and* duplicates one it never touched,

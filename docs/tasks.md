@@ -49,7 +49,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 > order. The numbers follow [roadmap.md](roadmap.md)'s RM-1…RM-6 so the two documents agree on
 > identity; the sequence is explained in each section's subtitle.
 
-**Story counts:** 87 done · 1 inproject · 16 todo · 1 cancelled  (105 stories)
+**Story counts:** 88 done · 1 inproject · 16 todo · 1 cancelled  (106 stories)
 
 ---
 
@@ -269,6 +269,7 @@ Last: the largest dependency footprint for the engine that overlaps us most.
 | ZMBNI-1504 | `remove-orphans` | `remove_orphan_files`, and it produced two findings that only a live run gives. Spark **refuses any interval under 24 hours**, hard-coded — a third floor behaviour across three engines — and exactly 1 day is refused too, because the timestamp is computed here and evaluated moments later. And it **lists with Hadoop FileSystem, not Iceberg FileIO**, so it needs its own `spark.hadoop.fs.s3a.*` credentials even though every other operation runs on the catalog's vended ones | done | 2026-08-07 |
 | ZMBNI-1505 | Dangling deletes via `rewrite_position_delete_files` | Not a standalone procedure: it is the `remove-dangling-deletes` option on `rewrite_data_files`, which the ZMBNI-13 analysis established and this implements. Both operations emit the same statement, and `maintenance` now **skips the second** — `OperationSupport.fulfilled_by` finally acts rather than documenting. Without it a Spark run would compact twice, the second time to no effect | done | 2026-08-07 |
 | ZMBNI-1506 | Live verification | Against a real Spark 3.5.9 driving Lakekeeper and MinIO: all five operations succeed, 6 data files to 1, 60 rows unchanged. Java 11 caps us at Spark 3.x — Spark 4 needs 17 — which the `>=3.5,<5` range permits but a deployment must know | done | 2026-08-07 |
+| ZMBNI-1507 | Independent review and revise | Reviewed by a second model, five findings, all real. The identifier one was the serious one: the plain procedure argument was derived by stripping backticks off the *quoted* form, and `quote()` doubles an embedded backtick to escape it — so ``we`ird.ta-ble`` became ``weird.ta-ble``, a different table, targeted with no error by operations that delete files. Also: `remove-dangling-deletes` was hard-coded `true`, overriding both the retention setting and a `block` policy; Z-order was unreachable from the CLI for any non-local engine because table-config ordering was only translated on the local path; the expiry timestamp carried no offset and was read in `spark.sql.session.timeZone` (measured: four hours deeper than asked); and the preview flag was spliced in with `str.replace` after the statement was built | done | 2026-08-07 |
 
 ---
 

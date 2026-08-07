@@ -529,14 +529,14 @@ def spark_request(**compaction):
             Operation.EXPIRE,
             (
                 "CALL system.expire_snapshots(table => 'iceberg.db.events', "
-                "older_than => TIMESTAMP '2026-07-31 12:00:00', retain_last => 2)"
+                "older_than => TIMESTAMP '2026-07-31 12:00:00+00:00', retain_last => 2)"
             ),
         ),
         (
             Operation.REMOVE_ORPHANS,
             (
                 "CALL system.remove_orphan_files(table => 'iceberg.db.events', "
-                "older_than => TIMESTAMP '2026-07-31 12:00:00')"
+                "older_than => TIMESTAMP '2026-07-31 12:00:00+00:00')"
             ),
         ),
         (
@@ -566,7 +566,7 @@ def test_expire_takes_a_timestamp_where_trino_takes_a_duration():
     """
     sql = spark().statement_for(Operation.EXPIRE, "db.events", spark_request())
 
-    assert "older_than => TIMESTAMP '2026-07-31 12:00:00'" in sql
+    assert "older_than => TIMESTAMP '2026-07-31 12:00:00+00:00'" in sql
     assert "'7d'" not in sql
     assert "current_timestamp()" not in sql, "an expression is rejected by Spark's parser"
 
@@ -657,3 +657,91 @@ def test_spark_identifiers_are_backtick_quoted():
     sql = spark().statement_for(Operation.APPLY_PROPERTIES, "we`ird.ta-ble", spark_request())
 
     assert "ALTER TABLE `iceberg`.`we``ird`.`ta-ble`" in sql
+
+
+# -- review findings (independent review of ZMBNI-15) ---------------------
+
+
+def test_a_backticked_identifier_survives_into_the_procedure_argument():
+    """The first implementation derived the plain identifier by stripping every
+    backtick off the quoted form. `quote()` doubles an embedded backtick to
+    escape it, so stripping collapsed the escape and the delimiters together and
+    ``we`ird.ta-ble`` silently became ``weird.ta-ble`` -- a *different table*,
+    targeted with no error, by operations that delete files."""
+    sql = spark().statement_for(Operation.REWRITE_MANIFESTS, "we`ird.ta-ble", spark_request())
+
+    assert "table => 'iceberg.we`ird.ta-ble'" in sql
+    assert "weird" not in sql
+
+
+def test_the_timestamp_carries_an_explicit_utc_offset():
+    """A bare wall-clock is read in `spark.sql.session.timeZone`, not UTC.
+
+    Verified against a live session in America/New_York: our UTC value was
+    shifted four hours later, so every expiry cut deeper than asked, and a
+    1-day orphan interval fell under Spark's 24h floor. The offset removes the
+    ambiguity without touching the operator's session timezone.
+    """
+    sql = spark().statement_for(Operation.EXPIRE, "db.events", spark_request())
+
+    assert "TIMESTAMP '2026-07-31 12:00:00+00:00'" in sql
+
+
+@pytest.mark.parametrize(
+    ("retention_enabled", "policy", "expected"),
+    [
+        (True, "report", "true"),
+        (False, "report", "false"),
+        (True, "block", "false"),
+    ],
+)
+def test_compaction_honours_the_dangling_delete_settings(retention_enabled, policy, expected):
+    """Hard-coded `true` meant an operator who disabled dangling-delete removal,
+    or set `block` specifically so compaction would refuse rather than touch
+    delete files, got them deleted anyway and silently. Iceberg's option accepts
+    false; nothing forced the hard-coding."""
+    from zamboni.config import CompactionConfig
+    from zamboni.tableconfig import RemoveDanglingDeletesSettings
+
+    request = MaintenanceRequest(
+        retention=replace(
+            full_retention().retention,
+            remove_dangling_deletes=RemoveDanglingDeletesSettings(enabled=retention_enabled),
+        ),
+        compaction=CompactionConfig(dangling_delete_policy=policy),
+    )
+
+    sql = spark().statement_for(Operation.COMPACT, "db.events", request)
+
+    assert f"'remove-dangling-deletes', '{expected}'" in sql
+
+
+def test_compact_declares_the_dangling_delete_side_effect():
+    """An operator reading `zamboni engines` for `compact` must be able to learn
+    that it also touches delete files. Previously that coupling was recorded
+    only under remove-dangling-deletes."""
+    support = SparkMaintainer.capabilities().of(Operation.COMPACT)
+
+    assert any("dangling" in invariant for invariant in support.invariants)
+
+
+def test_the_preview_flag_is_an_argument_not_a_string_splice():
+    """`execute` used to add the flag by `str.replace`-ing the built statement,
+    so a preview that failed to match its own needle would silently delete for
+    real. Asking the builder for it means there is nothing to mismatch."""
+    maintainer = spark()
+
+    preview = maintainer.statement_for(
+        Operation.REMOVE_ORPHANS, "db.events", spark_request(), dry_run=True
+    )
+    live = maintainer.statement_for(Operation.REMOVE_ORPHANS, "db.events", spark_request())
+
+    assert "dry_run => true" in preview
+    assert "dry_run" not in live
+
+
+def test_no_other_operation_can_be_asked_for_a_preview():
+    """`can_preview` says only remove-orphans previews; the builder must agree,
+    rather than accepting the flag and dropping it."""
+    with pytest.raises(PreviewUnavailable):
+        spark().execute(Operation.COMPACT, "db.events", request=spark_request(), dry_run=True)

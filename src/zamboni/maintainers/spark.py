@@ -109,11 +109,25 @@ def _days_ago(days: int) -> str:
     more than intended. Trino does not have this exposure, because a duration is
     resolved where the data is. Declared as a limitation rather than hidden.
     """
-    stamp = (_utc_now() - dt.timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-    # A *typed* literal. A bare string is parsed but then rejected: "Wrong arg
-    # type for older_than: cannot cast StringType to TimestampType". Both
-    # failures were found by running it -- the parser and the type checker want
-    # different things, and only the TIMESTAMP form satisfies both.
+    stamp = (_utc_now() - dt.timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S+00:00")
+    # A *typed* literal carrying an explicit offset. Three things had to be
+    # learned by running it:
+    #
+    #   `date_sub(current_timestamp(), 7)` -- rejected by the parser,
+    #       "mismatched input '(' expecting STRING".
+    #   `'2026-08-06 12:00:00'` -- rejected by the type checker, "cannot cast
+    #       StringType to TimestampType".
+    #   `TIMESTAMP '2026-08-06 12:00:00'` -- accepted, and **wrong**. A bare
+    #       wall-clock is read in `spark.sql.session.timeZone`, not UTC. Against
+    #       a session in America/New_York that shifted our UTC value four hours
+    #       later, so every expiry cut four hours deeper than asked. It is also
+    #       the real reason a 1-day orphan interval was refused: 24h minus the
+    #       offset falls under Spark's 24h floor. An earlier comment here blamed
+    #       the JVM start-up round trip, which is backwards -- elapsed time makes
+    #       an interval *longer*, not shorter.
+    #
+    # The offset removes the ambiguity without touching the operator's session
+    # timezone, which is not ours to change.
     return f"TIMESTAMP {_literal(stamp)}"
 
 
@@ -162,12 +176,20 @@ class SparkMaintainer(Maintainer):
                     can_preview=False,
                     invariants=(
                         (
+                            "also removes dangling deletes in the same statement, unless "
+                            "`remove_dangling_deletes` is disabled or "
+                            "`dangling_delete_policy` is `block` -- Spark has no standalone "
+                            "procedure, so the two operations share one call"
+                        ),
+                        (
                             "`partial-progress.enabled` defaults to false, so a run "
                             "commits once -- the same default Zamboni chose"
                         ),
                         (
-                            "can reorganise into a different partition spec during the "
-                            "rewrite via `output-spec-id`"
+                            "the procedure accepts `output-spec-id`, which would reorganise "
+                            "into a different partition spec during the rewrite. Zamboni "
+                            "does not expose it, so partition evolution stays a local-engine "
+                            "capability"
                         ),
                     ),
                 ),
@@ -214,8 +236,11 @@ class SparkMaintainer(Maintainer):
                             "abort-on-doubt posture as ours for a different failure"
                         ),
                         (
-                            "`file_list_view` can replace the directory listing entirely, "
-                            "which is the answer to a remote-signing warehouse"
+                            "the procedure also accepts `file_list_view`, which would "
+                            "replace the directory listing entirely -- the answer to a "
+                            "remote-signing warehouse. Zamboni does not expose it yet, so "
+                            "this is a property of Spark, not a capability you can reach "
+                            "from here (ZMBNI-1602)"
                         ),
                     ),
                 ),
@@ -283,10 +308,30 @@ class SparkMaintainer(Maintainer):
 
     # -- statement building: pure, so no JVM is needed to test it -----------
 
-    def statement_for(self, operation: Operation, table: str, request: MaintenanceRequest) -> str:
-        """The exact SQL this maintainer would run. No session needed."""
+    def statement_for(
+        self,
+        operation: Operation,
+        table: str,
+        request: MaintenanceRequest,
+        *,
+        dry_run: bool = False,
+    ) -> str:
+        """The exact SQL this maintainer would run. No session needed.
+
+        `dry_run` is a parameter rather than something `execute` splices in
+        afterwards. The first version did the splice -- a `str.replace` of
+        ``"CALL system.remove_orphan_files("`` -- which meant the preview flag
+        depended on the exact spelling of a string produced elsewhere: rename
+        the procedure, change the spacing in `_call`, and the replace silently
+        matches nothing and the "preview" deletes files for real. Building it
+        as an argument makes that class of failure impossible, and makes the
+        preview statement inspectable without running anything.
+        """
         self.check_supported(operation)
         target = qualified(table, catalog=self.catalog)
+        plain = self._plain(table)
+        if operation is Operation.REMOVE_ORPHANS:
+            return self._remove_orphans_sql(target, plain, request, dry_run=dry_run)
         builder = {
             Operation.COMPACT: self._compact_sql,
             Operation.EXPIRE: self._expire_sql,
@@ -295,9 +340,9 @@ class SparkMaintainer(Maintainer):
             Operation.REWRITE_MANIFESTS: self._rewrite_manifests_sql,
             Operation.APPLY_PROPERTIES: self._apply_properties_sql,
         }[operation]
-        return builder(target, request)
+        return builder(target, plain, request)
 
-    def _compact_sql(self, target: str, request: MaintenanceRequest) -> str:
+    def _compact_sql(self, target: str, plain: str, request: MaintenanceRequest) -> str:
         """``rewrite_data_files``, which also carries dangling-delete removal.
 
         Spark has no standalone procedure for dangling deletes -- it is the
@@ -306,8 +351,24 @@ class SparkMaintainer(Maintainer):
         declaration marks the operation ``fulfilled_by`` COMPACT, and why both
         route to this builder.
         """
-        arguments: list[tuple[str, str]] = [("table", _literal(self._plain(target)))]
-        options: list[tuple[str, str]] = [("remove-dangling-deletes", "true")]
+        arguments: list[tuple[str, str]] = [("table", _literal(plain))]
+
+        # Honour the settings rather than hard-coding "true", which is what the
+        # first version did -- so an operator who disabled dangling-delete
+        # removal in table-config.json, or set `dangling_delete_policy: block`
+        # specifically to make compaction refuse rather than touch delete files,
+        # got them deleted anyway and silently. Iceberg's option accepts false;
+        # nothing forced the hard-coding.
+        drop_dangling = request.retention.remove_dangling_deletes.enabled
+        if request.compaction is not None and request.compaction.dangling_delete_policy == "block":
+            # `block` means "refuse rather than proceed" on the local engine.
+            # Spark cannot express that mid-rewrite, so the honest translation
+            # is to not remove them and say so, rather than to silently do the
+            # opposite of what the policy asks.
+            drop_dangling = False
+        options: list[tuple[str, str]] = [
+            ("remove-dangling-deletes", "true" if drop_dangling else "false")
+        ]
 
         compaction = request.compaction
         if compaction is not None:
@@ -353,7 +414,7 @@ class SparkMaintainer(Maintainer):
             return str(compaction.sort_expression)
         return None
 
-    def _expire_sql(self, target: str, request: MaintenanceRequest) -> str:
+    def _expire_sql(self, target: str, plain: str, request: MaintenanceRequest) -> str:
         settings = request.retention.expire_snapshots
         days = (
             request.max_snapshot_age_days
@@ -365,7 +426,7 @@ class SparkMaintainer(Maintainer):
             if request.min_snapshots_to_keep is not None
             else settings.min_snapshots_to_keep
         )
-        arguments: list[tuple[str, str]] = [("table", _literal(self._plain(target)))]
+        arguments: list[tuple[str, str]] = [("table", _literal(plain))]
         if days is not None:
             # A timestamp here, where Trino takes a duration. The same setting,
             # two vocabularies -- which is what MaintenanceRequest exists for.
@@ -374,22 +435,31 @@ class SparkMaintainer(Maintainer):
             arguments.append(("retain_last", str(keep)))
         return _call("expire_snapshots", arguments)
 
-    def _remove_orphans_sql(self, target: str, request: MaintenanceRequest) -> str:
+    def _remove_orphans_sql(
+        self,
+        target: str,
+        plain: str,
+        request: MaintenanceRequest,
+        *,
+        dry_run: bool = False,
+    ) -> str:
         settings = request.retention.remove_orphan_files
         days = (
             request.older_than_days
             if request.older_than_days is not None
             else settings.older_than_days
         )
-        arguments: list[tuple[str, str]] = [("table", _literal(self._plain(target)))]
+        arguments: list[tuple[str, str]] = [("table", _literal(plain))]
+        if dry_run:
+            arguments.append(("dry_run", "true"))
         if days is not None:
             arguments.append(("older_than", _days_ago(days)))
         return _call("remove_orphan_files", arguments)
 
-    def _rewrite_manifests_sql(self, target: str, request: MaintenanceRequest) -> str:
-        return _call("rewrite_manifests", [("table", _literal(self._plain(target)))])
+    def _rewrite_manifests_sql(self, target: str, plain: str, request: MaintenanceRequest) -> str:
+        return _call("rewrite_manifests", [("table", _literal(plain))])
 
-    def _apply_properties_sql(self, target: str, request: MaintenanceRequest) -> str:
+    def _apply_properties_sql(self, target: str, plain: str, request: MaintenanceRequest) -> str:
         """Spark takes the Iceberg property names directly.
 
         Worth stating because Trino does not: there the same two settings need
@@ -413,14 +483,21 @@ class SparkMaintainer(Maintainer):
             )
         return f"ALTER TABLE {target} SET TBLPROPERTIES ({', '.join(pairs)})"
 
-    @staticmethod
-    def _plain(target: str) -> str:
-        """Procedure arguments take the identifier as a *string*, not quoted SQL.
+    def _plain(self, table: str) -> str:
+        """The identifier as a procedure argument: a plain string, not quoted SQL.
 
-        `CALL system.rewrite_data_files(table => 'db.events')` -- so the
-        backticks that belong in `ALTER TABLE` must not appear here.
+        Built from the original name, **never** by stripping backticks off the
+        quoted form. That was the first implementation and it silently corrupted
+        any name containing a backtick: ``quote()`` doubles an embedded backtick
+        to escape it, and stripping every backtick collapsed the escape and the
+        delimiters together, so ``we`ird.ta-ble`` became ``weird.ta-ble`` -- a
+        *different table*, targeted with no error, by operations that delete
+        files.
         """
-        return target.replace("`", "")
+        namespace, _, name = table.rpartition(".")
+        if not namespace:
+            raise ValueError(f"{table!r} has no namespace; expected <namespace>.<table>")
+        return f"{self.catalog}.{namespace}.{name}"
 
     # -- execution ------------------------------------------------------------
 
@@ -470,17 +547,12 @@ class SparkMaintainer(Maintainer):
         request: MaintenanceRequest,
         dry_run: bool,
     ) -> Reportable:
-        statement = self.statement_for(operation, table, request)
         if dry_run and not self.capabilities().can_preview(operation):
             raise PreviewUnavailable(
-                f"spark cannot preview {operation.value}. The statement would be: {statement}"
+                f"spark cannot preview {operation.value}. The statement would be: "
+                f"{self.statement_for(operation, table, request)}"
             )
-        if dry_run:
-            # remove_orphan_files is the one Spark procedure that previews.
-            statement = statement.replace(
-                "CALL system.remove_orphan_files(",
-                "CALL system.remove_orphan_files(dry_run => true, ",
-            )
+        statement = self.statement_for(operation, table, request, dry_run=dry_run)
 
         logger.info("spark: %s", statement)
         session = self.connect()
