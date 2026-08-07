@@ -17,10 +17,31 @@ from .backends.base import RewriteBackend, RewriteContext, RewriteOutput
 from .capabilities import PyIcebergCapabilities, detect
 from .committer import ConcurrentModification, ReplaceCommitter, UnsupportedPyIceberg
 from .compactor import CompactionBlocked, CompactionResult, TableCompactor
-from .config import CompactionConfig, MemoryMode
+from .config import CompactionConfig, MemoryMode, config_from_table_settings
+from .deletes import DanglingDeleteCleaner
+from .expire import RetentionPolicy, SnapshotExpirer
+from .maintainers import (
+    EngineConfigProblem,
+    Maintainer,
+    MaintainerCapabilities,
+    MaintenanceRequest,
+    Operation,
+    OperationSupport,
+    PreviewUnavailable,
+    Support,
+    UnsupportedOperation,
+)
+from .maintainers import available as available_engines
+from .maintainers import get as get_maintainer
+from .manifests import ManifestRewriter
+from .orphans import OrphanCleaner
 from .planner import CompactionPlan, CompactionPlanner, FileGroup
 from .profile import Finding, Severity, TableProfile, profile_table
+from .reachable import reachable_files
 from .session import CatalogSession, S3Settings
+from .settings import Profile
+from .settings import resolve as resolve_settings
+from .tableconfig import Retention, TableConfig, TableConfigError, TableSettings
 
 # Read from the installed distribution rather than repeated as a literal here.
 # pyproject.toml is the single source of truth, so `zamboni --version` cannot
@@ -57,6 +78,18 @@ def version_banner() -> str:
     return f"zamboni {__version__} (pyiceberg {pyiceberg}, python {python})"
 
 
+#: The supported API. Everything here is covered by the compatibility promise in
+#: docs/releasing.md; anything reachable but absent from this list is internal
+#: and may move in a patch release.
+#:
+#: This was compaction-only until ZMBNI-915 -- `TableCompactor` and its
+#: config, and nothing for the other five operations. An application that
+#: wanted to expire snapshots had to import `zamboni.expire`, which is exactly
+#: the kind of private-path dependency a public surface exists to prevent. The
+#: engine-neutral entry point for an integrator is `get_maintainer`; the
+#: operation classes below are the local engine's own vocabulary and are
+#: exported because `--engine local` is the default and its results carry
+#: detail the generic `Reportable` does not.
 __all__ = [
     "CatalogSession",
     "CompactionBlocked",
@@ -65,21 +98,45 @@ __all__ = [
     "CompactionPlanner",
     "CompactionResult",
     "ConcurrentModification",
+    "DanglingDeleteCleaner",
+    "EngineConfigProblem",
     "FileGroup",
     "Finding",
+    "Maintainer",
+    "MaintainerCapabilities",
+    "MaintenanceRequest",
+    "ManifestRewriter",
     "MemoryMode",
+    "Operation",
+    "OperationSupport",
+    "OrphanCleaner",
+    "PreviewUnavailable",
+    "Profile",
     "PyIcebergCapabilities",
     "ReplaceCommitter",
+    "Retention",
+    "RetentionPolicy",
     "RewriteBackend",
     "RewriteContext",
     "RewriteOutput",
     "S3Settings",
     "Severity",
+    "SnapshotExpirer",
+    "Support",
     "TableCompactor",
+    "TableConfig",
+    "TableConfigError",
     "TableProfile",
+    "TableSettings",
+    "UnsupportedOperation",
     "UnsupportedPyIceberg",
     "__version__",
+    "available_engines",
+    "config_from_table_settings",
     "detect",
+    "get_maintainer",
     "profile_table",
+    "reachable_files",
+    "resolve_settings",
     "version_banner",
 ]

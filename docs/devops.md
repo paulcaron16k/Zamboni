@@ -125,7 +125,7 @@ acme, after:
 
 This is what makes a nightly log answer "did it help" without a second tool. The
 numbers to watch, and what they mean when they go the wrong way, are in
-[runbook.md §4](runbook.md).
+[runbook.md §3](runbook.md).
 
 ---
 
@@ -195,7 +195,7 @@ What Zamboni owns is doing the work correctly and reporting what happened.
 
 ### When one customer fails
 
-Exit codes are unchanged from [runbook.md §5](runbook.md) — 0 success, 2 usage,
+Exit codes are unchanged from [runbook.md §1](runbook.md) — 0 success, 2 usage,
 3 refused, 4 a safety check aborted — and `maintenance` returns the *worst* code
 any operation produced, so a partial failure is never reported as success.
 

@@ -105,6 +105,44 @@ Two categories beyond the usual set, because this tool deletes files:
   Its session timezone is deliberately not UTC, because a UTC server cannot
   distinguish a correct timestamp literal from one missing its offset.
 
+- **[docs/user_guide.md](docs/user_guide.md)** — four ways to run Zamboni, for
+  two audiences. A capability table that leads with Z-order, because that is the
+  row a small deployment should choose an engine on and the one where the
+  obvious choice (Trino) is the wrong one. Secrets posture, a multi-warehouse
+  SaaS loop, and transient-engine scripts for Trino and Spark.
+
+- **A public API.** `zamboni.__all__` was compaction-only, so an application
+  that wanted to expire snapshots had to import `zamboni.expire` — a private
+  path. It now exports the maintainer interface, the config types and the local
+  operation classes, and states the compatibility promise on the list itself.
+
+- **`zamboni table-config generate|validate|summary`** — `generate` writes a
+  config describing the catalog *as it is today*, so the first run against it
+  changes nothing but file sizes. `summary` answers what `validate` does not:
+  what the file would *do*, marking every value that came from a default,
+  naming what an unset knob resolves to instead of printing `None`, and
+  flagging the settings that silently do nothing on the wrong engine.
+  `validate-config` remains as an alias.
+
+- **[docs/runbook-dev.md](docs/runbook-dev.md)** — the developer half of the
+  runbook: running each step by hand, the six-verb order and why each position
+  matters, cadence arithmetic, sizing the orphan guard, the dev stack.
+  [docs/runbook.md](docs/runbook.md) is now what an operator opens when a cycle
+  has failed — exit codes first, getting a stack trace out of cron, table
+  status, a health check, and common failures.
+
+### Changed
+
+- **`MemoryMode.CHUNKED` no longer claims to bound peak memory**, because it
+  does not. Measured across three table sizes, peak RSS grows linearly with the
+  rewrite group and is indistinguishable from `IN_MEMORY` (226MB → +538MB,
+  450MB → +975MB, 889MB → +1840MB). Most of it is upstream: consuming
+  PyIceberg's `ArrowScan.to_record_batches` and discarding every batch still
+  grows ~1.3×. **Budget ~2× your largest partition**, and partition tables you
+  intend to compact locally — the planner makes one group per partition, so
+  partitioning is the lever that works. No behaviour changed; the docstring and
+  the guide now say what the code does. Tracked as ZMBNI-1906.
+
 ### Fixed
 
 - **Z-order was unreachable from the CLI on any engine but the local one.**

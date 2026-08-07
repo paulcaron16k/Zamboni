@@ -151,13 +151,19 @@ without friction. See [LICENSE](LICENSE).
 
 ## Documentation
 
+**Start here: [docs/user_guide.md](docs/user_guide.md)** — the four ways to run
+Zamboni (Python API, cron + CLI, Trino, Spark), a capability table to choose an
+engine with, secrets handling, and the local engine's measured memory ceiling.
+
 - **[docs/design.md](docs/design.md)** — high-level design: how Iceberg stores a table, how
   that grows, why each maintenance operation exists, architecture, sequence diagrams,
   constraints, and who owns what.
 - **[docs/plan.md](docs/plan.md)** — delivery plan: scope, phasing, requirements
   traceability, verification approach, residual risk.
-- **[docs/runbook.md](docs/runbook.md)** — operator runbook: the order to run the six verbs
-  in, how to derive a cadence, how to size the orphan guard, and what each exit code means.
+- **[docs/runbook.md](docs/runbook.md)** — when a maintenance cycle fails: exit codes,
+  getting a stack trace out of cron, table status, a health check, and recovery.
+- **[docs/runbook-dev.md](docs/runbook-dev.md)** — running each step by hand: the order
+  and why each position matters, cadence arithmetic, sizing the orphan guard, the dev stack.
 - **[docs/devops.md](docs/devops.md)** — running it in production: the cron line, `zamboni.yml`
   and `.env`, why there is no shell wrapper, and the multi-tenant layout for one
   warehouse per customer.

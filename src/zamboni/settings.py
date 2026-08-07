@@ -36,7 +36,7 @@ PROFILE_NAME = "zamboni.yml"
 ENV_NAME = ".env"
 
 #: The runbook order. Encoded here rather than in a shell script because three
-#: of the five gaps between these are load-bearing -- see docs/runbook.md §1.
+#: of the five gaps between these are load-bearing -- see docs/runbook-dev.md §1.
 DEFAULT_OPERATIONS = (
     "compact",
     "apply-properties",

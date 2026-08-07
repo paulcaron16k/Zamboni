@@ -45,6 +45,7 @@ import logging
 import os
 import sys
 from dataclasses import replace
+from pathlib import Path
 
 from . import maintainers, settings, version_banner
 from .capabilities import detect
@@ -169,6 +170,10 @@ def main(argv: list[str] | None = None) -> int:
         return _from_catalog(args)
     if args.command == "validate-config":
         return _validate_config(args)
+    if args.command == "table-config" and args.table_config_command == "validate":
+        return _validate_config(args)
+    if args.command == "table-config" and args.table_config_command == "summary":
+        return _table_config_summary(args)
 
     try:
         session = _session_from(args)
@@ -184,6 +189,9 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "warehouses":
             return _warehouses(session, args)
+
+        if args.command == "table-config":
+            return _table_config_generate(session, args)
 
         if args.command == "expire":
             return _expire(session, args)
@@ -284,6 +292,35 @@ def _build_parser() -> argparse.ArgumentParser:
 
     vc = sub.add_parser("validate-config", help="check a table-config.json")
     vc.add_argument("config", help="path to table-config.json")
+
+    # `table-config` groups the three things an operator does to that file.
+    # `validate-config` stays as it is: it shipped in 0.1.0 and removing a verb
+    # is breaking under docs/releasing.md, which for this tool is not a cost
+    # worth paying to tidy a name. It is now an alias of `table-config validate`
+    # rather than a second implementation.
+    tc = sub.add_parser("table-config", help="create, check and explain a table-config.json")
+    tc_sub = tc.add_subparsers(dest="table_config_command", required=True)
+
+    tcg = tc_sub.add_parser(
+        "generate",
+        help="write a starter table-config.json describing the catalog as it is today",
+    )
+    tcg.add_argument("-o", "--output", default="table-config.json")
+    tcg.add_argument("--namespace", help="only this namespace; default is every table")
+    tcg.add_argument("--force", action="store_true", help="overwrite an existing output file")
+    _add_catalog_args(tcg)
+
+    tcv = tc_sub.add_parser(
+        "validate", help="check that a table-config.json parses and means something"
+    )
+    tcv.add_argument("config", help="path to table-config.json")
+
+    tcs = tc_sub.add_parser(
+        "summary",
+        help="what this config would do, per table, including the defaults you did not write",
+    )
+    tcs.add_argument("config", help="path to table-config.json")
+    tcs.add_argument("--table", help="only this table")
 
     for name, help_text in [
         ("describe", "profile a table without changing it"),
@@ -1071,6 +1108,175 @@ def _validate_config(args: argparse.Namespace) -> int:
             else "disabled"
         )
         print(f"  {identifier}: [{parts}] ordering={settings.ordering.mode} evolution={evolution}")
+    return 0
+
+
+def _table_config_generate(session: CatalogSession, args: argparse.Namespace) -> int:
+    """A starter config that describes the catalog **as it is today**.
+
+    Deliberately descriptive rather than aspirational. Every table gets the
+    default settings plus its *current* partition spec written out, so the first
+    run of `zamboni maintenance` against the generated file changes nothing but
+    file sizes -- an operator can diff their intent against reality instead of
+    discovering it during a run that deletes things.
+
+    `from-catalog` is the other direction: a Singer catalog describes tables
+    that may not exist yet. This one reads a live Iceberg catalog.
+    """
+    from pyiceberg.exceptions import NoSuchTableError
+
+    from .orphans import _all_table_identifiers
+    from .tableconfig import DEFAULT_SETTINGS, PartitionField, TableConfig
+
+    output = Path(args.output)
+    if output.exists() and not args.force:
+        print(f"{output} exists; pass --force to overwrite", file=sys.stderr)
+        return 2
+
+    identifiers = _all_table_identifiers(session.catalog)
+    if args.namespace:
+        wanted = tuple(args.namespace.split("."))
+        identifiers = [i for i in identifiers if i[: len(wanted)] == wanted]
+
+    tables, skipped = {}, []
+    for identifier in sorted(identifiers):
+        name = ".".join(identifier)
+        try:
+            tbl = session.catalog.load_table(identifier)
+        except NoSuchTableError:  # dropped between listing and loading
+            skipped.append((name, "no longer exists"))
+            continue
+        # V1 is refused by every operation, so writing it into a config would
+        # generate a file whose first run errors on a table nobody can maintain.
+        if tbl.metadata.format_version < 2:
+            skipped.append((name, "format version 1, which Zamboni refuses"))
+            continue
+        partition = tuple(
+            PartitionField(
+                column=tbl.schema().find_column_name(f.source_id) or "?", transform=str(f.transform)
+            )
+            for f in tbl.spec().fields
+        )
+        tables[name] = replace(DEFAULT_SETTINGS, partition=partition)
+
+    config = TableConfig(tables=tables, defaults=DEFAULT_SETTINGS)
+    config.validate()
+    config.dump(str(output))
+
+    print(f"wrote {output}: {len(tables)} table(s)")
+    for name, reason in skipped:
+        print(f"  skipped {name}: {reason}")
+    print("\nThis describes the catalog as it is now. Edit it to say what you want,")
+    print("then: zamboni table-config summary " + str(output))
+    return 0
+
+
+#: What an unset expiry knob resolves to, named rather than printed as `None`.
+#: Kept beside the summary because it is documentation; the resolution itself
+#: lives in expire.py.
+_UNSET_AGE = "unset -> history.expire.max-snapshot-age-ms, else 5"
+_UNSET_KEEP = "unset -> history.expire.min-snapshots-to-keep, else 1"
+
+
+def _table_config_summary(args: argparse.Namespace) -> int:
+    """What the file *does*, including the defaults nobody wrote down.
+
+    `validate` answers "does this parse". This answers the question an operator
+    actually has before a run that deletes files: which operations are on, what
+    windows they use, and where a value came from when it is not in the file.
+    """
+    from .tableconfig import DEFAULT_SETTINGS, TableConfig
+
+    config = TableConfig.load(args.config)
+    names = sorted(config.tables)
+    if args.table:
+        if args.table not in config.tables:
+            print(
+                f"{args.table} is not in {args.config}; it would get the defaults "
+                f"({len(config.tables)} table(s) are named)",
+                file=sys.stderr,
+            )
+            return 2
+        names = [args.table]
+
+    print(f"{args.config}: version {config.version}, {len(config.tables)} table(s)")
+    print("Values not written in the file are marked (default).\n")
+
+    def mark(value, fallback, *, unset: str = "") -> str:
+        """Render a setting, saying where it came from.
+
+        `None` is not "no value": it means the knob was left out, and expiry
+        then falls back to the Iceberg table property and only then to the spec
+        default. A bare `None` told an operator nothing and read like a bug --
+        naming the fallback is the whole point of a summary.
+        """
+        if value is None:
+            return unset or "unset"
+        return f"{value}" if value != fallback else f"{value} (default)"
+
+    for name in names:
+        s = config.for_table(name)
+        d = DEFAULT_SETTINGS
+        print(f"{name}")
+        parts = (
+            "partition [" + ", ".join(f"{pf.column}:{pf.transform}" for pf in s.partition) + "]"
+            if s.partition
+            else "unpartitioned"
+        )
+        print(f"  layout     {parts}, ordering {mark(s.ordering.mode, d.ordering.mode)}")
+        if s.ordering.mode == "zorder" and s.ordering.zorder:
+            print(
+                f"             zorder columns {', '.join(s.ordering.zorder.columns)}"
+                "  -- local and spark only; trino cannot do this"
+            )
+
+        r = s.retention
+        expire = "on" if r.expire_snapshots.enabled else "OFF"
+        de = d.retention.expire_snapshots
+        print(
+            f"  expire     {expire}, "
+            "keep "
+            + mark(
+                r.expire_snapshots.max_snapshot_age_days,
+                de.max_snapshot_age_days,
+                unset=_UNSET_AGE,
+            )
+            + " day(s), minimum "
+            + mark(
+                r.expire_snapshots.min_snapshots_to_keep,
+                de.min_snapshots_to_keep,
+                unset=_UNSET_KEEP,
+            )
+            + " snapshot(s)"
+        )
+        orphans = "on" if r.remove_orphan_files.enabled else "OFF"
+        do = d.retention.remove_orphan_files
+        print(
+            f"  orphans    {orphans}, files older than "
+            f"{mark(r.remove_orphan_files.older_than_days, do.older_than_days)} day(s) "
+            "-- this deletes storage; the guard is what stands between it and a live write"
+        )
+        dangling = "on" if r.remove_dangling_deletes.enabled else "OFF"
+        print(f"  dangling   {dangling}")
+        manifests = "on" if r.rewrite_manifests.enabled else "OFF"
+        print(f"  manifests  {manifests}")
+        if r.metadata.previous_versions_max is None and r.metadata.delete_after_commit is None:
+            print("  metadata   unset; apply-properties has nothing to set and will refuse")
+        else:
+            print(
+                f"  metadata   keep {r.metadata.previous_versions_max} previous version(s), "
+                f"delete after commit {r.metadata.delete_after_commit}"
+            )
+        ev = s.partition_evolution
+        if ev.enabled and ev.rules:
+            rules = ", ".join(
+                f"{r_.from_transform}->{r_.to_transform} after {r_.older_than_days}d"
+                for r_ in ev.rules
+            )
+            print(f"  evolution  {rules}  -- local engine only")
+        else:
+            print("  evolution  disabled")
+        print()
     return 0
 
 

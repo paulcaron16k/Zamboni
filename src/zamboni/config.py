@@ -25,10 +25,32 @@ class MemoryMode(enum.Enum):
     PyIceberg's writer in a single call. Simplest, and fine for small groups.
 
     CHUNKED streams the group as Arrow record batches and accumulates them into
-    bounded slices, writing one slice at a time. Peak memory is roughly one
-    output file rather than one partition. Any ``ORDER BY`` is executed by
+    bounded slices, writing one slice at a time. Any ``ORDER BY`` is executed by
     DuckDB, which spills its sort to ``temp_directory`` on disk -- that is where
     the "batch/chunk via local temp files" behaviour actually comes from.
+
+    **CHUNKED does not currently bound peak memory, and this docstring used to
+    claim it did** ("peak memory is roughly one output file"). Measured on an
+    unpartitioned table with a 64MB budget, peak RSS grows linearly with the
+    group and is indistinguishable from IN_MEMORY:
+
+    ====== ============= ============== =========
+    data   CHUNKED peak  IN_MEMORY peak ratio
+    ====== ============= ============== =========
+    226MB  +538MB        --             2.4x
+    450MB  +975MB        +985MB         2.2x
+    889MB  +1840MB       --             2.1x
+    ====== ============= ============== =========
+
+    Most of it is upstream: consuming ``ArrowScan.to_record_batches(tasks)`` and
+    discarding every batch immediately still grows ~1.3x the group's on-disk
+    size, because PyIceberg reads the tasks concurrently and buffers them. The
+    bin-packing here adds the rest.
+
+    So the number to budget against is **~2x the largest partition**, not the
+    output file size, and the lever that actually works today is partitioning
+    the table -- the planner makes one group per (spec, partition), with no cap
+    on group size. Tracked as ZMBNI-914.
 
     AUTO picks per group by comparing the group's on-disk size against
     ``memory_budget_bytes``.

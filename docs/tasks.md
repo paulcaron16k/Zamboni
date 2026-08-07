@@ -43,13 +43,14 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-16 | Zamboni vs ice-keeper | Delivered as [ice-keeper-comparison.md](ice-keeper-comparison.md). Found ZMBNI-507, a data-loss path in shipped code. [roadmap.md RM-6](roadmap.md) | done | 2026-08-03 |
 | ZMBNI-17 | DevOps CLI and operations | One command a cron line can call, config that is not twenty flags, and a fleet story for multi-tenant warehouses. [devops.md](devops.md) | done | 2026-08-04 |
 | ZMBNI-18 | Licence and publication | Apache-2.0, the files a public repo needs, and the order in which to flip the switch. Gated on ZMBNI-905: publishing a repo whose CI has never run invites an assumption we cannot back | todo | |
+| ZMBNI-19 | User guide and API surface | The documentation two audiences actually need — an administrator running many warehouses and a home gamer running one — plus the public API that makes the first of those possible. Split the runbook by audience. [user_guide.md](user_guide.md) | inproject | |
 
 > **On section order.** Epics ZMBNI-1…10 appear below in numeric order; the roadmap epics
 > ZMBNI-11…16 appear in *delivery* order (13, 16, 12, 14, 11, 15), which is not their numeric
 > order. The numbers follow [roadmap.md](roadmap.md)'s RM-1…RM-6 so the two documents agree on
 > identity; the sequence is explained in each section's subtitle.
 
-**Story counts:** 89 done · 1 inproject · 16 todo · 1 cancelled  (107 stories)
+**Story counts:** 93 done · 1 inproject · 17 todo · 1 cancelled  (112 stories)
 
 ---
 
@@ -292,6 +293,17 @@ the tool the wrapper. [devops.md](devops.md)
 | ZMBNI-1708 | The DevOps guide | [devops.md](devops.md): the cron line, why there is no shell wrapper, the zamboni.yml/.env split, the multi-tenant layout, and why per-warehouse invocation beats one loop | done | 2026-08-04 |
 
 ---
+
+## ZMBNI-19 — User guide and API surface
+
+| id | title | description | status | completed-at |
+|---|---|---|---|---|
+| ZMBNI-1901 | Measure the local engine's memory ceiling | The question was whether `LocalMaintainer` does full-table loads. Answer: not of *rows* — expiry, manifests, dangling deletes and properties are metadata-only, and orphan removal compares path sets. But compaction holds ~2x a rewrite group's on-disk size, and the planner makes one group per (spec, partition) with no cap. Measured across three sizes: 226MB->+538MB, 450MB->+975MB, 889MB->+1840MB, growing linearly. **`MemoryMode.CHUNKED` did not bound it and the docstring claimed it did** ("peak memory is roughly one output file"); the claim is now the measurement. Isolated the cause: consuming PyIceberg's `ArrowScan.to_record_batches` and discarding every batch still grows ~1.3x, so most of it is upstream buffering | done | 2026-08-07 |
+| ZMBNI-1902 | Define the public API | `__all__` was compaction-only: `TableCompactor` and its config, and nothing for the other five operations. An application wanting to expire snapshots had to import `zamboni.expire` — a private path, which is exactly what a public surface exists to prevent. Now exports the maintainer interface, the config types and the local operation classes, 48 names, with the compatibility promise stated on the list. Found while writing the guide's sample: a `MaintenanceRequest` carrying only `retention` raises on `compact`, so `config_from_table_settings` had to be exported too — the sample in the guide is run verbatim rather than written from memory | done | 2026-08-07 |
+| ZMBNI-1903 | `zamboni table-config generate\|validate\|summary` | `generate` describes the catalog **as it is today** — each table's current partition spec with default retention — so the first run against it changes nothing but file sizes and an operator diffs intent against reality. `summary` answers the question `validate` does not: what would this *do*, marking every value that came from a default and naming what an unset knob resolves to rather than printing `None`. It also flags the two settings that silently do nothing on the wrong engine: Z-order on Trino, partition evolution anywhere but local. `validate-config` stays as an alias; removing a verb is breaking under [releasing.md](releasing.md) | done | 2026-08-07 |
+| ZMBNI-1904 | The user guide | [user_guide.md](user_guide.md): four modes (Python API, cron + CLI, transient Trino, transient Spark), a capability table that leads with Z-order because that is the row a small deployment should choose on, secrets posture, a multi-warehouse SaaS loop, and the measured memory ceiling with partitioning named as the lever that actually works | done | 2026-08-07 |
+| ZMBNI-1905 | Split the runbook by audience | [runbook-dev.md](runbook-dev.md) for running each step by hand — the order, the cadence arithmetic, sizing the orphan guard, the dev stack. [runbook.md](runbook.md) becomes what an operator opens at 08:00: exit codes first, how to get a stack trace out of cron, table status, a health check, and common failures. Reconciled with [devops.md](devops.md), which argues against shell wrappers — it is right about wrappers that reimplement the six-verb order, and the two narrow reasons that remain (a dated log, `set -euo pipefail` before a transient engine starts) are neither | done | 2026-08-07 |
+| ZMBNI-1906 | Bound compaction memory | The ceiling ZMBNI-1901 measured. Two candidate levers: cap group size in the planner so one partition becomes several rewrites, and limit the read concurrency that does the upstream buffering. Neither is free — a capped group cannot be globally sorted, which is the point of Z-order — so this needs a design before code | todo | |
 
 ## ZMBNI-18 — Licence and publication
 
