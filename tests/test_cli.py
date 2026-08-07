@@ -4,6 +4,7 @@ fire without consent."""
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -632,3 +633,70 @@ def test_an_explicit_missing_profile_is_a_usage_error(tmp_path, monkeypatch, cap
     with pytest.raises(SystemExit):
         main(["--profile", str(tmp_path / "absent.yml"), "doctor"])
     assert "no such file" in capsys.readouterr().err
+
+
+def test_maintenance_skips_an_operation_another_already_fulfilled(
+    devops_dir, session, capsys, monkeypatch
+):
+    """On Spark, dangling-delete removal *is* an option of rewrite_data_files.
+
+    Running both would compact the table twice, the second time to no effect.
+    `OperationSupport.fulfilled_by` declares that relationship and this is what
+    makes it act -- without it the field is documentation.
+
+    Uses the local engine with a patched declaration rather than Spark, because
+    the behaviour under test is the CLI's, not Spark's.
+    """
+    from zamboni.maintainers import Operation, Support
+    from zamboni.maintainers.local import LocalMaintainer
+
+    real = LocalMaintainer.capabilities()
+    patched = dict(real.operations)
+    patched[Operation.REMOVE_DANGLING_DELETES] = replace(
+        patched[Operation.REMOVE_DANGLING_DELETES],
+        support=Support.FULL,
+        limitations=(),
+        fulfilled_by=Operation.COMPACT,
+    )
+    monkeypatch.setattr(
+        LocalMaintainer,
+        "capabilities",
+        classmethod(lambda cls: replace(real, operations=patched)),
+    )
+
+    assert main(["maintenance", "--yes"]) == 0
+
+    out = capsys.readouterr().out
+    assert "remove-dangling-deletes: already done by compact" in out
+
+
+def test_maintenance_still_runs_it_when_the_fulfilling_operation_did_not(
+    devops_dir, session, capsys, monkeypatch
+):
+    """A profile that lists dangling-delete removal without compact must still
+    get its work done -- the skip is conditional on the other having run."""
+    from zamboni.maintainers import Operation, Support
+    from zamboni.maintainers.local import LocalMaintainer
+
+    real = LocalMaintainer.capabilities()
+    patched = dict(real.operations)
+    patched[Operation.REMOVE_DANGLING_DELETES] = replace(
+        patched[Operation.REMOVE_DANGLING_DELETES],
+        support=Support.FULL,
+        limitations=(),
+        fulfilled_by=Operation.COMPACT,
+    )
+    monkeypatch.setattr(
+        LocalMaintainer,
+        "capabilities",
+        classmethod(lambda cls: replace(real, operations=patched)),
+    )
+    (devops_dir / "zamboni.yml").write_text(
+        f"warehouse: acme\nengine: local\nroot: {devops_dir}\n"
+        "operations:\n  - remove-dangling-deletes\n"
+    )
+
+    assert main(["maintenance", "--yes"]) == 0
+
+    out = capsys.readouterr().out
+    assert "already done by" not in out

@@ -51,6 +51,10 @@ sql = ["pyiceberg[sql-sqlite]>=0.11.1,<0.12"]
 # Only needed for `--engine trino`. Optional so nobody installs a query-engine
 # client to compact a table locally.
 trino = ["trino>=0.330.0"]
+# Only for `--engine spark`, and the heaviest thing here by a wide margin: a JVM
+# plus ~300MB of Spark. Emphatically optional -- the point of this tool is not
+# needing Spark.
+spark = ["pyspark>=3.5,<5"]
 
 [project.scripts]
 zamboni = "zamboni.cli:main"

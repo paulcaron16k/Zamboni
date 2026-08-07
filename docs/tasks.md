@@ -39,7 +39,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-12 | Maintainer interface | `Maintainer` ABC, `LocalMaintainer` extracted with no behaviour change, Trino and Spark stubs carrying real capability declarations, and `--engine` / `zamboni engines`. [roadmap.md RM-2](roadmap.md) | done | 2026-08-03 |
 | ZMBNI-13 | Zamboni vs Trino vs Spark | Delivered as [engine-comparison.md](engine-comparison.md): three surfaces, a twelve-row semantic-difference register, and the seam it forces. [roadmap.md RM-3](roadmap.md) | done | 2026-08-03 |
 | ZMBNI-14 | Trino maintainer | `ALTER TABLE … EXECUTE` for five of six verbs, refusing dangling-delete removal. Verified against a live Trino 483 in the dev stack. [roadmap.md RM-4](roadmap.md) | done | 2026-08-04 |
-| ZMBNI-15 | Spark maintainer | Iceberg Spark procedures, including the one operation we cannot do locally. [roadmap.md RM-5](roadmap.md) | todo | |
+| ZMBNI-15 | Spark maintainer | Iceberg Spark procedures, including the one operation we cannot do locally. Verified against a live Spark 3.5.9. [roadmap.md RM-5](roadmap.md) | done | 2026-08-07 |
 | ZMBNI-16 | Zamboni vs ice-keeper | Delivered as [ice-keeper-comparison.md](ice-keeper-comparison.md). Found ZMBNI-507, a data-loss path in shipped code. [roadmap.md RM-6](roadmap.md) | done | 2026-08-03 |
 | ZMBNI-17 | DevOps CLI and operations | One command a cron line can call, config that is not twenty flags, and a fleet story for multi-tenant warehouses. [devops.md](devops.md) | done | 2026-08-04 |
 | ZMBNI-18 | Licence and publication | Apache-2.0, the files a public repo needs, and the order in which to flip the switch. Gated on ZMBNI-905: publishing a repo whose CI has never run invites an assumption we cannot back | todo | |
@@ -49,7 +49,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 > order. The numbers follow [roadmap.md](roadmap.md)'s RM-1…RM-6 so the two documents agree on
 > identity; the sequence is explained in each section's subtitle.
 
-**Story counts:** 81 done · 1 inproject · 22 todo · 1 cancelled  (105 stories)
+**Story counts:** 87 done · 1 inproject · 16 todo · 1 cancelled  (105 stories)
 
 ---
 
@@ -263,12 +263,12 @@ Last: the largest dependency footprint for the engine that overlaps us most.
 
 | id | title | description | status | completed-at |
 |---|---|---|---|---|
-| ZMBNI-1501 | Spark session | PySpark and py4j as an optional dependency group, so nobody installs a JVM to compact locally. `../ice-keeper` is working prior art | todo | |
-| ZMBNI-1502 | `compact` via `rewrite_data_files` | Including `sort` and `zorder` — the one engine besides ours that can Z-order | todo | |
-| ZMBNI-1503 | `rewrite-manifests` and `expire` | `rewrite_manifests`, `expire_snapshots` | todo | |
-| ZMBNI-1504 | `remove-orphans` | `remove_orphan_files`, with the same guarantee caveat as Trino's | todo | |
-| ZMBNI-1505 | Dangling deletes via `rewrite_position_delete_files` | The case that justifies the interface carrying capability in both directions: Spark rewrites *partially* dangling delete files, which is ZMBNI-604 — blocked for us on PyIceberg, available here | todo | |
-| ZMBNI-1506 | Live verification | Against a real Spark. Open question 3 | todo | |
+| ZMBNI-1501 | Spark session | PySpark as an optional `zamboni[spark]` extra — ~300MB and a JVM, so emphatically not a default. Session config is deliberately minimal: only the Iceberg extension, plus whatever the operator passes as `conf.*`. A maintenance tool silently setting `spark.sql.catalog.*` would be changing where the data is | done | 2026-08-07 |
+| ZMBNI-1502 | `compact` via `rewrite_data_files` | `rewrite_data_files`, with `strategy => 'sort'` and `sort_order => 'zorder(a, b)'` — Spark is the only non-local engine that can Z-order. `sort_by_table_order` selects the strategy without naming an order, because Spark then defaults to the table's own, which is what the setting means. Verified live: 6 data files to 1, 60 rows intact | done | 2026-08-07 |
+| ZMBNI-1503 | `rewrite-manifests` and `expire` | `rewrite_manifests` (7 manifests to 1, live) and `expire_snapshots`. Expire takes a **typed literal timestamp** where Trino takes a duration — both forms learned by running them: `date_sub(current_timestamp(), 7)` is rejected by the parser ("mismatched input '(' expecting STRING"), a bare string by the type checker ("cannot cast StringType to TimestampType") | done | 2026-08-07 |
+| ZMBNI-1504 | `remove-orphans` | `remove_orphan_files`, and it produced two findings that only a live run gives. Spark **refuses any interval under 24 hours**, hard-coded — a third floor behaviour across three engines — and exactly 1 day is refused too, because the timestamp is computed here and evaluated moments later. And it **lists with Hadoop FileSystem, not Iceberg FileIO**, so it needs its own `spark.hadoop.fs.s3a.*` credentials even though every other operation runs on the catalog's vended ones | done | 2026-08-07 |
+| ZMBNI-1505 | Dangling deletes via `rewrite_position_delete_files` | Not a standalone procedure: it is the `remove-dangling-deletes` option on `rewrite_data_files`, which the ZMBNI-13 analysis established and this implements. Both operations emit the same statement, and `maintenance` now **skips the second** — `OperationSupport.fulfilled_by` finally acts rather than documenting. Without it a Spark run would compact twice, the second time to no effect | done | 2026-08-07 |
+| ZMBNI-1506 | Live verification | Against a real Spark 3.5.9 driving Lakekeeper and MinIO: all five operations succeed, 6 data files to 1, 60 rows unchanged. Java 11 caps us at Spark 3.x — Spark 4 needs 17 — which the `>=3.5,<5` range permits but a deployment must know | done | 2026-08-07 |
 
 ---
 

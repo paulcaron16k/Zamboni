@@ -46,6 +46,21 @@ Two categories beyond the usual set, because this tool deletes files:
   is written.
 - **`zamboni engines`** — per-engine, per-operation support, previewability and
   limitations.
+- **`--engine spark`** — all six operations over the Iceberg Spark procedures,
+  including Z-order, which Trino cannot do. Needs the optional `zamboni[spark]`
+  extra (a JVM and ~300MB). Verified against a live Spark 3.5.9 driving
+  Lakekeeper and MinIO.
+
+  Three things behave differently from Trino and are declared rather than
+  smoothed over: `older_than` is a **typed literal timestamp computed on the
+  client**, because a `CALL` argument cannot be an expression — so a fast clock
+  expires more than intended; `remove_orphan_files` refuses any interval under
+  24 hours, and refuses exactly 1 day too, since the timestamp is evaluated
+  moments after it is computed; and it **lists with Hadoop FileSystem rather
+  than Iceberg FileIO**, so it needs its own `spark.hadoop.fs.s3a.*`
+  credentials even though every other operation runs on the catalog's vended
+  ones.
+
 - **`--engine trino`** — five of the six operations, over `ALTER TABLE … EXECUTE`.
   Needs the optional `zamboni[trino]` extra. Configure with `--trino-host`,
   `--trino-port`, `--trino-user`, `--trino-catalog` and `--trino-version`, or the

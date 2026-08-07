@@ -9,6 +9,7 @@ verified.
 
 from __future__ import annotations
 
+import datetime
 from dataclasses import replace
 
 import pytest
@@ -195,12 +196,14 @@ def test_an_unknown_engine_names_the_ones_that_exist():
         maintainers.get("presto")
 
 
-def test_the_spark_stub_refuses_to_pretend_it_ran():
-    """Trino is implemented (ZMBNI-14); Spark is not (ZMBNI-15). A stub that
-    returned a plausible-looking result would be the worst outcome here."""
-    with pytest.raises(NotImplementedError, match="not implemented yet"):
+def test_spark_refuses_to_return_a_preview_it_cannot_produce():
+    """Both non-local engines are implemented now (ZMBNI-14, ZMBNI-15), so the
+    stub assertion this replaces is gone. What still needs pinning is that
+    `execute(dry_run=True)` on an operation Spark cannot preview raises rather
+    than returning something that reads like a plan."""
+    with pytest.raises(PreviewUnavailable, match="cannot preview"):
         SparkMaintainer(None).execute(
-            Operation.COMPACT, "db.events", request=request(), dry_run=False
+            Operation.COMPACT, "db.events", request=request(), dry_run=True
         )
 
 
@@ -481,3 +484,176 @@ def test_the_warehouse_limitation_is_not_probe_derived(monkeypatch):
 
     assert support.support is Support.PARTIAL
     assert "remote-signing" in support.limitations[0]
+
+
+# -- ZMBNI-15: the statements Spark actually receives ----------------------
+
+
+FROZEN_NOW = datetime.datetime(2026, 8, 7, 12, 0, 0, tzinfo=datetime.UTC)
+
+
+@pytest.fixture(autouse=True)
+def frozen_clock(monkeypatch):
+    """Spark takes `older_than` as a literal timestamp computed on this host, so
+    an exact-statement assertion needs a fixed clock. Pinning it also documents
+    the exposure: the value is ours, not the engine's."""
+    from zamboni.maintainers import spark as spark_module
+
+    monkeypatch.setattr(spark_module, "_utc_now", lambda: FROZEN_NOW)
+
+
+def spark(**overrides):
+    return SparkMaintainer(None, {"catalog": "iceberg", **overrides})
+
+
+def spark_request(**compaction):
+    """Always carries a CompactionConfig.
+
+    An earlier version passed None when given no overrides, so the options block
+    was skipped and the test asserting `partial-progress.enabled` was checking a
+    statement that could never occur in practice -- `_request_for` always builds
+    one for compact and maintenance.
+    """
+    from zamboni.config import CompactionConfig
+
+    return MaintenanceRequest(
+        retention=full_retention().retention,
+        compaction=CompactionConfig(**compaction),
+    )
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected"),
+    [
+        (
+            Operation.EXPIRE,
+            (
+                "CALL system.expire_snapshots(table => 'iceberg.db.events', "
+                "older_than => TIMESTAMP '2026-07-31 12:00:00', retain_last => 2)"
+            ),
+        ),
+        (
+            Operation.REMOVE_ORPHANS,
+            (
+                "CALL system.remove_orphan_files(table => 'iceberg.db.events', "
+                "older_than => TIMESTAMP '2026-07-31 12:00:00')"
+            ),
+        ),
+        (
+            Operation.REWRITE_MANIFESTS,
+            "CALL system.rewrite_manifests(table => 'iceberg.db.events')",
+        ),
+        (
+            Operation.APPLY_PROPERTIES,
+            (
+                "ALTER TABLE `iceberg`.`db`.`events` SET TBLPROPERTIES ("
+                "'write.metadata.previous-versions-max' = '3', "
+                "'write.metadata.delete-after-commit.enabled' = 'true')"
+            ),
+        ),
+    ],
+)
+def test_the_exact_spark_statement_for_each_operation(operation, expected):
+    assert spark().statement_for(operation, "db.events", spark_request()) == expected
+
+
+def test_expire_takes_a_timestamp_where_trino_takes_a_duration():
+    """The same setting, two vocabularies -- what MaintenanceRequest is for.
+
+    Trino: `retention_threshold => '7d'`. Spark: a *typed literal* timestamp,
+    computed on this host. Both forms were learned by running them -- an
+    expression is rejected by the parser, a bare string by the type checker.
+    """
+    sql = spark().statement_for(Operation.EXPIRE, "db.events", spark_request())
+
+    assert "older_than => TIMESTAMP '2026-07-31 12:00:00'" in sql
+    assert "'7d'" not in sql
+    assert "current_timestamp()" not in sql, "an expression is rejected by Spark's parser"
+
+
+def test_the_orphan_floor_is_two_days_not_one():
+    """Spark refuses under 24 hours, and exactly 1 day is refused too: the
+    timestamp is computed here and evaluated moments later, so it is short by
+    the round trip. Both verified against a live Spark."""
+    assert spark().validate(Operation.REMOVE_ORPHANS, spark_request_with_orphan_days(1))
+    assert spark().validate(Operation.REMOVE_ORPHANS, spark_request_with_orphan_days(0))
+    assert not spark().validate(Operation.REMOVE_ORPHANS, spark_request_with_orphan_days(2))
+
+
+def spark_request_with_orphan_days(days: int) -> MaintenanceRequest:
+    from zamboni.config import CompactionConfig
+    from zamboni.tableconfig import RemoveOrphanFilesSettings
+
+    base = full_retention().retention
+    return MaintenanceRequest(
+        retention=replace(
+            base,
+            remove_orphan_files=RemoveOrphanFilesSettings(enabled=True, older_than_days=days),
+        ),
+        compaction=CompactionConfig(),
+    )
+
+
+def test_zorder_reaches_spark():
+    """Spark is the only non-local engine that can Z-order, so this is the one
+    capability the Trino maintainer had to declare missing."""
+    sql = spark().statement_for(
+        Operation.COMPACT, "db.events", spark_request(zorder_columns=["a", "b"])
+    )
+
+    assert "strategy => 'sort'" in sql
+    assert "sort_order => 'zorder(a, b)'" in sql
+
+
+def test_sort_by_table_order_selects_the_strategy_without_an_expression():
+    """Spark defaults `sort_order` to the table's own, which is exactly what the
+    setting means -- so naming one would override the thing being asked for."""
+    sql = spark().statement_for(
+        Operation.COMPACT, "db.events", spark_request(sort_by_table_order=True)
+    )
+
+    assert "strategy => 'sort'" in sql
+    assert "sort_order =>" not in sql
+
+
+def test_compaction_always_asks_spark_to_drop_dangling_deletes():
+    sql = spark().statement_for(Operation.COMPACT, "db.events", spark_request())
+
+    assert "'remove-dangling-deletes', 'true'" in sql
+
+
+def test_dangling_delete_removal_is_the_compaction_statement():
+    """Not a separate procedure in Spark. Both must emit the same SQL, or the
+    `fulfilled_by` declaration is a lie."""
+    request = spark_request()
+    compact = spark().statement_for(Operation.COMPACT, "db.events", request)
+    dangling = spark().statement_for(Operation.REMOVE_DANGLING_DELETES, "db.events", request)
+
+    assert compact == dangling
+
+
+def test_partial_progress_is_passed_explicitly_not_left_to_a_default():
+    """Iceberg's default is false and ZMBNI-106 chose the same locally. Sending
+    it makes the two agree visibly rather than by coincidence."""
+    off = spark().statement_for(Operation.COMPACT, "db.events", spark_request())
+    on = spark().statement_for(Operation.COMPACT, "db.events", spark_request(partial_progress=True))
+
+    assert "'partial-progress.enabled', 'false'" in off
+    assert "'partial-progress.enabled', 'true'" in on
+
+
+def test_procedure_arguments_take_a_plain_identifier_not_quoted_sql():
+    """`table => 'db.events'` is a string argument. Backticks belong in
+    ALTER TABLE and would be part of the name here."""
+    call = spark().statement_for(Operation.REWRITE_MANIFESTS, "db.events", spark_request())
+    alter = spark().statement_for(Operation.APPLY_PROPERTIES, "db.events", spark_request())
+
+    assert "`" not in call
+    assert "`iceberg`.`db`.`events`" in alter
+
+
+def test_spark_identifiers_are_backtick_quoted():
+    """Spark quotes with backticks where Trino uses double quotes."""
+    sql = spark().statement_for(Operation.APPLY_PROPERTIES, "we`ird.ta-ble", spark_request())
+
+    assert "ALTER TABLE `iceberg`.`we``ird`.`ta-ble`" in sql

@@ -820,8 +820,16 @@ def _maintenance(session: CatalogSession, args: argparse.Namespace) -> int:
     for table in tables:
         print(f"\n{table}")
         print("  " + "-" * 68)
+        done: set = set()
         for operation in operations:
+            if skipped_by := _already_fulfilled(session, args, operation, done):
+                # `fulfilled_by` is not decoration. On Spark, dangling-delete
+                # removal *is* an option of rewrite_data_files, so running both
+                # would compact the table twice -- the second time to no effect.
+                print(f"  {operation.value}: already done by {skipped_by.value}")
+                continue
             code = _run_one(session, args, operation, table)
+            done.add(operation)
             worst = max(worst, code)
             if code:
                 failures.append(f"{table} {operation.value} (exit {code})")
@@ -840,6 +848,22 @@ def _maintenance(session: CatalogSession, args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"  {failure}", file=sys.stderr)
     return worst
+
+
+def _already_fulfilled(session: CatalogSession, args: argparse.Namespace, operation, done: set):
+    """The operation this one rides on, if that already ran in this sequence.
+
+    Declared per engine via ``OperationSupport.fulfilled_by``. Only skips when
+    the fulfilling operation actually ran: a profile listing
+    `remove-dangling-deletes` without `compact` still gets its work done.
+    """
+    try:
+        support = _maintainer_for(session, args).capabilities().of(operation)
+    except Exception:  # pragma: no cover - capability lookup must not fail a run
+        return None
+    if support.fulfilled_by and support.fulfilled_by in done:
+        return support.fulfilled_by
+    return None
 
 
 def _tables_to_maintain(args: argparse.Namespace, profile) -> list[str]:

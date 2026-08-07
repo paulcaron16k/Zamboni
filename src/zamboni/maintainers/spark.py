@@ -1,7 +1,14 @@
-"""Spark, over the Iceberg stored procedures. Not implemented -- ZMBNI-15.
+"""Spark, over the Iceberg stored procedures.
 
-As with the Trino stub, the capability declaration is real: it comes from
-docs/engine-comparison.md, read from the Iceberg ``spark-procedures.md`` source.
+Argument names and defaults come from the Iceberg ``spark-procedures.md``
+source, recorded in docs/engine-comparison.md. As with Trino, **statement
+generation is separated from execution**: the builders are pure, so every
+emitted ``CALL`` is asserted exactly without starting a JVM, and only
+:meth:`SparkMaintainer.execute` needs a session.
+
+That split matters more here than anywhere else. Spark is ~300MB and a JVM, so
+"run the tests" cannot mean "start Spark" -- and the alternative to pure
+builders would be a maintainer nobody exercises.
 
 Three declarations here shaped the interface:
 
@@ -20,28 +27,129 @@ Three declarations here shaped the interface:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import datetime as dt
+import logging
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from . import (
+    EngineConfigProblem,
     Maintainer,
     MaintainerCapabilities,
     MaintenanceRequest,
     Operation,
     OperationSupport,
+    PreviewUnavailable,
     Reportable,
     Support,
     register,
 )
 
 if TYPE_CHECKING:
-    pass
+    from collections.abc import Mapping
+
+    from ..config import CompactionConfig
+    from ..session import CatalogSession
+
+logger = logging.getLogger(__name__)
 
 SERVER_SIDE = ("runs server-side, so none of Zamboni's client-side reclaim invariants apply",)
+
+
+def quote(identifier: str) -> str:
+    """Backtick-quote a Spark identifier, doubling any embedded backtick.
+
+    Spark quotes with backticks where Trino uses double quotes -- the one
+    lexical difference between the two implementations, and reason enough not to
+    share a helper between them.
+    """
+    return "`" + identifier.replace("`", "``") + "`"
+
+
+def qualified(table: str, *, catalog: str) -> str:
+    """``db.events`` -> ```iceberg`.`db`.`events```."""
+    namespace, _, name = table.rpartition(".")
+    if not namespace:
+        raise ValueError(f"{table!r} has no namespace; expected <namespace>.<table>")
+    return f"{quote(catalog)}.{quote(namespace)}.{quote(name)}"
+
+
+def _literal(value: str) -> str:
+    """A Spark string literal, single-quoted with quotes doubled."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _options(pairs: list[tuple[str, str]]) -> str:
+    """Iceberg's procedure options are a Spark ``map(...)`` of string pairs."""
+    flat = ", ".join(f"{_literal(k)}, {_literal(v)}" for k, v in pairs)
+    return f"map({flat})"
+
+
+def _call(procedure: str, arguments: list[tuple[str, str]]) -> str:
+    rendered = ", ".join(f"{name} => {value}" for name, value in arguments)
+    return f"CALL system.{procedure}({rendered})"
+
+
+def _utc_now() -> dt.datetime:
+    """Indirection so tests can pin the clock and assert an exact statement."""
+    return dt.datetime.now(dt.UTC)
+
+
+def _days_ago(days: int) -> str:
+    """``older_than`` as a timestamp *string literal*.
+
+    Two things had to be learned by running it. Spark takes a timestamp where
+    Trino takes a duration -- the same setting, two vocabularies. And a ``CALL``
+    argument must be a literal: `older_than => date_sub(current_timestamp(), 7)`
+    is rejected with ``mismatched input '(' expecting STRING``, so the
+    expression cannot be evaluated server-side.
+
+    **The consequence is that the clock is the client's, not the engine's.** A
+    maintenance host whose clock runs ahead of the metadata timestamps expires
+    more than intended. Trino does not have this exposure, because a duration is
+    resolved where the data is. Declared as a limitation rather than hidden.
+    """
+    stamp = (_utc_now() - dt.timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    # A *typed* literal. A bare string is parsed but then rejected: "Wrong arg
+    # type for older_than: cannot cast StringType to TimestampType". Both
+    # failures were found by running it -- the parser and the type checker want
+    # different things, and only the TIMESTAMP form satisfies both.
+    return f"TIMESTAMP {_literal(stamp)}"
+
+
+@dataclass(frozen=True)
+class SparkResult:
+    """What a procedure returns.
+
+    Unlike Trino, Iceberg's Spark procedures *do* return a result row -- e.g.
+    ``rewrite_data_files`` yields rewritten/added file counts. Captured verbatim
+    rather than interpreted, because the columns differ per procedure and
+    inventing a common shape would mean guessing at several of them.
+    """
+
+    operation: Operation
+    table: str
+    statement: str
+    rows: tuple[Any, ...] = ()
+
+    def describe(self) -> str:
+        lines = [f"{self.table}: {self.operation.value} via spark", f"  {self.statement}"]
+        if self.rows:
+            lines.extend(f"  {row}" for row in self.rows)
+        else:
+            lines.append("  committed; the procedure returned no rows.")
+        return "\n".join(lines)
 
 
 @register
 class SparkMaintainer(Maintainer):
     name = "spark"
+
+    DEFAULT_CATALOG = "iceberg"
+
+    def __init__(self, session: CatalogSession, options: Mapping[str, str] | None = None) -> None:
+        super().__init__(session, options)
+        self.catalog = self._options.get("catalog") or self.DEFAULT_CATALOG
 
     @classmethod
     def capabilities(cls) -> MaintainerCapabilities:
@@ -69,14 +177,35 @@ class SparkMaintainer(Maintainer):
                     can_preview=False,
                     limitations=(
                         "no `max_ref_age_days`: the spec's retention step 2 is unavailable",
+                        (
+                            "`older_than` is a timestamp literal computed on *this* host -- "
+                            "a CALL argument cannot be an expression, so a clock ahead of "
+                            "the metadata expires more than intended"
+                        ),
                     ),
                     invariants=SERVER_SIDE,
                 ),
                 Operation.REMOVE_ORPHANS: OperationSupport(
                     Operation.REMOVE_ORPHANS,
-                    Support.FULL,
+                    Support.PARTIAL,
                     # The one operation on any non-local engine that previews.
                     can_preview=True,
+                    limitations=(
+                        (
+                            "refuses an interval under 24 hours outright -- a third floor "
+                            "behaviour: ours defaults to 3 days but allows 0 via "
+                            "--reclaim-now, Trino has a configurable floor defaulting to 7 "
+                            "days, Spark's 24 hours is hard-coded in the procedure. Exactly "
+                            "1 day is refused too, because the timestamp is computed here "
+                            "and Spark evaluates it moments later"
+                        ),
+                        (
+                            "lists with Hadoop FileSystem, not Iceberg FileIO, so it needs "
+                            "its own `spark.hadoop.fs.s3a.*` configuration and credentials "
+                            "-- the catalog's vended credentials are not enough, though "
+                            "they suffice for every other operation"
+                        ),
+                    ),
                     invariants=(
                         *SERVER_SIDE,
                         "`dry_run` previews; the only Spark procedure that can",
@@ -120,6 +249,219 @@ class SparkMaintainer(Maintainer):
             },
         )
 
+    #: Hard-coded in Iceberg's `remove_orphan_files` procedure, not configurable:
+    #: "Cannot remove orphan files with an interval less than 24 hours."
+    MINIMUM_ORPHAN_INTERVAL_DAYS = 2
+
+    def validate(self, operation: Operation, request: MaintenanceRequest) -> tuple[str, ...]:
+        """Catch Spark's orphan floor before a session is even started.
+
+        Worth doing here rather than letting the procedure raise: starting a
+        SparkSession costs a JVM and a jar download, and failing after that for
+        a reason knowable up front is a poor trade.
+        """
+        if operation is not Operation.REMOVE_ORPHANS:
+            return ()
+        days = (
+            request.older_than_days
+            if request.older_than_days is not None
+            else request.retention.remove_orphan_files.older_than_days
+        )
+        if days is not None and days < self.MINIMUM_ORPHAN_INTERVAL_DAYS:
+            return (
+                (
+                    f"older_than_days is {days}, but Spark's remove_orphan_files "
+                    "refuses any interval under 24 hours -- hard-coded in the "
+                    "procedure, not a configurable floor. Raise it to at least 2 -- "
+                    "exactly 1 is refused because the timestamp is computed here and "
+                    "evaluated moments later -- or "
+                    "run this operation on the local engine, which allows a shorter "
+                    "guard deliberately."
+                ),
+            )
+        return ()
+
+    # -- statement building: pure, so no JVM is needed to test it -----------
+
+    def statement_for(self, operation: Operation, table: str, request: MaintenanceRequest) -> str:
+        """The exact SQL this maintainer would run. No session needed."""
+        self.check_supported(operation)
+        target = qualified(table, catalog=self.catalog)
+        builder = {
+            Operation.COMPACT: self._compact_sql,
+            Operation.EXPIRE: self._expire_sql,
+            Operation.REMOVE_ORPHANS: self._remove_orphans_sql,
+            Operation.REMOVE_DANGLING_DELETES: self._compact_sql,
+            Operation.REWRITE_MANIFESTS: self._rewrite_manifests_sql,
+            Operation.APPLY_PROPERTIES: self._apply_properties_sql,
+        }[operation]
+        return builder(target, request)
+
+    def _compact_sql(self, target: str, request: MaintenanceRequest) -> str:
+        """``rewrite_data_files``, which also carries dangling-delete removal.
+
+        Spark has no standalone procedure for dangling deletes -- it is the
+        ``remove-dangling-deletes`` option here, which "will generate an
+        additional commit for the removal". That is why the capability
+        declaration marks the operation ``fulfilled_by`` COMPACT, and why both
+        route to this builder.
+        """
+        arguments: list[tuple[str, str]] = [("table", _literal(self._plain(target)))]
+        options: list[tuple[str, str]] = [("remove-dangling-deletes", "true")]
+
+        compaction = request.compaction
+        if compaction is not None:
+            # Direct attribute access, not getattr-with-default. The first draft
+            # of this used `getattr(compaction, "zorder_by", None)` -- a field
+            # that does not exist -- so Z-order would have been silently dropped
+            # forever, which is precisely the failure this interface exists to
+            # prevent. A wrong name must raise, not return None.
+            if compaction.target_file_size_bytes:
+                options.append(("target-file-size-bytes", str(compaction.target_file_size_bytes)))
+            if compaction.min_input_files:
+                options.append(("min-input-files", str(compaction.min_input_files)))
+            # Iceberg's own default is false, and ZMBNI-106 chose the same for
+            # the local engine. Pass it explicitly so the two agree visibly
+            # rather than by coincidence.
+            options.append(
+                ("partial-progress.enabled", "true" if compaction.partial_progress else "false")
+            )
+            if (
+                compaction.zorder_columns
+                or compaction.sort_expression
+                or (compaction.sort_by_table_order)
+            ):
+                arguments.append(("strategy", _literal("sort")))
+                if expression := self._sort_expression(compaction):
+                    arguments.append(("sort_order", _literal(expression)))
+
+        arguments.append(("options", _options(options)))
+        return _call("rewrite_data_files", arguments)
+
+    @staticmethod
+    def _sort_expression(compaction: CompactionConfig) -> str | None:
+        """Spark is the only non-local engine that can Z-order.
+
+        ``zorder(a, b)`` for multi-key; otherwise the declared sort expression.
+        ``sort_by_table_order`` returns None deliberately -- it still selects the
+        ``sort`` strategy, and Spark then defaults ``sort_order`` to the table's
+        own, which is exactly what that setting means.
+        """
+        if compaction.zorder_columns:
+            return f"zorder({', '.join(compaction.zorder_columns)})"
+        if compaction.sort_expression:
+            return str(compaction.sort_expression)
+        return None
+
+    def _expire_sql(self, target: str, request: MaintenanceRequest) -> str:
+        settings = request.retention.expire_snapshots
+        days = (
+            request.max_snapshot_age_days
+            if request.max_snapshot_age_days is not None
+            else settings.max_snapshot_age_days
+        )
+        keep = (
+            request.min_snapshots_to_keep
+            if request.min_snapshots_to_keep is not None
+            else settings.min_snapshots_to_keep
+        )
+        arguments: list[tuple[str, str]] = [("table", _literal(self._plain(target)))]
+        if days is not None:
+            # A timestamp here, where Trino takes a duration. The same setting,
+            # two vocabularies -- which is what MaintenanceRequest exists for.
+            arguments.append(("older_than", _days_ago(days)))
+        if keep is not None:
+            arguments.append(("retain_last", str(keep)))
+        return _call("expire_snapshots", arguments)
+
+    def _remove_orphans_sql(self, target: str, request: MaintenanceRequest) -> str:
+        settings = request.retention.remove_orphan_files
+        days = (
+            request.older_than_days
+            if request.older_than_days is not None
+            else settings.older_than_days
+        )
+        arguments: list[tuple[str, str]] = [("table", _literal(self._plain(target)))]
+        if days is not None:
+            arguments.append(("older_than", _days_ago(days)))
+        return _call("remove_orphan_files", arguments)
+
+    def _rewrite_manifests_sql(self, target: str, request: MaintenanceRequest) -> str:
+        return _call("rewrite_manifests", [("table", _literal(self._plain(target)))])
+
+    def _apply_properties_sql(self, target: str, request: MaintenanceRequest) -> str:
+        """Spark takes the Iceberg property names directly.
+
+        Worth stating because Trino does not: there the same two settings need
+        `max_previous_versions` and `delete_after_commit_enabled`, since its
+        table properties are an allowlist. Spark passes them through.
+        """
+        settings = request.retention.metadata
+        pairs = []
+        if settings.previous_versions_max is not None:
+            pairs.append(
+                f"'write.metadata.previous-versions-max' = "
+                f"{_literal(str(settings.previous_versions_max))}"
+            )
+        if settings.delete_after_commit is not None:
+            value = "true" if settings.delete_after_commit else "false"
+            pairs.append(f"'write.metadata.delete-after-commit.enabled' = {_literal(value)}")
+        if not pairs:
+            raise EngineConfigProblem(
+                "apply-properties has nothing to set: the config declares neither "
+                "previous_versions_max nor delete_after_commit."
+            )
+        return f"ALTER TABLE {target} SET TBLPROPERTIES ({', '.join(pairs)})"
+
+    @staticmethod
+    def _plain(target: str) -> str:
+        """Procedure arguments take the identifier as a *string*, not quoted SQL.
+
+        `CALL system.rewrite_data_files(table => 'db.events')` -- so the
+        backticks that belong in `ALTER TABLE` must not appear here.
+        """
+        return target.replace("`", "")
+
+    # -- execution ------------------------------------------------------------
+
+    def connect(self):
+        """A SparkSession with the Iceberg extensions.
+
+        Imported here, not at module scope: PySpark is optional and importing
+        this module must not require a JVM -- `zamboni engines` reports Spark's
+        capabilities on an install that has never seen it.
+        """
+        try:
+            from pyspark.sql import SparkSession
+        except ImportError as exc:  # pragma: no cover - depends on the install
+            raise EngineConfigProblem(
+                "the spark engine needs PySpark: install zamboni[spark]."
+            ) from exc
+
+        builder = SparkSession.builder.appName("zamboni")
+        if master := self._options.get("master"):
+            builder = builder.master(master)
+        for key, value in self._session_config().items():
+            builder = builder.config(key, value)
+        return builder.getOrCreate()
+
+    def _session_config(self) -> dict[str, str]:
+        """Only what Iceberg needs; everything else is the operator's business.
+
+        Deliberately does not invent a catalog configuration. A deployment that
+        runs Spark already has one, and a maintenance tool silently overriding
+        `spark.sql.catalog.*` would be changing where the data is.
+        """
+        config = {
+            "spark.sql.extensions": (
+                "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+            ),
+        }
+        config.update(
+            {k[len("conf.") :]: v for k, v in self._options.items() if k.startswith("conf.")}
+        )
+        return config
+
     def execute(
         self,
         operation: Operation,
@@ -128,9 +470,19 @@ class SparkMaintainer(Maintainer):
         request: MaintenanceRequest,
         dry_run: bool,
     ) -> Reportable:
-        self.check_supported(operation)
-        raise NotImplementedError(
-            f"the spark maintainer is not implemented yet (ZMBNI-15). Its declared "
-            f"support for {operation.value} is already accurate -- run "
-            "`zamboni engines` to see it."
-        )
+        statement = self.statement_for(operation, table, request)
+        if dry_run and not self.capabilities().can_preview(operation):
+            raise PreviewUnavailable(
+                f"spark cannot preview {operation.value}. The statement would be: {statement}"
+            )
+        if dry_run:
+            # remove_orphan_files is the one Spark procedure that previews.
+            statement = statement.replace(
+                "CALL system.remove_orphan_files(",
+                "CALL system.remove_orphan_files(dry_run => true, ",
+            )
+
+        logger.info("spark: %s", statement)
+        session = self.connect()
+        rows = tuple(row.asDict() for row in session.sql(statement).collect())
+        return SparkResult(operation=operation, table=table, statement=statement, rows=rows)
