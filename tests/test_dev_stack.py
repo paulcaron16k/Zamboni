@@ -607,3 +607,246 @@ def test_trino_enforces_the_retention_floor_we_validate_against(trino_env, sessi
 
     with pytest.raises(TrinoUserError, match="minimum retention"):
         maintainer(trino_env, session).connect().cursor().execute(statement)
+
+
+# -- Spark over Spark Connect (ZMBNI-913) ---------------------------------
+#
+# Same opt-in posture as Trino: its own compose profile, skipped when the port
+# is closed even under ZAMBONI_REQUIRE_DEV_STACK.
+#
+# Connect rather than a standalone master, and that choice is what makes these
+# tests cheap enough to have at all. The client is `pyspark-client`, ~1.5MB of
+# pure Python against pyspark's ~434MB, and it starts no JVM -- so "run the
+# Spark tests" costs a gRPC connection here and a container there, instead of a
+# JVM in the pytest process and a Java version this project has to pin.
+
+
+def spark_up(env: dict[str, str]) -> bool:
+    """A TCP connect, not an HTTP GET: Connect speaks gRPC on this port."""
+    import socket
+
+    port = env.get("SPARK_CONNECT_PORT")
+    if not port:
+        return False
+    try:
+        with socket.create_connection(("localhost", int(port)), timeout=3):
+            return True
+    except OSError:
+        return False
+
+
+@pytest.fixture(scope="module")
+def spark_env(env: dict[str, str]) -> dict[str, str]:
+    if not spark_up(env):
+        pytest.skip(
+            "Spark Connect not running -- cd dev-stack && "
+            "docker compose --profile spark up -d --wait spark"
+        )
+    pytest.importorskip("pyspark", reason="install zamboni[spark-connect]")
+    return env
+
+
+@pytest.fixture
+def spark_table(spark_env, session, request):
+    """Six data files, in a namespace unique to this run."""
+    namespace = f"zs913_{uuid.uuid4().hex[:8]}"
+    session.catalog.create_namespace(namespace)
+    request.addfinalizer(lambda: _drop_namespace(session, namespace))
+
+    identifier = f"{namespace}.events"
+    tbl = session.catalog.create_table(
+        identifier, schema=SCHEMA, properties={"format-version": "2"}
+    )
+    for i in range(6):
+        tbl.append(
+            pa.table(
+                {
+                    "id": pa.array([i * 2, i * 2 + 1], type=pa.int32()),
+                    "category": pa.array(["a", "b"], type=pa.string()),
+                },
+                schema=ARROW,
+            )
+        )
+    return identifier
+
+
+def spark_maintainer(spark_env, session):
+    from zamboni.maintainers.spark import SparkMaintainer
+
+    return SparkMaintainer(
+        session,
+        {"remote": f"sc://localhost:{spark_env['SPARK_CONNECT_PORT']}", "catalog": "iceberg"},
+    )
+
+
+def spark_request(**overrides):
+    from zamboni.maintainers import MaintenanceRequest
+    from zamboni.tableconfig import (
+        ExpireSnapshotsSettings,
+        MetadataSettings,
+        RemoveOrphanFilesSettings,
+        Retention,
+    )
+
+    # 7 days for both. Spark's own floor is 24 hours for remove_orphan_files and
+    # nothing for expire, but the point here is not to probe the floors -- that
+    # is `validate()`'s job and test_maintainers.py's -- it is to run what a
+    # sane config produces.
+    return MaintenanceRequest(
+        retention=Retention(
+            expire_snapshots=ExpireSnapshotsSettings(
+                enabled=True, max_snapshot_age_days=7, min_snapshots_to_keep=2
+            ),
+            remove_orphan_files=RemoveOrphanFilesSettings(enabled=True, older_than_days=7),
+            metadata=MetadataSettings(previous_versions_max=3, delete_after_commit=True),
+        ),
+        **overrides,
+    )
+
+
+@pytest.mark.parametrize(
+    "operation_name",
+    [
+        "compact",
+        "rewrite-manifests",
+        "apply-properties",
+        "expire",
+        "remove-orphans",
+        "remove-dangling-deletes",
+    ],
+)
+@pytest.mark.spark
+def test_spark_accepts_every_statement_we_generate(spark_env, session, spark_table, operation_name):
+    """The claim the unit tests cannot make.
+
+    They assert we emit the SQL we intended; only a server says whether it is
+    accepted. Every argument-shape defect in this maintainer was found here and
+    could not have been found anywhere else: `date_sub(...)` rejected by the
+    parser, a bare string rejected by the type checker, and the 24-hour floor.
+    """
+    from zamboni.maintainers import Operation
+
+    operation = Operation(operation_name)
+    result = spark_maintainer(spark_env, session).execute(
+        operation, spark_table, request=spark_request(), dry_run=False
+    )
+
+    assert operation.value in result.describe()
+
+
+@pytest.mark.spark
+def test_spark_compaction_actually_compacts(spark_env, session, spark_table):
+    """Not just accepted -- effective."""
+    from zamboni.maintainers import Operation
+
+    assert len(session.table(spark_table).inspect.files().to_pylist()) == 6
+
+    spark_maintainer(spark_env, session).execute(
+        Operation.COMPACT, spark_table, request=spark_request(), dry_run=False
+    )
+
+    tbl = session.table(spark_table)
+    assert len(tbl.inspect.files().to_pylist()) == 1
+    assert tbl.scan().to_arrow().num_rows == 12, "compaction changed the data"
+
+
+@pytest.mark.spark
+def test_zorder_is_accepted_by_the_server(spark_env, session, spark_table):
+    """The one thing Spark does that Trino cannot, so nothing else can cover it.
+
+    `sort_order => 'zorder(id, category)'` is a string Spark parses itself; a
+    unit test can only assert we wrote it.
+    """
+    from zamboni.config import CompactionConfig
+    from zamboni.maintainers import Operation
+
+    request = spark_request(compaction=CompactionConfig(zorder_columns=("id", "category")))
+    result = spark_maintainer(spark_env, session).execute(
+        Operation.COMPACT, spark_table, request=request, dry_run=False
+    )
+
+    assert "zorder(id, category)" in result.statement
+    assert session.table(spark_table).scan().to_arrow().num_rows == 12
+
+
+@pytest.mark.spark
+def test_only_remove_orphans_previews(spark_env, session, spark_table):
+    """`can_preview` is per operation because of this asymmetry; here the server
+    agrees rather than us asserting it about ourselves."""
+    from zamboni.maintainers import Operation, PreviewUnavailable
+
+    maintainer = spark_maintainer(spark_env, session)
+
+    result = maintainer.execute(
+        Operation.REMOVE_ORPHANS, spark_table, request=spark_request(), dry_run=True
+    )
+    assert "dry_run => true" in result.statement
+
+    with pytest.raises(PreviewUnavailable):
+        maintainer.execute(Operation.COMPACT, spark_table, request=spark_request(), dry_run=True)
+
+
+@pytest.mark.spark
+def test_remove_orphans_reaches_storage_on_the_servers_own_credentials(
+    spark_env, session, spark_table
+):
+    """The operation that fails alone when the S3A configuration is wrong.
+
+    Every other operation reads and writes through Iceberg FileIO on
+    Lakekeeper's vended STS credentials. `remove_orphan_files` lists through
+    Hadoop's S3A filesystem, which knows nothing about Iceberg and needs its own
+    static keys on the *server* -- a Connect client cannot supply them, because
+    `spark.hadoop.*` is read when the server builds its Hadoop configuration.
+
+    A dry run is enough: listing is the part that needs the credentials, and it
+    happens before anything is deleted. If S3A is misconfigured this raises
+    while the other five operations keep passing, which is exactly the confusing
+    symptom the assertion exists to name.
+    """
+    from zamboni.maintainers import Operation
+
+    result = spark_maintainer(spark_env, session).execute(
+        Operation.REMOVE_ORPHANS, spark_table, request=spark_request(), dry_run=True
+    )
+
+    assert "remove_orphan_files" in result.statement
+    assert session.table(spark_table).scan().to_arrow().num_rows == 12
+
+
+@pytest.mark.spark
+def test_the_expiry_timestamp_is_read_as_the_instant_we_meant(spark_env, session):
+    """Why this stack's Spark session is deliberately **not** UTC.
+
+    Zamboni computes `older_than` on the client and sends it as a typed literal.
+    Spark reads a bare wall-clock in `spark.sql.session.timeZone`, so on a
+    UTC server a literal missing its offset is indistinguishable from a correct
+    one -- a UTC dev stack would certify the ZMBNI-1507 bug as working.
+
+    Two assertions, and the second is the one that keeps the first honest: our
+    literal must land on the intended instant, *and* the naive form must land on
+    a different one. If someone sets this server to UTC, the second assertion
+    fails and says why.
+    """
+    import datetime as dt
+
+    from zamboni.maintainers.spark import _days_ago, _utc_now
+
+    spark = spark_maintainer(spark_env, session).connect()
+    zone = spark.conf.get("spark.sql.session.timeZone")
+    assert zone != "UTC", (
+        f"this server is on {zone}; a UTC session cannot tell a correct "
+        "timestamp literal from one missing its offset"
+    )
+
+    expected = _utc_now() - dt.timedelta(days=7)
+    literal = _days_ago(7)  # TIMESTAMP '... +00:00'
+    naive = literal.replace("+00:00", "")
+
+    ours, without_offset = spark.sql(
+        f"SELECT unix_timestamp({literal}) AS a, unix_timestamp({naive}) AS b"
+    ).collect()[0]
+
+    assert abs(ours - expected.timestamp()) <= 1, "our literal is not the instant we computed"
+    assert ours != without_offset, (
+        "the offset made no difference, so this test cannot detect its loss"
+    )

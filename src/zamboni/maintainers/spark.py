@@ -502,18 +502,46 @@ class SparkMaintainer(Maintainer):
     # -- execution ------------------------------------------------------------
 
     def connect(self):
-        """A SparkSession with the Iceberg extensions.
+        """A SparkSession: over Spark Connect if `remote` is set, else local.
 
         Imported here, not at module scope: PySpark is optional and importing
         this module must not require a JVM -- `zamboni engines` reports Spark's
         capabilities on an install that has never seen it.
+
+        The two modes differ in more than a URL.
+
+        **Connect** (`remote`, an `sc://` URL) runs no JVM here at all. The
+        session belongs to a server someone else operates, which is why
+        `_session_config` is *not* applied to it: `spark.sql.extensions` and
+        `spark.hadoop.*` are read when that server starts its context, so
+        sending them from a client is at best ignored and at worst an error on a
+        server that rejects static conf. It also means the Iceberg extensions
+        and the S3A credentials `remove-orphans` needs are the server operator's
+        responsibility, and `zamboni doctor` cannot check them from here. The
+        payoff is that `zamboni[spark-connect]` is ~1.5MB against ~434MB, and a
+        developer needs no Java.
+
+        **Local** starts a driver JVM in this process, so the machine's Java
+        version becomes ours: Spark 3.x wants Java 8/11/17, Spark 4 wants 17 or
+        21.
         """
         try:
             from pyspark.sql import SparkSession
         except ImportError as exc:  # pragma: no cover - depends on the install
             raise EngineConfigProblem(
-                "the spark engine needs PySpark: install zamboni[spark]."
+                "the spark engine needs PySpark: install zamboni[spark] for a "
+                "local session, or zamboni[spark-connect] to drive a Spark "
+                "Connect server with --spark-remote."
             ) from exc
+
+        if remote := self._options.get("remote"):
+            if self._options.get("master"):
+                raise EngineConfigProblem(
+                    "--spark-remote and --spark-master are mutually exclusive: "
+                    "Connect attaches to a session someone else started, and a "
+                    "master tells this process to start its own."
+                )
+            return SparkSession.builder.remote(remote).getOrCreate()
 
         builder = SparkSession.builder.appName("zamboni")
         if master := self._options.get("master"):
@@ -528,6 +556,8 @@ class SparkMaintainer(Maintainer):
         Deliberately does not invent a catalog configuration. A deployment that
         runs Spark already has one, and a maintenance tool silently overriding
         `spark.sql.catalog.*` would be changing where the data is.
+
+        Local mode only -- see :meth:`connect` for why Connect cannot take these.
         """
         config = {
             "spark.sql.extensions": (

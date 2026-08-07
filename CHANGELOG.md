@@ -82,6 +82,29 @@ Two categories beyond the usual set, because this tool deletes files:
   so it is gated on `--trino-version` and its loss is reported rather than
   silent.
 
+- **`--spark-remote`, `--spark-master` and `--spark-catalog`** — Spark had no
+  CLI flags at all: the maintainer read `remote`, `master` and `catalog` from
+  options that nothing on the command line ever populated, so `--engine spark`
+  was reachable and unconfigurable, and `--trino-catalog` was silently
+  configuring Spark. Engine options are now built per engine.
+
+- **`zamboni[spark-connect]`** — the Spark engine over Spark Connect. This is
+  `pyspark-client`, ~1.5MB of pure Python against pyspark's 434MB, and it starts
+  no JVM, so the machine's Java version stops mattering. Mutually exclusive with
+  `zamboni[spark]`: both provide the `pyspark` package. Needs a Spark 4 server.
+
+  With Connect the Iceberg extensions and the S3 credentials `remove-orphans`
+  lists with belong to whoever operates the server — `spark.hadoop.*` is read
+  when that server builds its Hadoop configuration, so Zamboni cannot supply
+  them at call time and `zamboni doctor` cannot check them.
+
+- **A Spark Connect server in the dev stack**, in its own `spark` profile
+  alongside Trino's, plus a CI job that runs six live tests against it. The
+  Spark maintainer's automated coverage was previously the SQL strings it
+  generated and nothing else, which is how a timezone defect reached review.
+  Its session timezone is deliberately not UTC, because a UTC server cannot
+  distinguish a correct timestamp literal from one missing its offset.
+
 ### Fixed
 
 - **Z-order was unreachable from the CLI on any engine but the local one.**

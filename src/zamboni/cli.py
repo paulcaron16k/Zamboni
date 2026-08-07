@@ -455,6 +455,27 @@ def _add_engine_arg(p: argparse.ArgumentParser) -> None:
         default=os.environ.get("ZAMBONI_TRINO_CATALOG"),
         help="the Trino catalog holding the Iceberg tables. Default `iceberg`.",
     )
+    # Spark had no flags at all until ZMBNI-913 -- the maintainer read `remote`,
+    # `master` and `catalog` from its options, and nothing on the CLI ever put
+    # them there. `--engine spark` was reachable and unconfigurable.
+    p.add_argument(
+        "--spark-remote",
+        default=os.environ.get("ZAMBONI_SPARK_REMOTE"),
+        help="Spark Connect endpoint, e.g. sc://localhost:15002. Needs no JVM "
+        "here; the server owns the Iceberg extensions and the S3 credentials "
+        "`remove-orphans` lists with.",
+    )
+    p.add_argument(
+        "--spark-master",
+        default=os.environ.get("ZAMBONI_SPARK_MASTER"),
+        help="Spark master for a local driver, e.g. local[*]. Mutually "
+        "exclusive with --spark-remote.",
+    )
+    p.add_argument(
+        "--spark-catalog",
+        default=os.environ.get("ZAMBONI_SPARK_CATALOG"),
+        help="the Spark catalog holding the Iceberg tables. Default `iceberg`.",
+    )
 
 
 def _add_catalog_args(p: argparse.ArgumentParser) -> None:
@@ -589,18 +610,29 @@ def _compactor_for(session: CatalogSession, args: argparse.Namespace) -> TableCo
 
 def _maintainer_for(session: CatalogSession, args: argparse.Namespace):
     """The engine named by ``--engine``, defaulting to the local one."""
+    engine = getattr(args, "engine", "local")
+    # Per engine, not merged: `catalog` means a different thing to each, and one
+    # flat dict made --trino-catalog configure Spark. It did, before ZMBNI-913.
+    by_engine = {
+        "trino": (
+            ("host", "trino_host"),
+            ("port", "trino_port"),
+            ("user", "trino_user"),
+            ("catalog", "trino_catalog"),
+            ("version", "trino_version"),
+        ),
+        "spark": (
+            ("remote", "spark_remote"),
+            ("master", "spark_master"),
+            ("catalog", "spark_catalog"),
+        ),
+    }
     options = {
         key: value
-        for key, value in (
-            ("host", getattr(args, "trino_host", None)),
-            ("port", getattr(args, "trino_port", None)),
-            ("user", getattr(args, "trino_user", None)),
-            ("catalog", getattr(args, "trino_catalog", None)),
-            ("version", getattr(args, "trino_version", None)),
-        )
-        if value
+        for key, attribute in by_engine.get(engine, ())
+        if (value := getattr(args, attribute, None))
     }
-    return maintainers.get(getattr(args, "engine", "local"))(session, options)
+    return maintainers.get(engine)(session, options)
 
 
 def _request_for(args: argparse.Namespace) -> MaintenanceRequest:
