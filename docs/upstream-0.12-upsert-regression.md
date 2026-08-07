@@ -63,8 +63,29 @@ print(sorted(zip(arr["k"].to_pylist(), arr["v"].to_pylist())))
 Two defects in one result: the superseded `('a', 1)` survives beside its
 replacement, and `('b', 1)` — a row the upsert never targeted — is duplicated.
 
-**The partition spec is required to reproduce.** The same script on an
-unpartitioned table is correct on both versions.
+### Narrowed: temporal transforms only, and only with a survivor in the manifest
+
+Retested against `7d0f5031`, which is `version = "0.12.0"` proper. Two things
+narrow it well beyond "partitioned":
+
+| partition spec | |
+|---|---|
+| `identity(ts)`, `truncate(k, 1)`, `bucket(k, 4)` | correct |
+| `year(ts)`, `month(ts)`, `day(ts)`, `hour(ts)` | **duplicates** |
+
+Not "partitioned" in general, and not "non-identity" either — `truncate` and
+`bucket` are both fine. Only the four transforms whose partition value is an
+integer ordinal derived from a timestamp, which is exactly what makes the
+predicate nonsensical: `EqualTo(Reference('ts'), LongLiteral(20455))` compares a
+timestamp column to a day ordinal. For `identity` the two coincide; for
+`truncate` and `bucket` the projection is evidently still usable.
+
+**The minimum condition is one manifest holding both a replaced row and a
+surviving one.** Append one row and upsert it and the result is *correct* —
+every entry is deleted, so the manifest is dropped whole and the stale path is
+never reached. Append two and upsert one, and the survivor forces a rewrite that
+the evaluator declines, so the manifest is kept verbatim with **both** entries
+beside the newly written ones.
 
 ---
 
