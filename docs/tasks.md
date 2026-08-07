@@ -42,13 +42,14 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-15 | Spark maintainer | Iceberg Spark procedures, including the one operation we cannot do locally. [roadmap.md RM-5](roadmap.md) | todo | |
 | ZMBNI-16 | Zamboni vs ice-keeper | Delivered as [ice-keeper-comparison.md](ice-keeper-comparison.md). Found ZMBNI-507, a data-loss path in shipped code. [roadmap.md RM-6](roadmap.md) | done | 2026-08-03 |
 | ZMBNI-17 | DevOps CLI and operations | One command a cron line can call, config that is not twenty flags, and a fleet story for multi-tenant warehouses. [devops.md](devops.md) | done | 2026-08-04 |
+| ZMBNI-18 | Licence and publication | Apache-2.0, the files a public repo needs, and the order in which to flip the switch. Gated on ZMBNI-905: publishing a repo whose CI has never run invites an assumption we cannot back | todo | |
 
 > **On section order.** Epics ZMBNI-1…10 appear below in numeric order; the roadmap epics
 > ZMBNI-11…16 appear in *delivery* order (13, 16, 12, 14, 11, 15), which is not their numeric
 > order. The numbers follow [roadmap.md](roadmap.md)'s RM-1…RM-6 so the two documents agree on
 > identity; the sequence is explained in each section's subtitle.
 
-**Story counts:** 80 done · 1 inproject · 16 todo · 1 cancelled  (98 stories)
+**Story counts:** 81 done · 1 inproject · 22 todo · 1 cancelled  (105 stories)
 
 ---
 
@@ -290,6 +291,26 @@ the tool the wrapper. [devops.md](devops.md)
 
 ---
 
+## ZMBNI-18 — Licence and publication
+
+Whether to publish is decided; *when* and *in what state* are not. The sequencing
+matters more than the checklist: pushing to GitHub is how CI finally runs, and a
+private repo gets Actions minutes, so **push private, get CI green, then flip
+visibility** — one click, history intact, no exposure while the first run
+surfaces whatever it surfaces.
+
+| id | title | description | status | completed-at |
+|---|---|---|---|---|
+| ZMBNI-1801 | Apply the licence | Apache-2.0. The same licence as Iceberg and PyIceberg, so contributions flow both ways without friction, and it grants patent rights — which matters for a tool whose whole job is manipulating a spec'd format. `LICENSE` carries the standard text only: the copy in the PyIceberg checkout appends attributions for vendored Avro, Thrift and Hive code, and we vendor none of it. Declared in `pyproject.toml` too (`license`, `license-files`, classifiers) so it travels with the wheel rather than only the repo | done | 2026-08-07 |
+| ZMBNI-1802 | Decide on per-file licence headers | Apache projects put a header in every source file; standalone projects often do not. A real decision rather than a default: 40 files gain nine lines each, against machine-readable provenance if code is ever copied out. Recommend **no** — `LICENSE` plus package metadata is sufficient for a single-licence repo, and the headers would dwarf several of our shorter modules | todo | |
+| ZMBNI-1803 | `SECURITY.md` | Matters here more than for most projects: this tool deletes files, and the failure mode of a defect is somebody's data. Needs a reporting address, an expectation of response, and a statement of which versions get fixes. Should say plainly that data-loss reports are the priority category | todo | |
+| ZMBNI-1804 | `CONTRIBUTING.md` | The conventions that are currently only visible by reading commits: verify a claim before making it, test against both PyIceberg lines where a change touches the capability probes, run the review step before committing, and never let a doc assert something the code does not do. Without this, drive-by contributions will not match the codebase's own standard | todo | |
+| ZMBNI-1805 | Publication-readiness pass on the docs | The README is the shop window and currently assumes a reader who already trusts the tool. Needs: what it is and is not, `v0.1.0` and one-author framing kept prominent rather than buried in releasing.md §4, the `<0.12` cap explained where someone will hit it, and no CI badge until ZMBNI-905 is green — a badge that has never run is a claim | todo | |
+| ZMBNI-1806 | Repository metadata | Description, topics and the `[project.urls]` block, so the repo is findable by someone searching for the gap it fills. Cheap, and the difference between a repo people find and one they do not | todo | |
+| ZMBNI-1807 | Flip to public | Last, and only after ZMBNI-905 is green. One click; the preceding stories are what make it defensible | todo | |
+
+---
+
 ## What is actually left
 
 Two kinds of remaining work: finishing `v0.1.0`'s loose end, and the roadmap.
@@ -312,6 +333,11 @@ reproduced end to end before the fix. Found by ZMBNI-1601 comparing against ice-
 guards exactly this. The fix is the fourth checked invariant in design.md §6.6. It shipped in
 `v0.1.0`, so the next release carries a **SAFETY** entry per
 [releasing.md §1](releasing.md).
+
+**Publication — ZMBNI-18.** Whether to open-source is decided; the licence is applied
+(Apache-2.0) and the rest is sequencing. Gated on ZMBNI-905, because publishing a repo whose
+CI has never run invites an assumption we cannot back. The order that resolves the
+chicken-and-egg: push **private**, let CI run, fix what it finds, then flip visibility.
 
 **The roadmap — ZMBNI-11 … 16.** Six features, defined in [roadmap.md](roadmap.md). The theme
 is to stop being one implementation: three engines can do this work, and Zamboni should be one

@@ -7,7 +7,21 @@ name = "zamboni"
 version = "0.1.0"
 description = "Iceberg table maintenance (compaction) for MinIO + Lakekeeper, without Trino or Spark"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
+keywords = ["iceberg", "lakehouse", "compaction", "maintenance", "pyiceberg", "duckdb"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: System :: Systems Administration",
+]
 dependencies = [
     # Upper bound deliberate, not caution. PyIceberg 0.12 corrupts data on a
     # partitioned `upsert` -- it leaves the row it replaced *and* duplicates one

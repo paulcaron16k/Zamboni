@@ -144,6 +144,11 @@ uv run pre-commit run --all-files
 The full suite stays out of the hook deliberately — a four-minute hook gets bypassed, and a
 bypassed hook is worse than none.
 
+## Licence
+
+Apache-2.0 — the same licence as Iceberg and PyIceberg, so contributions flow both ways
+without friction. See [LICENSE](LICENSE).
+
 ## Documentation
 
 - **[docs/design.md](docs/design.md)** — high-level design: how Iceberg stores a table, how
