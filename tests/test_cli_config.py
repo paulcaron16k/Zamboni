@@ -267,10 +267,16 @@ def test_summary_warns_when_apply_properties_would_have_nothing_to_do(tmp_path, 
     assert "apply-properties has nothing to set" in capsys.readouterr().out
 
 
-def test_summary_flags_zorder_as_unavailable_on_trino(tmp_path, capsys):
+def test_summary_flags_zorder_as_unavailable_where_it_is(tmp_path, capsys):
     """The one layout setting that silently does nothing on an engine that
-    cannot do it, so the summary says so where the choice is made."""
+    cannot do it, so the summary says so where the choice is made.
+
+    Derived from the capability declarations rather than asserted against a
+    literal: the first version compared against the string "trino cannot do
+    this", which would have kept passing after Trino gained Z-order.
+    """
     from zamboni.cli import main
+    from zamboni.maintainers import LayoutFeature, engines_lacking
 
     config = tmp_path / "tc.json"
     config.write_text(
@@ -280,7 +286,60 @@ def test_summary_flags_zorder_as_unavailable_on_trino(tmp_path, capsys):
     main(["table-config", "summary", str(config)])
 
     out = capsys.readouterr().out
-    assert "trino cannot do this" in out
+    # The zorder line only. Checking the whole output would catch the evolution
+    # warning, which names different engines for a different reason.
+    line = next(ln for ln in out.splitlines() if "zorder columns" in ln)
+    lacking = engines_lacking(LayoutFeature.ZORDER)
+    assert lacking, "no engine lacks Z-order; this test no longer means anything"
+    for engine in lacking:
+        assert engine in line
+    for engine in {"local", "spark", "trino"} - set(lacking):
+        assert engine not in line
+
+
+def test_summary_warns_about_evolution_on_the_engines_that_lack_it(tmp_path, capsys):
+    """Partition evolution is local-only today, and a config that declares it is
+    silently a no-op everywhere else."""
+    from zamboni.cli import main
+    from zamboni.maintainers import LayoutFeature, engines_lacking
+
+    config = tmp_path / "tc.json"
+    config.write_text('{"version": 1, "tables": {"db.events": {}}}')
+    main(["table-config", "summary", str(config)])
+
+    out = capsys.readouterr().out
+    for engine in engines_lacking(LayoutFeature.PARTITION_EVOLUTION):
+        assert engine in out
+
+
+def test_a_warning_disappears_when_the_engine_gains_the_feature(tmp_path, capsys, monkeypatch):
+    """The property that makes this derived rather than decorative.
+
+    Grant Trino Z-order and the summary must stop warning, with no edit to the
+    CLI. If this fails, the warning has drifted back into a literal.
+    """
+    from dataclasses import replace
+
+    from zamboni.cli import main
+    from zamboni.maintainers import LayoutFeature
+    from zamboni.maintainers.trino import TrinoMaintainer
+
+    granted = replace(
+        TrinoMaintainer.capabilities(),
+        layout=TrinoMaintainer.capabilities().layout | {LayoutFeature.ZORDER},
+    )
+    monkeypatch.setattr(TrinoMaintainer, "capabilities", classmethod(lambda cls: granted))
+
+    config = tmp_path / "tc.json"
+    config.write_text(
+        '{"version": 1, "tables": {"db.events": {"ordering": {"mode": "zorder", '
+        '"zorder": {"columns": ["a", "b"]}}}}}'
+    )
+    main(["table-config", "summary", str(config)])
+
+    out = capsys.readouterr().out
+    assert "zorder columns a, b" in out
+    assert "not available on" not in out.split("zorder columns a, b")[1].split("\n")[0]
 
 
 def test_table_config_validate_matches_the_original_verb(tmp_path, capsys):

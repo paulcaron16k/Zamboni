@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import (
     EngineConfigProblem,
+    LayoutFeature,
     Maintainer,
     MaintainerCapabilities,
     MaintenanceRequest,
@@ -169,6 +170,17 @@ class SparkMaintainer(Maintainer):
     def capabilities(cls) -> MaintainerCapabilities:
         return MaintainerCapabilities(
             engine=cls.name,
+            # Everything except partition evolution: `rewrite_data_files` takes
+            # `output-spec-id`, which would do it, but Zamboni does not expose
+            # that yet -- so it is a property of Spark rather than a capability
+            # reachable from here.
+            layout=frozenset(
+                {
+                    LayoutFeature.ZORDER,
+                    LayoutFeature.SORT,
+                    LayoutFeature.TARGET_FILE_SIZE,
+                }
+            ),
             operations={
                 Operation.COMPACT: OperationSupport(
                     Operation.COMPACT,

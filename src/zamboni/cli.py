@@ -54,6 +54,7 @@ from .compactor import CompactionBlocked, TableCompactor
 from .config import CompactionConfig, MemoryMode
 from .maintainers import (
     EngineConfigProblem,
+    LayoutFeature,
     MaintenanceRequest,
     Operation,
     PreviewUnavailable,
@@ -1171,6 +1172,21 @@ def _table_config_generate(session: CatalogSession, args: argparse.Namespace) ->
     return 0
 
 
+def _lacking(feature: LayoutFeature) -> str:
+    """ " -- not available on: trino", or "" when every engine can do it.
+
+    Asked of the capability declarations rather than written out here. The first
+    version was the string "-- local and spark only; trino cannot do this",
+    which was true and would have gone stale silently: `zamboni engines` derives
+    its answer from the code, so a hardcoded duplicate is a second source of
+    truth that nothing keeps honest.
+    """
+    lacking = maintainers.engines_lacking(feature)
+    if not lacking:
+        return ""
+    return f"  -- not available on: {', '.join(lacking)}"
+
+
 #: What an unset expiry knob resolves to, named rather than printed as `None`.
 #: Kept beside the summary because it is documentation; the resolution itself
 #: lives in expire.py.
@@ -1225,10 +1241,8 @@ def _table_config_summary(args: argparse.Namespace) -> int:
         )
         print(f"  layout     {parts}, ordering {mark(s.ordering.mode, d.ordering.mode)}")
         if s.ordering.mode == "zorder" and s.ordering.zorder:
-            print(
-                f"             zorder columns {', '.join(s.ordering.zorder.columns)}"
-                "  -- local and spark only; trino cannot do this"
-            )
+            columns = ", ".join(s.ordering.zorder.columns)
+            print(f"             zorder columns {columns}{_lacking(LayoutFeature.ZORDER)}")
 
         r = s.retention
         expire = "on" if r.expire_snapshots.enabled else "OFF"
@@ -1273,7 +1287,7 @@ def _table_config_summary(args: argparse.Namespace) -> int:
                 f"{r_.from_transform}->{r_.to_transform} after {r_.older_than_days}d"
                 for r_ in ev.rules
             )
-            print(f"  evolution  {rules}  -- local engine only")
+            print(f"  evolution  {rules}{_lacking(LayoutFeature.PARTITION_EVOLUTION)}")
         else:
             print("  evolution  disabled")
         print()

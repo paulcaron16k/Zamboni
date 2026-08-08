@@ -50,7 +50,7 @@ class MemoryMode(enum.Enum):
     So the number to budget against is **~2x the largest partition**, not the
     output file size, and the lever that actually works today is partitioning
     the table -- the planner makes one group per (spec, partition), with no cap
-    on group size. Tracked as ZMBNI-914.
+    on group size. Tracked as ZMBNI-1906.
 
     AUTO picks per group by comparing the group's on-disk size against
     ``memory_budget_bytes``.

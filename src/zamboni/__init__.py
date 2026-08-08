@@ -22,6 +22,7 @@ from .deletes import DanglingDeleteCleaner
 from .expire import RetentionPolicy, SnapshotExpirer
 from .maintainers import (
     EngineConfigProblem,
+    LayoutFeature,
     Maintainer,
     MaintainerCapabilities,
     MaintenanceRequest,
@@ -30,6 +31,7 @@ from .maintainers import (
     PreviewUnavailable,
     Support,
     UnsupportedOperation,
+    engines_lacking,
 )
 from .maintainers import available as available_engines
 from .maintainers import get as get_maintainer
@@ -102,6 +104,7 @@ __all__ = [
     "EngineConfigProblem",
     "FileGroup",
     "Finding",
+    "LayoutFeature",
     "Maintainer",
     "MaintainerCapabilities",
     "MaintenanceRequest",
@@ -134,6 +137,7 @@ __all__ = [
     "available_engines",
     "config_from_table_settings",
     "detect",
+    "engines_lacking",
     "get_maintainer",
     "profile_table",
     "reachable_files",

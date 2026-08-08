@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import (
     EngineConfigProblem,
+    LayoutFeature,
     Maintainer,
     MaintainerCapabilities,
     MaintenanceRequest,
@@ -161,6 +162,11 @@ class TrinoMaintainer(Maintainer):
     def capabilities(cls) -> MaintainerCapabilities:
         return MaintainerCapabilities(
             engine=cls.name,
+            # No Z-order -- verified against the connector source, see COMPACT's
+            # limitations below -- and no control over output file size, since
+            # `file_size_threshold` selects inputs rather than sizing outputs.
+            # Partition evolution has no procedure at all.
+            layout=frozenset({LayoutFeature.SORT}),
             operations={
                 Operation.COMPACT: OperationSupport(
                     Operation.COMPACT,

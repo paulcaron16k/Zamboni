@@ -131,6 +131,14 @@ Two categories beyond the usual set, because this tool deletes files:
   has failed — exit codes first, getting a stack trace out of cron, table
   status, a health check, and common failures.
 
+- **`LayoutFeature` and `MaintainerCapabilities.layout`** — Z-order, sort,
+  partition evolution and output-size control are layout *settings* rather than
+  verbs, so `OperationSupport` had nowhere to record them and they existed only
+  as prose inside `compact`'s limitations. Each engine now declares them, and
+  `zamboni engines` prints them. `zamboni table-config summary` derives its "not
+  available on: trino" warnings from those declarations instead of a hardcoded
+  string that would have gone stale the day Trino gained Z-order.
+
 ### Changed
 
 - **`MemoryMode.CHUNKED` no longer claims to bound peak memory**, because it

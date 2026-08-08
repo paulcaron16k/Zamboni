@@ -745,3 +745,41 @@ def test_no_other_operation_can_be_asked_for_a_preview():
     rather than accepting the flag and dropping it."""
     with pytest.raises(PreviewUnavailable):
         spark().execute(Operation.COMPACT, "db.events", request=spark_request(), dry_run=True)
+
+
+# -- layout features (ZMBNI-1907) -----------------------------------------
+
+
+def test_every_engine_declares_its_layout_features():
+    """A missing declaration reads as "none of them", which would make the
+    config summary warn about a Z-order that works perfectly well."""
+    for name in maintainers.available():
+        capabilities = maintainers.get(name).capabilities()
+        assert capabilities.layout, f"{name} declares no layout features"
+
+
+def test_trino_is_the_engine_without_zorder():
+    """Pins the fact the whole engine-choice section of the user guide turns on."""
+    from zamboni.maintainers import LayoutFeature
+
+    assert maintainers.engines_lacking(LayoutFeature.ZORDER) == ("trino",)
+    assert LocalMaintainer.capabilities().can(LayoutFeature.ZORDER)
+    assert SparkMaintainer.capabilities().can(LayoutFeature.ZORDER)
+
+
+def test_partition_evolution_is_local_only():
+    from zamboni.maintainers import LayoutFeature
+
+    assert set(maintainers.engines_lacking(LayoutFeature.PARTITION_EVOLUTION)) == {
+        "spark",
+        "trino",
+    }
+
+
+def test_engines_reports_the_layout_features():
+    """`zamboni engines` is the generated answer, so it has to carry this too --
+    otherwise the summary derives from a declaration nobody can read."""
+    text = TrinoMaintainer.capabilities().describe()
+
+    assert "layout:" in text
+    assert "zorder" not in text.split("layout:")[1]

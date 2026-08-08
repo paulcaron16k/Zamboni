@@ -59,7 +59,24 @@ delete manifests only. ⁸ No procedure and no side effect achieves it; run this
 one elsewhere. ⁹ No size control. ¹⁰ Translated to Trino's own property names.
 
 `zamboni engines` prints this from the code, with the reason attached to every
-limitation. When this table and that command disagree, the command is right.
+limitation. **When this table and that command disagree, the command is right** —
+the table above is written by hand and the command is not:
+
+```console
+$ zamboni engines
+  engine: trino
+  compact                  partial      cannot preview
+      - no Z-order. Verified against the connector source: zero occurrences of
+        zorder/z-order/morton/interleave in all 474 files, and no open issue
+        proposing it. Only the leading sort column gets file skipping, so a
+        filter on any other column reads every file in every surviving partition
+  ...
+  layout: sort
+```
+
+That `layout:` line is what `zamboni table-config summary` consults when it
+warns you that a Z-order you just configured will do nothing on the engine you
+chose. Nothing about that warning is written twice.
 
 ### Reading the table if you are a home gamer
 
@@ -633,11 +650,18 @@ and Arrow. That buys you Z-order, partition evolution and a preview of every
 operation with no cluster at all. What it costs is memory, and the number below
 is measured rather than estimated.
 
-### Memory: budget ~2× your largest partition
+### Memory: you must provide RAM ≈ 2 × group size
 
-The planner makes **one rewrite group per (partition spec, partition value)**,
-with no cap on group size. Compaction then holds roughly twice that group's
-on-disk size in RAM:
+**This is the single number to plan around, and it is not what the design
+intends.** Zamboni goes to real trouble to avoid loading a table: it streams the
+source as Arrow record batches rather than materialising it, bin-packs those
+batches into output-sized slices, writes one slice at a time, and pushes any
+`ORDER BY` into DuckDB so the sort spills to disk instead of sitting in memory.
+`MemoryMode.CHUNKED` exists for exactly this.
+
+**Measured, it does not work.** Peak resident memory still grows linearly with
+the amount of data in one rewrite group, and `CHUNKED` is indistinguishable
+from `IN_MEMORY`:
 
 | Group on disk | Peak RSS growth | Ratio |
 |---|---|---|
@@ -645,34 +669,137 @@ on-disk size in RAM:
 | 450 MB | +975 MB | 2.2× |
 | 889 MB | +1840 MB | 2.1× |
 
-Measured on an unpartitioned table with `memory_budget_bytes` set to 64MB —
-which is to say, **`MemoryMode.CHUNKED` does not currently bound this**. It
-streams record batches and bin-packs them, but peak memory still grows linearly
-with the group and is indistinguishable from `IN_MEMORY`. Most of that is
-upstream: consuming PyIceberg's `ArrowScan.to_record_batches(tasks)` and
-discarding every batch immediately still grows ~1.3× the group's size, because
-it reads the tasks concurrently and buffers them. Tracked as ZMBNI-914.
+Measured with `memory_budget_bytes` set to 64MB, so `AUTO` and `CHUNKED` could
+not quietly fall back to the in-memory path. Most of the ceiling is upstream:
+consuming PyIceberg's `ArrowScan.to_record_batches(tasks)` and discarding every
+batch the instant it arrives *still* grows ~1.3× the group's on-disk size,
+because it reads the tasks concurrently and buffers them. Our bin-packing adds
+the rest.
 
-So the rule is:
+So plan for it rather than around it:
 
-> **An unpartitioned table is compacted as one group.** A 20GB unpartitioned
-> table needs ~40GB of RAM, and there is no setting that changes that today.
+> **Provide RAM ≈ 2 × the largest group you will compact.** No current setting
+> reduces the ratio. What you can change is the group.
 
-**Partitioning is the lever that works.** A table partitioned by day, with 500MB
-of new data per day, compacts one day at a time and peaks around 1GB regardless
-of how large the table is in total. This is a good reason to partition even when
-query patterns do not demand it.
+Tracked as ZMBNI-1906. Until it is fixed, the number above is the contract.
+
+#### What a "group" is
+
+A **group** is the unit of one rewrite: the set of data files compaction reads
+together, sorts together and replaces with new files in a single commit. The
+planner builds them like this:
+
+1. Take every live data file.
+2. Drop the ones already at or above `target_file_size_bytes` — they need no
+   rewriting. (Unless `rewrite_all` is set, which keeps them.)
+3. Bucket what remains by **(partition spec id, partition value)**.
+4. Drop buckets with fewer than `min_input_files` files, and buckets of one.
+5. Every surviving bucket is one group.
+
+There is **no cap on how large a bucket may be**. So:
+
+| Table | Groups | Largest group |
+|---|---|---|
+| Unpartitioned, 20 GB of small files | **1** | 20 GB → needs ~40 GB RAM |
+| Partitioned by day, 500 MB/day, 3 years | ~1,095 | 500 MB → needs ~1 GB RAM |
+| Partitioned by month, 15 GB/month | ~36 | 15 GB → needs ~30 GB RAM |
+
+The total table size is irrelevant. **The largest single partition is the whole
+question**, and an unpartitioned table is one partition.
+
+`zamboni plan` prints exactly this, which makes it the sizing tool:
+
+```console
+$ zamboni plan acme.events --table-config table-config.json
+acme.events: 2 group(s), 8 file(s), target 134217728 bytes, snapshot 8239698985041148504
+  group 0: spec=0 partition=(20671) files=4 bytes=3768 rows=2000
+  group 1: spec=0 partition=(20672) files=4 bytes=3768 rows=2000
+  skipped spec=0 partition=(20673): 1 candidate file(s) < min_input_files=2
+```
+
+**Double the largest `bytes=` it reports.** That is your requirement. (Partition
+values print as Iceberg stores them — `20671` is a day transform, days since the
+epoch, not a date.)
+
+#### How to reduce group size
+
+In order of how well they work:
+
+**1. Partition the table, or partition it more finely.** This is the lever that
+actually works, and the only one with no downside for maintenance. Day instead
+of month divides the largest group by ~30. A table partitioned by day with
+steady ingest has a bounded group size *forever*, however large the table grows.
+Worth doing even when query patterns do not demand it.
+
+**2. Lower `target_file_size_bytes`.** Step 2 above excludes files already at or
+above the target, so a smaller target excludes more of them and the group
+shrinks. The cost is that you are asking for smaller output files, which is the
+problem compaction exists to solve — this buys headroom on a table you cannot
+repartition today, not a steady state.
+
+**3. Never set `rewrite_all` on a large partition.** It disables step 2
+entirely, so every file joins the group including the ones already at target.
+It exists for forcing a re-sort after a layout change, and on a big partition it
+is the most reliable way to run a machine out of memory.
+
+**4. Raise `min_input_files`.** This does not shrink a group; it stops small
+buckets being compacted at all. Useful for skipping pointless work, useless for
+the partition that is actually too big.
+
+**5. Move compaction to Spark.** A cluster spreads one group across executors.
+Keep `local` for everything else — expiry, orphans, manifests and properties are
+metadata operations that cost megabytes regardless of table size, and partition
+evolution only exists on `local`. Both engines read the same
+`table-config.json`, so this is a per-operation choice, not a migration.
+
+#### Where this conflicts with Z-order
+
+Splitting a partition into several smaller groups is the obvious fix, and it is
+the one thing that **breaks Z-order**.
+
+Z-order works by interleaving the bits of several columns so that rows near each
+other in any of those dimensions land in the same file. The clustering is only
+as good as the set of rows it can see. Sort a group, and every row in that group
+is placed relative to every other row in it — file min/max statistics come out
+tight, and a query filtering on any of the Z-ordered columns skips most files.
+
+Split that group in half and sort each half independently, and you get two
+overlapping ranges instead of one ordered sequence. Every file's statistics
+widen, fewer files can be skipped, and the benefit degrades roughly in
+proportion to the number of pieces. Split it into ten and the clustering is
+largely gone.
+
+So the two goals pull against each other:
+
+| | wants |
+|---|---|
+| Bounded memory | the smallest possible group |
+| Z-order quality | the largest possible group |
+
+**Partitioning does not have this problem**, which is why it is lever 1 rather
+than lever 5. Z-order is applied *within* a partition anyway — Iceberg already
+skips whole partitions using the partition predicate — so cutting a table into
+daily partitions costs nothing in clustering quality. Splitting a single
+partition into arbitrary sub-groups costs a great deal.
+
+That is also why ZMBNI-1906 is not a one-line fix. Capping group size in the
+planner would bound memory immediately and quietly degrade every Z-ordered
+table, so the honest options are to reduce the per-group ratio instead (the
+upstream buffering is the larger half), or to make the cap explicit and refuse
+to apply it silently to a table that asked for Z-order.
 
 Practical guidance:
 
-- Home gamers: partition by day or month. Anything that keeps a partition under
-  a few hundred MB will run comfortably in 2GB of RAM.
-- Administrators: size the maintenance host against the *largest partition* you
-  expect, not the largest table. `zamboni plan` prints the groups compaction
-  would build, one per partition, with their file counts — that is the number to
-  double.
-- If a table is large and unpartitioned, use Spark for compaction and `local`
-  for everything else. Both read the same config.
+- **Home gamers:** partition by day or month. Anything that keeps a partition
+  under a few hundred MB runs comfortably in 2 GB of RAM, and Z-order within
+  that partition stays as good as it gets.
+- **Administrators:** size the maintenance host against the largest *partition*
+  you expect, not the largest table, and check it with `zamboni plan` rather
+  than arithmetic. If one table is both huge and unpartitioned, compact that one
+  on Spark and leave the rest on `local`.
+- **Anyone:** if a run is killed by the OOM killer, the log ends mid-operation
+  with no traceback. That signature — a truncated log and no Python error — is
+  almost always this.
 
 ### Other things to know
 
