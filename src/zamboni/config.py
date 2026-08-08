@@ -29,36 +29,34 @@ class MemoryMode(enum.Enum):
     DuckDB, which spills its sort to ``temp_directory`` on disk -- that is where
     the "batch/chunk via local temp files" behaviour actually comes from.
 
-    **CHUNKED does not currently bound peak memory, and this docstring used to
-    claim it did** ("peak memory is roughly one output file"). Measured on an
-    unpartitioned table with a 64MB budget, peak RSS grows linearly with the
-    group and is indistinguishable from IN_MEMORY:
+    **CHUNKED bounds peak memory by the largest data *file*, not by the group.**
+    That is true as of ZMBNI-1906 and was not true before it: this docstring
+    previously claimed a bound the code did not deliver ("peak memory is roughly
+    one output file"), and measurement showed CHUNKED was indistinguishable from
+    IN_MEMORY, both growing linearly with the group.
 
-    ====== ============= ============== =========
-    data   CHUNKED peak  IN_MEMORY peak ratio
-    ====== ============= ============== =========
-    226MB  +538MB        --             2.4x
-    450MB  +975MB        +985MB         2.2x
-    889MB  +1840MB       --             2.1x
-    ====== ============= ============== =========
+    The cause was upstream and is worked around in
+    :meth:`~zamboni.backends.duckdb_arrow.DuckDBArrowBackend._batches_one_file_at_a_time`,
+    which explains it. Reading one task per call instead of handing over the
+    whole list makes peak flat as the group grows. Measured end to end with file
+    size held at ~28MB:
 
-    Most of it is upstream: consuming ``ArrowScan.to_record_batches(tasks)`` and
-    discarding every batch immediately still grows ~1.3x the group's on-disk
-    size, because PyIceberg reads the tasks concurrently and buffers them. The
-    bin-packing here adds the rest.
+    ====== ================ ===============
+    group  before (CHUNKED) after (CHUNKED)
+    ====== ================ ===============
+    224MB  +822MB           +541MB
+    447MB  +1088MB          +527MB
+    894MB  +1111MB          +577MB
+    ====== ================ ===============
 
-    So the number to budget against is **~2x the largest partition**, not the
-    output file size, and the lever that actually works today is partitioning
-    the table -- the planner makes one group per (spec, partition), with no cap
-    on group size. Tracked as ZMBNI-1906.
+    Flat is the property; the absolute figure is one materialised data file plus
+    Arrow allocator retention and DuckDB's own footprint. Smaller files cost
+    less: the same ~675MB group in 7MB files peaks at +362MB against +475MB in
+    28MB files.
 
-    AUTO picks per group by comparing the group's on-disk size against
-    ``memory_budget_bytes``.
-
-    Note: PyIceberg 0.11.1 has no streaming write path of its own --
-    ``_dataframe_to_data_files`` accepts a ``pa.Table`` only, and
-    ``bin_pack_record_batches`` does not exist in this release -- so CHUNKED
-    does the bin-packing itself before calling into the writer.
+    IN_MEMORY remains linear in the group -- 2.3x to 3.4x measured -- which is
+    what it is for. AUTO exists to choose between them, and the budget below is
+    what makes that choice.
     """
 
     AUTO = "auto"
@@ -79,6 +77,14 @@ class CompactionConfig:
             meet the target size.
         memory_mode: See :class:`MemoryMode`.
         memory_budget_bytes: Group size above which ``AUTO`` chooses CHUNKED.
+            256MiB, lowered from 1GiB by ZMBNI-1906. The old value predates
+            CHUNKED actually bounding anything: crossing it bought nothing, so
+            it was set high to avoid paying for a slower path. Now that the
+            bounded path works, the trade is real -- IN_MEMORY on a 1GiB group
+            was measured at ~2.3GiB of peak growth, which is more than a small
+            host has, while CHUNKED costs roughly 1.5x on read and stays flat.
+            Raise it if your maintenance host has memory to spare and you would
+            rather have the speed.
         temp_directory: Where DuckDB spills sorts and hash tables. ``None``
             leaves DuckDB's default in place.
         sort_by_table_order: Order rewritten rows by the table's declared sort
@@ -115,7 +121,7 @@ class CompactionConfig:
     min_input_files: int = 2
     rewrite_all: bool = False
     memory_mode: MemoryMode = MemoryMode.AUTO
-    memory_budget_bytes: int = 1 * 1024 * 1024 * 1024
+    memory_budget_bytes: int = 256 * 1024 * 1024
     temp_directory: str | None = None
     sort_by_table_order: bool = False
     sort_expression: str | None = None

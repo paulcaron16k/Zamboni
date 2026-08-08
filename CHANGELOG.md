@@ -141,15 +141,38 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Changed
 
-- **`MemoryMode.CHUNKED` no longer claims to bound peak memory**, because it
-  does not. Measured across three table sizes, peak RSS grows linearly with the
-  rewrite group and is indistinguishable from `IN_MEMORY` (226MB → +538MB,
-  450MB → +975MB, 889MB → +1840MB). Most of it is upstream: consuming
-  PyIceberg's `ArrowScan.to_record_batches` and discarding every batch still
-  grows ~1.3×. **Budget ~2× your largest partition**, and partition tables you
-  intend to compact locally — the planner makes one group per partition, so
-  partitioning is the lever that works. No behaviour changed; the docstring and
-  the guide now say what the code does. Tracked as ZMBNI-1906.
+- **`MemoryMode.CHUNKED` now bounds peak memory**, which it has always claimed
+  to and never did. Compaction reads **one data file at a time** instead of
+  handing PyIceberg the whole task list. That mattered because
+  `ArrowScan.to_record_batches` materialises each data file into a list before
+  yielding any of it, and drives that with `executor.map`, which submits every
+  task at once and returns results in order — so files that finished early sat
+  in memory waiting for the consumer, and peak grew with the group.
+
+  Measured end to end with file size held at ~28MB while the group grew 4×:
+
+  | Group | before | after |
+  |---|---|---|
+  | 224 MB | +822 MB | **+541 MB** |
+  | 447 MB | +1088 MB | **+527 MB** |
+  | 894 MB | +1111 MB | **+577 MB** |
+
+  Flat is the point: peak is now set by the largest data *file*, so a partition
+  larger than RAM compacts. It costs roughly 1.5× on read, so it applies to the
+  CHUNKED path only.
+
+  A group cap would also have bounded memory and was **rejected**: clustering
+  quality is a function of how many rows the sort can see at once, so N
+  sub-groups would produce N overlapping ranges and silently degrade every
+  Z-ordered table. Bounding the read avoids that — DuckDB still receives the
+  whole group and spills its sort to disk.
+
+- **`memory_budget_bytes` default lowered from 1GiB to 256MiB.** This is the
+  size above which `AUTO` chooses CHUNKED. The old value predates CHUNKED
+  bounding anything: crossing it bought nothing, so it was set high to avoid a
+  slower path for no benefit. `IN_MEMORY` on a 1GiB group measures ~2.3GiB of
+  peak growth, which is more than a small host has. Raise it if you have memory
+  to spare and would rather have the speed.
 
 ### Fixed
 

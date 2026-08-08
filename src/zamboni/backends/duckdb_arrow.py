@@ -147,11 +147,58 @@ class DuckDBArrowBackend(RewriteBackend):
         # ArrowScan emits large_string/large_binary where schema_to_pyarrow
         # declares string/binary, so the cast is load-bearing, not cosmetic.
         # DataScan.to_arrow_batch_reader does the same thing upstream.
-        arrow_scan = self._arrow_scan(ctx)
         target_schema = _projected_arrow_schema(ctx)
         return pa.RecordBatchReader.from_batches(
-            target_schema, arrow_scan.to_record_batches(tasks)
+            target_schema, self._batches_one_file_at_a_time(tasks, ctx)
         ).cast(target_schema)
+
+    def _batches_one_file_at_a_time(
+        self, tasks: list[FileScanTask], ctx: RewriteContext
+    ) -> Iterator[pa.RecordBatch]:
+        """One ``to_record_batches`` call per task, not one for all of them.
+
+        This is what makes CHUNKED bound anything, and it was measured rather
+        than reasoned about (ZMBNI-1906). Handing PyIceberg the whole task list
+        buffers most of the group, for two compounding reasons in
+        ``ArrowScan.to_record_batches``:
+
+        * ``batches_for_task`` materialises **an entire data file** into a list
+          before yielding any of it, deliberately -- the comment says so -- to
+          keep the work inside the executor.
+        * it drives that with ``executor.map(batches_for_task, tasks)``, which
+          submits *every* task immediately and returns results in order. Tasks
+          that finish early hold their whole materialised file until the
+          consumer reaches them.
+
+        So peak memory scaled with the group. Reading one task at a time makes
+        it scale with the largest **file** instead. Measured with file size held
+        at ~28MB while the group grew 4x:
+
+        ====== ============== ==========
+        group  all tasks      per task
+        ====== ============== ==========
+        224MB  +822MB         +392MB
+        447MB  +1088MB        +408MB
+        894MB  +1111MB        +434MB
+        ====== ============== ==========
+
+        Flat, which is the property that matters; the absolute figure is one
+        file plus Arrow allocator retention.
+
+        **This costs throughput** -- around 1.5x on the same measurements, since
+        the files are now read in series. That is why it lives on the CHUNKED
+        path only: AUTO uses CHUNKED for groups above ``memory_budget_bytes``,
+        where bounded memory is the whole point, and leaves small groups on the
+        materialising path where speed is.
+
+        **And it does not cost Z-order anything**, which is the reason to prefer
+        it over capping group size. DuckDB still receives the entire group as
+        one stream and spills its sort to disk, so the ordering sees every row
+        it would have seen. A capped group cannot say that: N sub-groups sort
+        independently and produce N overlapping ranges.
+        """
+        for task in tasks:
+            yield from self._arrow_scan(ctx).to_record_batches([task])
 
     # -- sort ------------------------------------------------------------
 

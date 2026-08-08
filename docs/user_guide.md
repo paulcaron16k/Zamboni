@@ -650,40 +650,59 @@ and Arrow. That buys you Z-order, partition evolution and a preview of every
 operation with no cluster at all. What it costs is memory, and the number below
 is measured rather than estimated.
 
-### Memory: you must provide RAM ≈ 2 × group size
+### Memory: bounded by your largest data file, not by the partition
 
-**This is the single number to plan around, and it is not what the design
-intends.** Zamboni goes to real trouble to avoid loading a table: it streams the
-source as Arrow record batches rather than materialising it, bin-packs those
-batches into output-sized slices, writes one slice at a time, and pushes any
-`ORDER BY` into DuckDB so the sort spills to disk instead of sitting in memory.
-`MemoryMode.CHUNKED` exists for exactly this.
+The local engine streams the source as Arrow record batches rather than
+materialising it, bin-packs those batches into output-sized slices, writes one
+slice at a time, and pushes any `ORDER BY` into DuckDB so the sort spills to
+disk. `MemoryMode.CHUNKED` exists for exactly this.
 
-**Measured, it does not work.** Peak resident memory still grows linearly with
-the amount of data in one rewrite group, and `CHUNKED` is indistinguishable
-from `IN_MEMORY`:
+**For a while it did not work, and this guide said so.** Peak memory grew
+linearly with the rewrite group and CHUNKED was indistinguishable from
+`IN_MEMORY`. The cause was upstream, and is now worked around: handing PyIceberg
+the whole task list made it materialise each data file into a list *and* submit
+every task at once, so files that finished early sat in memory waiting for the
+consumer. Reading one file per call fixes it.
 
-| Group on disk | Peak RSS growth | Ratio |
-|---|---|---|
-| 226 MB | +538 MB | 2.4× |
-| 450 MB | +975 MB | 2.2× |
-| 889 MB | +1840 MB | 2.1× |
+| Group on disk | CHUNKED before | CHUNKED now | IN_MEMORY |
+|---|---|---|---|
+| 224 MB | +822 MB | **+541 MB** | +721 MB |
+| 447 MB | +1088 MB | **+527 MB** | +1512 MB |
+| 894 MB | +1111 MB | **+577 MB** | +2009 MB |
 
-Measured with `memory_budget_bytes` set to 64MB, so `AUTO` and `CHUNKED` could
-not quietly fall back to the in-memory path. Most of the ceiling is upstream:
-consuming PyIceberg's `ArrowScan.to_record_batches(tasks)` and discarding every
-batch the instant it arrives *still* grows ~1.3× the group's on-disk size,
-because it reads the tasks concurrently and buffers them. Our bin-packing adds
-the rest.
+The important column is the third, and the important property is that it is
+**flat**. Quadruple the data and it does not move. So:
 
-So plan for it rather than around it:
+> **CHUNKED's peak is set by your largest data *file*, not by the group.** A
+> partition larger than RAM compacts. An unpartitioned 100GB table compacts.
 
-> **Provide RAM ≈ 2 × the largest group you will compact.** No current setting
-> reduces the ratio. What you can change is the group.
+Smaller files cost less: the same ~675MB group peaks at +362MB in 7MB files
+against +475MB in 28MB files. Most of what remains is one materialised file plus
+Arrow's allocator retention and DuckDB's own footprint, not something that
+scales with your table.
 
-Tracked as ZMBNI-1906. Until it is fixed, the number above is the contract.
+**`IN_MEMORY` is still linear** — 2.3× to 3.4× measured — which is what it is
+for. It is faster, and on a group that fits it is the right choice.
 
-#### What a "group" is
+**`AUTO`, the default, picks between them** at `memory_budget_bytes`, which is
+**256 MiB**. Groups under that materialise; groups over it stream. That
+threshold was 1 GiB until the bounded path started working: crossing it bought
+nothing, so it was set high to avoid paying for a slower path. Now the trade is
+real — `IN_MEMORY` on a 1 GiB group was measured at ~2.3 GiB of growth, more
+than a small host has, while CHUNKED stays flat for about 1.5× on read.
+
+So the practical rule for the default configuration:
+
+> **Budget ~1 GB for the local engine, plus a margin for your largest data
+> file.** Raise `memory_budget_bytes` if you have RAM to spare and want the
+> speed; there is no need to lower it.
+
+Group size still matters — for how *long* a rewrite takes, for how much a failed
+run wastes, and for `IN_MEMORY` if you choose it — so the rest of this section
+still applies. It is no longer the thing that decides whether compaction runs at
+all.
+
+#### What a "group" is, and why it still matters
 
 A **group** is the unit of one rewrite: the set of data files compaction reads
 together, sorts together and replaces with new files in a single commit. The
@@ -696,18 +715,24 @@ planner builds them like this:
 4. Drop buckets with fewer than `min_input_files` files, and buckets of one.
 5. Every surviving bucket is one group.
 
-There is **no cap on how large a bucket may be**. So:
+There is **no cap on how large a bucket may be**, so an unpartitioned table is
+one group. That is no longer a memory problem, but it is still three other
+things:
 
-| Table | Groups | Largest group |
-|---|---|---|
-| Unpartitioned, 20 GB of small files | **1** | 20 GB → needs ~40 GB RAM |
-| Partitioned by day, 500 MB/day, 3 years | ~1,095 | 500 MB → needs ~1 GB RAM |
-| Partitioned by month, 15 GB/month | ~36 | 15 GB → needs ~30 GB RAM |
+- **Duration.** One group is one unit of work with one commit at the end. A
+  10-hour rewrite is 10 hours during which nothing is committed.
+- **Cost of failure.** A run that fails commits nothing. The output files it
+  wrote become orphans that the next `remove-orphans` sweeps once they pass the
+  age guard — so a huge group that fails wastes the whole rewrite.
+- **The orphan guard.** `older_than_days` must exceed your longest single write,
+  and your longest single write is usually a compaction rather than ingest. A
+  bigger group pushes that number up. See
+  [runbook-dev.md](runbook-dev.md).
+- **`IN_MEMORY` if you select it explicitly**, where the 2.3–3.4× ratio is
+  still linear in the group.
 
-The total table size is irrelevant. **The largest single partition is the whole
-question**, and an unpartitioned table is one partition.
-
-`zamboni plan` prints exactly this, which makes it the sizing tool:
+`zamboni plan` prints the groups it would build, which is how you see all of
+this before it happens:
 
 ```console
 $ zamboni plan acme.events --table-config table-config.json
@@ -717,57 +742,51 @@ acme.events: 2 group(s), 8 file(s), target 134217728 bytes, snapshot 82396989850
   skipped spec=0 partition=(20673): 1 candidate file(s) < min_input_files=2
 ```
 
-**Double the largest `bytes=` it reports.** That is your requirement. (Partition
-values print as Iceberg stores them — `20671` is a day transform, days since the
-epoch, not a date.)
+(Partition values print as Iceberg stores them — `20671` is a day transform,
+days since the epoch, not a date.)
 
 #### How to reduce group size
 
-In order of how well they work:
+Still worth doing for the reasons above, in order of how well they work:
 
-**1. Partition the table, or partition it more finely.** This is the lever that
-actually works, and the only one with no downside for maintenance. Day instead
-of month divides the largest group by ~30. A table partitioned by day with
-steady ingest has a bounded group size *forever*, however large the table grows.
-Worth doing even when query patterns do not demand it.
+**1. Partition the table, or partition it more finely.** The lever with no
+downside. Day instead of month divides the largest group by ~30, and a table
+partitioned by day with steady ingest has a bounded group size *forever*,
+however large the table grows.
 
 **2. Lower `target_file_size_bytes`.** Step 2 above excludes files already at or
 above the target, so a smaller target excludes more of them and the group
 shrinks. The cost is that you are asking for smaller output files, which is the
-problem compaction exists to solve — this buys headroom on a table you cannot
-repartition today, not a steady state.
+problem compaction exists to solve.
 
 **3. Never set `rewrite_all` on a large partition.** It disables step 2
-entirely, so every file joins the group including the ones already at target.
-It exists for forcing a re-sort after a layout change, and on a big partition it
-is the most reliable way to run a machine out of memory.
+entirely, so every file joins the group including those already at target. It
+exists for forcing a re-sort after a layout change.
 
 **4. Raise `min_input_files`.** This does not shrink a group; it stops small
 buckets being compacted at all. Useful for skipping pointless work, useless for
-the partition that is actually too big.
+the partition that is actually too big — a common misreading.
 
-**5. Move compaction to Spark.** A cluster spreads one group across executors.
-Keep `local` for everything else — expiry, orphans, manifests and properties are
-metadata operations that cost megabytes regardless of table size, and partition
-evolution only exists on `local`. Both engines read the same
-`table-config.json`, so this is a per-operation choice, not a migration.
+**5. Move compaction to Spark.** A cluster spreads one group across executors,
+which addresses duration rather than memory. Keep `local` for everything else:
+expiry, orphans, manifests and properties are metadata operations costing
+megabytes regardless of table size, and partition evolution only exists on
+`local`. Both engines read the same `table-config.json`, so this is a
+per-operation choice, not a migration.
 
-#### Where this conflicts with Z-order
+#### Why the fix was the reader and not a group cap
 
-Splitting a partition into several smaller groups is the obvious fix, and it is
-the one thing that **breaks Z-order**.
+Worth recording, because capping group size is the obvious fix and it is the
+wrong one: **it would have quietly degraded every Z-ordered table.**
 
-Z-order works by interleaving the bits of several columns so that rows near each
-other in any of those dimensions land in the same file. The clustering is only
-as good as the set of rows it can see. Sort a group, and every row in that group
-is placed relative to every other row in it — file min/max statistics come out
-tight, and a query filtering on any of the Z-ordered columns skips most files.
-
-Split that group in half and sort each half independently, and you get two
-overlapping ranges instead of one ordered sequence. Every file's statistics
-widen, fewer files can be skipped, and the benefit degrades roughly in
-proportion to the number of pieces. Split it into ten and the clustering is
-largely gone.
+Z-order interleaves the bits of several columns so that rows near each other in
+any of those dimensions land in the same file. The clustering is only as good as
+the set of rows the sort can see at once. Sort a whole group and every row is
+placed relative to every other — file statistics come out tight, and a query
+filtering on any Z-ordered column skips most files. Split that group in half and
+sort each half independently and you get two overlapping ranges instead of one
+ordered sequence: statistics widen, fewer files skip, and the benefit degrades
+roughly in proportion to the number of pieces.
 
 So the two goals pull against each other:
 
@@ -776,30 +795,32 @@ So the two goals pull against each other:
 | Bounded memory | the smallest possible group |
 | Z-order quality | the largest possible group |
 
-**Partitioning does not have this problem**, which is why it is lever 1 rather
-than lever 5. Z-order is applied *within* a partition anyway — Iceberg already
-skips whole partitions using the partition predicate — so cutting a table into
-daily partitions costs nothing in clustering quality. Splitting a single
-partition into arbitrary sub-groups costs a great deal.
+Bounding the *read* escapes the conflict entirely. DuckDB still receives the
+whole group as one stream and spills its sort to disk, so the ordering sees
+every row it would have seen — the memory bound and the clustering are no longer
+competing for the same knob. `test_chunked_still_sorts_across_the_whole_group`
+pins that: it forces several output files per partition and asserts the ordering
+holds across all of them.
 
-That is also why ZMBNI-1906 is not a one-line fix. Capping group size in the
-planner would bound memory immediately and quietly degrade every Z-ordered
-table, so the honest options are to reduce the per-group ratio instead (the
-upstream buffering is the larger half), or to make the cap explicit and refuse
-to apply it silently to a table that asked for Z-order.
+**Partitioning never had the conflict either**, which is why it is lever 1
+above. Z-order applies within a partition anyway, since Iceberg already skips
+whole partitions by predicate, so daily partitions cost nothing in clustering
+quality. Splitting a single partition into arbitrary sub-groups would have cost
+a great deal.
 
-Practical guidance:
+#### Practical guidance
 
-- **Home gamers:** partition by day or month. Anything that keeps a partition
-  under a few hundred MB runs comfortably in 2 GB of RAM, and Z-order within
-  that partition stays as good as it gets.
-- **Administrators:** size the maintenance host against the largest *partition*
-  you expect, not the largest table, and check it with `zamboni plan` rather
-  than arithmetic. If one table is both huge and unpartitioned, compact that one
-  on Spark and leave the rest on `local`.
+- **Home gamers:** the defaults are now safe on a small host. ~1 GB of headroom
+  runs the local engine on tables far larger than that. Partition by day or
+  month anyway — it bounds how long a rewrite takes and how much a failed one
+  wastes.
+- **Administrators:** size against your largest *data file* plus about a
+  gigabyte, not against the table. If you have RAM to spare and want the speed
+  back, raise `memory_budget_bytes` so more groups take the materialising path.
 - **Anyone:** if a run is killed by the OOM killer, the log ends mid-operation
-  with no traceback. That signature — a truncated log and no Python error — is
-  almost always this.
+  with no traceback. That signature — truncated log, no Python error — used to
+  be this section. If you see it now, check whether `memory_mode` is pinned to
+  `in_memory` or `rewrite_all` is set on a large partition.
 
 ### Other things to know
 

@@ -324,3 +324,68 @@ def test_a_failed_atomic_run_leaves_no_referenced_file_missing(session, partitio
     assert referenced <= on_disk, (
         f"{len(referenced - on_disk)} referenced file(s) were deleted by the cleanup"
     )
+
+
+# -- bounded reads (ZMBNI-1906) -------------------------------------------
+
+
+def test_chunked_reads_one_data_file_at_a_time(session, partitioned, monkeypatch):
+    """The property that makes CHUNKED bound anything.
+
+    Handing PyIceberg the whole task list buffers most of the group:
+    `ArrowScan.to_record_batches` materialises each data file into a list and
+    drives that with `executor.map`, which submits every task at once and
+    returns results in order -- so tasks that finish early hold their whole file
+    until the consumer catches up. Measured, peak memory scaled with the group;
+    reading one task per call makes it scale with the largest *file*.
+
+    Asserted on the call shape rather than on memory, because a memory
+    assertion is a flaky assertion. If someone reverts to passing every task,
+    this fails; if they keep the property while restructuring, it passes.
+    """
+    from pyiceberg.io.pyarrow import ArrowScan
+
+    task_counts = []
+    original = ArrowScan.to_record_batches
+
+    def counting(self, tasks):
+        tasks = list(tasks)
+        task_counts.append(len(tasks))
+        return original(self, tasks)
+
+    monkeypatch.setattr(ArrowScan, "to_record_batches", counting)
+
+    config = CompactionConfig(memory_mode=MemoryMode.CHUNKED, rewrite_all=True)
+    TableCompactor(session, "db.partitioned", config).execute()
+
+    assert task_counts, "the chunked path did not stream at all"
+    assert set(task_counts) == {1}, (
+        f"expected one task per read call, got {sorted(set(task_counts))} -- "
+        "passing the whole list back to PyIceberg reinstates the buffering"
+    )
+
+
+def test_chunked_still_sorts_across_the_whole_group(session, partitioned):
+    """Why this fix was preferred over capping group size.
+
+    Bounding the *read* leaves the sort seeing every row in the group, because
+    DuckDB consumes the stream and spills to disk. Capping the group would not:
+    N sub-groups sort independently and produce N overlapping ranges, which is
+    precisely what makes Z-order work less well. A per-file read that quietly
+    sorted per file would have the same defect, so the ordering is asserted
+    across the partition rather than within a file.
+    """
+    before_rows = rows(partitioned)
+    config = CompactionConfig(
+        memory_mode=MemoryMode.CHUNKED,
+        sort_expression="id DESC",
+        target_file_size_bytes=200,  # force several output files per partition
+        rewrite_all=True,
+    )
+    TableCompactor(session, "db.partitioned", config).execute()
+
+    tbl = session.table("db.partitioned")
+    assert rows(tbl) == before_rows
+    for category in ("a", "b"):
+        ids = tbl.scan(row_filter=f"category == '{category}'").to_arrow()["id"].to_pylist()
+        assert ids == sorted(ids, reverse=True), "the group was sorted in pieces, not as a whole"

@@ -363,7 +363,10 @@ When `sort_expression` is set the stream is routed through DuckDB, whose `ORDER 
 to `temp_directory` on disk rather than holding the group in memory.
 
 `MemoryMode.AUTO` (the default) picks `IN_MEMORY` for groups under `memory_budget_bytes`
-and `CHUNKED` above it.
+(256MiB) and `CHUNKED` above it. CHUNKED reads **one data file at a time**, which is what
+bounds it: peak memory is set by the largest file rather than by the group, so a partition
+larger than RAM still compacts. It costs about 1.5x on read, which is why small groups stay
+on the materialising path. See [docs/user_guide.md](docs/user_guide.md) for the numbers.
 
 ## Limitations
 
