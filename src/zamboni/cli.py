@@ -537,10 +537,19 @@ def _add_catalog_args(p: argparse.ArgumentParser) -> None:
     s.add_argument("--s3-region", default=os.environ.get("ZAMBONI_S3_REGION", "us-east-1"))
 
 
+#: Defaults come from the dataclass, never repeated as literals here.
+#: `--memory-budget-bytes` was written as `1 << 30`, so when ZMBNI-1906 lowered
+#: the dataclass default to 256MiB the change reached Python callers and *not*
+#: the CLI -- every command-line run kept the old 1GiB threshold and the fix
+#: silently did not apply to the people most likely to need it. A default that
+#: exists in two places is a default that will disagree in one of them.
+_DEFAULTS = CompactionConfig()
+
+
 def _add_config_args(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("compaction")
     g.add_argument("--target-file-size-bytes", type=int)
-    g.add_argument("--min-input-files", type=int, default=2)
+    g.add_argument("--min-input-files", type=int, default=_DEFAULTS.min_input_files)
     g.add_argument("--rewrite-all", action="store_true")
     g.add_argument(
         "--partial-progress",
@@ -552,7 +561,27 @@ def _add_config_args(p: argparse.ArgumentParser) -> None:
     g.add_argument(
         "--memory-mode", choices=[m.value for m in MemoryMode], default=MemoryMode.AUTO.value
     )
-    g.add_argument("--memory-budget-bytes", type=int, default=1 << 30)
+    g.add_argument(
+        "--memory-budget-bytes",
+        type=int,
+        default=_DEFAULTS.memory_budget_bytes,
+        help="group size above which AUTO streams instead of materialising. "
+        "Raise it to trade memory for speed on a host that has memory.",
+    )
+    g.add_argument(
+        "--read-ahead-bytes",
+        type=int,
+        default=_DEFAULTS.read_ahead_bytes,
+        help="how much of a group the streaming path may have in flight, in "
+        "on-disk bytes. 0 reads strictly one file at a time, which is slower "
+        "against object storage because it serialises the round trips.",
+    )
+    g.add_argument(
+        "--max-read-ahead-files",
+        type=int,
+        default=_DEFAULTS.max_read_ahead_files,
+        help="ceiling on concurrent reads regardless of --read-ahead-bytes.",
+    )
     g.add_argument("--temp-directory")
     g.add_argument(
         "--sort-by",
@@ -610,6 +639,8 @@ def _operational_config(args: argparse.Namespace) -> CompactionConfig:
         partial_progress=args.partial_progress,
         memory_mode=MemoryMode(args.memory_mode),
         memory_budget_bytes=args.memory_budget_bytes,
+        read_ahead_bytes=args.read_ahead_bytes,
+        max_read_ahead_files=args.max_read_ahead_files,
         temp_directory=args.temp_directory,
         branch=args.branch,
         snapshot_operation=args.snapshot_operation,
@@ -625,6 +656,8 @@ def _config_from(args: argparse.Namespace) -> CompactionConfig:
         partial_progress=args.partial_progress,
         memory_mode=MemoryMode(args.memory_mode),
         memory_budget_bytes=args.memory_budget_bytes,
+        read_ahead_bytes=args.read_ahead_bytes,
+        max_read_ahead_files=args.max_read_ahead_files,
         temp_directory=args.temp_directory,
         sort_by_table_order=args.sort_by_table_order,
         sort_expression=args.sort_expression,

@@ -181,3 +181,78 @@ def test_every_referenced_fr_exists_in_the_plan():
     missing = sorted(cited - declared)
     assert not missing, f"tasks.md cites requirements absent from plan.md: {missing}"
     assert len(cited) > 30, f"only {len(cited)} requirements cited; the ranges are not expanding"
+
+
+# -- the guide's sample configurations must actually work -----------------
+
+
+def config_samples() -> list[tuple[str, dict]]:
+    """Whole-document config samples from the user guide.
+
+    Scoped to user_guide.md rather than all of docs/ on purpose. table-config.md
+    is the *specification*, and its json blocks are fragments -- a `retention`
+    stanza on its own, a single rule -- which cannot be parsed as documents and
+    should not be. The guide's blocks are things a reader will copy whole, so
+    there an unparseable block is a defect rather than a style.
+    """
+    import json
+
+    found = []
+    for block in re.findall(r"```json\n(.*?)```", (DOCS / "user_guide.md").read_text(), re.S):
+        try:
+            parsed = json.loads(block)
+        except json.JSONDecodeError as exc:
+            raise AssertionError(
+                f"user_guide.md has a ```json block that is not JSON: {exc}"
+            ) from exc
+        if isinstance(parsed, dict) and "tables" in parsed:
+            found.append(("user_guide.md", parsed))
+    return found
+
+
+def test_the_documented_configurations_are_valid():
+    """A sample config that does not parse is worse than no sample.
+
+    The first draft of the event-data example used `from_transform`/
+    `to_transform` -- the *Python attribute* names -- where the file wants
+    `from`/`to`. The schema rejected it, which is what the schema is for, and
+    this is what makes that rejection happen before a reader copies it.
+    """
+    from zamboni.tableconfig import TableConfig
+
+    samples = config_samples()
+    assert samples, "no sample configurations found; the extraction stopped matching"
+
+    for name, raw in samples:
+        try:
+            TableConfig.from_dict(raw, source=name).validate()
+        except Exception as exc:
+            raise AssertionError(f"{name} documents a config that does not load: {exc}") from exc
+
+
+def test_the_guide_documents_every_run_control():
+    """The reference table has to keep up with the dataclass.
+
+    `read_ahead_bytes` and `max_read_ahead_files` shipped as fields with no CLI
+    flag and no mention here, which is a setting an operator cannot find and
+    could not have used if they had.
+    """
+    from dataclasses import fields
+
+    from zamboni import CompactionConfig
+
+    guide = (DOCS / "user_guide.md").read_text()
+    # A field may appear under its own name, under its flag, or -- for the
+    # layout settings that belong in table-config.json -- under the key a reader
+    # would actually type. `sort_expression` is spelled `--sort-by` because the
+    # flag names the intent while the field names the mechanism.
+    aliases = {"sort_expression": "--sort-by"}
+
+    undocumented = [
+        f.name
+        for f in fields(CompactionConfig)
+        if f.name not in guide
+        and f"--{f.name.replace('_', '-')}" not in guide
+        and aliases.get(f.name, "\0") not in guide
+    ]
+    assert not undocumented, f"user_guide.md does not mention: {undocumented}"

@@ -355,3 +355,69 @@ def test_table_config_validate_matches_the_original_verb(tmp_path, capsys):
     old = capsys.readouterr().out
     assert main(["table-config", "validate", str(config)]) == 0
     assert capsys.readouterr().out == old
+
+
+# -- flag defaults track the dataclass (ZMBNI-1910) -----------------------
+
+
+def test_cli_defaults_match_the_dataclass():
+    """A default written down twice is a default that will disagree once.
+
+    `--memory-budget-bytes` was `1 << 30` here while the dataclass said 256MiB,
+    so ZMBNI-1906's lowered threshold reached Python callers and not the CLI --
+    every command-line run kept the old behaviour and the fix silently missed
+    the people most likely to need it.
+    """
+    from zamboni import CompactionConfig
+    from zamboni.cli import _build_parser, _operational_config
+
+    args = _build_parser().parse_args(["compact", "db.t", "--local-warehouse", "/tmp/x"])
+    defaults = CompactionConfig()
+    built = _operational_config(args)
+
+    for field in (
+        "memory_budget_bytes",
+        "read_ahead_bytes",
+        "max_read_ahead_files",
+        "memory_mode",
+        "rewrite_all",
+        "partial_progress",
+        "dangling_delete_policy",
+    ):
+        assert getattr(built, field) == getattr(defaults, field), (
+            f"the CLI default for {field} has drifted from CompactionConfig"
+        )
+
+
+def test_every_operational_knob_is_reachable_from_the_command_line():
+    """The knobs existed for a release before any flag set them.
+
+    `read_ahead_bytes` and `max_read_ahead_files` were added to the dataclass
+    and wired into the backend, and nothing on the command line could reach
+    them -- documented settings an operator could not use. The exclusions below
+    are deliberate and each says why.
+    """
+    from dataclasses import fields
+
+    from zamboni import CompactionConfig
+    from zamboni.cli import _build_parser
+
+    # Layout, not operations: these come from table-config.json so that analysts
+    # own them and an operator does not set them per-run.
+    layout_owned = {
+        "target_file_size_bytes",  # flag exists too, but the file wins
+        "zorder_columns",
+        "zorder_precision_bits",
+    }
+
+    parser = _build_parser()
+    args = parser.parse_args(["compact", "db.t", "--local-warehouse", "/tmp/x"])
+    known = set(vars(args))
+    # `--sort-by` sets `sort_expression`; argparse dest names are what count.
+    missing = [
+        f.name
+        for f in fields(CompactionConfig)
+        if f.name not in layout_owned and f.name not in known
+    ]
+
+    assert not missing, f"CompactionConfig settings with no CLI flag: {missing}"

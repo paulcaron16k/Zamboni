@@ -880,6 +880,225 @@ Worth stating plainly, because "no cluster" invites suspicion:
 
 ---
 
+## Every control, and where it lives
+
+Settings live in three places, and which place is not arbitrary — it is the
+distinction between *what the table should look like*, which analysts own and
+which is the same on every engine, and *how a run executes*, which an operator
+owns and which is specific to the machine doing the work.
+
+| Where | Owns | Read by |
+|---|---|---|
+| `table-config.json` | layout and retention: partitioning, ordering, what may be deleted | every engine |
+| `zamboni.yml` | which catalog, which engine, which operations | the CLI |
+| CLI flags / `CompactionConfig` | how one run executes: memory, concurrency, commits | the local engine |
+| `.env` | credentials, and nothing else | the CLI |
+
+A flag always beats the file, so a one-off run overrides without an edit.
+
+### `table-config.json` — layout and retention
+
+Full schema in [table-config.md](table-config.md); `zamboni table-config
+summary` prints what a given file actually means, including the defaults you did
+not write.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `partition` | none | The partition spec. The single most consequential setting: it bounds rewrite duration, and it is what lets Iceberg skip whole partitions |
+| `partition_evolution` | day→month after 90d | Rewrite aged partitions to a coarser transform. **`local` only** |
+| `ordering.mode` | `none` | `sort` or `zorder`. **Z-order is `local` and `spark` only** |
+| `ordering.sort` | — | Columns for a declared sort order |
+| `ordering.zorder.columns` | — | Columns to interleave (`zorder_columns` in Python). Two to four is the useful range |
+| `ordering.zorder.precision_bits` | 16 | Bits taken from each column before interleaving (`zorder_precision_bits`). More bits is finer clustering and a longer key |
+| `retention.expire_snapshots.max_snapshot_age_days` | Iceberg's 5 | How far back time travel reaches. **Also how long a running query may hold a snapshot** |
+| `retention.expire_snapshots.min_snapshots_to_keep` | Iceberg's 1 | Floor, regardless of age |
+| `retention.remove_orphan_files.older_than_days` | 3 | **The one that can destroy data if set wrong.** Must exceed your longest single write — usually your own compaction, not ingest |
+| `retention.remove_dangling_deletes.enabled` | on | Drop delete files that no longer apply |
+| `retention.rewrite_manifests.enabled` | on | Regroup manifest entries so predicates prune |
+| `retention.metadata.previous_versions_max` | unset | Trim the metadata log |
+| `retention.metadata.delete_after_commit` | unset | Actually delete what the log drops |
+
+### `zamboni.yml` — the profile
+
+Six keys, and unknown ones are refused rather than ignored. Template:
+`zamboni.yml.sample`.
+
+| Key | Default | What it does |
+|---|---|---|
+| `uri` | — | REST catalog endpoint |
+| `warehouse` | — | Warehouse name |
+| `engine` | `local` | `local`, `trino` or `spark` |
+| `root` | `~/.zamboni` | Where per-warehouse configs live: `{root}/configs/{warehouse}/table-config.json` |
+| `operations` | all six | Which operations `maintenance` runs, and in this order |
+| `tables` | every table in the config | Restrict a run |
+
+### Run controls — flags, or `CompactionConfig` from Python
+
+Every one of these is a flag *and* a field, with the same name and the same
+default; `test_cli_defaults_match_the_dataclass` keeps them honest.
+
+| Flag / field | Default | What it does |
+|---|---|---|
+| `--target-file-size-bytes` | from table properties, else 128 MiB | Output size, and the threshold above which a file is left alone |
+| `--min-input-files` | 2 | Skip partitions with fewer candidates than this |
+| `--rewrite-all` | off | Rewrite everything, including files already at target. **The most reliable way to run out of memory on a large partition** |
+| `--memory-mode` | `auto` | `auto`, `in_memory`, `chunked` |
+| `--memory-budget-bytes` | 256 MiB | Group size above which `auto` streams instead of materialising |
+| `--read-ahead-bytes` | 64 MiB | How much of a group the streaming path may have in flight. `0` reads strictly one file at a time — bounded tightest, and slower against object storage because it serialises the round trips |
+| `--max-read-ahead-files` | 8 | Ceiling on concurrent reads regardless of the byte window |
+| `--temp-directory` | system | Where DuckDB spills sorts. Point it somewhere with room if you Z-order |
+| `--partial-progress` | off | Commit each group as it finishes. More commits, but a failure keeps the finished ones |
+| `--branch` | `main` | Which branch to commit to |
+| `--snapshot-operation` | `replace` | How the snapshot is labelled |
+| `--dangling-delete-policy` | `report` | `block` refuses to compact rather than touch delete files |
+| `--sort-by` | — | Arbitrary DuckDB `ORDER BY`. Output keeps `sort_order_id = None`, because the rows are ordered but not by any order the table declares |
+| `--sort-by-table-order` | off | Order by the table's declared sort order, and stamp its id |
+| `--yes` | off | **Actually commit.** Without it every mutating verb previews |
+
+---
+
+## Two configurations worth copying
+
+### 1. General data — dimension tables, reference data, anything without a time axis
+
+Tables that are queried by key rather than by range, updated in batches, and not
+naturally partitioned. Compaction is doing the classic small-files job.
+
+```json
+{
+  "version": 1,
+  "defaults": {
+    "ordering": { "mode": "none" },
+    "partition_evolution": { "enabled": false },
+    "retention": {
+      "expire_snapshots":     { "enabled": true, "max_snapshot_age_days": 7,
+                                "min_snapshots_to_keep": 3 },
+      "remove_orphan_files":  { "enabled": true, "older_than_days": 3 },
+      "remove_dangling_deletes": { "enabled": true },
+      "rewrite_manifests":    { "enabled": true },
+      "metadata":             { "previous_versions_max": 10,
+                                "delete_after_commit": true }
+    }
+  },
+  "tables": {
+    "acme.customers": {
+      "ordering": { "mode": "sort", "sort": [{ "column": "customer_id" }] }
+    },
+    "acme.products": {}
+  }
+}
+```
+
+```cron
+17 3 * * * cd /srv/zamboni && zamboni maintenance --yes --verbose >> /var/log/zamboni/cron.log 2>&1
+```
+
+Why these numbers:
+
+- **`max_snapshot_age_days: 7`, `min_snapshots_to_keep: 3`.** A week of time
+  travel and at least three snapshots regardless. The minimum is the useful
+  half — it survives a quiet weekend where age alone would expire everything but
+  the newest.
+- **No partitioning, and that is fine here.** These tables do not have a
+  time axis to partition on, and inventing one to satisfy the maintainer would
+  make every query read every partition. The consequence is that the whole table
+  is one rewrite group, which since ZMBNI-1906 is a duration question rather
+  than a memory one.
+- **`partition_evolution` off**, because there is nothing to evolve.
+- **Sort, not Z-order, on `customers`.** One access pattern, one column, so a
+  declared sort order is both sufficient and honest — it stamps a real
+  `sort_order_id` that other engines can see.
+
+### 2. Process and event data — day partitions, evolving to months
+
+The shape this tool was built for: an append-only event stream, partitioned by
+day, queried on a time range plus one or two other columns, where old partitions
+are read rarely and should stop being thousands of small daily directories.
+
+```json
+{
+  "version": 1,
+  "tables": {
+    "acme.events": {
+      "partition": [{ "column": "event_ts", "transform": "day" }],
+      "partition_evolution": {
+        "enabled": true,
+        "rules": [{ "from": "day", "to": "month", "older_than_days": 90 }]
+      },
+      "ordering": {
+        "mode": "zorder",
+        "zorder": { "columns": ["customer_id", "event_type"] }
+      },
+      "retention": {
+        "expire_snapshots":    { "enabled": true, "max_snapshot_age_days": 3,
+                                 "min_snapshots_to_keep": 2 },
+        "remove_orphan_files": { "enabled": true, "older_than_days": 3 },
+        "metadata":            { "previous_versions_max": 5,
+                                 "delete_after_commit": true }
+      }
+    }
+  }
+}
+```
+
+```cron
+# Nightly: compaction and expiry. Orphan removal lists storage, so weekly.
+17 3 * * 1-6 cd /srv/zamboni && zamboni --profile nightly.yml maintenance --yes
+17 3 * * 0   cd /srv/zamboni && zamboni maintenance --yes
+```
+
+```yaml
+# nightly.yml — everything except the storage listing
+operations: [compact, apply-properties, remove-dangling-deletes, rewrite-manifests, expire]
+```
+
+Why these numbers:
+
+- **Day partitions bound the rewrite.** One day's ingest is one group, so a
+  compaction is one day's work however many years the table holds. This is the
+  setting that decides how long a nightly run takes.
+- **`day → month` after 90 days** is the reason partition evolution exists. A
+  three-year daily table is ~1,095 partitions and ~1,095 metadata entries a
+  planner walks; folding everything past a quarter into months takes that to
+  ~36 plus a quarter of days. New data still lands in day partitions — evolution
+  changes where *old* data lives, not where writes go. **`local` only**, so if
+  you compact on Spark, run this operation on `local`.
+- **Z-order on `customer_id, event_type`.** The partition predicate already
+  handles time; Z-order handles the other two dimensions, which a single-column
+  sort could not. **Not available on Trino** — `zamboni table-config summary`
+  will tell you so.
+- **`max_snapshot_age_days: 3`**, shorter than the general case, because
+  append-only event tables accumulate snapshots fast and nobody time-travels a
+  telemetry table to last Tuesday. Check it against your longest-running query
+  first: expiry is what removes the snapshot a slow reader is holding.
+- **`older_than_days: 3` for orphans** — Iceberg's default, and it must exceed
+  your longest single write. Time your largest compaction before trusting it;
+  the guidance is in [runbook-dev.md](runbook-dev.md).
+
+Neither of these enables anything destructive that is off by default, and both
+should be run without `--yes` for a week first. `zamboni table-config summary`
+prints what either one would actually do — including the two warnings the event
+config earns:
+
+```console
+$ zamboni table-config summary table-config.json
+acme.events
+  layout     partition [event_ts:day], ordering zorder
+             zorder columns customer_id, event_type  -- not available on: trino
+  expire     on, keep 3 day(s), minimum 2 snapshot(s)
+  orphans    on, files older than 3 (default) day(s) -- this deletes storage; the
+             guard is what stands between it and a live write
+  dangling   on
+  manifests  on
+  metadata   keep 5 previous version(s), delete after commit True
+  evolution  day->month after 90d  -- not available on: spark, trino
+```
+
+Both samples are checked by `test_the_documented_configurations_are_valid`, so
+they load against the current schema rather than the one they were written for.
+
+---
+
 ## When something goes wrong
 
 That is [runbook.md](runbook.md): exit codes, how to read a failed cycle's logs,

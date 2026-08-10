@@ -198,7 +198,23 @@ Two categories beyond the usual set, because this tool deletes files:
   peak growth, which is more than a small host has. Raise it if you have memory
   to spare and would rather have the speed.
 
+- **`--read-ahead-bytes` and `--max-read-ahead-files`** — the two settings
+  added above, now reachable from the command line. They shipped as dataclass
+  fields wired into the backend with no flag, so an operator could not use them.
+
+- **A complete controls reference** in [docs/user_guide.md](docs/user_guide.md):
+  all four places a setting can live and which owns what, plus two worked
+  configurations — general data, and day-partitioned event data with day→month
+  evolution. Both are loaded by the test suite, so they cannot rot against the
+  schema.
+
 ### Fixed
+
+- **`--memory-budget-bytes` ignored the default it was supposed to have.** The
+  flag hardcoded `1 << 30` while `CompactionConfig` said 256MiB, so the
+  threshold lowered in this release reached Python callers and **not the CLI** —
+  every command-line run kept the old 1GiB behaviour. CLI defaults now come from
+  the dataclass instead of being repeated as literals.
 
 - **Z-order was unreachable from the CLI on any engine but the local one.**
   `table-config.json` ordering was translated into a compaction config only on
