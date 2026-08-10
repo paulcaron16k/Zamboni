@@ -168,29 +168,41 @@ zamboni.yml     catalog URI, warehouse, engine, which operations run   → commi
 .env            tokens, S3 keys                                        → chmod 600, never commit
 ```
 
-### The one that catches everyone: argv
+### There is no flag for a secret
 
-`--token`, `--credential` and `--s3-secret-access-key` accept a value directly,
-and **anything on a command line is readable by every local user** — from
-`ps aux`, from `/proc/<pid>/cmdline` — for as long as the process runs, and it
-stays in your shell history afterwards. Verified, not assumed: a token passed
-that way was read straight back out of `/proc`.
+**Anything on a command line is readable by every local user** — from `ps aux`,
+from `/proc/<pid>/cmdline` — for as long as the process runs, and it stays in
+your shell history afterwards. Verified, not assumed: a token passed that way
+was read straight back out of `/proc`.
 
-Zamboni warns when you do it:
+So `--token`, `--credential` and `--s3-secret-access-key` **were removed**. They
+still parse, only to tell you where the value goes now:
 
 ```console
 $ zamboni compact acme.events --token "$TOKEN"
-warning: --token put a secret on the command line, where any local user can read it
-from `ps` or /proc/<pid>/cmdline, and where your shell history keeps it. Use the
-matching ZAMBONI_* variable, or a .env file -- see docs/user_guide.md.
+zamboni compact: error: --token was removed: a secret on the command line is
+readable by any local user from `ps` or /proc/<pid>/cmdline, and your shell
+history keeps it. Set ZAMBONI_TOKEN in the environment or in a .env file
+(mode 600) instead -- see docs/user_guide.md#secrets.
 ```
 
-The flags exist because a one-off interactive run is a legitimate use, so this
-is a warning rather than a refusal. In anything automated, use the environment.
+Every secret arrives through the environment, and nothing else:
 
-`--s3-access-key-id` is deliberately **not** warned about: a key id is an
-identifier, not a secret, and warning on it would train you to ignore the
-warning for the flag beside it that is.
+| Instead of | Set |
+|---|---|
+| `--token` | `ZAMBONI_TOKEN` |
+| `--credential` | `ZAMBONI_CREDENTIAL` |
+| `--s3-secret-access-key` | `ZAMBONI_S3_SECRET_ACCESS_KEY` |
+
+`--s3-access-key-id` is deliberately **kept**: a key id is an identifier, not a
+secret, and removing it alongside would be applying the rule by rote rather than
+for its reason.
+
+### Every variable is prefixed `ZAMBONI_`
+
+Without exception, and that is load-bearing rather than tidy. It makes "is this
+variable ours?" answerable without a list, which is what lets the rules below
+work.
 
 ### Reduce the number of secrets first
 
@@ -220,12 +232,37 @@ ZAMBONI_TOKEN=...
 EOF
 ```
 
-Zamboni reads `./.env` from the working directory, then `$ZAMBONI_ROOT`, and
-**warns if the file is readable by group or other**:
+Zamboni reads `./.env` from the working directory, or the file named by
+`--env`. Three rules apply to it:
+
+**1. It must not be readable by group or other, or the run stops.**
 
 ```console
-warning: /srv/zamboni/.env is readable by group or other (mode 644); it holds
-credentials. chmod 600 it.
+zamboni: error: /srv/zamboni/.env is readable by group or other (mode 644) and
+holds credentials. Fix it and re-run:
+    chmod 600 /srv/zamboni/.env
+```
+
+A hard error rather than a warning, deliberately: a warning on a nightly cron
+job is a line in a log nobody opens. The check is "no group or other access",
+so `0400` is fine — it is stricter, and refusing a read-only credential file for
+being too safe would be an odd thing to do.
+
+**2. Only `ZAMBONI_*` entries are read.** A `.env` in a working directory is
+very often shared with docker compose, a framework, or another tool. Loading all
+of it would mean Zamboni silently altering the environment of everything
+downstream of it, so it reads its own keys and leaves the rest alone.
+
+**3. A discovered file with no `ZAMBONI_*` entries is treated as not ours** and
+ignored entirely, permissions included. It is somebody else's `.env` that
+happens to share a directory; neither reading it nor complaining about its mode
+is our business. Name that same file with `--env` and it is an error instead —
+you meant *that* file, and it is the wrong one:
+
+```console
+zamboni: error: --env .env: no ZAMBONI_* variables. Every variable this tool
+reads is prefixed ZAMBONI_; check the file, or drop the flag to use the
+environment as it stands.
 ```
 
 Real environment variables beat the file, deliberately: a systemd unit or
@@ -283,8 +320,8 @@ subprocess.run(
     check=True,
 )
 
-# Wrong: readable by every local user for the life of the process.
-subprocess.run(["zamboni", "maintenance", "--token", token, "--yes"])
+# There is no --token to get wrong any more; it exits 2 and says to use the
+# environment. Before it was removed, this was readable by every local user.
 ```
 
 Prefer a list argument to `subprocess.run` over `shell=True`. With a shell, the
@@ -313,10 +350,12 @@ BashOperator(
     append_env=True,
 )
 
-# Wrong: the token is rendered into the command, so it appears in the UI and log.
+# Wrong, and now impossible via --token, but equally wrong written as an inline
+# export: the value is rendered into the command, so it appears in the UI's
+# rendered-fields view and in the task log.
 BashOperator(
     task_id="maintain_acme",
-    bash_command="zamboni maintenance --token {{ conn.zamboni_catalog.password }} --yes",
+    bash_command="ZAMBONI_TOKEN={{ conn.zamboni_catalog.password }} zamboni maintenance --yes",
 )
 ```
 
@@ -616,8 +655,8 @@ zamboni expire  acme.events --table-config table-config.json --yes
 
 `.env` beside `zamboni.yml`, mode 600, and nothing in the crontab or the
 wrapper. Zamboni warns if the file is group- or world-readable. The full
-treatment — including why the `--token` flag exists and should not be used from
-a script — is in [Secrets](#secrets).
+treatment — including why there is no `--token` flag at all — is in
+[Secrets](#secrets).
 
 ---
 

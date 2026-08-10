@@ -88,18 +88,75 @@ def find_env(explicit: str | None = None, *, start: Path | None = None) -> Path 
     return candidate if candidate.is_file() else None
 
 
-def load_env(path: Path | None) -> dict[str, str]:
-    """Load ``path`` into ``os.environ`` without overwriting what is there.
+#: Every variable this tool reads is prefixed. Enforced rather than assumed
+#: (ZMBNI-1812): a `.env` in a working directory is very often shared with
+#: docker compose, a framework, or another tool, and loading all of it would
+#: mean Zamboni silently changing the environment of everything downstream of
+#: it. Reading only our own keys makes the file safe to share; requiring the
+#: prefix makes "is this variable ours" answerable without a list.
+ENV_PREFIX = "ZAMBONI_"
+
+
+def env_ours(path: Path) -> dict[str, str]:
+    """The ``ZAMBONI_*`` entries of a dotenv file. Everything else is ignored."""
+    from dotenv import dotenv_values
+
+    return {
+        k: v for k, v in dotenv_values(path).items() if v is not None and k.startswith(ENV_PREFIX)
+    }
+
+
+def check_env_permissions(path: Path) -> None:
+    """Refuse to read a credential file that others can read.
+
+    A hard error rather than a warning, and that is the point: a warning on a
+    nightly cron job is a line in a log nobody opens. The file holds a catalog
+    token; if the mode is wrong, the fix takes one command and the run should
+    not proceed until it has been taken.
+
+    The test is "no group or other bits", not "exactly 0600" -- 0400 is
+    *stricter*, and rejecting a read-only credential file for being too safe
+    would be an odd thing to do.
+    """
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError as exc:  # pragma: no cover - raced with a delete
+        raise ProfileError(f"{path}: cannot stat: {exc}") from exc
+    if mode & 0o077:
+        raise ProfileError(
+            f"{path} is readable by group or other (mode {mode:03o}) and holds "
+            f"credentials. Fix it and re-run:\n    chmod 600 {path}"
+        )
+
+
+def load_env(path: Path | None, *, explicit: bool = False) -> dict[str, str]:
+    """Load the ``ZAMBONI_*`` entries of ``path`` into ``os.environ``.
 
     Real environment beats the file deliberately: a container or systemd unit
     that injects secrets properly should not be overridden by a stale ``.env``
     someone left in the working directory.
+
+    A discovered file carrying no ``ZAMBONI_*`` keys is treated as **not ours**
+    and ignored, permissions included -- it is somebody else's `.env` that
+    happens to share a directory, and neither reading it nor complaining about
+    its mode would be our business. Named explicitly with ``--env``, the same
+    file is an error instead: the operator meant that file, and it is the wrong
+    one.
     """
     if path is None:
         return {}
-    from dotenv import dotenv_values
 
-    values = {k: v for k, v in dotenv_values(path).items() if v is not None}
+    values = env_ours(path)
+    if not values:
+        if explicit:
+            raise ProfileError(
+                f"--env {path}: no {ENV_PREFIX}* variables. Every variable this "
+                f"tool reads is prefixed {ENV_PREFIX}; check the file, or drop "
+                "the flag to use the environment as it stands."
+            )
+        return {}
+
+    check_env_permissions(path)
     applied = {k: v for k, v in values.items() if k not in os.environ}
     os.environ.update(applied)
     return applied
@@ -190,5 +247,8 @@ def resolve(
     profile decides whether it needs to.
     """
     env_file = find_env(env_path, start=start)
-    load_env(env_file)
-    return load_profile(find_profile(profile_path, start=start)), env_file
+    applied = load_env(env_file, explicit=bool(env_path))
+    # Report the file only when it was actually used, so `--verbose` and the
+    # warnings do not name a foreign `.env` we deliberately ignored.
+    used = env_file if applied else None
+    return load_profile(find_profile(profile_path, start=start)), used

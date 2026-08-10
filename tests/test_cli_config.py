@@ -423,50 +423,46 @@ def test_every_operational_knob_is_reachable_from_the_command_line():
     assert not missing, f"CompactionConfig settings with no CLI flag: {missing}"
 
 
-# -- secret handling (ZMBNI-1811) -----------------------------------------
+# -- secret handling (ZMBNI-1811, ZMBNI-1812) -----------------------------
 
 
-def test_a_secret_on_the_command_line_is_warned_about():
-    """Verified rather than assumed: a token passed this way was read back out
-    of /proc/<pid>/cmdline and `ps aux` while the process was running."""
-    from zamboni.cli import secret_handling_warnings
+@pytest.mark.parametrize(
+    ("flag", "variable"),
+    [
+        ("--token", "ZAMBONI_TOKEN"),
+        ("--credential", "ZAMBONI_CREDENTIAL"),
+        ("--s3-secret-access-key", "ZAMBONI_S3_SECRET_ACCESS_KEY"),
+    ],
+)
+def test_the_secret_flags_are_removed_and_say_where_to_put_the_value(flag, variable, capsys):
+    """Removed rather than warned about: a command line is readable by every
+    local user, verified by reading a token back out of /proc/<pid>/cmdline.
 
-    warnings = secret_handling_warnings(["compact", "db.t", "--token", "hunter2"], env_file=None)
+    They still parse, only to fail usefully. Deleting the argument outright
+    gives `unrecognized arguments: --token`, which tells an operator running
+    yesterday's script nothing about where the value goes now.
+    """
+    from zamboni.cli import main
 
-    assert len(warnings) == 1
-    assert "--token" in warnings[0]
-    assert "hunter2" not in warnings[0], "the warning must not repeat the secret"
+    with pytest.raises(SystemExit) as exit_info:
+        main(["describe", "db.t", flag, "hunter2"])
 
-
-def test_a_key_id_on_the_command_line_is_not_warned_about():
-    """An access key id is an identifier, not a secret. Warning about it would
-    train people to ignore the warning for the flag beside it that is."""
-    from zamboni.cli import secret_handling_warnings
-
-    assert secret_handling_warnings(["compact", "--s3-access-key-id", "AKIA"], None) == []
-
-
-def test_a_group_readable_env_file_is_warned_about(tmp_path):
-    from zamboni.cli import secret_handling_warnings
-
-    env = tmp_path / ".env"
-    env.write_text("ZAMBONI_TOKEN=x\n")
-    env.chmod(0o644)
-
-    warnings = secret_handling_warnings(["compact"], env)
-    assert len(warnings) == 1
-    assert "644" in warnings[0]
-
-    env.chmod(0o600)
-    assert secret_handling_warnings(["compact"], env) == []
+    assert exit_info.value.code == 2
+    message = capsys.readouterr().err
+    assert "was removed" in message
+    assert variable in message
+    assert "hunter2" not in message, "the error must not echo the value back"
 
 
-def test_a_missing_env_file_is_not_an_error(tmp_path):
-    """The check runs before anything else and must not be the thing that fails
-    a run -- it is advice."""
-    from zamboni.cli import secret_handling_warnings
+def test_a_key_id_is_still_a_flag():
+    """An access key id is an identifier, not a secret. Removing it alongside
+    the secret would be cargo-culting the rule rather than applying it."""
+    from zamboni.cli import _build_parser
 
-    assert secret_handling_warnings(["compact"], tmp_path / "gone.env") == []
+    args = _build_parser().parse_args(
+        ["describe", "db.t", "--local-warehouse", "/tmp/x", "--s3-access-key-id", "AKIA"]
+    )
+    assert args.s3_access_key_id == "AKIA"
 
 
 def test_the_s3_settings_repr_redacts_the_secret():

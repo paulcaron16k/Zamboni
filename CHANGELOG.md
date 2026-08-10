@@ -255,6 +255,28 @@ Two categories beyond the usual set, because this tool deletes files:
   without the ordering the file asked for. The translation now happens for every
   engine.
 
+### BREAKING
+
+- **`--token`, `--credential` and `--s3-secret-access-key` are removed.** A
+  value on a command line is readable by every local user from `ps` or
+  `/proc/<pid>/cmdline` — confirmed by reading one back — and shell history
+  keeps it. Set `ZAMBONI_TOKEN`, `ZAMBONI_CREDENTIAL` or
+  `ZAMBONI_S3_SECRET_ACCESS_KEY` instead. The flags still parse, only to exit 2
+  naming the variable, so a script that used them says what to change rather
+  than `unrecognized arguments`. `--s3-access-key-id` is kept: a key id is an
+  identifier, not a secret.
+
+- **A `.env` readable by group or other now stops the run.** It was a warning in
+  the same release; a warning on a nightly cron job is a line in a log nobody
+  opens. `chmod 600` — or `0400`, which also passes, since the check is for
+  group and other access rather than an exact mode.
+
+- **Only `ZAMBONI_*` entries are read from a `.env`.** Such a file is very often
+  shared with docker compose or a framework, and loading all of it meant Zamboni
+  silently altering the environment of everything downstream. A discovered file
+  with no `ZAMBONI_*` entries is now treated as not ours and ignored entirely;
+  the same file named with `--env` is an error, because there you meant it.
+
 ### SAFETY
 
 - **Spark identifiers containing a backtick could target a different table.**

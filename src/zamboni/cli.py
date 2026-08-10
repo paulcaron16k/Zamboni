@@ -149,8 +149,6 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
         return 2
     _apply_profile(args, args.zamboni_profile)
-    for warning in secret_handling_warnings(sys.argv[1:] if argv is None else argv, env_file):
-        print(f"warning: {warning}", file=sys.stderr)
     if args.verbose:
         logging.getLogger(__name__).debug(
             "profile: %s, env: %s", args.zamboni_profile.source, env_file
@@ -471,47 +469,6 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-#: Flags whose *value* is a secret. Not `--s3-access-key-id`: a key id is an
-#: identifier, and treating it as a secret would train people to ignore the
-#: warning for the one flag beside it that is.
-SECRET_FLAGS = ("--token", "--credential", "--s3-secret-access-key")
-
-
-def secret_handling_warnings(argv: list[str], env_file: Path | None) -> list[str]:
-    """Advice, not enforcement, for the two ways secrets leak locally.
-
-    Warnings rather than errors on purpose: both conditions are real hazards and
-    both have legitimate exceptions -- a single-user container, an interactive
-    one-off -- and refusing to run would break working deployments to make a
-    point. They go to stderr so a cron job's log keeps them.
-    """
-    warnings = []
-
-    on_argv = sorted({flag for flag in SECRET_FLAGS if flag in argv})
-    if on_argv:
-        # Verified rather than assumed: a token passed this way was read back
-        # out of /proc/<pid>/cmdline and `ps aux` while the process ran.
-        warnings.append(
-            f"{', '.join(on_argv)} put a secret on the command line, where any "
-            "local user can read it from `ps` or /proc/<pid>/cmdline, and where "
-            "your shell history keeps it. Use the matching ZAMBONI_* variable, "
-            "or a .env file -- see docs/user_guide.md."
-        )
-
-    if env_file is not None:
-        try:
-            mode = env_file.stat().st_mode
-        except OSError:  # pragma: no cover - raced with a delete
-            mode = 0
-        if mode & 0o077:
-            warnings.append(
-                f"{env_file} is readable by group or other (mode "
-                f"{mode & 0o777:03o}); it holds credentials. chmod 600 it."
-            )
-
-    return warnings
-
-
 def _add_engine_arg(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--engine",
@@ -564,8 +521,8 @@ def _add_catalog_args(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("catalog")
     g.add_argument("--uri", default=os.environ.get("ZAMBONI_URI"), help="REST catalog endpoint")
     g.add_argument("--warehouse", default=os.environ.get("ZAMBONI_WAREHOUSE"))
-    g.add_argument("--credential", default=os.environ.get("ZAMBONI_CREDENTIAL"))
-    g.add_argument("--token", default=os.environ.get("ZAMBONI_TOKEN"))
+    _add_removed_secret_flag(g, "--credential", "ZAMBONI_CREDENTIAL")
+    _add_removed_secret_flag(g, "--token", "ZAMBONI_TOKEN")
     g.add_argument("--oauth2-server-uri", default=os.environ.get("ZAMBONI_OAUTH2_SERVER_URI"))
     g.add_argument("--scope", default=os.environ.get("ZAMBONI_SCOPE"))
     g.add_argument(
@@ -577,7 +534,7 @@ def _add_catalog_args(p: argparse.ArgumentParser) -> None:
     s = p.add_argument_group("s3 / minio")
     s.add_argument("--s3-endpoint", default=os.environ.get("ZAMBONI_S3_ENDPOINT"))
     s.add_argument("--s3-access-key-id", default=os.environ.get("ZAMBONI_S3_ACCESS_KEY_ID"))
-    s.add_argument("--s3-secret-access-key", default=os.environ.get("ZAMBONI_S3_SECRET_ACCESS_KEY"))
+    _add_removed_secret_flag(s, "--s3-secret-access-key", "ZAMBONI_S3_SECRET_ACCESS_KEY")
     s.add_argument("--s3-region", default=os.environ.get("ZAMBONI_S3_REGION", "us-east-1"))
 
 
@@ -642,6 +599,33 @@ def _add_config_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--dangling-delete-policy", choices=["report", "block"], default="report")
 
 
+class _RemovedSecretFlag(argparse.Action):
+    """A flag that exists only to explain that it no longer exists.
+
+    Deleting the argument outright would produce `unrecognized arguments:
+    --token`, which tells an operator nothing about where to put the value
+    instead -- and the people hitting it are running a script that worked
+    yesterday. This says what to do, and exits 2 like any other usage error.
+    """
+
+    def __init__(self, option_strings, dest, variable: str = "", **kwargs) -> None:
+        self.variable = variable
+        super().__init__(option_strings, dest, nargs="?", help=argparse.SUPPRESS, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None) -> None:
+        parser.error(
+            f"{option_string} was removed: a secret on the command line is "
+            "readable by any local user from `ps` or /proc/<pid>/cmdline, and "
+            f"your shell history keeps it. Set {self.variable} in the "
+            "environment or in a .env file (mode 600) instead -- see "
+            "docs/user_guide.md#secrets."
+        )
+
+
+def _add_removed_secret_flag(parser, flag: str, variable: str) -> None:
+    parser.add_argument(flag, action=_RemovedSecretFlag, variable=variable, default=None)
+
+
 def _session_from(args: argparse.Namespace) -> CatalogSession:
     if args.local_warehouse:
         return CatalogSession.for_local(warehouse_path=args.local_warehouse)
@@ -654,22 +638,29 @@ def _session_from(args: argparse.Namespace) -> CatalogSession:
 
     s3 = None
     if args.s3_endpoint:
-        if not (args.s3_access_key_id and args.s3_secret_access_key):
+        secret = os.environ.get("ZAMBONI_S3_SECRET_ACCESS_KEY")
+        if not (args.s3_access_key_id and secret):
             raise ValueError(
-                "--s3-endpoint also needs --s3-access-key-id and --s3-secret-access-key"
+                "--s3-endpoint also needs --s3-access-key-id (or "
+                "ZAMBONI_S3_ACCESS_KEY_ID) and ZAMBONI_S3_SECRET_ACCESS_KEY. "
+                "The secret has no flag on purpose -- see "
+                "docs/user_guide.md#secrets."
             )
         s3 = S3Settings(
             endpoint=args.s3_endpoint,
             access_key_id=args.s3_access_key_id,
-            secret_access_key=args.s3_secret_access_key,
+            secret_access_key=secret,
             region=args.s3_region,
         )
 
     return CatalogSession.for_lakekeeper(
         uri=args.uri,
         warehouse=args.warehouse,
-        credential=args.credential,
-        token=args.token,
+        # Environment only: the flags that used to set these were removed
+        # because a command line is world-readable. `_RemovedSecretFlag` says so
+        # if anyone passes the old ones.
+        credential=os.environ.get("ZAMBONI_CREDENTIAL"),
+        token=os.environ.get("ZAMBONI_TOKEN"),
         oauth2_server_uri=args.oauth2_server_uri,
         scope=args.scope,
         s3=s3,

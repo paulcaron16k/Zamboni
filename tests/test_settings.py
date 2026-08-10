@@ -16,6 +16,23 @@ import pytest
 from zamboni import settings
 
 
+@pytest.fixture(autouse=True)
+def restore_environment():
+    """`load_env` writes into `os.environ`, and nothing undid it.
+
+    Every test here that loads a dotenv file left its variables set for the rest
+    of the session. It never failed because pytest collects `test_cli.py` before
+    `test_settings.py` alphabetically, so the tests that would trip over a stray
+    `ZAMBONI_WAREHOUSE` happened to run first -- and this project runs
+    `pytest-randomly`, which does not promise that order. A latent flake rather
+    than a passing suite.
+    """
+    saved = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
+
+
 def write(tmp_path: Path, name: str, text: str) -> Path:
     path = tmp_path / name
     path.write_text(text)
@@ -166,7 +183,9 @@ def test_the_profile_beats_zamboni_root_from_the_environment(tmp_path, monkeypat
 
 
 def test_env_values_are_loaded(tmp_path, monkeypatch):
+    monkeypatch.delenv("ZAMBONI_CREDENTIAL", raising=False)
     path = write(tmp_path, ".env", "ZAMBONI_CREDENTIAL=id:secret\n")
+    path.chmod(0o600)  # required since ZMBNI-1812; the file holds credentials
 
     applied = settings.load_env(path)
 
@@ -178,7 +197,7 @@ def test_a_real_environment_variable_beats_the_file(tmp_path, monkeypatch):
     """Deliberate: a container or systemd unit that injects secrets properly
     must not be overridden by a stale .env left in the working directory."""
     monkeypatch.setenv("ZAMBONI_CREDENTIAL", "from-environment")
-    write(tmp_path, ".env", "ZAMBONI_CREDENTIAL=from-file\n")
+    write(tmp_path, ".env", "ZAMBONI_CREDENTIAL=from-file\n").chmod(0o600)
 
     settings.load_env(tmp_path / ".env")
 
@@ -188,7 +207,8 @@ def test_a_real_environment_variable_beats_the_file(tmp_path, monkeypatch):
 def test_resolve_loads_env_before_the_profile(tmp_path, monkeypatch):
     """Order matters: the profile's own defaults read ZAMBONI_*, so a .env that
     sets ZAMBONI_WAREHOUSE has to be in effect before the profile is built."""
-    write(tmp_path, ".env", "ZAMBONI_WAREHOUSE=from-env\n")
+    monkeypatch.delenv("ZAMBONI_WAREHOUSE", raising=False)
+    write(tmp_path, ".env", "ZAMBONI_WAREHOUSE=from-env\n").chmod(0o600)
     write(tmp_path, "zamboni.yml", "engine: local\n")
     monkeypatch.setenv("ZAMBONI_ROOT", str(tmp_path))
 
@@ -196,3 +216,70 @@ def test_resolve_loads_env_before_the_profile(tmp_path, monkeypatch):
 
     assert env_file == tmp_path / ".env"
     assert profile.warehouse == "from-env"
+
+
+# -- the dotenv file must be ours, and private (ZMBNI-1812) ---------------
+
+
+def test_a_group_readable_env_file_stops_the_run(tmp_path):
+    """A hard error, not a warning. A warning on a nightly cron job is a line in
+    a log nobody opens, and the file holds a catalog token."""
+    path = write(tmp_path, ".env", "ZAMBONI_TOKEN=t\n")
+    path.chmod(0o644)
+
+    with pytest.raises(settings.ProfileError, match="chmod 600"):
+        settings.load_env(path)
+
+
+def test_a_read_only_env_file_is_accepted(tmp_path):
+    """0400 is stricter than 0600, so refusing it for not being exactly 0600
+    would reject a credential file for being too safe."""
+    path = write(tmp_path, ".env", "ZAMBONI_TOKEN=t\n")
+    path.chmod(0o400)
+
+    assert settings.load_env(path)["ZAMBONI_TOKEN"] == "t"
+
+
+def test_only_zamboni_variables_are_read_from_the_file(tmp_path, monkeypatch):
+    """A `.env` in a working directory is very often shared with docker compose
+    or a framework. Loading all of it would mean Zamboni silently changing the
+    environment of everything downstream of it."""
+    monkeypatch.delenv("ZAMBONI_TOKEN", raising=False)
+    path = write(
+        tmp_path, ".env", "ZAMBONI_TOKEN=ours\nPOSTGRES_PASSWORD=theirs\nAWS_SECRET=theirs\n"
+    )
+    path.chmod(0o600)
+
+    applied = settings.load_env(path)
+
+    assert applied == {"ZAMBONI_TOKEN": "ours"}
+    assert "POSTGRES_PASSWORD" not in os.environ
+    assert "AWS_SECRET" not in os.environ
+
+
+def test_a_discovered_foreign_env_file_is_ignored_not_refused(tmp_path):
+    """Somebody else's `.env` sharing our working directory is not ours to read
+    and not ours to complain about -- including its mode."""
+    path = write(tmp_path, ".env", "POSTGRES_PASSWORD=theirs\n")
+    path.chmod(0o644)
+
+    assert settings.load_env(path) == {}
+
+
+def test_a_foreign_env_file_named_explicitly_is_an_error(tmp_path):
+    """`--env` means the operator meant *that* file, so silence would hide a
+    typo that leaves a run with no credentials at all."""
+    path = write(tmp_path, "other.env", "POSTGRES_PASSWORD=theirs\n")
+    path.chmod(0o600)
+
+    with pytest.raises(settings.ProfileError, match=r"no ZAMBONI_\* variables"):
+        settings.load_env(path, explicit=True)
+
+
+def test_resolve_reports_no_env_file_when_it_ignored_one(tmp_path, monkeypatch):
+    """`--verbose` and error messages must not name a file we did not read."""
+    write(tmp_path, ".env", "POSTGRES_PASSWORD=theirs\n").chmod(0o644)
+
+    _profile, env_file = settings.resolve(start=tmp_path)
+
+    assert env_file is None
