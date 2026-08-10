@@ -689,7 +689,30 @@ for. It is faster, and on a group that fits it is the right choice.
 threshold was 1 GiB until the bounded path started working: crossing it bought
 nothing, so it was set high to avoid paying for a slower path. Now the trade is
 real — `IN_MEMORY` on a 1 GiB group was measured at ~2.3 GiB of growth, more
-than a small host has, while CHUNKED stays flat for about 1.5× on read.
+than a small host has, while CHUNKED stays flat.
+
+**What CHUNKED costs in time**, measured against real object storage rather than
+local files — the dev stack's MinIO through Lakekeeper with vended credentials,
+228MB in 96 files, which is the small-file shape compaction actually gets, with
+a proxy injecting per-request round-trip time:
+
+| RTT to the bucket | CHUNKED | unbounded reads | cost |
+|---|---|---|---|
+| direct (no proxy) | 7.4 s | 6.5 s | 1.14× |
+| 0 ms (proxy control) | 11.3 s | 10.1 s | 1.12× |
+| 10 ms | 19.1 s | 15.2 s | 1.26× |
+| 30 ms | 34.4 s | 24.7 s | 1.39× |
+
+The cost grows with latency, which is what you would expect: the parallelism
+being given up is what hid the round trips. The 0 ms row is the proxy's own
+overhead as a control — it moves both columns and leaves the ratio alone.
+
+It is **cheaper on object storage than the ~1.5× measured on local files**, up
+to somewhere past 30 ms of RTT. And the memory saving does not decay with
+latency: CHUNKED used 0.53–0.61× of the unbounded peak at every RTT.
+
+For a same-region bucket (single-digit milliseconds) budget ~1.2×. For a distant
+one, more — and consider whether that table wants Spark.
 
 So the practical rule for the default configuration:
 

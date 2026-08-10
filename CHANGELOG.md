@@ -158,8 +158,17 @@ Two categories beyond the usual set, because this tool deletes files:
   | 894 MB | +1111 MB | **+577 MB** |
 
   Flat is the point: peak is now set by the largest data *file*, so a partition
-  larger than RAM compacts. It costs roughly 1.5× on read, so it applies to the
-  CHUNKED path only.
+  larger than RAM compacts. It applies to the CHUNKED path only, because it
+  costs time.
+
+  That cost was then measured against object storage rather than local files,
+  since the parallelism being given up is what hides network latency — MinIO
+  through Lakekeeper with vended credentials, 228MB in 96 files, with a proxy
+  injecting per-request RTT: **1.12× at 0ms, 1.26× at 10ms, 1.39× at 30ms**. So
+  it is cheaper on a bucket than the ~1.5× measured on local disk, up to
+  somewhere past 30ms of round trip, and the memory saving does not decay with
+  latency (0.53–0.61× at every RTT). A bounded read-ahead would recover most of
+  the time; ZMBNI-1909.
 
   A group cap would also have bounded memory and was **rejected**: clustering
   quality is a function of how many rows the sort can see at once, so N

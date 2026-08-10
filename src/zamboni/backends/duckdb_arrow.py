@@ -185,11 +185,35 @@ class DuckDBArrowBackend(RewriteBackend):
         Flat, which is the property that matters; the absolute figure is one
         file plus Arrow allocator retention.
 
-        **This costs throughput** -- around 1.5x on the same measurements, since
-        the files are now read in series. That is why it lives on the CHUNKED
-        path only: AUTO uses CHUNKED for groups above ``memory_budget_bytes``,
-        where bounded memory is the whole point, and leaves small groups on the
-        materialising path where speed is.
+        **This costs throughput**, and the cost grows with round-trip time,
+        because the parallelism being given up is what hid the latency. Measured
+        against the dev stack's MinIO through Lakekeeper with vended credentials
+        -- 228MB in 96 files, the small-file shape compaction actually gets --
+        with a proxy injecting per-request RTT:
+
+        ======== ========== =========== ======
+        RTT      per file   all at once ratio
+        ======== ========== =========== ======
+        direct    7.4s       6.5s       1.14x
+        0ms       11.3s      10.1s      1.12x
+        10ms      19.1s      15.2s      1.26x
+        30ms      34.4s      24.7s      1.39x
+        ======== ========== =========== ======
+
+        The 0ms row is the proxy's own overhead as a control: it moves both
+        columns and leaves the ratio alone, so the latency rows are the latency
+        and not the harness. Peak memory was 0.53x-0.61x of all-at-once at every
+        RTT -- the memory win does not decay.
+
+        So it is cheaper on object storage than the ~1.5x measured on local
+        files, up to somewhere past 30ms of RTT. That is why it lives on the
+        CHUNKED path only: AUTO uses CHUNKED for groups above
+        ``memory_budget_bytes``, where bounded memory is the whole point, and
+        leaves small groups on the materialising path where speed is.
+
+        A bounded read-ahead -- two to four files in flight rather than one --
+        would recover most of the latency while keeping peak proportional to the
+        read-ahead. Not done here; ZMBNI-1908.
 
         **And it does not cost Z-order anything**, which is the reason to prefer
         it over capping group size. DuckDB still receives the entire group as
