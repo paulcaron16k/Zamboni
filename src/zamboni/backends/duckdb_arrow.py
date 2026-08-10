@@ -19,7 +19,9 @@ it -- rather than writing Parquet ourselves and registering it with
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 
 import pyarrow as pa
@@ -149,13 +151,13 @@ class DuckDBArrowBackend(RewriteBackend):
         # DataScan.to_arrow_batch_reader does the same thing upstream.
         target_schema = _projected_arrow_schema(ctx)
         return pa.RecordBatchReader.from_batches(
-            target_schema, self._batches_one_file_at_a_time(tasks, ctx)
+            target_schema, self._batches_with_read_ahead(tasks, ctx)
         ).cast(target_schema)
 
-    def _batches_one_file_at_a_time(
+    def _batches_with_read_ahead(
         self, tasks: list[FileScanTask], ctx: RewriteContext
     ) -> Iterator[pa.RecordBatch]:
-        """One ``to_record_batches`` call per task, not one for all of them.
+        """A bounded window of ``to_record_batches`` calls, one task each.
 
         This is what makes CHUNKED bound anything, and it was measured rather
         than reasoned about (ZMBNI-1906). Handing PyIceberg the whole task list
@@ -211,9 +213,42 @@ class DuckDBArrowBackend(RewriteBackend):
         ``memory_budget_bytes``, where bounded memory is the whole point, and
         leaves small groups on the materialising path where speed is.
 
-        A bounded read-ahead -- two to four files in flight rather than one --
-        would recover most of the latency while keeping peak proportional to the
-        read-ahead. Not done here; ZMBNI-1908.
+        **The window is the answer to that** (ZMBNI-1909), and it is sized in
+        bytes rather than files because bytes are what the memory contract is
+        denominated in. ``read_ahead_bytes`` admits as many whole files as fit,
+        capped by ``max_read_ahead_files``, so many small files -- the shape
+        compaction actually gets, and the one with the most round trips to hide
+        -- get real concurrency, while a few large ones fall back towards one at
+        a time, which is the case where memory is the binding constraint. Peak
+        stays bounded by the window plus the file being handed over, never by
+        the group. ``read_ahead_bytes=0`` restores the strictly serial read.
+
+        The submission is deliberately **not** ``executor.map``: that is the
+        upstream mistake this method exists to avoid, since map submits every
+        task at once and the window would be the group again. A new read starts
+        only as a finished one is handed to the consumer, which bounds what is
+        *outstanding* rather than merely what is running.
+
+        Measured on the same harness as the serial figures above -- 228MB in 96
+        files, MinIO through Lakekeeper, per-request RTT injected by a proxy --
+        with the default 64MiB window:
+
+        ====== ========== ========== ============
+        RTT    serial     window     unbounded
+        ====== ========== ========== ============
+        10ms   20.8s      15.3s      15.9s
+        30ms   36.2s      25.8s      26.3s
+        ====== ========== ========== ============
+
+        **The window matches unbounded speed** at both latencies -- the whole
+        cost of ZMBNI-1906 was serialised round trips, and a window of two files
+        is enough to hide them. It gives back some of the memory to do it:
+        +356MB against serial's +295MB and unbounded's +494MB at 10ms, so about
+        70% of unbounded rather than 60%.
+
+        And it stays flat, which is the point. With 28MB files and the group
+        quadrupling, peak growth went 692MB, 840MB, 784MB -- against unbounded's
+        822MB, 1088MB, 1111MB. Bounded by the window, not by the group.
 
         **And it does not cost Z-order anything**, which is the reason to prefer
         it over capping group size. DuckDB still receives the entire group as
@@ -221,8 +256,48 @@ class DuckDBArrowBackend(RewriteBackend):
         it would have seen. A capped group cannot say that: N sub-groups sort
         independently and produce N overlapping ranges.
         """
-        for task in tasks:
-            yield from self._arrow_scan(ctx).to_record_batches([task])
+        window = ctx.config.read_ahead_bytes
+        if window <= 0:
+            for task in tasks:
+                yield from self._arrow_scan(ctx).to_record_batches([task])
+            return
+
+        def read(task: FileScanTask) -> list[pa.RecordBatch]:
+            # A fresh ArrowScan per call: cheap, and it keeps threads off shared
+            # mutable state. PyIceberg reads tasks concurrently itself, so the
+            # io underneath is expected to take it.
+            return list(self._arrow_scan(ctx).to_record_batches([task]))
+
+        max_files = ctx.config.max_read_ahead_files
+        pending: deque[tuple[Future[list[pa.RecordBatch]], int]] = deque()
+        remaining = iter(tasks)
+
+        def fill() -> None:
+            while len(pending) < max_files:
+                # `pending and` admits the first file unconditionally, so one
+                # larger than the whole window still makes progress rather than
+                # deadlocking against its own size.
+                if pending and sum(size for _, size in pending) >= window:
+                    return
+                task = next(remaining, None)
+                if task is None:
+                    return
+                pending.append((pool.submit(read, task), task.file.file_size_in_bytes))
+
+        with ThreadPoolExecutor(max_workers=max_files) as pool:
+            try:
+                fill()
+                while pending:
+                    future, _ = pending.popleft()
+                    batches = future.result()
+                    fill()
+                    yield from batches
+            finally:
+                # An abandoned generator -- a consumer that stops early, or an
+                # exception downstream -- must not leave reads running against
+                # the object store. At most `max_files` are ever outstanding.
+                for future, _ in pending:
+                    future.cancel()
 
     # -- sort ------------------------------------------------------------
 

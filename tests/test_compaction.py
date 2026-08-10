@@ -342,6 +342,10 @@ def test_chunked_reads_one_data_file_at_a_time(session, partitioned, monkeypatch
     Asserted on the call shape rather than on memory, because a memory
     assertion is a flaky assertion. If someone reverts to passing every task,
     this fails; if they keep the property while restructuring, it passes.
+
+    Still one task per call after ZMBNI-1909 added a read-ahead window: the
+    window changes how many of these calls are in flight, not how much each one
+    is asked for. That distinction is the whole bound.
     """
     from pyiceberg.io.pyarrow import ArrowScan
 
@@ -389,3 +393,122 @@ def test_chunked_still_sorts_across_the_whole_group(session, partitioned):
     for category in ("a", "b"):
         ids = tbl.scan(row_filter=f"category == '{category}'").to_arrow()["id"].to_pylist()
         assert ids == sorted(ids, reverse=True), "the group was sorted in pieces, not as a whole"
+
+
+def _concurrency_probe(monkeypatch):
+    """Record the high-water mark of overlapping reads."""
+    import threading
+
+    from pyiceberg.io.pyarrow import ArrowScan
+
+    state = {"live": 0, "peak": 0, "calls": 0}
+    lock = threading.Lock()
+    original = ArrowScan.to_record_batches
+
+    def tracked(self, tasks):
+        with lock:
+            state["live"] += 1
+            state["calls"] += 1
+            state["peak"] = max(state["peak"], state["live"])
+        try:
+            # An iterator, not a list: `to_table` calls next() on the result,
+            # and this probe also sits under that path.
+            return iter(list(original(self, tasks)))
+        finally:
+            with lock:
+                state["live"] -= 1
+
+    monkeypatch.setattr(ArrowScan, "to_record_batches", tracked)
+    return state
+
+
+def test_read_ahead_zero_reads_strictly_one_file_at_a_time(session, partitioned, monkeypatch):
+    """The ZMBNI-1906 behaviour, still reachable.
+
+    It is the floor the window is measured against, and the setting to reach for
+    on a host where even one extra file in flight is too much.
+    """
+    state = _concurrency_probe(monkeypatch)
+
+    TableCompactor(
+        session,
+        "db.partitioned",
+        CompactionConfig(memory_mode=MemoryMode.CHUNKED, rewrite_all=True, read_ahead_bytes=0),
+    ).execute()
+
+    assert state["calls"] > 1, "nothing was read; the probe is not on the read path"
+    assert state["peak"] == 1, f"reads overlapped with the window disabled: {state['peak']}"
+
+
+def test_read_ahead_overlaps_reads_without_unbounding_them(session, partitioned, monkeypatch):
+    """The point of ZMBNI-1909: concurrency comes back, the bound does not go.
+
+    Measured on object storage, serialising the reads cost 1.12x-1.39x as RTT
+    rose 0 to 30ms, because it serialised the round trips too.
+    """
+    state = _concurrency_probe(monkeypatch)
+    before_rows = rows(partitioned)
+
+    TableCompactor(
+        session,
+        "db.partitioned",
+        CompactionConfig(
+            memory_mode=MemoryMode.CHUNKED,
+            rewrite_all=True,
+            read_ahead_bytes=64 * 1024 * 1024,  # far larger than these tiny files
+            max_read_ahead_files=4,
+        ),
+    ).execute()
+
+    assert state["peak"] > 1, "the window admitted nothing; reads stayed serial"
+    assert state["peak"] <= 4, f"more files in flight than the cap allows: {state['peak']}"
+    assert rows(session.table("db.partitioned")) == before_rows
+
+
+def test_a_file_larger_than_the_window_still_makes_progress(session, partitioned):
+    """A window smaller than one file must admit that file anyway.
+
+    The obvious loop -- refuse to submit while queued bytes exceed the window --
+    never submits anything when the first file is already over, and the run
+    hangs rather than failing. One byte is the smallest way to say that.
+    """
+    before_rows = rows(partitioned)
+
+    TableCompactor(
+        session,
+        "db.partitioned",
+        CompactionConfig(memory_mode=MemoryMode.CHUNKED, rewrite_all=True, read_ahead_bytes=1),
+    ).execute()
+
+    assert rows(session.table("db.partitioned")) == before_rows
+
+
+def test_read_ahead_preserves_row_order_across_files(session, partitioned):
+    """Concurrent reads, ordered results.
+
+    Futures are drained in submission order, so a fast third file cannot
+    overtake a slow first one. Asserted through a sort, which would expose any
+    reordering as a broken sequence.
+    """
+    config = CompactionConfig(
+        memory_mode=MemoryMode.CHUNKED,
+        sort_expression="id DESC",
+        target_file_size_bytes=200,
+        rewrite_all=True,
+        read_ahead_bytes=64 * 1024 * 1024,
+    )
+    TableCompactor(session, "db.partitioned", config).execute()
+
+    tbl = session.table("db.partitioned")
+    for category in ("a", "b"):
+        ids = tbl.scan(row_filter=f"category == '{category}'").to_arrow()["id"].to_pylist()
+        assert ids == sorted(ids, reverse=True)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("read_ahead_bytes", -1), ("max_read_ahead_files", 0)],
+)
+def test_the_read_ahead_settings_are_validated(field, value):
+    with pytest.raises(ValueError, match=field):
+        CompactionConfig(**{field: value})

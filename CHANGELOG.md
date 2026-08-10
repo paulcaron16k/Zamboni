@@ -164,11 +164,26 @@ Two categories beyond the usual set, because this tool deletes files:
   That cost was then measured against object storage rather than local files,
   since the parallelism being given up is what hides network latency — MinIO
   through Lakekeeper with vended credentials, 228MB in 96 files, with a proxy
-  injecting per-request RTT: **1.12× at 0ms, 1.26× at 10ms, 1.39× at 30ms**. So
-  it is cheaper on a bucket than the ~1.5× measured on local disk, up to
-  somewhere past 30ms of round trip, and the memory saving does not decay with
-  latency (0.53–0.61× at every RTT). A bounded read-ahead would recover most of
-  the time; ZMBNI-1909.
+  injecting per-request RTT: 1.12× at 0ms, 1.26× at 10ms, 1.39× at 30ms. All of
+  it was serialised round trips, which is what the read-ahead window below gives
+  back.
+
+- **`read_ahead_bytes` (64MiB) and `max_read_ahead_files` (8)** — a bounded
+  window of files in flight, so CHUNKED is no longer slower than reading
+  everything at once:
+
+  | RTT | one file at a time | windowed | unbounded |
+  |---|---|---|---|
+  | 10 ms | 20.8 s | **15.3 s** | 15.9 s |
+  | 30 ms | 36.2 s | **25.8 s** | 26.3 s |
+
+  The window is sized in **bytes rather than files**, so it adapts: many small
+  files get real concurrency — the case with the most round trips to hide —
+  while a few large ones fall back towards one at a time, the case where memory
+  binds. Peak stays bounded by the window rather than the group (692/840/784MB
+  as a 28MB-file group quadrupled, against 822/1088/1111MB unbounded), at about
+  70% of the unbounded peak rather than the 60% strictly-serial reads managed.
+  Set `read_ahead_bytes=0` to restore those.
 
   A group cap would also have bounded memory and was **rejected**: clustering
   quality is a function of how many rows the sort can see at once, so N

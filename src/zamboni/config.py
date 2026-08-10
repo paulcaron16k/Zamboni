@@ -76,6 +76,22 @@ class CompactionConfig:
         rewrite_all: Rewrite every live data file, including files that already
             meet the target size.
         memory_mode: See :class:`MemoryMode`.
+        read_ahead_bytes: How much of the group CHUNKED may have in flight at
+            once, in on-disk bytes. The window is sized in **bytes rather than
+            files** because that is what the memory contract is denominated in:
+            many small files get real concurrency, which is exactly the case
+            that needs it -- lots of files means lots of round trips -- while a
+            few large ones fall back to reading one at a time, which is exactly
+            the case where memory is the constraint. Peak is therefore bounded
+            by this plus one file, not by the group.
+
+            0 disables it, which is ZMBNI-1906's behaviour: strictly one file at
+            a time. That was measured 1.12x-1.39x slower than unbounded reads as
+            round-trip time rose from 0 to 30ms, because serialising the reads
+            serialises the latency too. 64MiB is enough window to hide most of
+            that on a same-region bucket without giving the bound back.
+        max_read_ahead_files: Ceiling on concurrent reads regardless of
+            ``read_ahead_bytes``.
         memory_budget_bytes: Group size above which ``AUTO`` chooses CHUNKED.
             256MiB, lowered from 1GiB by ZMBNI-1906. The old value predates
             CHUNKED actually bounding anything: crossing it bought nothing, so
@@ -122,6 +138,12 @@ class CompactionConfig:
     rewrite_all: bool = False
     memory_mode: MemoryMode = MemoryMode.AUTO
     memory_budget_bytes: int = 256 * 1024 * 1024
+    read_ahead_bytes: int = 64 * 1024 * 1024
+    #: Hard cap on files in flight, whatever ``read_ahead_bytes`` allows. A
+    #: group of ten-thousand 4KB files would otherwise open ten-thousand
+    #: connections to satisfy a 64MiB window, which is a way to be rate-limited
+    #: rather than a way to be fast.
+    max_read_ahead_files: int = 8
     temp_directory: str | None = None
     sort_by_table_order: bool = False
     sort_expression: str | None = None
@@ -141,6 +163,10 @@ class CompactionConfig:
                 f"target_file_size_bytes must be >= {MIN_TARGET_FILE_SIZE_BYTES}, "
                 f"got {self.target_file_size_bytes}"
             )
+        if self.read_ahead_bytes < 0:
+            raise ValueError(f"read_ahead_bytes must be >= 0, got {self.read_ahead_bytes}")
+        if self.max_read_ahead_files < 1:
+            raise ValueError(f"max_read_ahead_files must be >= 1, got {self.max_read_ahead_files}")
         if self.min_input_files < 1:
             raise ValueError(f"min_input_files must be >= 1, got {self.min_input_files}")
         chosen = [

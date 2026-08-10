@@ -664,11 +664,11 @@ the whole task list made it materialise each data file into a list *and* submit
 every task at once, so files that finished early sat in memory waiting for the
 consumer. Reading one file per call fixes it.
 
-| Group on disk | CHUNKED before | CHUNKED now | IN_MEMORY |
+| Group on disk | unbounded reads | **CHUNKED now** | IN_MEMORY |
 |---|---|---|---|
-| 224 MB | +822 MB | **+541 MB** | +721 MB |
-| 447 MB | +1088 MB | **+527 MB** | +1512 MB |
-| 894 MB | +1111 MB | **+577 MB** | +2009 MB |
+| 224 MB | +822 MB | **+692 MB** | +721 MB |
+| 447 MB | +1088 MB | **+840 MB** | +1512 MB |
+| 894 MB | +1111 MB | **+784 MB** | +2009 MB |
 
 The important column is the third, and the important property is that it is
 **flat**. Quadruple the data and it does not move. So:
@@ -691,28 +691,29 @@ nothing, so it was set high to avoid paying for a slower path. Now the trade is
 real — `IN_MEMORY` on a 1 GiB group was measured at ~2.3 GiB of growth, more
 than a small host has, while CHUNKED stays flat.
 
-**What CHUNKED costs in time**, measured against real object storage rather than
-local files — the dev stack's MinIO through Lakekeeper with vended credentials,
-228MB in 96 files, which is the small-file shape compaction actually gets, with
-a proxy injecting per-request round-trip time:
+**What CHUNKED costs in time: nothing worth planning around.** Bounding the
+reads originally meant reading strictly one file at a time, which serialised the
+round trips as well — measured 1.26× slower at 10 ms of latency and 1.39× at
+30 ms. A **bounded read-ahead window** gives that back. Measured against the dev
+stack's MinIO through Lakekeeper, 228 MB in 96 files, with a proxy injecting
+per-request RTT:
 
-| RTT to the bucket | CHUNKED | unbounded reads | cost |
+| RTT to the bucket | one file at a time | **windowed (default)** | unbounded |
 |---|---|---|---|
-| direct (no proxy) | 7.4 s | 6.5 s | 1.14× |
-| 0 ms (proxy control) | 11.3 s | 10.1 s | 1.12× |
-| 10 ms | 19.1 s | 15.2 s | 1.26× |
-| 30 ms | 34.4 s | 24.7 s | 1.39× |
+| 10 ms | 20.8 s | **15.3 s** | 15.9 s |
+| 30 ms | 36.2 s | **25.8 s** | 26.3 s |
 
-The cost grows with latency, which is what you would expect: the parallelism
-being given up is what hid the round trips. The 0 ms row is the proxy's own
-overhead as a control — it moves both columns and leaves the ratio alone.
+The window matches unbounded speed, because the entire cost was serialised round
+trips and two files in flight is enough to hide them. It gives back some memory
+to do it — about 70% of the unbounded peak rather than 60% — and it stays flat
+as the group grows, which is the property that matters.
 
-It is **cheaper on object storage than the ~1.5× measured on local files**, up
-to somewhere past 30 ms of RTT. And the memory saving does not decay with
-latency: CHUNKED used 0.53–0.61× of the unbounded peak at every RTT.
-
-For a same-region bucket (single-digit milliseconds) budget ~1.2×. For a distant
-one, more — and consider whether that table wants Spark.
+`read_ahead_bytes` (64 MiB) sizes that window **in bytes, not files**, so it
+adapts: many small files get real concurrency, which is exactly the case with
+the most round trips to hide, while a few large ones fall back towards one at a
+time, which is exactly the case where memory binds. Set it to `0` to restore
+strictly serial reads on a host where even one extra file in flight is too
+much.
 
 So the practical rule for the default configuration:
 
