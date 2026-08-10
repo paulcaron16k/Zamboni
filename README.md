@@ -1,10 +1,61 @@
 # Zamboni
 
-Iceberg table maintenance -- compaction, dangling-delete removal, manifest rewriting,
-snapshot expiry and orphan-file removal -- for a MinIO + Lakekeeper lakehouse, without Trino
-or Spark.
+Iceberg table maintenance -- compaction, Z-order clustering, partition evolution,
+dangling-delete removal, manifest rewriting, snapshot expiry and orphan-file removal --
+**without needing Trino or Spark**. It can drive either when you have one.
 
-Nothing in that stack compacts tables today:
+```bash
+pip install "zamboni[s3,sql]"
+zamboni doctor                      # is this PyIceberg build usable?
+zamboni maintenance --table-config table-config.json   # previews; --yes commits
+```
+
+**New here?** [docs/user_guide.md](docs/user_guide.md) is the place to start: four ways to
+run it, an engine-capability table to choose with, secrets handling, and the memory
+numbers. This README is the *why* -- the evidence behind the design decisions.
+
+## Status: v0.1.0, and what that means
+
+Read this before depending on it.
+
+- **`0.x`.** The destructive defaults are public surface, so a changed default is a
+  breaking change even when no signature moves -- see [docs/releasing.md](docs/releasing.md),
+  which defines that for this tool specifically. `0.x` costs nothing and can become `1.0.0`
+  at any time; a promise cannot be withdrawn.
+- **One author.** Security response is best-effort rather than contractual
+  ([SECURITY.md](SECURITY.md)), and there is no backport branch: fixes land on the latest
+  `0.x`.
+- **CI is written and has never executed.** [.github/workflows/ci.yml](.github/workflows/ci.yml)
+  is complete and every command in it was verified locally, but this repository has had no
+  remote, so no job has ever run on a runner. There is deliberately **no CI badge** here: a
+  badge that has never run is a claim, not a result. Expect the first run to surface
+  something.
+- **Verified against real infrastructure, though.** Every operation has been run against a
+  live Lakekeeper + MinIO, and against real Trino 483 and Spark 4.0.4 servers. What is
+  unverified is the *automation*, not the tool.
+- **PyIceberg is capped at `<0.12`** and that is a safety measure, not conservatism --
+  see [below](#why-pyiceberg-is-capped-at-012).
+
+## What it is, and what it is not
+
+**It is** a maintenance tool for Iceberg tables that runs as a single process: PyIceberg for
+metadata, DuckDB for sorting. One command a cron line can call, one declarative file
+describing what each table's layout should be and what maintenance may delete.
+
+**It is not:**
+
+- **A query engine.** It rewrites files and commits snapshots; it does not serve queries.
+- **A catalog.** It talks to yours.
+- **A scheduler.** It exits with a code; cron, Airflow or systemd decides when.
+- **An ingestion tool.** Something else writes the data.
+- **A cluster.** Throughput is one machine's disk and CPU. For a partition larger than that
+  machine can chew through in the window you have, use `--engine spark`.
+- **A replacement for Trino or Spark** where you already run them. It is what you use when
+  you do not, and it drives them through the same config when you do.
+
+---
+
+Nothing in the MinIO + Lakekeeper stack compacts tables today:
 
 - **Lakekeeper OSS** ships queues for its own bookkeeping only. Verified against running
   servers: `v0.13.1` reports `["tabular_expiration", "tabular_purge", "task_log_cleanup"]`
@@ -120,18 +171,29 @@ Event catalogue: [data/healthims/HIMS_Discharge_Process_Events.md](data/healthim
 
 ## CI
 
-[.github/workflows/ci.yml](.github/workflows/ci.yml) runs four jobs on push and pull request:
+**Never executed.** See [Status](#status-v010-and-what-that-means) — this is what *will*
+run, not a record of what has.
+
+[.github/workflows/ci.yml](.github/workflows/ci.yml) defines five jobs on push and pull
+request:
 
 | Job | What it guards |
 |---|---|
-| `lint` | ruff check and format; mypy over `src` and `scripts`; `uv sync --frozen` fails on a stale lockfile; pre-commit and CI must pin the same ruff |
+| `lint` | ruff check and format; mypy over `src` and `scripts`; `uv sync --frozen` fails on a stale lockfile; pre-commit and CI must pin the same ruff; every source file carries its SPDX tag |
 | `test` | The suite on Python **3.11 and 3.13** — the floor `pyproject.toml` claims and the version pinned for development |
 | `executables` | `bin/` regenerates to a no-op, and both PEP 723 scripts run **from outside the project directory** |
-| `dev-stack` | The real thing: brings up Lakekeeper + Postgres + MinIO from `.env.sample`, bootstraps it, runs the 12 dev-stack tests, then the demo end to end |
+| `spark` | Builds a Spark Connect server with the Iceberg runtime and S3A, then runs the live Spark tests against it |
+| `dev-stack` | The real thing: brings up Lakekeeper + Postgres + MinIO from `.env.sample`, bootstraps it, runs the dev-stack tests, then the demo end to end |
 
-The `dev-stack` job sets `ZAMBONI_REQUIRE_DEV_STACK=1`, which turns "cannot reach the stack"
-from a skip into a failure. Without it, a stack that never started yields a suite of skips
-and a green tick that means nothing was tested.
+Two jobs guard against a green tick that means nothing. `dev-stack` sets
+`ZAMBONI_REQUIRE_DEV_STACK=1`, which turns "cannot reach the stack" from a skip into a
+failure; `spark` selects its tests by marker and fails if any of them *skipped*, because
+those fixtures skip on a closed port by design. Without both, a stack that never started
+yields a suite of skips and a tick that means nothing was tested.
+
+The `executables` job has already earned its place in advance: `bin/` was found stale
+against three separate changes, which is exactly what that job exists to catch and exactly
+what nothing caught while CI was not running.
 
 Locally, [.pre-commit-config.yaml](.pre-commit-config.yaml) runs the fast checks on every
 commit:
@@ -144,10 +206,17 @@ uv run pre-commit run --all-files
 The full suite stays out of the hook deliberately — a four-minute hook gets bypassed, and a
 bypassed hook is worse than none.
 
-## Licence
+## Contributing, security, licence
 
-Apache-2.0 — the same licence as Iceberg and PyIceberg, so contributions flow both ways
-without friction. See [LICENSE](LICENSE).
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — the five conventions that make this codebase's
+  claims trustworthy, each with the evidence that earned it. Read rule 1 before opening a
+  pull request: verify a claim before making it.
+- **[SECURITY.md](SECURITY.md)** — this tool deletes files, so the failure mode of a defect
+  is somebody's data. Report anything that could delete a still-referenced file privately,
+  and note that it does **not** need to be attacker-triggerable to count.
+- **Licence: Apache-2.0** — the same licence as Iceberg and PyIceberg, so contributions
+  flow both ways without friction. Every source file carries an SPDX tag; see
+  [LICENSE](LICENSE).
 
 ## Documentation
 
@@ -215,18 +284,24 @@ target-sized files with PyIceberg's own writer, and commits the swap as a single
 `replace` snapshot per partition.
 
 ```python
+import os
+
 from zamboni import CatalogSession, CompactionConfig, S3Settings, TableCompactor
 
 session = CatalogSession.for_lakekeeper(
     uri="http://localhost:8181/catalog",
     warehouse="demo",
-    credential="spark:2OR3eRvYfSZzzZ16MlPd95jhLnOaLM52",
+    # From the environment, or your secret manager -- never a literal, and never
+    # a command-line flag. See docs/user_guide.md#secrets.
+    credential=os.environ["ZAMBONI_CREDENTIAL"],
     oauth2_server_uri="http://localhost:30080/realms/iceberg/protocol/openid-connect/token",
     scope="lakekeeper",
-    s3=S3Settings(  # omit when Lakekeeper vends credentials
+    # Omit entirely when the catalog vends credentials, which is the arrangement
+    # worth having: one revocable secret instead of long-lived object-store keys.
+    s3=S3Settings(
         endpoint="http://localhost:9000",
-        access_key_id="minio-root-user",
-        secret_access_key="minio-root-password",
+        access_key_id=os.environ["ZAMBONI_S3_ACCESS_KEY_ID"],
+        secret_access_key=os.environ["ZAMBONI_S3_SECRET_ACCESS_KEY"],
     ),
 )
 
@@ -277,7 +352,7 @@ global environment pins 1.4.x for Airflow.
 
 ```bash
 uv sync            # builds .venv from uv.lock, Python pinned by .python-version
-uv run pytest -q   # 44 tests, no Docker/MinIO/Lakekeeper needed
+uv run pytest -q   # no Docker needed; the dev-stack tests skip when it is down
 uv run ruff check src tests scripts
 ```
 
@@ -442,6 +517,35 @@ errs the other way and hardcodes `sort_order_id=None` on every file it writes.
 Iceberg has no clustering concept distinct from sort order, and neither PyIceberg nor
 duckdb-iceberg has z-order or Hilbert curves anywhere. Express a z-order as a
 bit-interleaving expression in `sort_expression`.
+
+## Why PyIceberg is capped at `<0.12`
+
+`pyproject.toml` pins `pyiceberg[pyarrow]>=0.11.1,<0.12`. That upper bound is a **safety measure**,
+and it is the first thing you will hit if you try to use a newer PyIceberg alongside this.
+
+PyIceberg 0.12 corrupts data on a partitioned `upsert`: the row it was told to replace
+survives *alongside* its replacement, and a row it never touched is duplicated — with no
+error raised. Reproduced in 25 lines using no Zamboni code, and filed upstream as
+[apache/iceberg-python#3758](https://github.com/apache/iceberg-python/issues/3758). The
+full write-up is
+[docs/upstream-0.12-upsert-regression.md](docs/upstream-0.12-upsert-regression.md).
+
+Two things worth being clear about:
+
+- **Zamboni's own operations are fine on 0.12** — the whole suite passes there apart from
+  the demo, whose ingest upserts. What is unsafe is any *write* path going through
+  overwrite on a partitioned table, which is most merge-style ingestion. The cap protects
+  your ingest, not our maintenance.
+- **The cap is deliberate, not staleness.** The original bound was open-ended, which meant
+  the day 0.12 published, any `uv lock --upgrade` would have pulled it in with nobody
+  touching this code.
+
+It lifts when 0.12 is released *and* the regression is fixed. A `feature/pyiceberg-0.12`
+branch is written and verified against unreleased main, waiting for that.
+
+Note the capability probes do **not** catch this, and should not: they answer "can this
+build do X", and this build *can* upsert — it simply does it wrongly. A probe for
+correctness would have to write data and read it back, which is a test, not a probe.
 
 ## Capability detection, not version checks
 

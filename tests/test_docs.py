@@ -268,3 +268,31 @@ def test_the_guide_documents_every_run_control():
         and aliases.get(f.name, "\0") not in guide
     ]
     assert not undocumented, f"user_guide.md does not mention: {undocumented}"
+
+
+def test_no_document_carries_a_credential_shaped_literal():
+    """The README shipped `credential="spark:2OR3eRvYfSZzzZ16MlPd95jhLnOaLM52"`
+    in its first code sample for the whole of 0.1.0.
+
+    Whether or not that string was ever live is beside the point: a document
+    that tells operators to keep secrets out of files and command lines cannot
+    open with one pasted into a code block, and a reader copying the sample
+    inherits the habit. Samples read from the environment now.
+
+    The pattern is deliberately narrow -- a long high-entropy run after a
+    credential-ish keyword -- because a broad one would match hashes, commit
+    ids and base64 in the demo data, and a check that cries wolf gets deleted.
+    """
+    suspicious = re.compile(
+        r"(?:credential|password|secret[_-]?key|token)\s*[=:]\s*[\"'][^\"'\s]{20,}[\"']",
+        re.I,
+    )
+    offenders = []
+    for doc in all_docs():
+        for line in doc.read_text().splitlines():
+            if "os.environ" in line or "getenv" in line or "{{" in line:
+                continue  # reading one is the thing we are asking for
+            if match := suspicious.search(line):
+                offenders.append(f"{doc.name}: {match.group(0)[:60]}")
+
+    assert not offenders, f"credential-shaped literals in documentation: {offenders}"

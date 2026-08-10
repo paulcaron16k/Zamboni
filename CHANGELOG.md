@@ -226,7 +226,22 @@ Two categories beyond the usual set, because this tool deletes files:
   [docs/user_guide.md](docs/user_guide.md). They leak in different places, and
   the guide previously covered only cron.
 
+- **The README is written for someone who has not decided yet.** It opens with an
+  install line, a **Status** block (0.x, one author, CI written and never
+  executed, the PyIceberg cap) and a what-it-is-and-is-not list, instead of
+  opening with the evidence that nothing else does this. No CI badge: a badge
+  that has never run is a claim.
+
 ### Fixed
+
+- **The README's first code sample carried a credential-shaped literal.** A
+  document telling operators to keep secrets out of files and command lines
+  cannot open with one pasted into a code block — anyone copying the sample
+  inherited the habit. Samples read from the environment now, and
+  `test_no_document_carries_a_credential_shaped_literal` fails on a regression.
+
+- **The CI section claimed four jobs when there are five**, and read as though
+  it were green. It now says plainly that it has never executed.
 
 - **`S3Settings` printed its secret access key in `repr()`.** A frozen dataclass
   prints every field, so the key would appear in any traceback rendered with

@@ -95,7 +95,7 @@ If your change touches a probe, or depends on one, exercise it against both the
 pinned release and a checkout of PyIceberg `main`:
 
 ```bash
-uv pip install -e ../iceberg-python     # main
+uv pip install -e ../iceberg-python     # a checkout of apache/iceberg-python
 uv run zamboni doctor                   # what does this build support?
 pytest
 uv sync                                 # back to the pinned line

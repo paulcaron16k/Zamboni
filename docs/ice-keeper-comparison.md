@@ -4,7 +4,8 @@ A comparison against a maintenance service that is already deployed. This is
 [roadmap.md RM-6](roadmap.md); the engine comparison it sits beside is
 [engine-comparison.md](engine-comparison.md).
 
-**Method.** Read from the `../ice-keeper` checkout on 2026-08-03, at commit
+**Method.** Read from a checkout of [CybercentreCanada/ice-keeper](https://github.com/CybercentreCanada/ice-keeper)
+(MIT) on 2026-08-03, at commit
 `cd31a4d`. Statements about its behaviour come from its source, and the file is
 named where it matters.
 
