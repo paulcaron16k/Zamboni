@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Generate this project's self-contained executables, pinned to uv.lock.
 
 Both `bin/zamboni` and `bin/demo` come from here, so a dependency change
@@ -72,18 +73,37 @@ ENTRY_POINTS = {
 }
 
 
+#: Extras baked into the standalone executables. Named rather than `--all-extras`
+#: (ZMBNI-914), which broke the moment an extra existed that did not belong in a
+#: single-file CLI: it pulled in **both** `pyspark` and `pyspark-client`, which
+#: are mutually exclusive -- both provide the `pyspark` package, so whichever
+#: installed last would win -- and took the first-run download past 500MB for a
+#: tool whose whole premise is not needing Spark.
+#:
+#: The rule for this list: an extra belongs here when its absence makes the
+#: executable *unable to do its job*, not when it enables an optional engine.
+#: S3 access, a local catalog, bucket transforms and the Trino client are all
+#: small and pure-Python-ish; the Spark clients require a server anyway, and
+#: anyone who has one has an environment to install into.
+BUNDLED_EXTRAS = ("bucket", "sql", "s3", "trino")
+
+
 def locked_requirements() -> list[str]:
     """Exact pins for the runtime dependency set, from uv.lock.
 
-    All extras are included. A CLI that cannot reach S3, cannot open a local
-    warehouse, and cannot write a bucket-partitioned table is not a usable
-    executable, and the extras are small next to pyarrow.
+    A CLI that cannot reach S3, cannot open a local warehouse, and cannot write
+    a bucket-partitioned table is not a usable executable, so those extras are
+    included and are small next to pyarrow. See :data:`BUNDLED_EXTRAS` for what
+    is deliberately left out and why.
     """
+    extras: list[str] = []
+    for extra in BUNDLED_EXTRAS:
+        extras += ["--extra", extra]
     out = subprocess.run(
         [
             "uv",
             "export",
-            "--all-extras",
+            *extras,
             "--no-dev",
             "--no-emit-project",
             "--no-hashes",
