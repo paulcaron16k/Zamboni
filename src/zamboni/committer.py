@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Commit a compaction as an Iceberg ``replace`` snapshot.
 
 ``replace`` is the spec's operation for "data and delete files were added and

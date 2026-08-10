@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Trino, over ``ALTER TABLE … EXECUTE``.
 
 Four of Zamboni's six operations map to a Trino table procedure. Argument names,

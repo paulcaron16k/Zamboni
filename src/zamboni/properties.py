@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Apply the table properties that govern metadata.json retention.
 
 Unlike everything else in this package, metadata-log retention is not an

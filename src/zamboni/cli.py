@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Command-line entry point.
 
 The verbs, ordered by how much they change:

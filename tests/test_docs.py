@@ -28,7 +28,7 @@ def collected_test_names() -> set[str]:
 def test_every_cited_test_exists():
     known = collected_test_names()
     cited_anywhere = set()
-    for doc in sorted(DOCS.glob("*.md")):
+    for doc in all_docs():
         cited = set(re.findall(r"`(test_[a-z0-9_]+)`", doc.read_text()))
         cited_anywhere |= cited
         missing = sorted(cited - known)
@@ -44,17 +44,29 @@ def test_the_requirements_table_still_carries_its_evidence():
     assert len(cited) > 50, f"plan.md cites only {len(cited)} tests; expected the full matrix"
 
 
+#: Root-level documents that link into docs/. SECURITY.md and CONTRIBUTING.md
+#: joined the list when they were written: a contributor guide that names a test
+#: which no longer exists, or points at a moved runbook, is worse than none --
+#: it is the first thing an outside contributor reads.
+ROOT_DOCS = ("README.md", "CHANGELOG.md", "SECURITY.md", "CONTRIBUTING.md")
+
+
+def all_docs() -> list[Path]:
+    """Everything whose claims are checked: docs/*.md plus the root documents."""
+    return sorted(DOCS.glob("*.md")) + [
+        path for path in (ROOT / name for name in ROOT_DOCS) if path.exists()
+    ]
+
+
 def linking_docs() -> list[Path]:
-    """docs/*.md plus the two at the repository root.
+    """The documents whose relative links are resolved.
 
     Globbing only docs/ left README.md and CHANGELOG.md unchecked, and both link
     into docs/ -- so the file most likely to be read first was the one file whose
     links nothing verified. Relative targets resolve against each file's own
     directory, which is why this returns paths rather than names.
     """
-    return sorted(DOCS.glob("*.md")) + [
-        path for path in (ROOT / "README.md", ROOT / "CHANGELOG.md") if path.exists()
-    ]
+    return all_docs()
 
 
 def without_code_blocks(text: str) -> str:

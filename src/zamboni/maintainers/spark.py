@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Spark, over the Iceberg stored procedures.
 
 Argument names and defaults come from the Iceberg ``spark-procedures.md``

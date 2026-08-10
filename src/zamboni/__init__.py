@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Iceberg table maintenance without Trino or Spark.
 
 Compaction, ordering and partition evolution; snapshot expiry, orphan-file

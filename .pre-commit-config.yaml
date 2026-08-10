@@ -47,6 +47,22 @@ repos:
         pass_filenames: false
         files: ^(src|scripts)/.*\.py$
 
+      # Cheaper than a licence-scanning tool and catches the only case that
+      # matters: a new module landing without the tag. ZMBNI-1802.
+      - id: spdx-header
+        name: every source file declares its licence
+        # `uv run python`, not bare `python`. The bare form passed when driven
+        # through `uv run pre-commit` and failed as an actual git hook with
+        # "Executable `python` not found" -- the hook environment is not the
+        # shell you tested in. Every other system hook here goes through uv for
+        # the same reason.
+        entry: >-
+          uv run python -c "import sys; missing=[f for f in sys.argv[1:] if
+          'SPDX-License-Identifier' not in open(f).read(2000)];
+          sys.exit(print('missing SPDX tag:', *missing) or 1 if missing else 0)"
+        language: system
+        files: ^(src|scripts)/.*\.py$
+
       - id: no-dev-stack-env
         name: dev-stack/.env must never be committed
         entry: dev-stack/.env is gitignored for a reason -- it holds credentials

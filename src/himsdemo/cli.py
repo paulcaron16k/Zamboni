@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """`./bin/demo` -- the HIMS discharge maintenance demo.
 
 The intended arc is ingest -> status -> query -> maintenance -> status -> query,

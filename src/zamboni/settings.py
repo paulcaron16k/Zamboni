@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Configuration a cron line does not have to type.
 
 (Named settings rather than profile: profile.py is table profiling,

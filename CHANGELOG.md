@@ -208,6 +208,19 @@ Two categories beyond the usual set, because this tool deletes files:
   evolution. Both are loaded by the test suite, so they cannot rot against the
   schema.
 
+- **[SECURITY.md](SECURITY.md) and [CONTRIBUTING.md](CONTRIBUTING.md).** The
+  security policy treats data loss as its first category and says plainly that a
+  report does not need to be attacker-triggerable to count — a logic error that
+  makes a live file look unreferenced fires without anyone trying. The
+  contributing guide writes down the conventions that were previously visible
+  only by reading commits.
+
+- **An SPDX tag on every source file.** `# SPDX-License-Identifier: Apache-2.0`,
+  one line, with a pre-commit hook that fails on a file without it. Chosen over
+  the full Apache header (520 lines, 4.5% of the codebase, 76% of the smallest
+  module) and over nothing at all: the tag gives the machine-readable provenance
+  that survives a file being copied out, at a fifteenth of the cost.
+
 ### Fixed
 
 - **`--memory-budget-bytes` ignored the default it was supposed to have.** The

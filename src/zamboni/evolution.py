@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Partition evolution: condense aged fine-grained partitions into coarse ones.
 
 The motivating case is a table partitioned by ``day`` on an event timestamp.

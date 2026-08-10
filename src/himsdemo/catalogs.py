@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Where the demo's tables live: a local SQLite catalog, or the dev stack.
 
 Two backends, one interface, because they differ in more than a connection

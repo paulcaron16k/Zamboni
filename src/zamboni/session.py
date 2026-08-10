@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Catalog + compute-engine wiring.
 
 A :class:`CatalogSession` owns both halves of a maintenance run so they cannot

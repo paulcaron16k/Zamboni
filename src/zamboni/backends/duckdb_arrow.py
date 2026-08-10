@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Default rewrite backend: PyIceberg reads, DuckDB sorts, PyIceberg writes.
 
 Reads go through :class:`pyiceberg.io.pyarrow.ArrowScan` over a hand-filtered

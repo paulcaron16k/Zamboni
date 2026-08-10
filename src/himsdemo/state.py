@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Demo state: which day we are on, and which write mode is in play.
 
 Kept in a shell-readable `demo.env` so a developer can `cat` it, and so the

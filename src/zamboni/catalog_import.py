@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Generate ``table-config.json`` from a Meltano / Singer catalog.
 
 Analysts already describe streams in the catalog, so layout intent belongs next

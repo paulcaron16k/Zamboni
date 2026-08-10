@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The PyIceberg + DuckDB maintainer: what Zamboni was before it had a seam.
 
 Extracted with no behaviour change. The 331 tests that already covered these

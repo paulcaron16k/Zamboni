@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Snapshot expiry, and deletion of the files it orphans.
 
 PyIceberg's ``expire_snapshots()`` is metadata-only: it emits a

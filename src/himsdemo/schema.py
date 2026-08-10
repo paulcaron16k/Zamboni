@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Turn `table_schema.json` into Iceberg tables.
 
 `table_schema.json` is the logical contract -- columns, types, primary key,

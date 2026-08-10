@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The maintainer contract: one operation, several engines.
 
 The six operations are Iceberg's, not Zamboni's. Trino and Spark implement most

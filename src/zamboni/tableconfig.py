@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The ``table-config.json`` specification.
 
 This is the surface Data Engineers and Analysts author. It says how each table

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The `query` command: what a developer would actually ask this data.
 
 Read path is PyIceberg scan -> Arrow -> DuckDB. DuckDB cannot ATTACH a SQLite

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """What can this PyIceberg build actually do?
 
 Every version-dependent decision in this package routes through here rather than
