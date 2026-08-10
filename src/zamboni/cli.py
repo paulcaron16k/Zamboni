@@ -149,6 +149,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
         return 2
     _apply_profile(args, args.zamboni_profile)
+    for warning in secret_handling_warnings(sys.argv[1:] if argv is None else argv, env_file):
+        print(f"warning: {warning}", file=sys.stderr)
     if args.verbose:
         logging.getLogger(__name__).debug(
             "profile: %s, env: %s", args.zamboni_profile.source, env_file
@@ -467,6 +469,47 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_catalog_args(ap)
 
     return parser
+
+
+#: Flags whose *value* is a secret. Not `--s3-access-key-id`: a key id is an
+#: identifier, and treating it as a secret would train people to ignore the
+#: warning for the one flag beside it that is.
+SECRET_FLAGS = ("--token", "--credential", "--s3-secret-access-key")
+
+
+def secret_handling_warnings(argv: list[str], env_file: Path | None) -> list[str]:
+    """Advice, not enforcement, for the two ways secrets leak locally.
+
+    Warnings rather than errors on purpose: both conditions are real hazards and
+    both have legitimate exceptions -- a single-user container, an interactive
+    one-off -- and refusing to run would break working deployments to make a
+    point. They go to stderr so a cron job's log keeps them.
+    """
+    warnings = []
+
+    on_argv = sorted({flag for flag in SECRET_FLAGS if flag in argv})
+    if on_argv:
+        # Verified rather than assumed: a token passed this way was read back
+        # out of /proc/<pid>/cmdline and `ps aux` while the process ran.
+        warnings.append(
+            f"{', '.join(on_argv)} put a secret on the command line, where any "
+            "local user can read it from `ps` or /proc/<pid>/cmdline, and where "
+            "your shell history keeps it. Use the matching ZAMBONI_* variable, "
+            "or a .env file -- see docs/user_guide.md."
+        )
+
+    if env_file is not None:
+        try:
+            mode = env_file.stat().st_mode
+        except OSError:  # pragma: no cover - raced with a delete
+            mode = 0
+        if mode & 0o077:
+            warnings.append(
+                f"{env_file} is readable by group or other (mode "
+                f"{mode & 0o777:03o}); it holds credentials. chmod 600 it."
+            )
+
+    return warnings
 
 
 def _add_engine_arg(p: argparse.ArgumentParser) -> None:

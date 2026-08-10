@@ -19,6 +19,9 @@ This guide covers four ways to run it. Pick one:
 | Already running Trino, or willing to start one for the night | [Mode 3: Trino from cron](#mode-3-trino-from-cron) |
 | Already running Spark, or you need Z-order at cluster scale | [Mode 4: Spark from cron](#mode-4-spark-from-cron) |
 
+Before any of them, [Secrets](#secrets) — the four shapes leak in different
+places, and getting it right in one does not get it right in another.
+
 Two audiences run through all of it. **Administrators** operating production
 warehouses will care about secrets handling, per-customer isolation, exit codes
 and the memory ceiling. **Home gamers** — one warehouse, a NAS or a cheap VPS,
@@ -151,33 +154,203 @@ the Z-order you configured will be silently skipped on Trino, and that
 `evolution` only happens on `local`. The full schema is in
 [table-config.md](table-config.md).
 
-### Secrets
+## Secrets
 
-The rule is the same in every mode: **non-secret configuration in
-`zamboni.yml`, credentials in `.env`, and neither in the crontab.** A crontab is
-world-readable on many systems, appears in `ps` output, and gets committed by
-accident.
+One page, because the four deployment shapes below leak in different places and
+getting it right in one does not get it right in another.
+
+**The rule everywhere:** non-secret configuration in `zamboni.yml`, credentials
+supplied by whatever already manages secrets on that platform, and **never on a
+command line**.
 
 ```
-zamboni.yml     catalog URI, warehouse name, which operations to run   → commit this
+zamboni.yml     catalog URI, warehouse, engine, which operations run   → commit this
 .env            tokens, S3 keys                                        → chmod 600, never commit
 ```
 
-```bash
-chmod 600 .env
+### The one that catches everyone: argv
+
+`--token`, `--credential` and `--s3-secret-access-key` accept a value directly,
+and **anything on a command line is readable by every local user** — from
+`ps aux`, from `/proc/<pid>/cmdline` — for as long as the process runs, and it
+stays in your shell history afterwards. Verified, not assumed: a token passed
+that way was read straight back out of `/proc`.
+
+Zamboni warns when you do it:
+
+```console
+$ zamboni compact acme.events --token "$TOKEN"
+warning: --token put a secret on the command line, where any local user can read it
+from `ps` or /proc/<pid>/cmdline, and where your shell history keeps it. Use the
+matching ZAMBONI_* variable, or a .env file -- see docs/user_guide.md.
 ```
 
-Zamboni reads `./zamboni.yml` and `./.env` from the working directory, then
-`$ZAMBONI_ROOT/zamboni.yml`. Cron gives a job almost no environment, which is
-exactly why the dotenv file exists — see [devops.md](devops.md) for the
-multi-tenant layout.
+The flags exist because a one-off interactive run is a legitimate use, so this
+is a warning rather than a refusal. In anything automated, use the environment.
 
-For a credential-vending catalog (Lakekeeper with `sts-enabled`), the *only*
-secret Zamboni needs is the catalog token. S3 credentials are vended per table
-and never stored. That is worth arranging deliberately: it is the difference
-between one revocable secret and a set of long-lived object-store keys. The
-exception is Spark orphan removal, which needs its own S3 keys on the server —
-see [Mode 4](#mode-4-spark-from-cron).
+`--s3-access-key-id` is deliberately **not** warned about: a key id is an
+identifier, not a secret, and warning on it would train you to ignore the
+warning for the flag beside it that is.
+
+### Reduce the number of secrets first
+
+Before deciding how to store them, arrange to need fewer. With a
+credential-vending catalog (Lakekeeper with `sts-enabled: true`), **the only
+secret Zamboni needs is the catalog token** — S3 credentials are vended per
+table, per run, and never stored. That is one revocable secret instead of a set
+of long-lived object-store keys, and it is worth configuring deliberately.
+
+The exception is Spark's `remove-orphans`, which lists through Hadoop S3A and
+needs static keys **on the Spark server** — see
+[Mode 4](#mode-4-spark-from-cron). Zamboni cannot supply them and cannot see
+them.
+
+### 1. Cron and the CLI → a `.env` file, mode 600
+
+Cron gives a job almost no environment, which is exactly why the dotenv file
+exists. A crontab is the wrong place: it is world-readable on many systems and
+gets committed by accident.
+
+```bash
+install -m 600 /dev/null /srv/zamboni/.env
+cat >> /srv/zamboni/.env <<'EOF'
+ZAMBONI_URI=https://catalog.example.com/catalog
+ZAMBONI_WAREHOUSE=acme
+ZAMBONI_TOKEN=...
+EOF
+```
+
+Zamboni reads `./.env` from the working directory, then `$ZAMBONI_ROOT`, and
+**warns if the file is readable by group or other**:
+
+```console
+warning: /srv/zamboni/.env is readable by group or other (mode 644); it holds
+credentials. chmod 600 it.
+```
+
+Real environment variables beat the file, deliberately: a systemd unit or
+container that injects secrets properly should not be overridden by a stale
+`.env` somebody left in the working directory. So `LoadCredential=` or
+`EnvironmentFile=` under systemd works and needs no dotenv file at all.
+
+### 2. In-app, calling the Python API → the caller passes them
+
+Nothing is read from a file implicitly. `CatalogSession.for_lakekeeper` takes
+`token=` / `credential=` as arguments, so the secret comes from wherever your
+application already gets secrets — a vault client, a mounted file, the
+environment — and Zamboni never decides.
+
+```python
+session = CatalogSession.for_lakekeeper(
+    uri=settings.catalog_uri,
+    warehouse=warehouse,
+    token=vault.read(f"zamboni/{warehouse}").token,   # your secret manager
+)
+```
+
+Two things worth knowing:
+
+- **`S3Settings` redacts its secret in `repr()`.** A frozen dataclass otherwise
+  prints every field, so the key would appear in any traceback rendered with
+  locals, any `logger.debug("%s", settings)`, and any error aggregator. The key
+  *id* is kept, because that is what you need when the answer is "wrong
+  credentials".
+- **Nothing in Zamboni logs a credential**, at any verbosity. If you wrap it in
+  your own logging, do not log the session or the catalog properties —
+  `as_properties()` necessarily contains the secret, because that is what gets
+  sent.
+
+For the multi-warehouse loop, keep one secret per warehouse rather than one
+shared one — see [Mode 1](#mode-1-the-python-api). A shared token means a
+compromise of any tenant's credentials is a compromise of all of them.
+
+### 3. In-app, shelling out to the CLI → `env=`, never the argument list
+
+If your application runs `zamboni` as a subprocess, pass credentials through the
+child's environment. **Do not build them into the command.**
+
+```python
+import os, subprocess
+
+# Right: the secret is in the environment, which /proc/<pid>/cmdline does not show.
+subprocess.run(
+    ["zamboni", "maintenance", "--warehouse", warehouse, "--yes"],
+    env={
+        **os.environ,
+        "ZAMBONI_URI": catalog_uri,
+        "ZAMBONI_TOKEN": token,
+    },
+    check=True,
+)
+
+# Wrong: readable by every local user for the life of the process.
+subprocess.run(["zamboni", "maintenance", "--token", token, "--yes"])
+```
+
+Prefer a list argument to `subprocess.run` over `shell=True`. With a shell, the
+command string is what gets executed and quoting mistakes become injection.
+
+Note that `/proc/<pid>/environ` is readable by the *process owner*, so this
+protects against other users rather than against someone who is already you.
+That is the boundary that matters here; if it is not, the answer is a secrets
+manager the child fetches from itself, not a different flag.
+
+### 4. Airflow → Connections or a secrets backend, injected as env
+
+Do **not** template a secret into a `BashOperator` command. Templated values are
+rendered into the task's command line and into the Airflow UI's rendered-fields
+view, and they land in the task log.
+
+```python
+# Right: the secret stays in Airflow's secrets backend and arrives as env.
+BashOperator(
+    task_id="maintain_acme",
+    bash_command="cd /srv/zamboni && zamboni maintenance --warehouse acme --yes",
+    env={
+        "ZAMBONI_URI": "{{ conn.zamboni_catalog.host }}",
+        "ZAMBONI_TOKEN": "{{ conn.zamboni_catalog.password }}",
+    },
+    append_env=True,
+)
+
+# Wrong: the token is rendered into the command, so it appears in the UI and log.
+BashOperator(
+    task_id="maintain_acme",
+    bash_command="zamboni maintenance --token {{ conn.zamboni_catalog.password }} --yes",
+)
+```
+
+Airflow masks values it knows are secret in task logs, which helps and is not a
+substitute: masking is a display filter, and a secret in a command line has
+already been handed to the OS.
+
+For the Python API in a `@task`, fetch inside the task rather than at DAG-parse
+time — the scheduler parses DAG files continuously, and a secret fetched at
+module scope is fetched by the scheduler on every parse.
+
+```python
+@task
+def maintain(warehouse: str) -> None:
+    from airflow.models import Connection
+    conn = Connection.get_connection_from_secrets("zamboni_catalog")
+    session = CatalogSession.for_lakekeeper(
+        uri=conn.host, warehouse=warehouse, token=conn.password
+    )
+    ...
+```
+
+If you run Airflow on Kubernetes, a mounted secret volume read inside the task
+is better still: it is rotatable without touching the DAG.
+
+### What to check on any deployment
+
+- No secret appears in `ps aux` while a run is in progress.
+- `.env`, if used, is mode 600 and owned by the account that runs the job.
+- The job's log contains no credential — run one cycle with `--verbose` and
+  look.
+- The catalog token is scoped to what maintenance needs, and is revocable
+  without redeploying.
+- Per-warehouse rather than shared, if you maintain more than one tenant.
 
 ---
 
@@ -441,17 +614,10 @@ zamboni expire  acme.events --table-config table-config.json --yes
 
 ### Secrets
 
-```bash
-install -m 600 /dev/null /srv/zamboni/.env
-cat > /srv/zamboni/.env <<'EOF'
-ZAMBONI_URI=https://catalog.example.com/catalog
-ZAMBONI_WAREHOUSE=home
-ZAMBONI_TOKEN=...
-EOF
-```
-
-Zamboni reads `./.env` automatically. Nothing secret needs to appear in the
-crontab, in the wrapper, or in `ps`.
+`.env` beside `zamboni.yml`, mode 600, and nothing in the crontab or the
+wrapper. Zamboni warns if the file is group- or world-readable. The full
+treatment — including why the `--token` flag exists and should not be used from
+a script — is in [Secrets](#secrets).
 
 ---
 

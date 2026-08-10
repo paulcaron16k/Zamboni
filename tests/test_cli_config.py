@@ -421,3 +421,71 @@ def test_every_operational_knob_is_reachable_from_the_command_line():
     ]
 
     assert not missing, f"CompactionConfig settings with no CLI flag: {missing}"
+
+
+# -- secret handling (ZMBNI-1811) -----------------------------------------
+
+
+def test_a_secret_on_the_command_line_is_warned_about():
+    """Verified rather than assumed: a token passed this way was read back out
+    of /proc/<pid>/cmdline and `ps aux` while the process was running."""
+    from zamboni.cli import secret_handling_warnings
+
+    warnings = secret_handling_warnings(["compact", "db.t", "--token", "hunter2"], env_file=None)
+
+    assert len(warnings) == 1
+    assert "--token" in warnings[0]
+    assert "hunter2" not in warnings[0], "the warning must not repeat the secret"
+
+
+def test_a_key_id_on_the_command_line_is_not_warned_about():
+    """An access key id is an identifier, not a secret. Warning about it would
+    train people to ignore the warning for the flag beside it that is."""
+    from zamboni.cli import secret_handling_warnings
+
+    assert secret_handling_warnings(["compact", "--s3-access-key-id", "AKIA"], None) == []
+
+
+def test_a_group_readable_env_file_is_warned_about(tmp_path):
+    from zamboni.cli import secret_handling_warnings
+
+    env = tmp_path / ".env"
+    env.write_text("ZAMBONI_TOKEN=x\n")
+    env.chmod(0o644)
+
+    warnings = secret_handling_warnings(["compact"], env)
+    assert len(warnings) == 1
+    assert "644" in warnings[0]
+
+    env.chmod(0o600)
+    assert secret_handling_warnings(["compact"], env) == []
+
+
+def test_a_missing_env_file_is_not_an_error(tmp_path):
+    """The check runs before anything else and must not be the thing that fails
+    a run -- it is advice."""
+    from zamboni.cli import secret_handling_warnings
+
+    assert secret_handling_warnings(["compact"], tmp_path / "gone.env") == []
+
+
+def test_the_s3_settings_repr_redacts_the_secret():
+    """A frozen dataclass prints every field, so the secret appeared in full
+    anywhere this object reached a formatted string -- a traceback rendered with
+    locals, a debug log, an error aggregator. Nothing logs it today, which is
+    exactly why it would have gone unnoticed until something did."""
+    from zamboni import S3Settings
+
+    settings = S3Settings(
+        endpoint="http://minio:9000",
+        access_key_id="AKIA_IDENTIFIER",
+        secret_access_key="hunter2",
+        extra={"s3.connect-timeout": "10"},
+    )
+
+    text = repr(settings)
+    assert "hunter2" not in text
+    assert "AKIA_IDENTIFIER" in text, "the key id identifies which credential failed"
+    assert "10" not in text, "extra may hold secrets too, so its values stay out"
+    # The properties still carry it, or nothing could authenticate.
+    assert settings.as_properties()["s3.secret-access-key"] == "hunter2"

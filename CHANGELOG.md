@@ -221,7 +221,27 @@ Two categories beyond the usual set, because this tool deletes files:
   module) and over nothing at all: the tag gives the machine-readable provenance
   that survives a file being copied out, at a fifteenth of the cost.
 
+- **A `Secrets` section covering all four deployment shapes** — cron, the Python
+  API, a subprocess, and Airflow — in
+  [docs/user_guide.md](docs/user_guide.md). They leak in different places, and
+  the guide previously covered only cron.
+
 ### Fixed
+
+- **`S3Settings` printed its secret access key in `repr()`.** A frozen dataclass
+  prints every field, so the key would appear in any traceback rendered with
+  locals, any `logger.debug("%s", settings)`, and any error aggregator. Nothing
+  in this package logs it, which is why it had gone unnoticed. Redacted; the key
+  *id* is kept, since that is what identifies a wrong credential.
+
+- **Secrets passed as flags are now warned about.** `--token`, `--credential`
+  and `--s3-secret-access-key` put a value on the command line, where any local
+  user can read it from `ps` or `/proc/<pid>/cmdline` — confirmed by reading one
+  back — and where shell history keeps it. A warning rather than a refusal,
+  because an interactive one-off is a legitimate use.
+
+- **A group- or world-readable `.env` is now warned about.** The guide has always
+  said `chmod 600`; nothing checked.
 
 - **`--memory-budget-bytes` ignored the default it was supposed to have.** The
   flag hardcoded `1 << 30` while `CompactionConfig` said 256MiB, so the
