@@ -50,7 +50,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 > order. The numbers follow [roadmap.md](roadmap.md)'s RM-1…RM-6 so the two documents agree on
 > identity; the sequence is explained in each section's subtitle.
 
-**Story counts:** 114 done · 0 inproject · 10 todo · 1 cancelled  (125 stories)
+**Story counts:** 114 done · 0 inproject · 11 todo · 1 cancelled  (126 stories)
 
 ---
 
@@ -262,6 +262,7 @@ the path dependency makes `uv.lock` unreproducible elsewhere. [roadmap.md RM-1](
 | ZMBNI-1104 | Adopt streaming writes | `_dataframe_to_data_files` now accepts `pa.RecordBatchReader`, so the writer bin-packs the stream itself. May retire part of the chunked backend; measure before deleting | todo | |
 | ZMBNI-1105 | Re-verify on 0.12 | Full suite plus live verification. Neither waited-on blocker lifts — `ManifestWriterV2.content()` still returns `DATA`, there is still no `ManifestWriterV3`, and the equality-delete guard is still present — so ZMBNI-604 and 704–706 stay blocked and should be re-confirmed, not assumed | todo | |
 | ZMBNI-1106 | Decide the support window | One PyIceberg line or two. Settled as an architecture question by ZMBNI-1107: with probe-driven capabilities, supporting both needs no version branching in code at all. What remains is CI spend — a matrix where some expected values differ by install. Open question 1 in roadmap.md | todo | |
+| ZMBNI-1109 | `derives_delete_predicate` probes a symbol upstream renamed | Found while updating [engine-comparison.md](engine-comparison.md) against a real 0.12 build. The probe does `hasattr(_SnapshotProducer, '_build_delete_files_partition_predicate')`. The upstream fix for the pruning regression derives the filter from the deleted files' *recorded* partition values, in `_OverwriteFiles._deleted_files_partition_filters` — different name, different class. So on a 0.12 that has the fix the probe returns False, `manifest_pruning_is_safe` comes out False, and Zamboni **refuses to run at all** on a build where the property genuinely holds. It fails safe — refusing beats risking double-counted rows — but it is wrong, and it is precisely the class of bug `_guard_anywhere_in_scan_planning` was rewritten to fix: a probe keyed on one symbol that upstream moved. Measured: 0.11.1 and 0.12.0rc1 and main @ 32f036c5 all report `derives_delete_predicate=False`, while main is the one that actually derives it correctly | todo | |
 
 ---
 
