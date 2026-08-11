@@ -283,3 +283,79 @@ def test_resolve_reports_no_env_file_when_it_ignored_one(tmp_path, monkeypatch):
     _profile, env_file = settings.resolve(start=tmp_path)
 
     assert env_file is None
+
+
+# -- discovery and engine settings (ZMBNI-406/407/408) --------------------
+
+
+def test_the_env_file_is_looked_for_under_zamboni_root(tmp_path, monkeypatch):
+    """docs/devops.md puts `.env` at $ZAMBONI_ROOT and calls it fleet-wide
+    credentials. Only the working directory was searched, so that layout worked
+    when the cron line's `cd` happened to make them the same directory and
+    silently produced a credential-less run from anywhere else."""
+    root = tmp_path / "srv"
+    root.mkdir()
+    (root / ".env").write_text("ZAMBONI_TOKEN=fleet\n")
+    (root / ".env").chmod(0o600)
+    monkeypatch.setenv("ZAMBONI_ROOT", str(root))
+    monkeypatch.delenv("ZAMBONI_TOKEN", raising=False)
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    assert settings.find_env(start=elsewhere) == root / ".env"
+
+
+def test_a_foreign_env_in_the_working_directory_does_not_mask_the_fleet_one(tmp_path, monkeypatch):
+    """Somebody else's `.env` sharing the working directory is not ours, so it
+    must not stand between us and the file that is."""
+    root = tmp_path / "srv"
+    root.mkdir()
+    (root / ".env").write_text("ZAMBONI_TOKEN=fleet\n")
+    (root / ".env").chmod(0o600)
+    monkeypatch.setenv("ZAMBONI_ROOT", str(root))
+
+    here = tmp_path / "project"
+    here.mkdir()
+    (here / ".env").write_text("POSTGRES_PASSWORD=theirs\n")
+
+    assert settings.find_env(start=here) == root / ".env"
+
+
+def test_finding_no_env_file_is_not_an_error(tmp_path, monkeypatch):
+    """A container or systemd unit injecting secrets properly needs none, and
+    that is the deployment shape devops.md recommends."""
+    monkeypatch.setenv("ZAMBONI_ROOT", str(tmp_path / "absent"))
+    assert settings.find_env(start=tmp_path) is None
+
+
+def test_engine_settings_live_in_the_profile(tmp_path):
+    """A host, a port, a user and a catalog name are not secrets, and this file
+    is defined as everything that is not one. They had nowhere else to live but
+    a flag or the credentials file."""
+    path = write(
+        tmp_path,
+        "zamboni.yml",
+        "engine: trino\ntrino:\n  host: trino.internal\n  port: 8080\n  catalog: iceberg\n",
+    )
+
+    profile = settings.load_profile(path)
+
+    assert profile.engines["trino"] == {
+        "host": "trino.internal",
+        "port": "8080",
+        "catalog": "iceberg",
+    }
+
+
+def test_a_typo_in_an_engine_block_is_refused(tmp_path):
+    path = write(tmp_path, "zamboni.yml", "trino:\n  hostname: trino.internal\n")
+
+    with pytest.raises(settings.ProfileError, match="unknown key"):
+        settings.load_profile(path)
+
+
+def test_no_engine_setting_is_named_like_a_secret():
+    """The profile is meant to be committed. Rejecting a credential key by name
+    beats trusting the convention that nobody will put one here."""
+    for allowed in settings.ENGINE_SETTINGS.values():
+        assert not {"password", "token", "secret", "credential"} & set(allowed)

@@ -1,4 +1,4 @@
-# `table-config.json` — specification (version 2)
+# Iceberg Maintainer `table-config.json` — specification (version 2)
 
 The declarative layout target for each Iceberg table. Data Engineers and Analysts author
 it; the compactor reads it and works out what rewriting that implies. Nothing in it names
@@ -377,10 +377,18 @@ extractors:
             zorder: {columns: [customer_id, product_id]}
 ```
 
+To make a Meltano tap emit or generate a catalog using the selection and metadata
+rules specified in your meltano.yml file, run meltano invoke --dump=catalog <tap-name>
+in your terminal. This command processes your rules on the fly and prints the resulting
+Singer catalog to STDOUT.  Note, if you have a mapper and alias stream names or re-name
+partition or sort columns, the schema landed in Iceberg will differ from the source
+catalog - you will have to manually edit/adjust.
+
 Then generate:
 
 ```bash
-zamboni from-catalog .meltano/catalog.json --namespace analytics -o table-config.json
+meltano invoke --dump=catalog tap-postgres > .meltano/pg_catalog.json
+zamboni from-catalog .meltano/pg_catalog.json --namespace analytics -o table-config.json
 zamboni validate-config table-config.json
 zamboni compact analytics.events --table-config table-config.json --yes
 ```

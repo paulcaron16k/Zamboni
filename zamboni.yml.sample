@@ -25,6 +25,23 @@ warehouse: acme
 # and, more usefully, what each refuses.
 engine: local
 
+# Connection settings for the non-local engines. These are *not* secrets -- a
+# host, a port, a user name and a catalog name are all publishable -- which is
+# why they live here rather than in .env. Unknown keys are refused, and there is
+# deliberately no place for a password: if a setting is secret it belongs in
+# .env, and this file is meant to be committed.
+#
+#trino:
+#  host: trino.internal
+#  port: 8080
+#  user: zamboni
+#  catalog: iceberg
+#  version: "483"       # gates arguments only Trino >= 479 accepts
+#
+#spark:
+#  remote: sc://spark.internal:15002   # Spark Connect; no JVM on this host
+#  catalog: iceberg
+
 # --- layout ----------------------------------------------------------------
 # Per-warehouse table configuration is read from
 #   {root}/configs/{warehouse}/table-config.json

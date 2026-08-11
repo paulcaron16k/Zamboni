@@ -232,7 +232,24 @@ Two categories beyond the usual set, because this tool deletes files:
   opening with the evidence that nothing else does this. No CI badge: a badge
   that has never run is a claim.
 
+- **`trino:` and `spark:` blocks in `zamboni.yml`.** A host, a port, a user name
+  and a catalog name are not secrets, and that file is defined as everything
+  which is not one — but the profile refused those keys, so they could only come
+  from a flag or `.env`. Keys are allow-listed per engine and there is
+  deliberately none for a password.
+
+- **Spark settings in `env.sample`**, which documented five `ZAMBONI_TRINO_*`
+  variables and no Spark equivalent.
+
 ### Fixed
+
+- **`.env` is now looked for under `$ZAMBONI_ROOT`**, after `--env` and
+  `./.env` — the same order the profile already used. `docs/devops.md` puts the
+  fleet-wide `.env` there, so the documented multi-tenant layout worked only
+  when the cron line's `cd` made the working directory and `$ZAMBONI_ROOT` the
+  same place; from anywhere else the symptom was a run with no credentials
+  rather than an error. A foreign `.env` in the working directory no longer
+  masks the fleet's, and finding none remains legal.
 
 - **Spark addressed a nested namespace as one dotted identifier**, which it
   rejects. Verified against live servers: Spark needs one quoted part per level

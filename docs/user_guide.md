@@ -232,8 +232,12 @@ ZAMBONI_TOKEN=...
 EOF
 ```
 
-Zamboni reads `./.env` from the working directory, or the file named by
-`--env`. Three rules apply to it:
+Zamboni looks for `--env`, then `./.env`, then `$ZAMBONI_ROOT/.env` -- the same
+order as the profile, so the fleet-wide layout in
+[devops.md](devops.md) works from any working directory. Finding none is fine: a
+container or systemd unit injecting secrets properly needs no file at all.
+
+Three rules apply to the one it finds:
 
 **1. It must not be readable by group or other, or the run stops.**
 
@@ -1095,7 +1099,7 @@ owns and which is specific to the machine doing the work.
 | Where | Owns | Read by |
 |---|---|---|
 | `table-config.json` | layout and retention: partitioning, ordering, what may be deleted | every engine |
-| `zamboni.yml` | which catalog, which engine, which operations | the CLI |
+| `zamboni.yml` | which catalog, which engine, which operations, **how to reach Trino/Spark** | the CLI |
 | CLI flags / `CompactionConfig` | how one run executes: memory, concurrency, commits | the local engine |
 | `.env` | credentials, and nothing else | the CLI |
 
@@ -1136,6 +1140,7 @@ Six keys, and unknown ones are refused rather than ignored. Template:
 | `root` | `~/.zamboni` | Where per-warehouse configs live: `{root}/configs/{warehouse}/table-config.json` |
 | `operations` | all six | Which operations `maintenance` runs, and in this order |
 | `tables` | every table in the config | Restrict a run |
+| `trino:` / `spark:` | — | Engine connection settings: `host`, `port`, `user`, `catalog`, `version` for Trino; `remote`, `master`, `catalog` for Spark. Not secrets, so they belong here rather than in `.env`, and there is deliberately no key for a password |
 
 ### Run controls — flags, or `CompactionConfig` from Python
 

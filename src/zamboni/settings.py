@@ -48,6 +48,15 @@ DEFAULT_OPERATIONS = (
 )
 
 
+#: What may appear under `trino:`/`spark:` in the profile. Deliberately no
+#: password, token or secret key: those are the one thing this file must not
+#: hold, and rejecting them by name is better than trusting a convention.
+ENGINE_SETTINGS = {
+    "trino": frozenset({"host", "port", "user", "catalog", "version"}),
+    "spark": frozenset({"remote", "master", "catalog"}),
+}
+
+
 class ProfileError(ValueError):
     """The profile is unusable. Raised at load, never mid-run."""
 
@@ -62,6 +71,13 @@ class Profile:
     root: Path = DEFAULT_ROOT
     operations: tuple[str, ...] = DEFAULT_OPERATIONS
     tables: tuple[str, ...] = ()
+    #: Engine connection settings, per engine: ``{"trino": {"host": ...}}``.
+    #: A host, a port, a user and a catalog name are **not secrets**, and this
+    #: file is defined as everything that is not one -- so before ZMBNI-408 they
+    #: had nowhere to live but a flag or `.env`, which meant either twenty
+    #: characters of crontab per run or non-secret configuration sitting in the
+    #: credentials file. Only the password-shaped things belong there.
+    engines: dict[str, dict[str, str]] = field(default_factory=dict)
     #: Where this came from, for `--help` and error messages. `None` means
     #: nothing was found and the defaults are in force.
     source: Path | None = None
@@ -78,14 +94,39 @@ class Profile:
 
 
 def find_env(explicit: str | None = None, *, start: Path | None = None) -> Path | None:
-    """The dotenv file to load, or None."""
+    """The dotenv file to load, or None.
+
+    ``--env``, then ``./.env``, then ``$ZAMBONI_ROOT/.env`` -- the same order
+    :func:`find_profile` uses, and it did not used to. Only the working
+    directory was searched, while docs/devops.md's multi-tenant layout puts
+    ``.env`` at ``$ZAMBONI_ROOT`` and labels it "fleet-wide credentials". The
+    documented layout therefore only worked when the working directory happened
+    to *be* ``$ZAMBONI_ROOT``, which the cron line makes true and any other
+    invocation does not -- and the symptom was not an error but a run with no
+    credentials.
+
+    **Finding nothing is not an error.** A container or systemd unit that
+    injects secrets properly needs no dotenv file at all, and devops.md says so;
+    failing here would break the deployment shape we recommend most.
+    """
     if explicit:
         path = Path(explicit)
         if not path.is_file():
             raise ProfileError(f"--env {explicit}: no such file")
         return path
-    candidate = (start or Path.cwd()) / ENV_NAME
-    return candidate if candidate.is_file() else None
+
+    root_env = os.environ.get("ZAMBONI_ROOT")
+    candidates = [
+        (start or Path.cwd()) / ENV_NAME,
+        (Path(root_env) if root_env else DEFAULT_ROOT) / ENV_NAME,
+    ]
+    # The first that exists *and is ours*. A foreign `.env` sharing the working
+    # directory -- docker compose's, say -- must not mask the fleet's real one
+    # two directories up.
+    for candidate in candidates:
+        if candidate.is_file() and env_ours(candidate):
+            return candidate
+    return None
 
 
 #: Every variable this tool reads is prefixed. Enforced rather than assumed
@@ -198,7 +239,7 @@ def load_profile(path: Path | None) -> Profile:
     if not isinstance(raw, dict):
         raise ProfileError(f"{path}: expected a mapping at the top level")
 
-    known = {"uri", "warehouse", "engine", "root", "operations", "tables"}
+    known = {"uri", "warehouse", "engine", "root", "operations", "tables", "trino", "spark"}
     if unknown := sorted(set(raw) - known):
         raise ProfileError(
             f"{path}: unknown key(s) {', '.join(unknown)}. Known keys: {', '.join(sorted(known))}"
@@ -210,6 +251,22 @@ def load_profile(path: Path | None) -> Profile:
             f"{path}: unknown operation(s) {', '.join(bad)}. Known: {', '.join(DEFAULT_OPERATIONS)}"
         )
 
+    engines: dict[str, dict[str, str]] = {}
+    for engine_name in ("trino", "spark"):
+        block = raw.get(engine_name)
+        if block is None:
+            continue
+        if not isinstance(block, dict):
+            raise ProfileError(f"{path}: '{engine_name}' must be a block of settings")
+        allowed = ENGINE_SETTINGS[engine_name]
+        if unknown := sorted(set(block) - allowed):
+            raise ProfileError(
+                f"{path}: {engine_name}: unknown key(s) {', '.join(unknown)}. "
+                f"Known keys: {', '.join(sorted(allowed))}. Credentials do not go "
+                "here -- this file is meant to be committed."
+            )
+        engines[engine_name] = {k: str(v) for k, v in block.items()}
+
     base = _from_environment(source=path)
     root = raw.get("root")
     return Profile(
@@ -218,6 +275,7 @@ def load_profile(path: Path | None) -> Profile:
         engine=raw.get("engine") or base.engine,
         root=Path(root).expanduser() if root else base.root,
         operations=operations,
+        engines=engines,
         tables=tuple(raw.get("tables") or ()),
         source=path,
     )

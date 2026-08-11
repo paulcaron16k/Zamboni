@@ -94,7 +94,8 @@ profile without editing it.
 
 ## 3. `.env` — the secrets, separately
 
-Found automatically at `./.env`, or given with `--env`. Copy
+Found at `--env`, then `./.env`, then `$ZAMBONI_ROOT/.env` -- the same order
+as the profile. Copy
 [env.sample](../env.sample), which lists every variable Zamboni reads.
 
 **Why a file rather than the crontab.** Cron gives a job almost no environment,

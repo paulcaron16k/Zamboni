@@ -128,6 +128,15 @@ def _apply_profile(args: argparse.Namespace, profile) -> None:
     if getattr(args, "engine", None) == "local" and profile.engine != "local":
         args.engine = profile.engine
 
+    # Engine connection settings from the profile, gap-filled the same way.
+    # `--trino-host` beats `trino: {host: ...}` beats nothing; the flag defaults
+    # already carry ZAMBONI_TRINO_HOST, so a None here means nobody said.
+    for engine_name, block in profile.engines.items():
+        for key, value in block.items():
+            attribute = f"{engine_name}_{key}"
+            if hasattr(args, attribute) and not getattr(args, attribute):
+                setattr(args, attribute, value)
+
     # Per-warehouse table configuration, the multi-tenant layout in
     # docs/devops.md section 5: $ZAMBONI_ROOT/configs/{warehouse}/table-config.json
     if getattr(args, "table_config", None) is None and getattr(args, "warehouse", None):
