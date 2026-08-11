@@ -84,7 +84,7 @@ Read this before depending on it.
 **It is** a maintenance tool for Iceberg tables that runs as a single process: PyIceberg for
 metadata, DuckDB for sorting. One command a cron line can call, one declarative file
 describing what each table's layout should be and what maintenance may delete. It may optionally
-utilize Trino or Spark standalone or clusters.
+use Trino or Spark standalone or clusters.
 
 **It is not:**
 
