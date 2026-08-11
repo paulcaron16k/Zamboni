@@ -204,30 +204,43 @@ manifest's content agrees with the files inside it.
 
 ### Query it from the DuckDB CLI
 
-The demo writes real Iceberg tables, so anything that reads Iceberg can read them --
-including `duckdb` from a shell, with no Zamboni in the picture at all. That is worth
-seeing: it is what makes maintenance *worth* doing, and it is how you check that a
-compaction changed file counts and not answers.
+The demo writes real Iceberg tables, so anything that reads Iceberg reads them -- including
+`duckdb` from a shell, with no Zamboni in the picture at all. That is worth seeing: it is
+what makes maintenance *worth* doing, and it is how you check that a compaction changed
+file counts and not answers.
+
+**Ask the catalog which metadata is current.** This is the step to do properly, because it
+is the entire reason a catalog exists: it holds the pointer to the table's current
+metadata, and every writer updates it atomically. The demo's catalog is SQLite, so a
+one-liner reads it:
+
+```console
+$ uv run python -c "
+from pyiceberg.catalog.sql import SqlCatalog
+c = SqlCatalog('healthims', uri='sqlite:///data/healthims/iceberg_catalog.db',
+               warehouse='file://data/healthims/iceberg_warehouse')
+print(c.load_table('healthims.hims_events').metadata_location)"
+file:///.../data/healthims/iceberg_warehouse/healthims/hims_events/metadata/00065-e4147334-....metadata.json
+```
+
+**Then hand that to DuckDB.** `iceberg_scan()` takes the `file://` URI as it comes:
 
 ```console
 $ duckdb
 INSTALL iceberg; LOAD iceberg;
 
--- The demo's local catalog is SQLite, which DuckDB cannot read, so point at the
--- table directory. DuckDB refuses to guess the current metadata by default --
--- globbing could pick up an uncommitted write -- and this opts in. Safe here
--- because nothing else is writing to the demo warehouse; see below for the
--- version that asks the catalog instead.
-SET unsafe_enable_version_guessing = true;
-
-CREATE VIEW hims_events AS
-  SELECT * FROM iceberg_scan('data/healthims/iceberg_warehouse/healthims/hims_events');
+CREATE VIEW hims_events AS SELECT * FROM iceberg_scan(
+  'file:///.../hims_events/metadata/00065-e4147334-....metadata.json');
 ```
+
+Getting the DuckDB CLI: `curl https://install.duckdb.org | sh`, or `brew install duckdb`.
+Note that `pip install duckdb` and `pipx install duckdb` give you the Python *library* --
+the wheel ships no console script, so neither puts a `duckdb` command on your PATH.
 
 **Daily EVS turnaround** -- how long a room sits between the patient leaving and the bed
 being ready. Environmental Services cleans the room, and the metric is the gap between two
-events on the same `process_id`, one of which arrives after the discharge process has
-already reached its terminal state:
+events sharing a `process_id`, the second of which arrives *after* the discharge process
+has already reached its terminal state:
 
 ```sql
 WITH out AS (
@@ -257,30 +270,34 @@ GROUP BY 1 ORDER BY 1;
 └────────────┴───────┴────────────────────┴───────────┘
 ```
 
+The SQL is the demo's own -- `src/himsdemo/queries.py` runs this exact statement -- so the
+README and the demo cannot drift into computing different things under one name.
+
 **Run it before and after `./bin/demo maintenance`.** The numbers do not move. Measured on
-the five-day demo: `hims_events` went from **60 live data files to 5** and the output of
-the query above was byte-identical either side. That is the whole claim in one comparison
--- compaction, expiry and orphan removal change how the data is stored and never what it
-says. `./bin/demo query` runs this and three others for exactly that reason, and reports
-"files scanned" alongside, which *does* move.
+the five-day demo: `hims_events` went from **60 live data files to 5**, and the output
+above was byte-identical either side, once through the pre-maintenance metadata pointer and
+once through the new one. That is the whole claim in one comparison -- compaction, expiry
+and orphan removal change how the data is stored and never what it says. `./bin/demo query`
+runs this and three others for exactly that reason, and reports "files scanned" alongside,
+which *does* move.
 
-**Asking the catalog instead of guessing.** The version guess above is a convenience for a
-warehouse nobody else is writing to. The correct source of the current metadata is the
-catalog, which is the entire point of having one:
+**Skipping the pointer lookup.** If you would rather not ask the catalog, DuckDB can find
+the newest metadata itself, but it makes you say so:
 
-```console
-$ python -c "
-from pyiceberg.catalog.sql import SqlCatalog
-c = SqlCatalog('healthims', uri='sqlite:///data/healthims/iceberg_catalog.db',
-               warehouse='file://data/healthims/iceberg_warehouse')
-print(c.load_table('healthims.hims_events').metadata_location)"
-file:///.../hims_events/metadata/00063-b90ffcd4-....metadata.json
+```sql
+SET unsafe_enable_version_guessing = true;
+CREATE VIEW hims_events AS SELECT * FROM
+  iceberg_scan('data/healthims/iceberg_warehouse/healthims/hims_events');
 ```
 
-Feed that path to `iceberg_scan()` and no guessing is involved. Against a REST catalog --
-`./bin/demo --catalog lakekeeper` -- DuckDB can attach the catalog directly with
-`ATTACH ... (TYPE ICEBERG)` and resolve tables by name, which is what a real deployment
-does.
+The refusal is a good one and the setting is named honestly: globbing the metadata
+directory can pick up a file a writer has not committed yet. It is fine against this demo
+warehouse, which nothing else is writing to, and it is not how you should read a live
+table.
+
+**Against a REST catalog** -- `./bin/demo --catalog lakekeeper` -- none of this applies:
+DuckDB attaches the catalog with `ATTACH ... (TYPE ICEBERG)` and resolves tables by name,
+which is what a real deployment does.
 
 Requirements and domain model: [data/healthims/Demo_Requirements.md](data/healthims/Demo_Requirements.md).
 Event catalogue: [data/healthims/HIMS_Discharge_Process_Events.md](data/healthims/HIMS_Discharge_Process_Events.md).
