@@ -161,12 +161,48 @@ getting it right in one does not get it right in another.
 
 **The rule everywhere:** non-secret configuration in `zamboni.yml`, credentials
 supplied by whatever already manages secrets on that platform, and **never on a
-command line**.
+command line**. Secrets must be environment variables or in a .env file.
 
 ```
 zamboni.yml     catalog URI, warehouse, engine, which operations run   → commit this
 .env            tokens, S3 keys                                        → chmod 600, never commit
 ```
+
+### Secrets managers: none needed, and none built in
+
+Zamboni has **no code** for Infisical, OpenBAO, HashiCorp Vault, External
+Secrets Operator (ESO), or SOPS — no client, no dependency, no plugin. It does
+not need any, because every one of those tools delivers secrets the two ways
+Zamboni already reads them: as environment variables, or as a file.
+
+| Your tool does this | Zamboni sees | Works today |
+|---|---|---|
+| `infisical run -- zamboni ...` | injected environment | yes |
+| `sops exec-env secrets.enc.env 'zamboni ...'` | injected environment | yes |
+| ESO syncs a Secret, pod takes it via `envFrom` | injected environment | yes |
+| `bao agent` renders a template to `.env` | a dotenv file | yes — **see the mode below** |
+| `bao kv get -field=token ... > .env` in a wrapper | a dotenv file | yes — same |
+
+Nothing about that is a workaround. The `ZAMBONI_*` prefix is what makes it
+safe: Zamboni reads only its own variables, so injecting a whole vault of them
+into the process changes nothing else.
+
+**The one thing that will bite you** is the file mode. A rendered `.env` must
+not be readable by group or other, or the run stops:
+
+```console
+zamboni: error: /srv/zamboni/.env is readable by group or other (mode 640) and
+holds credentials. Fix it and re-run:
+    chmod 600 /srv/zamboni/.env
+```
+
+Template renderers do not default to 600. Vault and OpenBAO Agent take a `perms`
+option in the `template` stanza — set it to `"0600"`. A shell wrapper should
+`install -m 600 /dev/null "$f"` before writing, or `umask 077` first;
+`sops -d > .env` inherits your umask and is usually 0644.
+
+Injecting the environment avoids the question entirely, which is a reason to
+prefer it where the tool offers both.
 
 ### There is no flag for a secret
 
@@ -226,8 +262,6 @@ gets committed by accident.
 ```bash
 install -m 600 /dev/null /srv/zamboni/.env
 cat >> /srv/zamboni/.env <<'EOF'
-ZAMBONI_URI=https://catalog.example.com/catalog
-ZAMBONI_WAREHOUSE=acme
 ZAMBONI_TOKEN=...
 EOF
 ```
@@ -411,7 +445,9 @@ internal and may move in a patch release. The entry points you need:
 | Object | For |
 |---|---|
 | `CatalogSession` | connecting: `for_lakekeeper`, `for_local`, `from_catalog` |
-| `get_maintainer(name)` | the engine: `"local"`, `"trino"`, `"spark"` |
+| **`maintain(session, ...)`** | **the whole run — every operation, every table, one call. The CLI's `maintenance` verb is a printing adapter over it** |
+| `MaintenanceReport` / `Outcome` | what it returns: per-operation results, `failures`, and `exit_code` — the same number the CLI would exit with |
+| `get_maintainer(name)` | one engine, when you need a single operation: `"local"`, `"trino"`, `"spark"` |
 | `Operation` | the six operations, as an enum |
 | `MaintenanceRequest` | engine-neutral inputs — retention plus overrides |
 | `TableConfig` | loading and reading `table-config.json` |
@@ -481,90 +517,90 @@ provide the `pyspark` package.
 The shape that matters in a SaaS deployment: one warehouse per customer, one
 config per warehouse, and a failure in one customer must not stop the others.
 
+`maintain()` is the whole run — the same loop `zamboni maintenance` executes,
+including the operation order, the skip when one operation is fulfilled by
+another, which exceptions are refusals rather than failures, and stopping a
+table after a safety abort. You supply the session and the config:
+
 ```python
 import logging
 import os
 from pathlib import Path
 
-from zamboni import (
-    CatalogSession, MaintenanceRequest, Operation, TableConfig,
-    UnsupportedOperation, config_from_table_settings, get_maintainer,
-)
+from zamboni import CatalogSession, maintain
 
 log = logging.getLogger("maintenance")
-
-# Runbook order. The gaps between these are load-bearing -- see runbook.md.
-ORDER = (
-    Operation.COMPACT,
-    Operation.REWRITE_MANIFESTS,
-    Operation.REMOVE_DANGLING_DELETES,
-    Operation.EXPIRE,
-    Operation.REMOVE_ORPHANS,
-    Operation.APPLY_PROPERTIES,
-)
-
 ROOT = Path(os.environ.get("ZAMBONI_ROOT", Path.home() / ".zamboni"))
 
 
-def maintain(warehouse: str, engine: str = "local") -> list[str]:
-    """One customer. Returns the failures rather than raising, so the caller
-    can carry on to the next customer and report all of them at once."""
-    failures = []
-    # Per-customer config, per-customer credentials. See devops.md.
-    config = TableConfig.load(ROOT / "configs" / warehouse / "table-config.json")
+def maintain_warehouse(warehouse: str, engine: str = "local") -> int:
+    """One customer. Returns its exit code; never raises for a table's failure."""
     session = CatalogSession.for_lakekeeper(
         uri=os.environ["ZAMBONI_URI"],
         warehouse=warehouse,
         token=os.environ[f"ZAMBONI_TOKEN_{warehouse.upper()}"],
     )
     try:
-        maintainer = get_maintainer(engine)(session, {})
-        for table in sorted(config.tables):
-            settings = config.for_table(table)
-            request = MaintenanceRequest(
-                retention=settings.retention,
-                compaction=config_from_table_settings(settings),
-            )
-            for operation in ORDER:
-                try:
-                    result = maintainer.execute(
-                        operation, table, request=request, dry_run=False
-                    )
-                    log.info("%s %s %s: %s", warehouse, table, operation.value,
-                             result.describe())
-                except UnsupportedOperation as exc:
-                    # Not a failure. This engine says it cannot, and says why.
-                    log.info("%s %s %s: skipped -- %s", warehouse, table,
-                             operation.value, exc)
-                except Exception:
-                    # One table's failure must not cost the other tables their
-                    # maintenance, and one customer's must not cost the others.
-                    log.exception("%s %s %s failed", warehouse, table, operation.value)
-                    failures.append(f"{warehouse}/{table}/{operation.value}")
+        report = maintain(
+            session,
+            table_config=ROOT / "configs" / warehouse / "table-config.json",
+            warehouse=warehouse,       # asserts the config describes this one
+            engine=engine,
+            commit=True,
+            observer=lambda o: log.info("%s %s", warehouse, o.describe()),
+        )
+        for failure in report.failures:
+            log.error("%s %s", warehouse, failure.describe())
+        return report.exit_code
     finally:
         session.close()
-    return failures
 
 
 def main() -> int:
-    failed = []
-    for warehouse in sorted(p.name for p in (ROOT / "configs").iterdir() if p.is_dir()):
-        failed += maintain(warehouse)
-    if failed:
-        log.error("%d operation(s) failed: %s", len(failed), ", ".join(failed))
-        return 1
+    codes = {
+        path.name: maintain_warehouse(path.name)
+        for path in sorted((ROOT / "configs").iterdir())
+        if path.is_dir()
+    }
+    if failed := {w: c for w, c in codes.items() if c}:
+        log.error("%d warehouse(s) failed: %s", len(failed), failed)
+        return max(failed.values())
     return 0
 ```
 
-Three things in there are deliberate and worth keeping:
+Four things that used to be the caller's problem and are not any more:
 
-- **`UnsupportedOperation` is caught separately from `Exception`.** It is an
-  engine declaring a limit, not a failure. Treating it as an error would make
-  every Trino run alert on dangling deletes forever.
-- **One session per warehouse, closed in `finally`.** Sessions hold a DuckDB
-  connection and a catalog client.
-- **Failures are collected, not raised.** A customer whose catalog is
-  unreachable at 02:00 should not stop the other forty from being maintained.
+- **The operation order.** Three of the five gaps between the six operations are
+  load-bearing — [runbook-dev.md](runbook-dev.md) has the table. `maintain()`
+  uses it by default; pass `operations=` only if you mean to differ.
+- **`UnsupportedOperation` is a declaration, not a failure.** Trino cannot
+  remove dangling deletes. That comes back as an outcome with exit code 0 and
+  `skipped` set, so a nightly fleet run does not alert on it forever.
+- **A safety abort stops that table.** Exit code 4 means a check refused and
+  *nothing was deleted*; everything after it on the same table would be reading
+  state we have just said we do not trust, so it is skipped and the other tables
+  continue.
+- **The worst exit code wins, not the last.** A run where compaction was blocked
+  and everything after it succeeded still reports 3.
+
+`report.exit_code` is the number `zamboni maintenance` would have exited with —
+`test_the_cli_and_the_api_agree_on_the_exit_code` pins that, because two paths
+that disagree about an exit code are two paths one of which is lying to a cron
+line.
+
+**Per-customer sessions and per-customer secrets.** One session per warehouse,
+closed in `finally` — a session holds a DuckDB connection and a catalog client.
+One token per customer rather than a shared one, so a compromise of any tenant's
+credentials is not a compromise of all of them.
+
+**`warehouse=` is worth passing.** It checks the config file's own `warehouse`
+key, so the mistake this layout invites — copying one customer's config into
+another's directory — is an error before anything is touched.
+
+If you need something `maintain()` does not express, the pieces are still
+public: `get_maintainer(engine)(session, options)` gives you a maintainer, and
+`MaintenanceRequest` carries the intent. `maintain()` is a shorthand for the
+common case, not a wall around the rest.
 
 For a preview run — the thing to do first, and after any config change — pass
 `dry_run=True`. On `local` every operation previews. On the other engines,

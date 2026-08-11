@@ -241,6 +241,23 @@ Two categories beyond the usual set, because this tool deletes files:
 - **Spark settings in `env.sample`**, which documented five `ZAMBONI_TRINO_*`
   variables and no Spark equivalent.
 
+- **`maintain()` — the CLI's `maintenance` run, callable from Python.**
+
+  ```python
+  from zamboni import CatalogSession, maintain
+
+  report = maintain(session, table_config="table-config.json", commit=True)
+  raise SystemExit(report.exit_code)
+  ```
+
+  The loop lived only in `cli.py`, and the user guide told integrators to write
+  their own — so the operation order, the `fulfilled_by` skip, which exceptions
+  are refusals rather than failures, and when to stop after a safety abort all
+  existed twice. Now one implementation, with the CLI as a printing adapter over
+  it. `report.exit_code` is the number `zamboni maintenance` would have exited
+  with, and a test pins that. `commit=False` is the default, matching the rule
+  that nothing commits without `--yes`.
+
 ### Fixed
 
 - **`.env` is now looked for under `$ZAMBONI_ROOT`**, after `--env` and

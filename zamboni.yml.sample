@@ -13,11 +13,31 @@
 # env.sample and docs/devops.md §3.
 
 # --- catalog ---------------------------------------------------------------
+# The Iceberg REST specification standardises the *routes* -- /v1/config,
+# /v1/{prefix}/namespaces, and the rest -- but deliberately **not** the base URL
+# they hang off. `basePath` is an explicit variable in the spec's `servers`
+# block ("Optional prefix to be appended to all routes", default ""), and
+# implementations do choose differently: Lakekeeper serves the catalog under
+# /catalog, Polaris under /api/catalog -- both on port 8181 in their own
+# quickstarts. So the host *and* the path are deployment facts; copy this value
+# from your catalog's documentation rather than assuming it.
+#
+# Everything after that base is portable, which is the part that matters: the
+# same client talks to any conforming implementation once this URL is right.
 uri: https://lakekeeper.internal/catalog
 # The warehouse to maintain -- a *database*, in Postgres/Snowflake terms. The CLI
 # spells it --warehouse or --db. table-config.json also names a warehouse, but
 # that one asserts rather than selects: this is what chooses, and a config file
 # naming a different warehouse stops the run rather than being applied to it.
+# Optional, and a convenience for a single-warehouse deployment: set it here and
+# you never type --db again. Something must supply it -- flag, ZAMBONI_WAREHOUSE,
+# or this line -- or the run stops with "need --uri and --warehouse".
+#
+# **Leave it unset for a fleet**, and not only for tidiness. With it set in a
+# shared profile, a cron line that forgets `--db globex` does not fail: it
+# maintains whatever this says, finds that warehouse's own table-config, and the
+# assertion above agrees with itself. Everything is consistent and wrong. Unset,
+# the same slip is a usage error before anything is touched.
 warehouse: acme
 
 # --- engine ----------------------------------------------------------------

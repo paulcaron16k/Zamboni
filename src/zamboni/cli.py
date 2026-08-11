@@ -751,11 +751,12 @@ def _compactor_for(session: CatalogSession, args: argparse.Namespace) -> TableCo
     )
 
 
-def _maintainer_for(session: CatalogSession, args: argparse.Namespace):
-    """The engine named by ``--engine``, defaulting to the local one."""
-    engine = getattr(args, "engine", "local")
-    # Per engine, not merged: `catalog` means a different thing to each, and one
-    # flat dict made --trino-catalog configure Spark. It did, before ZMBNI-913.
+def _engine_options(args: argparse.Namespace) -> dict[str, str]:
+    """Connection settings for the named engine, and only that engine.
+
+    Per engine, not merged: `catalog` means a different thing to each, and one
+    flat dict made --trino-catalog configure Spark. It did, before ZMBNI-913.
+    """
     by_engine = {
         "trino": (
             ("host", "trino_host"),
@@ -770,12 +771,17 @@ def _maintainer_for(session: CatalogSession, args: argparse.Namespace):
             ("catalog", "spark_catalog"),
         ),
     }
-    options = {
+    return {
         key: value
-        for key, attribute in by_engine.get(engine, ())
+        for key, attribute in by_engine.get(getattr(args, "engine", "local"), ())
         if (value := getattr(args, attribute, None))
     }
-    return maintainers.get(engine)(session, options)
+
+
+def _maintainer_for(session: CatalogSession, args: argparse.Namespace):
+    """The engine named by ``--engine``, defaulting to the local one."""
+    engine = getattr(args, "engine", "local")
+    return maintainers.get(engine)(session, _engine_options(args))
 
 
 def _request_for(args: argparse.Namespace) -> MaintenanceRequest:
@@ -989,11 +995,14 @@ def _apply_properties(session: CatalogSession, args: argparse.Namespace) -> int:
 def _maintenance(session: CatalogSession, args: argparse.Namespace) -> int:
     """Every operation, in the runbook order, over every configured table.
 
-    One exit code: the **worst** any operation produced, so a partial failure is
-    never reported as success. That matters more here than anywhere else in the
-    CLI, because this is the entry point a cron line calls and nobody reads.
+    A thin adapter over :func:`zamboni.maintenance.maintain`, which is the same
+    function an application calls. The loop used to live here, and the user
+    guide told integrators to write their own copy of it -- so the operation
+    order, the `fulfilled_by` skip, which exceptions are refusals, and when to
+    stop all existed twice. Printing and exit codes are the CLI's business;
+    everything else is shared.
     """
-    from .maintainers import Operation
+    from .maintenance import maintain
 
     profile = args.zamboni_profile
     tables = _tables_to_maintain(args, profile)
@@ -1004,43 +1013,54 @@ def _maintenance(session: CatalogSession, args: argparse.Namespace) -> int:
             "that declares some."
         )
         return 2
+    if not args.table_config:
+        print(
+            "no table config. maintenance needs one: it carries the retention "
+            "that decides what may be deleted.",
+            file=sys.stderr,
+        )
+        return 2
 
-    operations = [Operation(name) for name in profile.operations]
     before = _status_snapshot(session, tables) if args.status else None
+    seen: set[str] = set()
 
-    worst = 0
-    failures: list[str] = []
-    for table in tables:
-        print(f"\n{table}")
-        print("  " + "-" * 68)
-        done: set = set()
-        for operation in operations:
-            if skipped_by := _already_fulfilled(session, args, operation, done):
-                # `fulfilled_by` is not decoration. On Spark, dangling-delete
-                # removal *is* an option of rewrite_data_files, so running both
-                # would compact the table twice -- the second time to no effect.
-                print(f"  {operation.value}: already done by {skipped_by.value}")
-                continue
-            code = _run_one(session, args, operation, table)
-            done.add(operation)
-            worst = max(worst, code)
-            if code:
-                failures.append(f"{table} {operation.value} (exit {code})")
-                if code == 4:
-                    # A safety check aborted. Everything after it on this table
-                    # reads the same state, so continuing would be doing more
-                    # work on a warehouse we have just said we do not trust.
-                    print(f"  stopping this table: {operation.value} aborted")
-                    break
+    def show(outcome) -> None:
+        if outcome.table not in seen:
+            seen.add(outcome.table)
+            print(f"\n{outcome.table}")
+            print("  " + "-" * 68)
+        stream = sys.stderr if outcome.exit_code else sys.stdout
+        print(f"  {outcome.operation.value}: {outcome.detail}", file=stream)
+
+    report = maintain(
+        session,
+        table_config=_load_table_config(args),
+        tables=tables,
+        engine=getattr(args, "engine", "local"),
+        engine_options=_engine_options(args),
+        operations=[Operation(name) for name in profile.operations],
+        commit=bool(args.yes),
+        base_config=_operational_config(args),
+        observer=show,
+    )
 
     if before is not None:
         _print_status_delta(session, tables, before)
 
-    if failures:
+    if not args.yes:
+        # Unconditional, by ZMBNI-911: three verbs used to print this only when
+        # they found work, so the one rule -- nothing commits without --yes --
+        # was visible on some runs and not others.
+        print("\n  dry run -- re-run with --yes to commit every operation above.")
+
+    if report.failures:
         print("\nfailed:", file=sys.stderr)
-        for failure in failures:
-            print(f"  {failure}", file=sys.stderr)
-    return worst
+        for failure in report.failures:
+            print(
+                f"  {failure.table} {failure.operation.value} (exit {failure.exit_code})",
+                file=sys.stderr,
+            )
+    return report.exit_code
 
 
 def _already_fulfilled(session: CatalogSession, args: argparse.Namespace, operation, done: set):

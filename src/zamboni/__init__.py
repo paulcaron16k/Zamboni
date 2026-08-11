@@ -36,6 +36,7 @@ from .maintainers import (
 )
 from .maintainers import available as available_engines
 from .maintainers import get as get_maintainer
+from .maintenance import RUNBOOK_ORDER, MaintenanceReport, Outcome, maintain
 from .manifests import ManifestRewriter
 from .orphans import OrphanCleaner
 from .planner import CompactionPlan, CompactionPlanner, FileGroup
@@ -94,6 +95,7 @@ def version_banner() -> str:
 #: exported because `--engine local` is the default and its results carry
 #: detail the generic `Reportable` does not.
 __all__ = [
+    "RUNBOOK_ORDER",
     "CatalogSession",
     "CompactionBlocked",
     "CompactionConfig",
@@ -108,12 +110,14 @@ __all__ = [
     "LayoutFeature",
     "Maintainer",
     "MaintainerCapabilities",
+    "MaintenanceReport",
     "MaintenanceRequest",
     "ManifestRewriter",
     "MemoryMode",
     "Operation",
     "OperationSupport",
     "OrphanCleaner",
+    "Outcome",
     "PreviewUnavailable",
     "Profile",
     "PyIcebergCapabilities",
@@ -140,6 +144,7 @@ __all__ = [
     "detect",
     "engines_lacking",
     "get_maintainer",
+    "maintain",
     "profile_table",
     "reachable_files",
     "resolve_settings",
