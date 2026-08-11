@@ -8,7 +8,7 @@ dangling-delete removal, manifest rewriting, snapshot expiry and orphan-file rem
 **without needing Trino or Spark**. It can drive either Trino or Spark if you have one.
 
 ```bash
-pipx install "zamboni[s3,sql]"      # or see Install, below
+pipx install git+https://github.com/paulcaron16k/Zamboni    # not on PyPI yet -- see Install
 # Copy zamboni.yml.sample to $HOME/.zamboni.yml and edit
 cat ~/.zamboni.yml
 zamboni doctor                      # is this PyIceberg build usable?
@@ -23,54 +23,68 @@ numbers. This README is the *why* -- the evidence behind the design decisions.
 
 **Never into your system Python.** Pick by what you want:
 
+**Not on PyPI yet.** Install from the repository until it is. Note that the name `zamboni`
+on PyPI belongs to an unrelated NHL scraper, so `pip install zamboni` fetches somebody
+else's package -- the distribution name here will have to differ, and that decision has not
+been made.
+
 **The CLI, isolated — recommended.** `pipx` gives it its own virtual environment and puts
 `zamboni` on your PATH:
 
 ```bash
-pipx install "zamboni[s3,sql]"
-uv tool install "zamboni[s3,sql]"     # the uv equivalent
+pipx install "git+https://github.com/paulcaron16k/Zamboni#egg=zamboni[s3,sql]"
+uv tool install --from "git+https://github.com/paulcaron16k/Zamboni" zamboni   # uv equivalent
 ```
 
 **The library, in your project's environment.** Activate a virtual environment first:
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
-pip install "zamboni[s3,sql]"
+pip install "zamboni[s3,sql] @ git+https://github.com/paulcaron16k/Zamboni"
 
-uv add "zamboni[s3,sql]"              # the uv equivalent; no activation needed
+uv add "zamboni[s3,sql] @ git+https://github.com/paulcaron16k/Zamboni"   # no activation needed
 ```
 
 Extras: `s3` for object storage, `sql` for a local SQLite catalog, `bucket` for
 bucket-partitioned tables, `trino` for `--engine trino`, and `spark-connect` for
 `--engine spark` — ~1.5MB and no JVM, where the `spark` extra pulls ~434MB and needs Java.
 
-## Status: v0.1.0, and what that means
+## Status: what depending on this commits you to
 
 Read this before depending on it.
 
-- **`0.x`.** The destructive defaults are public surface, so a changed default is a
-  breaking change even when no signature moves -- see [docs/releasing.md](docs/releasing.md),
-  which defines that for this tool specifically. `0.x` costs nothing and can become `1.0.0`
-  at any time; a promise cannot be withdrawn.
-- **One author.** Security response is best-effort rather than contractual
+- **`0.x`.** The public surface is believed reasonably firm, but a `0.x` release may still
+  break a CLI script or an API call; every effort will be made to avoid it. From `1.0.0`
+  onward the usual semver promise applies -- minor and patch releases will not break you.
+  **The unusual part, and the reason to read
+  [docs/releasing.md](docs/releasing.md):** for this tool a changed *default* is a breaking
+  change even when no signature moves. Lowering `older_than_days` deletes files on the next
+  nightly run with nothing in the API having moved at all, so the destructive defaults are
+  treated as public surface.
+- **Small team (of one).** Security response is best-effort rather than contractual
   ([SECURITY.md](SECURITY.md)), and there is no backport branch: fixes land on the latest
-  `0.x`.
-- **CI runs, and the first run was green.** All six jobs passed on the first push to
-  GitHub -- including `dev-stack`, which brings up a real Lakekeeper, Postgres and MinIO and
-  runs the demo end to end, and `spark`, which builds a Spark Connect server with the
-  Iceberg runtime. The badge above is therefore a result rather than a claim, which is why
-  it was withheld until there was one.
-- **Verified against real infrastructure, though.** Every operation has been run against a
-  live Lakekeeper + MinIO, and against real Trino 483 and Spark 4.0.4 servers. What is
-  unverified is the *automation*, not the tool.
+  `0.x`, or `1.x.x` once released, with a minor version, or possibly only patch
+  version, increment. Contributors welcome.
+- **CI runs green.** Five jobs on every push and pull request -- six runs, since `test` is
+  a matrix over Python 3.11 and 3.13 -- including `dev-stack`, which brings up a real
+  Lakekeeper, Postgres and MinIO and runs the demo end to end, and `spark`, which builds a
+  Spark Connect server with the Iceberg runtime. The badge above reports the current state
+  rather than a claim about it.
+- **Verified against real infrastructure.** Every operation has been run against a
+  live Lakekeeper + MinIO, and against real Trino 483 and Spark 4.0.4 servers.
 - **PyIceberg is capped at `<0.12`** and that is a safety measure, not conservatism --
-  see [below](#why-pyiceberg-is-capped-at-012).
+  see [below](#why-pyiceberg-is-capped-at-012). TL;DR significant new functionality needs
+  verification, and on current PyIceberg main branch there are failures.
+- **Not on PyPI yet.** Install from the repository; see [Install](#install). The
+  name `zamboni` is taken there by an unrelated project, so the distribution name
+  will have to differ.
 
 ## What it is, and what it is not
 
 **It is** a maintenance tool for Iceberg tables that runs as a single process: PyIceberg for
 metadata, DuckDB for sorting. One command a cron line can call, one declarative file
-describing what each table's layout should be and what maintenance may delete.
+describing what each table's layout should be and what maintenance may delete. It may optionally
+utilize Trino or Spark standalone or clusters.
 
 **It is not:**
 
@@ -303,9 +317,6 @@ Requirements and domain model: [data/healthims/Demo_Requirements.md](data/health
 Event catalogue: [data/healthims/HIMS_Discharge_Process_Events.md](data/healthims/HIMS_Discharge_Process_Events.md).
 
 ## CI
-
-**Never executed.** See [Status](#status-v010-and-what-that-means) — this is what *will*
-run, not a record of what has.
 
 [.github/workflows/ci.yml](.github/workflows/ci.yml) defines five jobs on push and pull
 request:
