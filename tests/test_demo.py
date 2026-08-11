@@ -372,11 +372,17 @@ def test_schema_and_layout_configs_agree(demo_root):
     schema = json.loads((demo_root / "table_schema.json").read_text())
     layout = json.loads((demo_root / "table-config.json").read_text())
     namespace = schema["namespace"]
+    layout_tables = {
+        f"{ns}.{name}": block
+        for ns, entry in layout["namespaces"].items()
+        for name, block in entry["tables"].items()
+    }
     declared = {f"{namespace}.{name}" for name in schema["tables"]}
-    assert set(layout["tables"]) == declared
+    assert set(layout_tables) == declared
+    assert layout["warehouse"], "the layout config must name the warehouse it describes"
 
     # And every column an ordering or partition names must be a real column.
-    for identifier, block in layout["tables"].items():
+    for identifier, block in layout_tables.items():
         columns = {c["name"] for c in schema["tables"][identifier.split(".")[1]]["columns"]}
         for pf in block.get("partition", []):
             assert pf["column"] in columns, f"{identifier}: no column {pf['column']}"

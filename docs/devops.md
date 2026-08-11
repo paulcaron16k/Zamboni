@@ -144,10 +144,17 @@ $ZAMBONI_ROOT/
     initech/table-config.json
 ```
 
-`--warehouse acme` reads `$ZAMBONI_ROOT/configs/acme/table-config.json`. Nothing
-else changes between customers, which is the point: the per-customer surface is
-one file in a predictable place, so provisioning a new customer is writing that
-file and adding a cron line.
+`--warehouse acme` -- or `--db acme`, the same flag -- reads
+`$ZAMBONI_ROOT/configs/acme/table-config.json`. Nothing else changes between
+customers, which is the point: the per-customer surface is one file in a
+predictable place, so provisioning a new customer is writing that file and
+adding a cron line.
+
+**That file names its warehouse too, and is checked against this one.** The
+directory selects; the `warehouse` key in the file confirms. It exists because
+this layout invites exactly one mistake -- copy `acme`'s config into `globex`'s
+directory, forget to edit a line, maintain the wrong tenant's tables all night --
+and one line of assertion turns that into an error before anything is touched.
 
 ### One invocation per warehouse, not one loop
 
@@ -166,9 +173,16 @@ stops the rest. Per-warehouse invocation gives you:
 - **Retries and timeouts that already exist.** Your scheduler has them. A loop
   inside Zamboni would be reimplementing a job runner badly.
 
-For a small fleet where that is overkill, `--all-warehouses` runs every warehouse
-the catalog reports, continuing past a failure and exiting non-zero if any failed.
-It is a convenience, not the recommended shape, and it says so in `--help`.
+There is deliberately **no `--all-warehouses`**. An earlier draft of this
+document described one in detail, including what its `--help` said; no such flag
+was ever written. The claim is removed rather than the flag added, because every
+argument above is an argument against it: a loop inside Zamboni would have one
+exit code, one log, no staggering, and would be reimplementing the retry and
+timeout logic your scheduler already has.
+
+For a small fleet where per-warehouse cron lines feel like overkill, generate
+them -- `zamboni warehouses` exists for exactly that, and is the subject of the
+next section.
 
 ### Discovery generates the schedule; it is not the scheduler
 

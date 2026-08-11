@@ -81,6 +81,12 @@ def qualified(table: str, *, catalog: str) -> str:
     Split on the *last* dot, so a nested namespace stays one schema identifier:
     Trino addresses ``a.b.c`` as schema ``a.b``, which is why
     ``iceberg.rest-catalog.nested-namespace-enabled`` is set in the dev stack.
+
+    Confirmed against a live Trino 483 with a genuinely nested namespace rather
+    than taken from the documentation: ``"iceberg"."nstest.deep"."events"``
+    reads, and the multi-level spelling fails with "Too many dots in table
+    name". Spark requires exactly the spelling Trino rejects -- see
+    :func:`zamboni.maintainers.spark.qualified`.
     """
     namespace, _, name = table.rpartition(".")
     if not namespace:

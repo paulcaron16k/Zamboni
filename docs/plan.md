@@ -120,7 +120,7 @@ test stops existing, so this table cannot rot silently.
 | FR-5.2 | The document round-trips through JSON | `test_round_trips_through_json`, `test_retention_parses_and_round_trips` |
 | FR-5.3 | Contradictions are refused at load | `test_rejects_contradictory_blocks`, `test_evolution_must_go_coarser`, `test_one_evolution_rule_per_source_granularity` |
 | FR-5.4 | A rule must name a partition field the table actually declares | `test_evolution_rule_must_match_a_declared_partition_field` |
-| FR-5.5 | Table keys are namespace-qualified; defaults apply to unknown tables | `test_table_keys_must_be_qualified`, `test_unknown_table_falls_back_to_defaults` |
+| FR-5.5 | Table keys are namespace-qualified; defaults apply to unknown tables | `test_a_table_name_cannot_contain_a_dot`, `test_a_nested_namespace_is_allowed_and_kept_whole`, `test_the_warehouse_is_required`, `test_the_version_1_shape_is_named_rather_than_puzzled_over`, `test_unknown_table_falls_back_to_defaults` |
 | FR-5.6 | The shipped example validates | `test_shipped_example_is_valid` |
 | FR-5.7 | `x-iceberg` blocks are imported from stream metadata or the schema root | `test_imports_from_stream_metadata`, `test_imports_from_the_schema_root` |
 | FR-5.8 | Streams without a block are reported, not silently skipped | `test_streams_without_the_block_are_reported_not_swallowed` |

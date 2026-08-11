@@ -62,7 +62,14 @@ from .maintainers import (
     UnsupportedOperation,
 )
 from .session import CatalogSession, S3Settings
-from .tableconfig import DEFAULT_SETTINGS, PartitionEvolution, TableConfig
+from .tableconfig import (
+    DEFAULT_SETTINGS,
+    NamespaceSettings,
+    PartitionEvolution,
+    TableConfig,
+    TableConfigError,
+    TableSettings,
+)
 
 USAGE = """\
 getting started
@@ -284,6 +291,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "from-catalog", help="generate table-config.json from a Meltano/Singer catalog"
     )
     fc.add_argument("catalog", help="path to the Singer catalog JSON")
+    fc.add_argument(
+        "--warehouse",
+        "--db",
+        dest="warehouse",
+        required=True,
+        help="which warehouse the generated file describes. Recorded in it, and "
+        "checked on every run, so a config cannot be applied to the wrong one.",
+    )
     fc.add_argument("-o", "--output", default="table-config.json")
     fc.add_argument("--namespace", help="Iceberg namespace for streams that do not name one")
     fc.add_argument(
@@ -520,7 +535,20 @@ def _add_engine_arg(p: argparse.ArgumentParser) -> None:
 def _add_catalog_args(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("catalog")
     g.add_argument("--uri", default=os.environ.get("ZAMBONI_URI"), help="REST catalog endpoint")
-    g.add_argument("--warehouse", default=os.environ.get("ZAMBONI_WAREHOUSE"))
+    # `--db` is the same flag. Iceberg says warehouse, Lakekeeper says warehouse,
+    # and everyone who has used a database says database -- the concept maps to
+    # a Postgres/Snowflake *database*, with an Iceberg namespace as its schema.
+    # `--catalog` is deliberately not offered: it already means the engine's
+    # catalog in `--trino-catalog`/`--spark-catalog`, and a Singer catalog file
+    # in `from-catalog`, so a bare one would be the most ambiguous flag here.
+    g.add_argument(
+        "--warehouse",
+        "--db",
+        dest="warehouse",
+        default=os.environ.get("ZAMBONI_WAREHOUSE"),
+        help="the warehouse (Iceberg catalog) to maintain -- a database, in "
+        "Postgres/Snowflake terms. `--db` is an alias.",
+    )
     _add_removed_secret_flag(g, "--credential", "ZAMBONI_CREDENTIAL")
     _add_removed_secret_flag(g, "--token", "ZAMBONI_TOKEN")
     g.add_argument("--oauth2-server-uri", default=os.environ.get("ZAMBONI_OAUTH2_SERVER_URI"))
@@ -707,7 +735,7 @@ def _compactor_for(session: CatalogSession, args: argparse.Namespace) -> TableCo
     if not args.table_config:
         return TableCompactor(session, args.table, _config_from(args))
 
-    table_config = TableConfig.load(args.table_config)
+    table_config = _load_table_config(args)
     # The file owns layout; the flags still own how the run executes.
     return TableCompactor.from_table_config(
         session, args.table, table_config, base=_operational_config(args)
@@ -749,7 +777,7 @@ def _request_for(args: argparse.Namespace) -> MaintenanceRequest:
     make every other engine translate *out of* ours instead of *from* the
     config.
     """
-    table_config = TableConfig.load(args.table_config) if args.table_config else None
+    table_config = _load_table_config(args) if args.table_config else None
     # Mirrors what _compactor_for did: without a config file the flags *are* the
     # layout, so the full flag-derived config is used; with one, the file owns
     # layout and only the operational half comes from the flags. Only compact
@@ -813,7 +841,7 @@ def _retention_for(args: argparse.Namespace):
 
     if not args.table_config:
         return Retention()
-    return TableConfig.load(args.table_config).for_table(args.table).retention
+    return _load_table_config(args).for_table(args.table).retention
 
 
 def _expire(session: CatalogSession, args: argparse.Namespace) -> int:
@@ -1027,6 +1055,26 @@ def _already_fulfilled(session: CatalogSession, args: argparse.Namespace, operat
     return None
 
 
+def _load_table_config(args: argparse.Namespace) -> TableConfig:
+    """Load ``--table-config`` and check it describes the warehouse in play.
+
+    The file's ``warehouse`` does not *select* anything -- the flag, the profile
+    or the directory does that. It asserts, so the mistake the per-warehouse
+    layout invites (copy acme's config into globex's directory, forget to edit
+    the one line) is an error rather than a night of maintaining the wrong
+    tenant's tables.
+    """
+    config = TableConfig.load(args.table_config)
+    expected = getattr(args, "warehouse", None)
+    if expected and config.warehouse != expected:
+        raise TableConfigError(
+            f"{args.table_config} declares warehouse {config.warehouse!r}, but this "
+            f"run is maintaining {expected!r}. One of the two is wrong; the file is "
+            "the one that travels between directories."
+        )
+    return config
+
+
 def _tables_to_maintain(args: argparse.Namespace, profile) -> list[str]:
     """Explicit argument, then the profile, then everything in table-config."""
     if getattr(args, "table", None):
@@ -1034,7 +1082,7 @@ def _tables_to_maintain(args: argparse.Namespace, profile) -> list[str]:
     if profile.tables:
         return list(profile.tables)
     if args.table_config:
-        return sorted(TableConfig.load(args.table_config).tables)
+        return sorted(_load_table_config(args).tables)
     return []
 
 
@@ -1152,7 +1200,11 @@ def _from_catalog(args: argparse.Namespace) -> int:
         )
 
     config, report = config_from_catalog(
-        catalog, namespace=args.namespace, defaults=defaults, source=args.catalog
+        catalog,
+        warehouse=args.warehouse,
+        namespace=args.namespace,
+        defaults=defaults,
+        source=args.catalog,
     )
     config.dump(args.output)
     print(report.describe())
@@ -1162,7 +1214,11 @@ def _from_catalog(args: argparse.Namespace) -> int:
 
 def _validate_config(args: argparse.Namespace) -> int:
     config = TableConfig.load(args.config)
-    print(f"{args.config}: valid (version {config.version}, {len(config.tables)} table(s))")
+    print(
+        f"{args.config}: valid (version {config.version}, warehouse "
+        f"{config.warehouse!r}, {len(config.namespaces)} namespace(s), "
+        f"{len(config.tables)} table(s))"
+    )
     for identifier in sorted(config.tables):
         settings = config.for_table(identifier)
         parts = (
@@ -1197,6 +1253,15 @@ def _table_config_generate(session: CatalogSession, args: argparse.Namespace) ->
     from .orphans import _all_table_identifiers
     from .tableconfig import DEFAULT_SETTINGS, PartitionField, TableConfig
 
+    if not args.warehouse:
+        print(
+            "table-config generate needs --warehouse/--db: the file records which "
+            "warehouse it describes, and is checked against it on every run. Name it "
+            "even for a filesystem catalog -- `--db local` is a fine answer.",
+            file=sys.stderr,
+        )
+        return 2
+
     output = Path(args.output)
     if output.exists() and not args.force:
         print(f"{output} exists; pass --force to overwrite", file=sys.stderr)
@@ -1207,7 +1272,8 @@ def _table_config_generate(session: CatalogSession, args: argparse.Namespace) ->
         wanted = tuple(args.namespace.split("."))
         identifiers = [i for i in identifiers if i[: len(wanted)] == wanted]
 
-    tables, skipped = {}, []
+    grouped: dict[str, dict[str, TableSettings]] = {}
+    skipped: list[tuple[str, str]] = []
     for identifier in sorted(identifiers):
         name = ".".join(identifier)
         try:
@@ -1226,18 +1292,43 @@ def _table_config_generate(session: CatalogSession, args: argparse.Namespace) ->
             )
             for f in tbl.spec().fields
         )
-        tables[name] = replace(DEFAULT_SETTINGS, partition=partition)
+        # The catalog hands the namespace back as a tuple, so the split is known
+        # rather than recovered from a string. That is the point of the shape.
+        grouped.setdefault(".".join(identifier[:-1]), {})[identifier[-1]] = replace(
+            DEFAULT_SETTINGS, partition=partition
+        )
 
-    config = TableConfig(tables=tables, defaults=DEFAULT_SETTINGS)
+    namespaces = {ns: NamespaceSettings(tables=t) for ns, t in sorted(grouped.items())}
+    config = TableConfig(
+        warehouse=args.warehouse or "", namespaces=namespaces, defaults=DEFAULT_SETTINGS
+    )
     config.validate()
     config.dump(str(output))
 
-    print(f"wrote {output}: {len(tables)} table(s)")
+    print(
+        f"wrote {output}: {len(config.tables)} table(s) in "
+        f"{len(namespaces)} namespace(s), warehouse {config.warehouse!r}"
+    )
     for name, reason in skipped:
         print(f"  skipped {name}: {reason}")
     print("\nThis describes the catalog as it is now. Edit it to say what you want,")
     print("then: zamboni table-config summary " + str(output))
     return 0
+
+
+def _lacking_nested() -> str:
+    """Nested namespaces work everywhere and mean different SQL on each engine.
+
+    Not a `LayoutFeature`: every engine supports them, so "unsupported" would be
+    a lie. What differs is spelling, verified live -- Trino wants one schema
+    identifier containing a dot, Spark wants one quoted part per level, and each
+    rejects the other's form outright. Nothing here is broken; it is simply a
+    thing you have to be sure you meant.
+    """
+    return (
+        " namespace; Trino and Spark address these with different SQL "
+        "(docs/table-config.md), so prefer one level where you can"
+    )
 
 
 def _lacking(feature: LayoutFeature) -> str:
@@ -1283,7 +1374,10 @@ def _table_config_summary(args: argparse.Namespace) -> int:
             return 2
         names = [args.table]
 
-    print(f"{args.config}: version {config.version}, {len(config.tables)} table(s)")
+    print(
+        f"{args.config}: version {config.version}, warehouse {config.warehouse!r}, "
+        f"{len(config.namespaces)} namespace(s), {len(config.tables)} table(s)"
+    )
     print("Values not written in the file are marked (default).\n")
 
     def mark(value, fallback, *, unset: str = "") -> str:
@@ -1301,7 +1395,9 @@ def _table_config_summary(args: argparse.Namespace) -> int:
     for name in names:
         s = config.for_table(name)
         d = DEFAULT_SETTINGS
-        print(f"{name}")
+        namespace = config.namespace_of(name)
+        nested = "  -- nested" + _lacking_nested() if len(namespace) > 1 else ""
+        print(f"{name}   [namespace {'.'.join(namespace)}, table {name.split('.')[-1]}]{nested}")
         parts = (
             "partition [" + ", ".join(f"{pf.column}:{pf.transform}" for pf in s.partition) + "]"
             if s.partition

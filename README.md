@@ -2,17 +2,44 @@
 
 Iceberg table maintenance -- compaction, Z-order clustering, partition evolution,
 dangling-delete removal, manifest rewriting, snapshot expiry and orphan-file removal --
-**without needing Trino or Spark**. It can drive either when you have one.
+**without needing Trino or Spark**. It can drive either Trino or Spark if you have one.
 
 ```bash
-pip install "zamboni[s3,sql]"
+pipx install "zamboni[s3,sql]"      # or see Install, below
+# Copy zamboni.yml.sample to $HOME/.zamboni.yml and edit
+cat ~/.zamboni.yml
 zamboni doctor                      # is this PyIceberg build usable?
-zamboni maintenance --table-config table-config.json   # previews; --yes commits
+zamboni --db acme maintenance       # previews; --yes commits
 ```
 
 **New here?** [docs/user_guide.md](docs/user_guide.md) is the place to start: four ways to
 run it, an engine-capability table to choose with, secrets handling, and the memory
 numbers. This README is the *why* -- the evidence behind the design decisions.
+
+## Install
+
+**Never into your system Python.** Pick by what you want:
+
+**The CLI, isolated — recommended.** `pipx` gives it its own virtual environment and puts
+`zamboni` on your PATH:
+
+```bash
+pipx install "zamboni[s3,sql]"
+uv tool install "zamboni[s3,sql]"     # the uv equivalent
+```
+
+**The library, in your project's environment.** Activate a virtual environment first:
+
+```bash
+python -m venv .venv && . .venv/bin/activate
+pip install "zamboni[s3,sql]"
+
+uv add "zamboni[s3,sql]"              # the uv equivalent; no activation needed
+```
+
+Extras: `s3` for object storage, `sql` for a local SQLite catalog, `bucket` for
+bucket-partitioned tables, `trino` for `--engine trino`, and `spark-connect` for
+`--engine spark` — ~1.5MB and no JVM, where the `spark` extra pulls ~434MB and needs Java.
 
 ## Status: v0.1.0, and what that means
 

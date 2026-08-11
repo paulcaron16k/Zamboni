@@ -47,7 +47,16 @@ def catalog_file(tmp_path):
 
 def test_from_catalog_writes_a_valid_config(catalog_file, tmp_path, capsys):
     out = tmp_path / "table-config.json"
-    argv = ["from-catalog", str(catalog_file), "-o", str(out), "--namespace", "analytics"]
+    argv = [
+        "from-catalog",
+        "--db",
+        "acme",
+        str(catalog_file),
+        "-o",
+        str(out),
+        "--namespace",
+        "analytics",
+    ]
     assert main(argv) == 0
 
     printed = capsys.readouterr().out
@@ -65,6 +74,8 @@ def test_no_evolution_flag_disables_the_default(catalog_file, tmp_path):
     main(
         [
             "from-catalog",
+            "--db",
+            "acme",
             str(catalog_file),
             "-o",
             str(out),
@@ -79,19 +90,40 @@ def test_no_evolution_flag_disables_the_default(catalog_file, tmp_path):
 
 def test_validate_config_summarises(catalog_file, tmp_path, capsys):
     out = tmp_path / "table-config.json"
-    main(["from-catalog", str(catalog_file), "-o", str(out), "--namespace", "analytics"])
+    main(
+        [
+            "from-catalog",
+            "--db",
+            "acme",
+            "--db",
+            "acme",
+            str(catalog_file),
+            "-o",
+            str(out),
+            "--namespace",
+            "analytics",
+        ]
+    )
     capsys.readouterr()
 
     assert main(["validate-config", str(out)]) == 0
     printed = capsys.readouterr().out
-    assert "valid (version 1, 1 table(s))" in printed
+    assert "valid (version 2, warehouse 'acme', 1 namespace(s), 1 table(s))" in printed
     assert "analytics.events: [occurred_at:day] ordering=zorder" in printed
     assert "evolution=day->month@90d" in printed
 
 
 def test_validate_config_rejects_a_bad_file(tmp_path):
     bad = tmp_path / "bad.json"
-    bad.write_text(json.dumps({"tables": {"a.b": {"partiton": []}}}))
+    bad.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "warehouse": "acme",
+                "namespaces": {"a": {"tables": {"b": {"partiton": []}}}},
+            }
+        )
+    )
     with pytest.raises(Exception, match="unknown key"):
         main(["validate-config", str(bad)])
 
@@ -108,12 +140,20 @@ def test_compact_reads_layout_from_the_config(session, tmp_path, capsys):
     config_path.write_text(
         json.dumps(
             {
-                "version": 1,
-                "tables": {
-                    "db.events": {
-                        "ordering": {
-                            "mode": "zorder",
-                            "zorder": {"columns": ["id", "category"], "precision_bits": 4},
+                "version": 2,
+                "warehouse": "acme",
+                "namespaces": {
+                    "db": {
+                        "tables": {
+                            "events": {
+                                "ordering": {
+                                    "mode": "zorder",
+                                    "zorder": {
+                                        "columns": ["id", "category"],
+                                        "precision_bits": 4,
+                                    },
+                                }
+                            }
                         }
                     }
                 },
@@ -180,7 +220,19 @@ def test_generate_describes_the_catalog_as_it_is(tmp_path, capsys):
     out = tmp_path / "tc.json"
 
     assert (
-        main(["table-config", "generate", "-o", str(out), "--local-warehouse", str(tmp_path)]) == 0
+        main(
+            [
+                "table-config",
+                "generate",
+                "--db",
+                "acme",
+                "-o",
+                str(out),
+                "--local-warehouse",
+                str(tmp_path),
+            ]
+        )
+        == 0
     )
 
     config = TableConfig.load(out)
@@ -200,7 +252,19 @@ def test_generate_refuses_to_overwrite_without_force(tmp_path, capsys):
     out.write_text("{}")
 
     assert (
-        main(["table-config", "generate", "-o", str(out), "--local-warehouse", str(tmp_path)]) == 2
+        main(
+            [
+                "table-config",
+                "generate",
+                "--db",
+                "acme",
+                "-o",
+                str(out),
+                "--local-warehouse",
+                str(tmp_path),
+            ]
+        )
+        == 2
     )
     assert out.read_text() == "{}"
     assert "--force" in capsys.readouterr().err
@@ -210,6 +274,8 @@ def test_generate_refuses_to_overwrite_without_force(tmp_path, capsys):
             [
                 "table-config",
                 "generate",
+                "--db",
+                "acme",
                 "-o",
                 str(out),
                 "--force",
@@ -229,7 +295,9 @@ def test_summary_names_the_fallback_instead_of_printing_none(tmp_path, capsys):
     from zamboni.cli import main
 
     config = tmp_path / "tc.json"
-    config.write_text('{"version": 1, "tables": {"db.events": {}}}')
+    config.write_text(
+        '{"version": 2, "warehouse": "acme", "namespaces": {"db": {"tables": {"events": {}}}}}'
+    )
 
     assert main(["table-config", "summary", str(config)]) == 0
 
@@ -244,8 +312,23 @@ def test_summary_marks_which_values_came_from_the_file(tmp_path, capsys):
 
     config = tmp_path / "tc.json"
     config.write_text(
-        '{"version": 1, "tables": {"db.events": {"retention": '
-        '{"remove_orphan_files": {"enabled": true, "older_than_days": 30}}}}}'
+        json.dumps(
+            {
+                "version": 2,
+                "warehouse": "acme",
+                "namespaces": {
+                    "db": {
+                        "tables": {
+                            "events": {
+                                "retention": {
+                                    "remove_orphan_files": {"enabled": True, "older_than_days": 30}
+                                }
+                            }
+                        }
+                    }
+                },
+            }
+        )
     )
 
     assert main(["table-config", "summary", str(config)]) == 0
@@ -261,7 +344,9 @@ def test_summary_warns_when_apply_properties_would_have_nothing_to_do(tmp_path, 
     from zamboni.cli import main
 
     config = tmp_path / "tc.json"
-    config.write_text('{"version": 1, "tables": {"db.events": {}}}')
+    config.write_text(
+        '{"version": 2, "warehouse": "acme", "namespaces": {"db": {"tables": {"events": {}}}}}'
+    )
     main(["table-config", "summary", str(config)])
 
     assert "apply-properties has nothing to set" in capsys.readouterr().out
@@ -280,8 +365,21 @@ def test_summary_flags_zorder_as_unavailable_where_it_is(tmp_path, capsys):
 
     config = tmp_path / "tc.json"
     config.write_text(
-        '{"version": 1, "tables": {"db.events": {"ordering": {"mode": "zorder", '
-        '"zorder": {"columns": ["a", "b"]}}}}}'
+        json.dumps(
+            {
+                "version": 2,
+                "warehouse": "acme",
+                "namespaces": {
+                    "db": {
+                        "tables": {
+                            "events": {
+                                "ordering": {"mode": "zorder", "zorder": {"columns": ["a", "b"]}}
+                            }
+                        }
+                    }
+                },
+            }
+        )
     )
     main(["table-config", "summary", str(config)])
 
@@ -304,7 +402,9 @@ def test_summary_warns_about_evolution_on_the_engines_that_lack_it(tmp_path, cap
     from zamboni.maintainers import LayoutFeature, engines_lacking
 
     config = tmp_path / "tc.json"
-    config.write_text('{"version": 1, "tables": {"db.events": {}}}')
+    config.write_text(
+        '{"version": 2, "warehouse": "acme", "namespaces": {"db": {"tables": {"events": {}}}}}'
+    )
     main(["table-config", "summary", str(config)])
 
     out = capsys.readouterr().out
@@ -332,8 +432,21 @@ def test_a_warning_disappears_when_the_engine_gains_the_feature(tmp_path, capsys
 
     config = tmp_path / "tc.json"
     config.write_text(
-        '{"version": 1, "tables": {"db.events": {"ordering": {"mode": "zorder", '
-        '"zorder": {"columns": ["a", "b"]}}}}}'
+        json.dumps(
+            {
+                "version": 2,
+                "warehouse": "acme",
+                "namespaces": {
+                    "db": {
+                        "tables": {
+                            "events": {
+                                "ordering": {"mode": "zorder", "zorder": {"columns": ["a", "b"]}}
+                            }
+                        }
+                    }
+                },
+            }
+        )
     )
     main(["table-config", "summary", str(config)])
 
@@ -349,7 +462,9 @@ def test_table_config_validate_matches_the_original_verb(tmp_path, capsys):
     from zamboni.cli import main
 
     config = tmp_path / "tc.json"
-    config.write_text('{"version": 1, "tables": {"db.events": {}}}')
+    config.write_text(
+        '{"version": 2, "warehouse": "acme", "namespaces": {"db": {"tables": {"events": {}}}}}'
+    )
 
     assert main(["validate-config", str(config)]) == 0
     old = capsys.readouterr().out

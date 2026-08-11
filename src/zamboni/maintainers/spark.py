@@ -69,11 +69,34 @@ def quote(identifier: str) -> str:
 
 
 def qualified(table: str, *, catalog: str) -> str:
-    """``db.events`` -> ```iceberg`.`db`.`events```."""
-    namespace, _, name = table.rpartition(".")
-    if not namespace:
+    """``db.events`` -> ```iceberg`.`db`.`events```.
+
+    **Every** dot is a separator, so ``a.b.events`` becomes four quoted parts and
+    not three. That is the opposite of Trino, and the difference is not a style
+    choice -- verified against both servers with a real nested namespace:
+
+    ============================= ============================ ==========
+    form                          Trino                        Spark
+    ============================= ============================ ==========
+    one part, dotted name         3 rows                       rejected
+    one quoted part per level     "Too many dots in table name" 3 rows
+    ============================= ============================ ==========
+
+    Trino's schema is a single identifier that may *contain* a dot, which is what
+    ``iceberg.rest-catalog.nested-namespace-enabled`` turns on. Spark has real
+    multi-level namespaces and rejects a dot inside a part outright
+    ("Namespace parts cannot contain '.'"). The same table therefore has two
+    spellings that each engine refuses from the other, which is the strongest
+    argument in the codebase for nested namespaces being more trouble than they
+    are worth -- see docs/table-config.md.
+
+    This split needs no help from the config because Spark forbids the ambiguous
+    case: a dot can only ever be a separator.
+    """
+    parts = table.split(".")
+    if len(parts) < 2:
         raise ValueError(f"{table!r} has no namespace; expected <namespace>.<table>")
-    return f"{quote(catalog)}.{quote(namespace)}.{quote(name)}"
+    return ".".join(quote(part) for part in (catalog, *parts))
 
 
 def _literal(value: str) -> str:

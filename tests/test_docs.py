@@ -217,7 +217,7 @@ def config_samples() -> list[tuple[str, dict]]:
             raise AssertionError(
                 f"user_guide.md has a ```json block that is not JSON: {exc}"
             ) from exc
-        if isinstance(parsed, dict) and "tables" in parsed:
+        if isinstance(parsed, dict) and "namespaces" in parsed:
             found.append(("user_guide.md", parsed))
     return found
 

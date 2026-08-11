@@ -50,7 +50,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 > order. The numbers follow [roadmap.md](roadmap.md)'s RM-1…RM-6 so the two documents agree on
 > identity; the sequence is explained in each section's subtitle.
 
-**Story counts:** 105 done · 1 inproject · 12 todo · 1 cancelled  (119 stories)
+**Story counts:** 108 done · 1 inproject · 12 todo · 1 cancelled  (122 stories)
 
 ---
 
@@ -92,6 +92,9 @@ has not been specified yet — that is deliberate signal, not an omission.
 |---|---|---|---|---|
 | ZMBNI-401 | `table-config.json` specification | Partition, evolution, ordering, sizing, retention. Unknown keys rejected; contradictions refused at load. FR-5.1–5.6. design §4 | done | 2026-08-03 |
 | ZMBNI-402 | Meltano `x-iceberg` import | Generate the config from a Singer catalog. Generated rather than read at runtime because the Singer SDK silently drops unknown keys. FR-5.7–5.10. design §5.1, §6.3 | done | 2026-08-03 |
+| ZMBNI-403 | table-config version 2: warehouse, namespace, table | The file now has the shape every data engineer already has — warehouse (a *database*) -> namespace (a *schema*) -> table — instead of a dotted key whose split had to be guessed. `warehouse` is required and **asserts** rather than selects: the directory or `--db` chooses, the file confirms, so copying acme's config into globex's directory is an error instead of a night maintaining the wrong tenant. Table names may not contain a dot; a dot in a namespace means nesting, unambiguously, because it sits in a field that means namespace. Maps throughout rather than arrays, so a duplicate name is impossible by construction, and `namespaces.<name>` wraps `tables` in an object so namespace-level defaults need no further format change. `tables` survives as a **derived** flat map, leaving 60+ runtime call sites untouched — and that form is now built by joining a stated namespace to a dotless name rather than parsed back out of a string, so it cannot disagree with the file. CLI takes `--warehouse` or `--db`; `--catalog` deliberately not offered, since it already means the engine's catalog in `--trino-catalog`/`--spark-catalog` and a Singer file in `from-catalog` | done | 2026-08-11 |
+| ZMBNI-404 | Fix Spark's nested-namespace quoting | While investigating ZMBNI-403 I claimed Trino and Spark both mis-quoted nested namespaces. Tested against live servers with a real nested namespace, and **Trino was right**: `"ice"."a.b"."events"` reads there, while the per-level form fails with "Too many dots in table name" — a Trino schema is one identifier that may contain a dot, which is what `nested-namespace-enabled` turns on. Spark is the opposite and was wrong: one quoted part per level, and a dot inside a part is rejected outright ("Namespace parts cannot contain '.'"). The two engines therefore need mutually incompatible spellings of the same table, each rejecting the other's. Only Spark changed; both docstrings carry the measurement, and it is now the concrete argument for discouraging nested namespaces that the docs previously made on taste | done | 2026-08-11 |
+| ZMBNI-405 | Remove the `--all-warehouses` claim | devops.md described the flag in detail, including what its `--help` said. No such flag was ever written. Removed the claim rather than adding the flag: every argument in that section — blast radius, per-customer exit codes, staggering, the retries a scheduler already has — is an argument against a loop inside Zamboni | done | 2026-08-11 |
 
 ---
 

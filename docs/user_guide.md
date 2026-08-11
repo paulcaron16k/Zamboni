@@ -1171,25 +1171,53 @@ naturally partitioned. Compaction is doing the classic small-files job.
 
 ```json
 {
-  "version": 1,
+  "version": 2,
+  "warehouse": "acme",
   "defaults": {
-    "ordering": { "mode": "none" },
-    "partition_evolution": { "enabled": false },
+    "ordering": {
+      "mode": "none"
+    },
+    "partition_evolution": {
+      "enabled": false
+    },
     "retention": {
-      "expire_snapshots":     { "enabled": true, "max_snapshot_age_days": 7,
-                                "min_snapshots_to_keep": 3 },
-      "remove_orphan_files":  { "enabled": true, "older_than_days": 3 },
-      "remove_dangling_deletes": { "enabled": true },
-      "rewrite_manifests":    { "enabled": true },
-      "metadata":             { "previous_versions_max": 10,
-                                "delete_after_commit": true }
+      "expire_snapshots": {
+        "enabled": true,
+        "max_snapshot_age_days": 7,
+        "min_snapshots_to_keep": 3
+      },
+      "remove_orphan_files": {
+        "enabled": true,
+        "older_than_days": 3
+      },
+      "remove_dangling_deletes": {
+        "enabled": true
+      },
+      "rewrite_manifests": {
+        "enabled": true
+      },
+      "metadata": {
+        "previous_versions_max": 10,
+        "delete_after_commit": true
+      }
     }
   },
-  "tables": {
-    "acme.customers": {
-      "ordering": { "mode": "sort", "sort": [{ "column": "customer_id" }] }
-    },
-    "acme.products": {}
+  "namespaces": {
+    "acme": {
+      "tables": {
+        "customers": {
+          "ordering": {
+            "mode": "sort",
+            "sort": [
+              {
+                "column": "customer_id"
+              }
+            ]
+          }
+        },
+        "products": {}
+      }
+    }
   }
 }
 ```
@@ -1222,24 +1250,53 @@ are read rarely and should stop being thousands of small daily directories.
 
 ```json
 {
-  "version": 1,
-  "tables": {
-    "acme.events": {
-      "partition": [{ "column": "event_ts", "transform": "day" }],
-      "partition_evolution": {
-        "enabled": true,
-        "rules": [{ "from": "day", "to": "month", "older_than_days": 90 }]
-      },
-      "ordering": {
-        "mode": "zorder",
-        "zorder": { "columns": ["customer_id", "event_type"] }
-      },
-      "retention": {
-        "expire_snapshots":    { "enabled": true, "max_snapshot_age_days": 3,
-                                 "min_snapshots_to_keep": 2 },
-        "remove_orphan_files": { "enabled": true, "older_than_days": 3 },
-        "metadata":            { "previous_versions_max": 5,
-                                 "delete_after_commit": true }
+  "version": 2,
+  "warehouse": "acme",
+  "namespaces": {
+    "acme": {
+      "tables": {
+        "events": {
+          "partition": [
+            {
+              "column": "event_ts",
+              "transform": "day"
+            }
+          ],
+          "partition_evolution": {
+            "enabled": true,
+            "rules": [
+              {
+                "from": "day",
+                "to": "month",
+                "older_than_days": 90
+              }
+            ]
+          },
+          "ordering": {
+            "mode": "zorder",
+            "zorder": {
+              "columns": [
+                "customer_id",
+                "event_type"
+              ]
+            }
+          },
+          "retention": {
+            "expire_snapshots": {
+              "enabled": true,
+              "max_snapshot_age_days": 3,
+              "min_snapshots_to_keep": 2
+            },
+            "remove_orphan_files": {
+              "enabled": true,
+              "older_than_days": 3
+            },
+            "metadata": {
+              "previous_versions_max": 5,
+              "delete_after_commit": true
+            }
+          }
+        }
       }
     }
   }

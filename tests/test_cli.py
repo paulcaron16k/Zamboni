@@ -132,16 +132,24 @@ def reclaim_config(tmp_path):
     path.write_text(
         json.dumps(
             {
-                "version": 1,
-                "tables": {
-                    "db.events": {
-                        "retention": {
-                            "expire_snapshots": {
-                                "enabled": True,
-                                "min_snapshots_to_keep": 2,
-                                "max_snapshot_age_days": 0,
-                            },
-                            "remove_orphan_files": {"enabled": True, "older_than_days": 0},
+                "version": 2,
+                "warehouse": "acme",
+                "namespaces": {
+                    "db": {
+                        "tables": {
+                            "events": {
+                                "retention": {
+                                    "expire_snapshots": {
+                                        "enabled": True,
+                                        "min_snapshots_to_keep": 2,
+                                        "max_snapshot_age_days": 0,
+                                    },
+                                    "remove_orphan_files": {
+                                        "enabled": True,
+                                        "older_than_days": 0,
+                                    },
+                                }
+                            }
                         }
                     }
                 },
@@ -206,12 +214,17 @@ def test_expire_respects_a_disabled_config(warehouse, session, tmp_path, capsys)
     config.write_text(
         json.dumps(
             {
-                "version": 1,
-                "tables": {
-                    "db.events": {
-                        "retention": {
-                            "expire_snapshots": {"enabled": False},
-                            "remove_orphan_files": {"enabled": False},
+                "version": 2,
+                "warehouse": "acme",
+                "namespaces": {
+                    "db": {
+                        "tables": {
+                            "events": {
+                                "retention": {
+                                    "expire_snapshots": {"enabled": False},
+                                    "remove_orphan_files": {"enabled": False},
+                                }
+                            }
                         }
                     }
                 },
@@ -530,16 +543,24 @@ def devops_dir(tmp_path, warehouse, monkeypatch):
     (root / "configs" / "acme" / "table-config.json").write_text(
         json.dumps(
             {
-                "version": 1,
-                "tables": {
-                    "db.events": {
-                        "retention": {
-                            "expire_snapshots": {
-                                "enabled": True,
-                                "max_snapshot_age_days": 0,
-                                "min_snapshots_to_keep": 1,
-                            },
-                            "remove_orphan_files": {"enabled": True, "older_than_days": 0},
+                "version": 2,
+                "warehouse": "acme",
+                "namespaces": {
+                    "db": {
+                        "tables": {
+                            "events": {
+                                "retention": {
+                                    "expire_snapshots": {
+                                        "enabled": True,
+                                        "max_snapshot_age_days": 0,
+                                        "min_snapshots_to_keep": 1,
+                                    },
+                                    "remove_orphan_files": {
+                                        "enabled": True,
+                                        "older_than_days": 0,
+                                    },
+                                }
+                            }
                         }
                     }
                 },

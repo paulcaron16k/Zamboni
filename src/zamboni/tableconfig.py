@@ -30,7 +30,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
-SPEC_VERSION = 1
+SPEC_VERSION = 2
 
 #: Iceberg partition transforms an author may name.
 PARTITION_TRANSFORMS = frozenset(
@@ -381,13 +381,75 @@ DEFAULT_SETTINGS = TableSettings(partition_evolution=DEFAULT_PARTITION_EVOLUTION
 
 
 @dataclass(frozen=True)
-class TableConfig:
-    """A parsed ``table-config.json``."""
+class NamespaceSettings:
+    """One namespace and the tables in it.
 
+    A wrapper around a single field today, and deliberately a wrapper rather
+    than a bare dict: namespace-level defaults are the obvious next thing to
+    want ("everything in `raw` keeps three days"), and adding a key beside
+    ``tables`` is then not a format change.
+    """
+
+    tables: dict[str, TableSettings] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TableConfig:
+    """A parsed ``table-config.json``.
+
+    The file is authored as **warehouse -> namespace -> table**, which is the
+    database/schema/table shape every data engineer already has. Version 2 made
+    that explicit; version 1 keyed tables by a dotted string and left the split
+    to be guessed.
+
+    Guessed is the right word. ``raw.telemetry.events`` was resolved with
+    ``rpartition`` -- the *last* dot wins -- so the local engine read it as
+    namespace ``('raw','telemetry')`` while Trino and Spark quoted it as a
+    single namespace literally named ``raw.telemetry``. The same key, three
+    engines, two different tables, no error anywhere. Stating the namespace and
+    forbidding dots in the table name removes the guess rather than fixing it.
+
+    ``tables`` stays available as the flat ``namespace.table`` mapping the rest
+    of the package works in, computed once here. That form is now *built* from
+    a stated namespace and a dotless name instead of parsed back out of a
+    string, so it cannot disagree with the file.
+    """
+
+    #: Which warehouse this file describes. Required. It does not select the
+    #: warehouse -- ``--warehouse``/``--db`` or the profile does that -- it
+    #: asserts, so copying acme's config into globex's directory and forgetting
+    #: to edit it is an error instead of a silent maintenance run against the
+    #: wrong tenant.
+    warehouse: str = ""
     version: int = SPEC_VERSION
     defaults: TableSettings = field(default_factory=lambda: DEFAULT_SETTINGS)
-    tables: dict[str, TableSettings] = field(default_factory=dict)
+    namespaces: dict[str, NamespaceSettings] = field(default_factory=dict)
     source: str | None = None
+    #: ``{"namespace.table": settings}``. Derived; never authored.
+    tables: dict[str, TableSettings] = field(init=False, repr=False, default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "tables",
+            {
+                f"{namespace}.{name}": settings
+                for namespace, block in self.namespaces.items()
+                for name, settings in block.tables.items()
+            },
+        )
+
+    def namespace_of(self, identifier: str) -> tuple[str, ...]:
+        """The namespace parts of a flat identifier, as Iceberg wants them.
+
+        Looked up rather than parsed: the file said where the namespace ends,
+        so a nested one comes back as ``('raw', 'telemetry')`` on every engine.
+        """
+        for namespace, block in self.namespaces.items():
+            for name in block.tables:
+                if f"{namespace}.{name}" == identifier:
+                    return tuple(namespace.split("."))
+        raise KeyError(identifier)
 
     def for_table(self, identifier: str) -> TableSettings:
         """Settings for ``identifier``, with defaults filled in.
@@ -426,13 +488,36 @@ class TableConfig:
                 f"unsupported table-config version {self.version}; "
                 f"this build understands {SPEC_VERSION}"
             )
+        if not self.warehouse:
+            raise TableConfigError(
+                "<root>: 'warehouse' is required. It names the warehouse this file "
+                "describes, and is checked against the one being maintained -- so a "
+                "config copied into the wrong directory is an error rather than a "
+                "run against the wrong tenant."
+            )
         self.defaults.validate("defaults")
-        for identifier, settings in self.tables.items():
-            if identifier.count(".") < 1:
+        for namespace, block in self.namespaces.items():
+            where = f"namespaces.{namespace}"
+            if not namespace:
+                raise TableConfigError("namespaces: a namespace name cannot be empty")
+            if any(not part for part in namespace.split(".")):
                 raise TableConfigError(
-                    f"tables.{identifier!r}: table keys must be 'namespace.table'"
+                    f"{where!r}: a dot in a namespace separates nesting levels, so "
+                    "no level may be empty"
                 )
-            settings.validate(f"tables.{identifier}")
+            if not block.tables:
+                raise TableConfigError(f"{where}: declares no tables")
+            for name, settings in block.tables.items():
+                if not name:
+                    raise TableConfigError(f"{where}.tables: a table name cannot be empty")
+                if "." in name:
+                    raise TableConfigError(
+                        f"{where}.tables.{name!r}: a table name cannot contain a dot. "
+                        "Dots separate namespace levels, so putting one here is the "
+                        "ambiguity this format exists to remove -- move the prefix into "
+                        "the namespace."
+                    )
+                settings.validate(f"{where}.tables.{name}")
 
     # -- serialisation ----------------------------------------------------
 
@@ -449,30 +534,56 @@ class TableConfig:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any], source: str | None = None) -> TableConfig:
-        _reject_unknown(raw, {"version", "defaults", "tables"}, "<root>")
+        if "tables" in raw and "namespaces" not in raw:
+            # The version 1 shape. Naming it beats "unknown key(s) ['tables']",
+            # which is what the generic check would say and which does not tell
+            # anyone what to do about it.
+            raise TableConfigError(
+                "<root>: 'tables' at the top level is the version 1 shape, where a "
+                "table key was 'namespace.table' and the split had to be guessed. "
+                "Version 2 states it: {'warehouse': ..., 'namespaces': {'<namespace>': "
+                "{'tables': {'<name>': {...}}}}}. Regenerate with `zamboni table-config "
+                "generate`, or see docs/table-config.md."
+            )
+        _reject_unknown(raw, {"version", "warehouse", "defaults", "namespaces"}, "<root>")
         defaults = (
             _settings_from_dict(raw["defaults"], "defaults")
             if "defaults" in raw
             else DEFAULT_SETTINGS
         )
-        tables = {
-            identifier: _settings_from_dict(block, f"tables.{identifier}")
-            for identifier, block in (raw.get("tables") or {}).items()
-        }
+        namespaces = {}
+        for namespace, block in (raw.get("namespaces") or {}).items():
+            where = f"namespaces.{namespace}"
+            _reject_unknown(block, {"tables"}, where)
+            namespaces[namespace] = NamespaceSettings(
+                tables={
+                    name: _settings_from_dict(settings, f"{where}.tables.{name}")
+                    for name, settings in (block.get("tables") or {}).items()
+                }
+            )
         return cls(
             version=raw.get("version", SPEC_VERSION),
+            warehouse=raw.get("warehouse", ""),
             defaults=defaults,
-            tables=tables,
+            namespaces=namespaces,
             source=source,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        out: dict[str, Any] = {
+        return {
             "version": self.version,
+            "warehouse": self.warehouse,
             "defaults": _settings_to_dict(self.defaults),
+            "namespaces": {
+                namespace: {
+                    "tables": {
+                        name: _settings_to_dict(settings)
+                        for name, settings in sorted(block.tables.items())
+                    }
+                }
+                for namespace, block in sorted(self.namespaces.items())
+            },
         }
-        out["tables"] = {k: _settings_to_dict(v) for k, v in sorted(self.tables.items())}
-        return out
 
     def dump(self, path: str | Path, *, indent: int = 2) -> None:
         Path(path).write_text(json.dumps(self.to_dict(), indent=indent) + "\n")

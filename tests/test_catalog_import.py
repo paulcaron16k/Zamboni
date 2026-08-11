@@ -33,7 +33,7 @@ def catalog(**overrides):
 
 
 def test_imports_from_stream_metadata():
-    config, report = config_from_catalog(catalog(), namespace="analytics")
+    config, report = config_from_catalog(catalog(), warehouse="acme", namespace="analytics")
 
     assert [s.origin for s in report.imported] == ["stream metadata"]
     settings = config.for_table("analytics.events")
@@ -48,7 +48,7 @@ def test_imports_from_the_schema_root():
     entry["streams"][0]["metadata"] = []
     entry["streams"][0]["schema"][EXTENSION_KEY] = ICEBERG_BLOCK
 
-    config, report = config_from_catalog(entry, namespace="analytics")
+    config, report = config_from_catalog(entry, warehouse="acme", namespace="analytics")
     assert [s.origin for s in report.imported] == ["schema"]
     assert config.for_table("analytics.events").ordering.mode == "zorder"
 
@@ -57,7 +57,7 @@ def test_streams_without_the_block_are_reported_not_swallowed():
     """Silence here would hide a misspelled extension key."""
     entry = catalog()
     entry["streams"][0]["metadata"] = []
-    _, report = config_from_catalog(entry, namespace="analytics")
+    _, report = config_from_catalog(entry, warehouse="acme", namespace="analytics")
 
     assert not report.imported
     assert report.skipped == [("public-events", f"no {EXTENSION_KEY!r} block")]
@@ -65,7 +65,7 @@ def test_streams_without_the_block_are_reported_not_swallowed():
 
 
 def test_generated_config_carries_the_evolution_default():
-    config, _ = config_from_catalog(catalog(), namespace="analytics")
+    config, _ = config_from_catalog(catalog(), warehouse="acme", namespace="analytics")
     settings = config.for_table("analytics.events")
     assert settings.partition_evolution.enabled is True
     assert settings.partition_evolution.rules[0].to_transform == "month"
@@ -76,14 +76,14 @@ def test_explicit_table_override_wins():
     entry = catalog()
     entry["streams"][0]["metadata"][0]["metadata"][EXTENSION_KEY] = block
 
-    config, _ = config_from_catalog(entry, namespace="analytics")
+    config, _ = config_from_catalog(entry, warehouse="acme", namespace="analytics")
     assert "warehouse.fact_events" in config.tables
 
 
 def test_schema_name_supplies_the_namespace():
     entry = catalog()
     entry["streams"][0]["metadata"][0]["metadata"]["schema-name"] = "raw"
-    config, _ = config_from_catalog(entry)
+    config, _ = config_from_catalog(entry, warehouse="acme")
     assert "raw.events" in config.tables
 
 
@@ -91,7 +91,7 @@ def test_unresolvable_identifier_is_skipped_not_guessed():
     entry = catalog()
     entry["streams"][0]["stream"] = "events"
     entry["streams"][0]["tap_stream_id"] = "events"
-    config, report = config_from_catalog(entry)
+    config, report = config_from_catalog(entry, warehouse="acme")
 
     assert not config.tables
     assert "could not resolve" in report.skipped[0][1]
@@ -101,17 +101,20 @@ def test_invalid_block_fails_loudly():
     entry = catalog()
     entry["streams"][0]["metadata"][0]["metadata"][EXTENSION_KEY] = {"nonsense": 1}
     with pytest.raises(TableConfigError, match="unknown key"):
-        config_from_catalog(entry, namespace="analytics")
+        config_from_catalog(entry, warehouse="acme", namespace="analytics")
 
 
 def test_generated_config_is_valid_and_round_trips(tmp_path):
-    config, _ = config_from_catalog(catalog(), namespace="analytics")
+    config, _ = config_from_catalog(catalog(), warehouse="acme", namespace="analytics")
     path = tmp_path / "table-config.json"
     config.dump(path)
 
     reloaded = json.loads(path.read_text())
-    assert reloaded["version"] == 1
-    assert "analytics.events" in reloaded["tables"]
+    assert reloaded["version"] == 2
+    assert reloaded["warehouse"] == "acme"
+    # Namespace and table are separate keys, so nothing downstream has to split
+    # a dotted string to know where one ends and the other begins.
+    assert "events" in reloaded["namespaces"]["analytics"]["tables"]
 
 
 def test_load_catalog_reports_bad_json(tmp_path):
@@ -123,4 +126,4 @@ def test_load_catalog_reports_bad_json(tmp_path):
 
 def test_missing_streams_list_is_an_error():
     with pytest.raises(TableConfigError, match="no 'streams' list"):
-        config_from_catalog({})
+        config_from_catalog({}, warehouse="acme")

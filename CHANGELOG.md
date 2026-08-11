@@ -234,6 +234,18 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **Spark addressed a nested namespace as one dotted identifier**, which it
+  rejects. Verified against live servers: Spark needs one quoted part per level
+  (`` `ice`.`a`.`b`.`events` ``) and refuses a dot inside a part; **Trino needs
+  exactly the opposite** (`"ice"."a.b"."events"`) and refuses the per-level form
+  with "Too many dots in table name". Trino's existing code was correct and is
+  unchanged. Two engines, mutually incompatible spellings of the same table.
+
+- **`docs/devops.md` documented an `--all-warehouses` flag that does not exist**,
+  including what its `--help` said. The claim is removed rather than the flag
+  added — every argument in that section is an argument against a loop inside
+  Zamboni.
+
 - **The README's first code sample carried a credential-shaped literal.** A
   document telling operators to keep secrets out of files and command lines
   cannot open with one pasted into a code block — anyone copying the sample
@@ -271,6 +283,30 @@ Two categories beyond the usual set, because this tool deletes files:
   engine.
 
 ### BREAKING
+
+- **`table-config.json` is version 2: warehouse -> namespace -> table.** The file
+  now has the shape every data engineer already has — an Iceberg warehouse is a
+  Postgres/Snowflake **database**, a namespace is a **schema** — instead of a
+  dotted key whose split had to be guessed:
+
+  ```json
+  {"version": 2, "warehouse": "acme",
+   "namespaces": {"analytics": {"tables": {"events": {}}}}}
+  ```
+
+  `warehouse` is required and **asserts** rather than selects: `--warehouse`/`--db`
+  or the per-customer directory chooses, and a file naming a different one stops
+  the run. Table names may not contain a dot. A dot in a *namespace* means
+  nesting, unambiguously. Version 1 files are refused with a message naming the
+  shape rather than a generic unknown-key error; there is no migration, because
+  nothing has shipped against it.
+
+- **`--catalog` is not a flag**, and will not be: it already means the engine's
+  catalog in `--trino-catalog`/`--spark-catalog`, and a Singer catalog file in
+  `from-catalog`. Use `--warehouse`, or its alias **`--db`**.
+
+- **`table-config generate` and `from-catalog` require `--warehouse`/`--db`.**
+  Without it they could emit a file that fails its own validation.
 
 - **`--token`, `--credential` and `--s3-secret-access-key` are removed.** A
   value on a command line is readable by every local user from `ps` or

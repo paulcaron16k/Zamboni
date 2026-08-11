@@ -14,6 +14,10 @@
 
 # --- catalog ---------------------------------------------------------------
 uri: https://lakekeeper.internal/catalog
+# The warehouse to maintain -- a *database*, in Postgres/Snowflake terms. The CLI
+# spells it --warehouse or --db. table-config.json also names a warehouse, but
+# that one asserts rather than selects: this is what chooses, and a config file
+# naming a different warehouse stops the run rather than being applied to it.
 warehouse: acme
 
 # --- engine ----------------------------------------------------------------
