@@ -105,11 +105,17 @@ Nothing in the MinIO + Lakekeeper stack compacts tables today:
 ## Try it: the HIMS discharge demo
 
 Five days of simulated hospital discharge ingestion, so you can watch small files
-accumulate and see what maintenance does about them.
+accumulate and see what maintenance does about them. Copy-on-Write (CoW) and
+Merge-on-Read (MoR) are selectable, the default is `mode cow` - which is not optimal for
+ingestion via frequent updates or transactional data. The Iceberg warehouse created is
+in data/healthims/iceberg_warehouse/ in namespace/schema healthims/ folder. The `iceberg_warehouse`
+folder is created _after_ the first `next-day` action.
 
 ```bash
 ./bin/demo clear
-./bin/demo next-day        # x5 -- each prints status; file counts climb
+./bin/demo mode cow        # Copy-on-Write is the default. Clear and repeat with "mode mor"
+                           # and time the next-day ingestion to see performance difference.
+./bin/demo next-day        # Repeat 5 times -- each prints status; file counts climb
 ./bin/demo query           # note "files scanned"
 ./bin/demo maintenance     # compact + drop dangling deletes + expire + remove orphans
 ./bin/demo query           # identical rows, far fewer files
@@ -195,6 +201,86 @@ and DuckDB both dispatch on the *entry's* content and read such a table correctl
 nothing would have failed -- but an engine that prunes on manifest content would apply no
 deletes at all. `zamboni/testing.py` supplies the missing writer, and a test asserts every
 manifest's content agrees with the files inside it.
+
+### Query it from the DuckDB CLI
+
+The demo writes real Iceberg tables, so anything that reads Iceberg can read them --
+including `duckdb` from a shell, with no Zamboni in the picture at all. That is worth
+seeing: it is what makes maintenance *worth* doing, and it is how you check that a
+compaction changed file counts and not answers.
+
+```console
+$ duckdb
+INSTALL iceberg; LOAD iceberg;
+
+-- The demo's local catalog is SQLite, which DuckDB cannot read, so point at the
+-- table directory. DuckDB refuses to guess the current metadata by default --
+-- globbing could pick up an uncommitted write -- and this opts in. Safe here
+-- because nothing else is writing to the demo warehouse; see below for the
+-- version that asks the catalog instead.
+SET unsafe_enable_version_guessing = true;
+
+CREATE VIEW hims_events AS
+  SELECT * FROM iceberg_scan('data/healthims/iceberg_warehouse/healthims/hims_events');
+```
+
+**Daily EVS turnaround** -- how long a room sits between the patient leaving and the bed
+being ready. Environmental Services cleans the room, and the metric is the gap between two
+events on the same `process_id`, one of which arrives after the discharge process has
+already reached its terminal state:
+
+```sql
+WITH out AS (
+    SELECT process_id, occurred_at AS left_at FROM hims_events
+    WHERE event_name = 'patient_displaced_discharged'
+), clean AS (
+    SELECT process_id, occurred_at AS ready_at FROM hims_events
+    WHERE event_name = 'bed_cleaned'
+)
+SELECT CAST(o.left_at AS DATE)                                    AS day,
+       COUNT(*)                                                   AS rooms,
+       ROUND(AVG(date_diff('minute', o.left_at, c.ready_at)), 1)  AS avg_turnaround_min,
+       MAX(date_diff('minute', o.left_at, c.ready_at))            AS worst_min
+FROM out o JOIN clean c USING (process_id)
+GROUP BY 1 ORDER BY 1;
+```
+
+```
+┌────────────┬───────┬────────────────────┬───────────┐
+│    day     │ rooms │ avg_turnaround_min │ worst_min │
+├────────────┼───────┼────────────────────┼───────────┤
+│ 2026-01-05 │     7 │               77.7 │       104 │
+│ 2026-01-06 │     9 │              104.3 │       140 │
+│ 2026-01-07 │     9 │               85.9 │       115 │
+│ 2026-01-08 │    10 │               92.6 │       113 │
+│ 2026-01-09 │     9 │               75.2 │       100 │
+└────────────┴───────┴────────────────────┴───────────┘
+```
+
+**Run it before and after `./bin/demo maintenance`.** The numbers do not move. Measured on
+the five-day demo: `hims_events` went from **60 live data files to 5** and the output of
+the query above was byte-identical either side. That is the whole claim in one comparison
+-- compaction, expiry and orphan removal change how the data is stored and never what it
+says. `./bin/demo query` runs this and three others for exactly that reason, and reports
+"files scanned" alongside, which *does* move.
+
+**Asking the catalog instead of guessing.** The version guess above is a convenience for a
+warehouse nobody else is writing to. The correct source of the current metadata is the
+catalog, which is the entire point of having one:
+
+```console
+$ python -c "
+from pyiceberg.catalog.sql import SqlCatalog
+c = SqlCatalog('healthims', uri='sqlite:///data/healthims/iceberg_catalog.db',
+               warehouse='file://data/healthims/iceberg_warehouse')
+print(c.load_table('healthims.hims_events').metadata_location)"
+file:///.../hims_events/metadata/00063-b90ffcd4-....metadata.json
+```
+
+Feed that path to `iceberg_scan()` and no guessing is involved. Against a REST catalog --
+`./bin/demo --catalog lakekeeper` -- DuckDB can attach the catalog directly with
+`ATTACH ... (TYPE ICEBERG)` and resolve tables by name, which is what a real deployment
+does.
 
 Requirements and domain model: [data/healthims/Demo_Requirements.md](data/healthims/Demo_Requirements.md).
 Event catalogue: [data/healthims/HIMS_Discharge_Process_Events.md](data/healthims/HIMS_Discharge_Process_Events.md).
