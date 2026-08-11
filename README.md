@@ -1,5 +1,8 @@
 # Zamboni
 
+[![CI](https://github.com/paulcaron16k/Zamboni/actions/workflows/ci.yml/badge.svg)](https://github.com/paulcaron16k/Zamboni/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 Iceberg table maintenance -- compaction, Z-order clustering, partition evolution,
 dangling-delete removal, manifest rewriting, snapshot expiry and orphan-file removal --
 **without needing Trino or Spark**. It can drive either Trino or Spark if you have one.
@@ -52,11 +55,11 @@ Read this before depending on it.
 - **One author.** Security response is best-effort rather than contractual
   ([SECURITY.md](SECURITY.md)), and there is no backport branch: fixes land on the latest
   `0.x`.
-- **CI is written and has never executed.** [.github/workflows/ci.yml](.github/workflows/ci.yml)
-  is complete and every command in it was verified locally, but this repository has had no
-  remote, so no job has ever run on a runner. There is deliberately **no CI badge** here: a
-  badge that has never run is a claim, not a result. Expect the first run to surface
-  something.
+- **CI runs, and the first run was green.** All six jobs passed on the first push to
+  GitHub -- including `dev-stack`, which brings up a real Lakekeeper, Postgres and MinIO and
+  runs the demo end to end, and `spark`, which builds a Spark Connect server with the
+  Iceberg runtime. The badge above is therefore a result rather than a claim, which is why
+  it was withheld until there was one.
 - **Verified against real infrastructure, though.** Every operation has been run against a
   live Lakekeeper + MinIO, and against real Trino 483 and Spark 4.0.4 servers. What is
   unverified is the *automation*, not the tool.

@@ -21,6 +21,18 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### Published
+
+- **The repository is public: [github.com/paulcaron16k/Zamboni](https://github.com/paulcaron16k/Zamboni).**
+  Created private, pushed, CI verified green, then flipped — nothing was visible
+  until it was known to build.
+
+- **CI has now run, and the first run was green.** All six jobs, including
+  `dev-stack` (a real Lakekeeper, Postgres and MinIO plus the demo end to end)
+  and `spark` (a built Spark Connect server with the Iceberg runtime). The CI
+  badge is in the README for the first time, because now it reports a result
+  rather than making a claim.
+
 ### Added
 
 - **`zamboni maintenance`** — one command that runs the six operations in the
