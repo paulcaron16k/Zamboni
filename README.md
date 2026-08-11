@@ -382,9 +382,10 @@ engine with, secrets handling, and the local engine's measured memory ceiling.
   warehouse per customer.
 - **[docs/tasks.md](docs/tasks.md)** — the ZMBNI backlog: what is done, what is left, and
   what is deliberately not being done.
-- **[docs/roadmap.md](docs/roadmap.md)** — the six features beyond `v0.1.0`, and why they are
-  sequenced as they are. The theme is to stop being one implementation: Trino and Spark can do
-  this work too, and Zamboni should be one option behind a common interface.
+- **[docs/roadmap.md](docs/roadmap.md)** — the six features planned beyond `v0.1.0`, five of
+  which shipped. Mostly a record now: what each was for, the evidence it was chosen on, and
+  the one place the sequencing was wrong. The remaining item is PyIceberg 0.12, blocked
+  upstream.
 - **[docs/engine-comparison.md](docs/engine-comparison.md)** — what Zamboni, Trino and Spark
   each can do, and the twelve places where the same-sounding operation differs.
 - **[docs/ice-keeper-comparison.md](docs/ice-keeper-comparison.md)** — against a deployed

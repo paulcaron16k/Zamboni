@@ -1,32 +1,52 @@
-# Roadmap
+# Roadmap — mostly delivered
 
-Six features beyond the delivered `v0.1.0`. This document defines *what* each one
-is and *why it is sequenced where it is*; the work items live in
-[tasks.md](tasks.md) as epics ZMBNI-11 … ZMBNI-16.
+**Five of the six features below shipped. One is blocked upstream.** This is now
+largely a record of a plan and how it turned out, kept for the reasoning rather
+than for the schedule: each feature says what it was *for*, and the evidence it
+was chosen on. If you want current status, [tasks.md](tasks.md) has it; if you
+want what to do next, there is exactly one answer and it is RM-1.
 
-**Status lives in tasks.md only.** There are deliberately no status columns here.
-Two places recording progress is two places to disagree, and this session has
-already spent time correcting counts that drifted between documents.
+| Feature | Epic | Outcome |
+|---|---|---|
+| RM-1 — PyIceberg 0.12 | ZMBNI-11 | **Open, blocked upstream.** Branch written and verified; see below |
+| RM-2 — Maintainer interface | ZMBNI-12 | Delivered 2026-08-03 |
+| RM-3 — Zamboni vs Trino vs Spark | ZMBNI-13 | Delivered 2026-08-03 — [engine-comparison.md](engine-comparison.md) |
+| RM-4 — Trino maintainer | ZMBNI-14 | Delivered 2026-08-04, verified against Trino 483 |
+| RM-5 — Spark maintainer | ZMBNI-15 | Delivered 2026-08-07, verified against Spark 4.0.4 |
+| RM-6 — Zamboni vs ice-keeper | ZMBNI-16 | Delivered 2026-08-03 — [ice-keeper-comparison.md](ice-keeper-comparison.md) |
+
+**Status still lives in tasks.md only.** The outcome column above is a pointer,
+not a second ledger: it records *that* something landed and when, and nothing
+about what remains inside it. Two places recording progress is two places to
+disagree.
 
 | | |
 |---|---|
-| Delivered | `v0.1.0` — compaction, ordering, evolution, reclamation, metadata hygiene, against PyIceberg 0.11.1 |
-| Theme | Stop being one implementation. Three engines can do this work; Zamboni should be one of them behind a common interface |
-| Delivery order | RM-3 + RM-6 → RM-2 → RM-4 → RM-1 → RM-5 |
+| Theme | Stop being one implementation. Three engines can do this work; Zamboni is now one of them behind a common interface |
+| Planned order | RM-3 + RM-6 → RM-2 → RM-4 → RM-1 → RM-5 |
+| Actual order | RM-3 + RM-6 + RM-2 → RM-4 → RM-5, with **RM-1 still open** |
 
-Feature RM-*n* maps to epic ZMBNI-1*n* — RM-1 is ZMBNI-11, RM-6 is ZMBNI-16.
+**The one place the plan was wrong is the interesting one.** RM-1 was sequenced
+fourth, ahead of RM-5, on the reasoning that it could proceed in parallel on a
+branch. It could, and did -- the branch exists and the migration is verified --
+but it cannot *land*, because 0.12 is not released in a usable state. The
+sequencing assumed the blocker was our capacity; it was somebody else's release.
+RM-5 moved up and shipped instead.
 
 ---
 
 ## What is already verified
 
 These were checked before writing this document, because a roadmap built on
-assumptions plans the wrong work. Each row says how it was established.
+assumptions plans the wrong work. Each row says how it was established, and rows
+that have since been overtaken say so rather than being quietly corrected --
+what a plan believed at the time is part of why it chose what it chose.
 
 | Fact | How | Consequence |
 |---|---|---|
-| PyIceberg 0.12 is **not released** — PyPI's latest is 0.11.1, with no rc | PyPI JSON API | RM-1 develops against the `../iceberg-python` checkout, not a version pin |
-| That checkout is on `main` at `154288fb` (2026-07-27), **397 commits** past `pyiceberg-0.11.1` | `git log` | Large surface for private-API drift — see RM-1 |
+| ~~PyIceberg 0.12 is **not released** — PyPI's latest is 0.11.1, with no rc~~ **Superseded 2026-08-11: `0.12.0rc1` is on PyPI; the latest *stable* is still 0.11.1** | PyPI JSON API | RM-1 still develops against the checkout, because rc1 carries a data-corruption defect — see below |
+| ~~That checkout is on `main` at `154288fb` (2026-07-27), **397 commits** past `pyiceberg-0.11.1`~~ **Now `32f036c5`, 19 commits past `pyiceberg-0.12.0rc1`** | `git log` | Large surface for private-API drift — and it drifted: two probes now key on symbols that moved (ZMBNI-1109) |
+| **`0.12.0rc1` corrupts a partitioned `upsert`**; main after rc1 does not | the 25-line reproduction in [upstream-0.12-upsert-regression.md](upstream-0.12-upsert-regression.md), run against both on 2026-08-11 | The `<0.12` cap lifts when 0.12 is released **with** the fix, not when 0.12 is released |
 | Trino has **no Z-order and no sort during `optimize`** | Trino Iceberg connector docs | A common interface cannot treat ordering as universally available |
 | Trino enforces **retention floors** (`iceberg.expire-snapshots.min-retention`, `remove-orphan-files.min-retention`, both default `7d`) | same | Zamboni's 5-day/3-day defaults are *rejected*, not honoured. Must fail at plan time |
 | Spark removes dangling deletes via the `remove-dangling-deletes` option on `rewrite_data_files`; `rewrite_position_delete_files` is a separate procedure that *compacts* delete files; Trino has neither | Iceberg Spark procedures docs, corrected by RM-3 | Dangling-delete removal is Spark-only, and Spark can do what *we* cannot. An earlier draft of this row attributed it to the wrong procedure |
@@ -278,7 +298,11 @@ per-capability recommendation to adopt, adapt, or decline.
 
 ---
 
-## Sequencing
+## Sequencing — as planned
+
+Kept as written. What actually happened is in the table at the top; the one
+divergence and its cause are noted there.
+
 
 ```
 RM-3  Trino/Spark analysis  ─┐
@@ -308,12 +332,15 @@ inside `LocalMaintainer`, with the interface pinning its observable behaviour.
 
 ## Open questions
 
-These need answers before the epic they belong to can be finished, and are
-recorded here rather than discovered mid-implementation:
+Recorded here rather than discovered mid-implementation. Three of the four are
+now answered; the answers are kept beside the questions because *what was
+uncertain at the time* is part of the record:
 
-1. **Does Zamboni support two PyIceberg lines at once?** RM-1 can either keep
-   0.11.1 working alongside 0.12 or move the floor. The probes make both
-   technically possible; the cost is a test matrix that doubles.
+1. **Does Zamboni support two PyIceberg lines at once?** Still open, and now the
+   only genuinely open question here. RM-1 can either keep 0.11.1 working
+   alongside 0.12 or move the floor. The probes make both technically possible;
+   the cost is a test matrix that doubles. It is a release-timing decision rather
+   than a technical one, which is why ZMBNI-1106 is deliberately unstarted.
 2. ~~**What does `--engine trino` do about `--yes`?**~~ **Answered by ZMBNI-1206.**
    Neither option in the original framing was taken. Where an engine cannot
    preview an operation, a run without `--yes` **refuses** — it does not execute,
@@ -321,9 +348,17 @@ recorded here rather than discovered mid-implementation:
    Refusing commits nothing, so *without `--yes`, nothing is committed* holds on
    every engine and still has no exceptions. The rule needed no weakening and no
    second opt-in; it needed the third option.
-3. **Does the dev stack grow a Trino and a Spark?** RM-4 and RM-5 need live
-   verification, and the existing stack pattern (shifted ports, `.env.sample`)
-   would extend to both — at a cost in start-up time for everyone.
-4. **Is the schedule/journal layer in scope at all?** RM-6 will surface it. It is
-   arguably a different product — a maintenance *service* rather than a
-   maintenance *tool* — and deciding that early avoids a scope argument later.
+3. ~~**Does the dev stack grow a Trino and a Spark?**~~ **Answered: both, each
+   behind its own compose profile so neither starts by default.** The cost
+   concern was real and the profiles are the answer to it -- Trino is a JVM and
+   the Spark image is 1.57GB, so nobody pays for either unless they ask. Spark is
+   a **Connect server** rather than a standalone master, which was not in the
+   original framing: it puts the JVM in the container, so `zamboni[spark-connect]`
+   is ~1.5MB of pure Python against pyspark's 434MB and the developer's Java
+   version stops being this project's problem.
+4. ~~**Is the schedule/journal layer in scope at all?**~~ **Answered: no, and
+   deliberately.** RM-6 surfaced it as predicted. Zamboni exits with a code and
+   something else decides when to run it -- cron, Airflow, systemd -- which is
+   why [devops.md](devops.md) argues against a loop inside the tool and why
+   `zamboni warehouses` generates a schedule rather than being one. The
+   maintenance *service* remains a different product.

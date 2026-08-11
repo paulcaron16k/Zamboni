@@ -286,8 +286,8 @@ Known and accepted:
 ## 6. Not in scope
 
 Out of scope **for `v0.1.0`, which is PyIceberg-only**. Two of these are limitations of that
-choice rather than of the operations, and [roadmap.md](roadmap.md) plans an engine that does
-not share them — Spark's `rewrite_position_delete_files` rewrites partially dangling delete
+choice rather than of the operations, and the Spark engine [roadmap.md](roadmap.md) planned
+-- since delivered -- does not share them — Spark's `rewrite_position_delete_files` rewrites partially dangling delete
 files (ZMBNI-1505). What follows is the scope of *this* implementation.
 
 - **Rewriting a partially dangling delete manifest** — blocked by
