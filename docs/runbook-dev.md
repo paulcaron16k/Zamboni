@@ -225,11 +225,11 @@ The dev stack's own README documents the two credential paths, the `s3://` vs
 
 Quote all three versions. Which operations this tool will even attempt is
 decided by probing the installed PyIceberg rather than by comparing version
-numbers, so "zamboni 0.1.0" alone does not identify a behaviour:
+numbers, so "zamboni 0.2.0" alone does not identify a behaviour:
 
 ```console
 $ zamboni --version
-zamboni 0.1.0 (pyiceberg 0.11.1, python 3.13.14)
+zamboni 0.2.0 (pyiceberg 0.11.1, python 3.13.14)
 $ zamboni doctor
 ```
 

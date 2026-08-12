@@ -345,13 +345,15 @@ surfaces whatever it surfaces.
 
 ## What is actually left
 
-Two kinds of remaining work: finishing `v0.1.0`'s loose end, and the roadmap.
+`v0.2.0` is cut. Three kinds of remaining work: one release step needing an account, the
+upstream blockers, and the roadmap's last feature.
 
-**In flight — ZMBNI-905.** The CI workflow exists and every command in it was run locally,
-but GitHub has never executed it: this repository has no remote. That is the single item
-standing between "tests pass on my machine" and "tests pass". `v0.1.0` is tagged; `1.0.0`
-waits on this going green and on one maintenance cycle against a warehouse we did not build,
-because "verified" is what a 1.0 claims. See [releasing.md §4](releasing.md).
+**In flight — ZMBNI-1808.** The `release.yml` workflow publishes `iceberg-zamboni` on a
+`v*.*.*` tag via trusted publishing, and refuses when the tag disagrees with
+`pyproject.toml`. Two steps remain and both need the PyPI account: register the pending
+publisher (project `iceberg-zamboni`, owner `paulcaron16k`, repo `Zamboni`, workflow
+`release.yml`, environment `pypi`), then push the tag. A PEP 541 request for the bare
+`zamboni` name is worth filing in parallel and not worth blocking on.
 
 **Blocked upstream — ZMBNI-604, 704, 705, 706.** No decision to make. Each carries either a
 capability probe or a named upstream limitation, and each lifts on its own when PyIceberg
@@ -359,27 +361,29 @@ grows the capability. They are tracked so nobody re-investigates from scratch. W
 that **PyIceberg 0.12 does not lift any of them** — verified against `main`, see ZMBNI-1105 —
 so they are not waiting on ZMBNI-11.
 
-**ZMBNI-507 is fixed.** Orphan removal refused nothing when another table shared this table's
-location, so another table's files were listed, found unreferenced by this one, and deleted —
-reproduced end to end before the fix. Found by ZMBNI-1601 comparing against ice-keeper, which
-guards exactly this. The fix is the fourth checked invariant in design.md §6.6. It shipped in
-`v0.1.0`, so the next release carries a **SAFETY** entry per
-[releasing.md §1](releasing.md).
+**Done since 0.1.0 — ZMBNI-905 and ZMBNI-18.** CI has executed, on GitHub, green: six jobs
+including a real Lakekeeper, Postgres and MinIO, and a built Spark Connect server. The
+repository is public at [github.com/paulcaron16k/Zamboni](https://github.com/paulcaron16k/Zamboni),
+in that order — pushed private, CI run, then flipped, because publishing a repo whose CI has
+never run invites an assumption we could not back.
 
-**Publication — ZMBNI-18.** Whether to open-source is decided; the licence is applied
-(Apache-2.0) and the rest is sequencing. Gated on ZMBNI-905, because publishing a repo whose
-CI has never run invites an assumption we cannot back. The order that resolves the
-chicken-and-egg: push **private**, let CI run, fix what it finds, then flip visibility.
+**What `1.0.0` still waits on.** Not CI any more; that argument is settled. One maintenance
+cycle against a warehouse we did not build, and a second user finding the sharp edges in
+`table-config.json` version 2, whose schema a 1.0 freezes. See [releasing.md §4](releasing.md).
+
+**ZMBNI-507 shipped as a SAFETY entry in `v0.2.0`.** Orphan removal refused nothing when
+another table shared this table's location, so another table's files were listed, found
+unreferenced by this one, and deleted — reproduced end to end before the fix, in shipped
+`v0.1.0`. Found by ZMBNI-1601 comparing against ice-keeper, which guards exactly this. The
+fix is the fourth checked invariant in design.md §6.6.
 
 **The roadmap — ZMBNI-11 … 16.** Six features, defined in [roadmap.md](roadmap.md). The theme
-is to stop being one implementation: three engines can do this work, and Zamboni should be one
-of them behind a common interface. Delivery order is ZMBNI-13 + ZMBNI-16 (analysis, together)
-→ ZMBNI-12 (the interface) → ZMBNI-14 (Trino) → ZMBNI-11 (0.12, parallel on a branch) →
-ZMBNI-15 (Spark). **The two analysis epics are done** —
-[engine-comparison.md](engine-comparison.md) and
-[ice-keeper-comparison.md](ice-keeper-comparison.md) — and between them they corrected three
-claims in roadmap.md and produced the defect above. ZMBNI-12 is next and is now specified
-rather than sketched: engine-comparison.md §6 lists six concrete requirements on it.
+was to stop being one implementation: three engines can do this work, and Zamboni should be
+one of them behind a common interface. **Five of the six are delivered** — the two analysis
+epics, the maintainer interface, Trino, and Spark — leaving only ZMBNI-11 (PyIceberg 0.12),
+which is blocked on somebody else's release rather than on capacity. The branch exists and
+the whole suite passes against `main` with the upstream fix applied; roadmap.md now reads as
+a record of a plan and how it turned out rather than as a schedule.
 
 **Closed as a decision — ZMBNI-605.** Splitting one partition across manifests would defeat
 the pruning that manifest regrouping exists to create, so it is cancelled rather than

@@ -52,20 +52,26 @@ in. They are refactored without ceremony. If that changes, it changes here first
 
 **Anything named with a leading underscore**, in this package or in PyIceberg.
 This tool drives PyIceberg's private snapshot producers on purpose (design.md
-§3), which is why `capabilities.py` probes structure rather than comparing
-versions. A PyIceberg upgrade that changes those internals is a compatibility
-matter, not a versioning one.
+§3), which is why `capabilities.py` probes the installed build rather than
+comparing versions — structurally where a symbol's presence settles the
+question, and *behaviourally* where it does not: the manifest-pruning hazard is
+decided by performing an overwrite on a transformed partition and counting the
+survivors, because the same private symbol exists on both the corrupting build
+and the fixed one (ZMBNI-1109). A PyIceberg upgrade that changes those internals
+is a compatibility matter, not a versioning one.
 
 **`src/himsdemo`.** The demo is a teaching aid that ships in the same wheel. It
 has no stability contract at all.
 
 ### The two version numbers
 
-`table-config.json` carries its own `version` field, currently `1`, and it is
+`table-config.json` carries its own `version` field, currently `2`, and it is
 **independent of the package version**. A config file does not need editing when
 Zamboni's minor number moves, and the config version bumps only when the file
 format changes in a way that cannot be read compatibly. Keeping them separate is
-what lets a fleet of pinned config files survive a tool upgrade.
+what lets a fleet of pinned config files survive a tool upgrade. It has moved
+once, in `0.2.0`, and the two numbers moved independently exactly as intended:
+`1` -> `2` added the namespace level, which no package version could have implied.
 
 ---
 
@@ -75,9 +81,14 @@ One literal, in `pyproject.toml`:
 
 ```toml
 [project]
-name = "zamboni"
-version = "0.1.0"
+name = "iceberg-zamboni"
+version = "0.2.0"
 ```
+
+**The distribution is `iceberg-zamboni`; the import is `zamboni`.** The bare name
+is taken on PyPI. `__version__` reads the *distribution* metadata, so the rename
+had to reach that lookup too -- it fails soft, reporting `0+unknown`, which would
+have degraded `--version` silently in exactly the case where a version matters.
 
 Everything else derives from it. `zamboni.__version__` reads the installed
 distribution metadata via `importlib.metadata`, so `zamboni --version` reports
@@ -85,13 +96,13 @@ what is actually installed rather than what a source file claims:
 
 ```console
 $ zamboni --version
-zamboni 0.1.0 (pyiceberg 0.11.1, python 3.13.14)
+zamboni 0.2.0 (pyiceberg 0.11.1, python 3.13.14)
 ```
 
 All three, because the first alone does not identify behaviour. Which operations
 this tool will attempt is decided by probing PyIceberg, so the same Zamboni
 refuses equality deletes against one PyIceberg and reads them against another —
-a bug report quoting only `zamboni 0.1.0` is missing the deciding fact. Python is
+a bug report quoting only `zamboni 0.2.0` is missing the deciding fact. Python is
 there because `bin/` pins an interpreter.
 
 `test_version.py` asserts the declared version, the installed metadata, the
@@ -132,7 +143,7 @@ git push && git push --tags
 ```
 
 **Step 2's `uv sync` is not housekeeping.** `uv.lock` carries its own
-`version = "0.1.0"` for this project, and CI runs `uv sync --frozen` — which
+`version` for this project, and CI runs `uv sync --frozen` — which
 fails on a lock that disagrees with `pyproject.toml`. Skipping it breaks the build
 rather than passing quietly.
 
@@ -153,19 +164,43 @@ command rather than reading it.
 `[0.2.0]` without the `v`. The prefix is there so `git tag` output is
 unambiguous against any future non-release tag.
 
-**No PyPI publication.** Not a decision to defer — this is consumed from a git
-checkout via `uv sync --frozen`, and the two entry points people actually run are
-the PEP 723 scripts in `bin/`, which reference the project as an editable path
-install. Publishing would add a distribution channel nobody uses. If that
-changes, `hatchling` is already the backend and `uv build` already works.
+**Pushing the tag is the publication.** `.github/workflows/release.yml` triggers
+on `v*.*.*` and nothing else: it re-runs the suite against the tagged tree rather
+than trusting the run from the commit the tag points at, builds, `twine check`s,
+and uploads to PyPI as `iceberg-zamboni`. There is deliberately no
+`workflow_dispatch` — a release that can be fired without a tag is one nobody can
+reconstruct later. So step 5 is the point of no return, and everything before it
+is reversible.
+
+**The tag must agree with `pyproject.toml`,** and the workflow refuses when it
+does not. This is the one guard worth having: a `v0.3.0` tag publishing `0.2.0`
+cannot be corrected, because **a version number can never be reused on PyPI, even
+after the file is deleted**. The whole number is burned.
+
+**Credentials: there are none.** Publication uses trusted publishing — PyPI mints
+a short-lived credential from GitHub's OIDC identity for this repository,
+workflow and environment, so there is no long-lived token in the repository
+settings to leak, rotate or forget. It needs a one-time setup on PyPI (Publishing
+-> pending publisher for `iceberg-zamboni`, owner `paulcaron16k`, repo `Zamboni`,
+workflow `release.yml`, environment `pypi`) and nothing afterwards. Until that
+exists the publish job fails at the upload — after `verify` and `build` have
+passed, and without consuming the version.
+
+**`bin/` is not what PyPI ships,** which has already cost one bug. The PEP 723
+scripts reference the project as an *editable path install*; the wheel is built
+from the same `pyproject.toml` but exercises none of that. The rename in `0.2.0`
+broke both `bin/` executables while the wheel installed and ran perfectly
+(ZMBNI-1810). Step 4 exists because CI checks `bin/` is not stale; it does not
+check that `bin/` still works, so run one of them.
 
 ---
 
-## 4. Why the first release is 0.1.0 and not 1.0.0
+## 4. Why this is 0.2.0 and not 1.0.0
 
-`v0.1.0` is tagged. It could have been `1.0.0` — the scope is delivered and every
-operation has been verified against a live Lakekeeper and MinIO — and it
-deliberately is not, for one reason and two specifics.
+`v0.1.0` and `v0.2.0` are tagged. Either could have been `1.0.0` — the scope is
+delivered, three engines are implemented, and every operation has been verified
+against a live Lakekeeper and MinIO — and deliberately was not, for one reason
+and two specifics.
 
 **The reason is asymmetry.** `0.x` costs nothing: it already permits breaking
 changes, and `1.0.0` can follow at any time. A promise cannot be withdrawn. Cut
@@ -173,17 +208,24 @@ changes, and `1.0.0` can follow at any time. A promise cannot be withdrawn. Cut
 be either `2.0.0` or a quiet slip into a minor release — and the second of those
 makes this document untrue, which is worse than a low version number.
 
-**CI has never executed.** The repository has no remote, so every command in
-`.github/workflows/ci.yml` has been run locally: one machine, one Python, one live
-Lakekeeper. `1.0.0` reads as "verified"; the honest claim today is narrower.
-Tracked as ZMBNI-905.
+0.2.0 is what that argument looks like when it is not free. Its BREAKING section
+runs to seven entries — a distribution rename, `table-config.json` version 2,
+secrets removed as command-line flags — every one of which a 1.0 would have had
+to either carry forward or break a promise to make. `0.x` is what allowed them to
+be fixed rather than lived with.
+
+**CI has executed, and this argument is settled.** It ran green on GitHub across
+six jobs, including a real Lakekeeper, Postgres and MinIO, and a built Spark
+Connect server (ZMBNI-905). `1.0.0` reads as "verified", and that part of the
+claim is now backed.
 
 **The parts a 1.0 locks hardest have had one author.** The `table-config.json`
-schema freezes its `version: 1` the moment a 1.0 tool depends on it, and config
-schemas are where a second user finds the sharp edges. The defaults deciding what
-gets deleted — §1 argues these are public API — were chosen against a single
-five-day dataset; `older_than_days: 3` is Iceberg's own number, but nobody has yet
-run this against a warehouse whose longest compaction we did not also write.
+schema freezes its `version: 2` the moment a 1.0 tool depends on it, and config
+schemas are where a second user finds the sharp edges — that number moved once
+already, in this release. The defaults deciding what gets deleted — §1 argues
+these are public API — were chosen against a single five-day dataset;
+`older_than_days: 3` is Iceberg's own number, but nobody has yet run this against
+a warehouse whose longest compaction we did not also write.
 
-**What 1.0.0 waits on:** a green CI run, and one maintenance cycle against a
-warehouse we did not build.
+**What 1.0.0 waits on:** one maintenance cycle against a warehouse we did not
+build, and a second user on the config schema.

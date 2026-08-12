@@ -27,7 +27,7 @@ dropping inapplicable ones. Both are recorded in §3 and §6.
 
 ## 1. The three surfaces
 
-### Zamboni (v0.1.0, PyIceberg 0.11.1)
+### Zamboni (v0.2.0, PyIceberg 0.11.1)
 
 Six mutating verbs plus `describe`, `plan`, `doctor`, `engines` and
 `table-config`. The shape of the surface is the difference worth noting: Trino

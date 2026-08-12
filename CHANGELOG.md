@@ -21,6 +21,20 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-12
+
+**Three engines, a public repository, and a name on PyPI.** 0.1.0 was one
+maintainer over PyIceberg; this release adds Trino and Spark behind the same six
+verbs and the same `table-config.json`, makes `maintenance` a single command an
+application or a cron line can call, and publishes the result as
+`iceberg-zamboni`.
+
+The BREAKING section is longer than a 0.x release would like. Most of it is the
+cost of those two facts: a distribution rename, a config file that had to grow a
+namespace level once one warehouse was not the only shape, and secrets that had
+to stop being command-line flags before anyone's process table was the place
+they lived. Each entry names what to change.
+
 ### Published
 
 - **The repository is public: [github.com/paulcaron16k/Zamboni](https://github.com/paulcaron16k/Zamboni).**

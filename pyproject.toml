@@ -10,7 +10,7 @@ build-backend = "hatchling.build"
 # unique. `iceberg-zamboni` rather than `zamboni-iceberg` so it sorts beside the
 # other `iceberg-*` packages. See ZMBNI-1808.
 name = "iceberg-zamboni"
-version = "0.1.0"
+version = "0.2.0"
 description = "Iceberg table maintenance -- compaction, Z-order, partition evolution, snapshot expiry and orphan-file removal -- without needing Trino or Spark"
 readme = "README.md"
 license = "Apache-2.0"
