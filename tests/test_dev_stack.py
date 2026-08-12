@@ -443,7 +443,7 @@ def test_the_demo_runs_on_the_dev_stack(demo_env, capsys):
 
 
 def test_the_demo_defaults_to_sqlite_with_no_stack(tmp_path, monkeypatch):
-    """`./bin/demo` must keep working with nothing running and nothing set."""
+    """`./bin/zamboni-demo` must keep working with nothing running and nothing set."""
     from himsdemo import catalogs
     from himsdemo.state import DemoState
 

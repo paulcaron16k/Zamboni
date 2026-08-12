@@ -147,7 +147,7 @@ def run(con, query: Query, tables: dict[str, Table]) -> QueryResult:
     if missing:
         raise KeyError(
             f"{query.title!r} reads {missing}, which do not exist yet -- "
-            "run './bin/demo next-day' first"
+            "run './bin/zamboni-demo next-day' first"
         )
     used = {name: tables[name] for name in query.reads}
     data_files, delete_files = _files_read(used.values())

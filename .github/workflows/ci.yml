@@ -68,7 +68,7 @@ jobs:
       - run: uv run --python ${{ matrix.python }} pytest -q --ignore=tests/test_dev_stack.py
 
   executables:
-    # bin/zamboni and bin/demo are PEP 723 scripts that reference the project as
+    # bin/zamboni and bin/zamboni-demo are PEP 723 scripts that reference the project as
     # an editable path install. Two bugs have already come from that path: one
     # absolute (broke on directory rename) and one non-editable (ran stale code).
     # Both were only visible when running from outside the project directory.
@@ -205,11 +205,11 @@ jobs:
           ZAMBONI_URI: http://localhost:8182/catalog
           ZAMBONI_WAREHOUSE: zamboni
         run: |
-          ./bin/demo --catalog lakekeeper clear
-          ./bin/demo --catalog lakekeeper next-day
-          ./bin/demo --catalog lakekeeper maintenance --reclaim-now
-          ./bin/demo --catalog lakekeeper query
-          ./bin/demo --catalog lakekeeper clear
+          ./bin/zamboni-demo --catalog lakekeeper clear
+          ./bin/zamboni-demo --catalog lakekeeper next-day
+          ./bin/zamboni-demo --catalog lakekeeper maintenance --reclaim-now
+          ./bin/zamboni-demo --catalog lakekeeper query
+          ./bin/zamboni-demo --catalog lakekeeper clear
 
       - name: Stack logs
         if: failure()

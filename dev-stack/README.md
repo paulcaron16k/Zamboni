@@ -16,9 +16,9 @@ export ZAMBONI_WAREHOUSE=zamboni
 Then, from the project root:
 
 ```bash
-./bin/demo --catalog lakekeeper clear
-./bin/demo --catalog lakekeeper next-day
-./bin/demo --catalog lakekeeper maintenance --reclaim-now
+./bin/zamboni-demo --catalog lakekeeper clear
+./bin/zamboni-demo --catalog lakekeeper next-day
+./bin/zamboni-demo --catalog lakekeeper maintenance --reclaim-now
 uv run pytest tests/test_dev_stack.py        # 12 tests; skipped if the stack is down
 ```
 

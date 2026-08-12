@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""`./bin/demo` -- the HIMS discharge maintenance demo.
+"""`./bin/zamboni-demo` -- the HIMS discharge maintenance demo.
 
 The intended arc is ingest -> status -> query -> maintenance -> status -> query,
 with the developer free to inspect the catalog in between. Commands that change
@@ -39,7 +39,7 @@ DOCS_URL = "https://github.com/paulcaron16k/Zamboni/tree/main/data/healthims"
 
 
 def default_inputs() -> Path:
-    """Where the demo reads from. A checkout wins, so `./bin/demo` in a working
+    """Where the demo reads from. A checkout wins, so `./bin/zamboni-demo` in a working
     tree uses the files you can edit rather than a stale installed copy."""
     return _CHECKOUT_INPUTS if _CHECKOUT_INPUTS.is_dir() else _PACKAGED_INPUTS
 
@@ -47,7 +47,7 @@ def default_inputs() -> Path:
 def default_root() -> Path:
     """Where the demo writes.
 
-    In a checkout, the data directory, which is what `./bin/demo` has always
+    In a checkout, the data directory, which is what `./bin/zamboni-demo` has always
     done and what the .gitignore already expects. Installed, `./zamboni-demo` in
     the current directory -- visible, removable, and emphatically not inside
     site-packages, which is read-only for a reason and shared between projects.
@@ -165,13 +165,13 @@ def _has_catalog(state: DemoState, catalog) -> bool:
 
 def _print_status(state: DemoState, catalog) -> None:
     if not _has_catalog(state, catalog):
-        print("\n  No tables yet -- run './bin/demo next-day'.\n")
+        print("\n  No tables yet -- run './bin/zamboni-demo next-day'.\n")
         return
 
     session, schema, config, tables = _open(state, catalog, create=False)
     try:
         if not tables:
-            print("\n  No tables yet -- run './bin/demo next-day'.\n")
+            print("\n  No tables yet -- run './bin/zamboni-demo next-day'.\n")
             return
         collected = [
             stats.collect(tables[d.name], config) for d in schema.tables if d.name in tables
@@ -215,7 +215,7 @@ def _mode(state: DemoState, args: argparse.Namespace) -> int:
     if state.days_ingested > 0:
         print(
             f"refusing to switch to {args.value}: {state.days_ingested} day(s) already "
-            f"ingested as {state.write_mode}.\nRun './bin/demo clear' first.",
+            f"ingested as {state.write_mode}.\nRun './bin/zamboni-demo clear' first.",
             file=sys.stderr,
         )
         return 2
@@ -239,7 +239,7 @@ def _next_day(state: DemoState, args: argparse.Namespace) -> int:
         # the resulting file counts would measure the crash, not the write mode.
         print(
             f"Day {state.ingesting_day} was interrupted mid-ingest and is partly loaded.\n"
-            "Run './bin/demo clear' and start again -- replaying it would distort "
+            "Run './bin/zamboni-demo clear' and start again -- replaying it would distort "
             "the file counts this demo reports.",
             file=sys.stderr,
         )
@@ -270,7 +270,7 @@ def _status(state: DemoState, args: argparse.Namespace) -> int:
 def _maintenance(state: DemoState, args: argparse.Namespace) -> int:
     catalog = args.demo_catalog
     if state.days_ingested == 0 or not _has_catalog(state, catalog):
-        print("nothing ingested yet -- run './bin/demo next-day' first")
+        print("nothing ingested yet -- run './bin/zamboni-demo next-day' first")
         return 0
 
     from zamboni import TableCompactor
@@ -375,7 +375,7 @@ def _indent(text: str, width: int) -> None:
 def _query(state: DemoState, args: argparse.Namespace) -> int:
     catalog = args.demo_catalog
     if state.days_ingested == 0 or not _has_catalog(state, catalog):
-        print("nothing ingested yet -- run './bin/demo next-day' first")
+        print("nothing ingested yet -- run './bin/zamboni-demo next-day' first")
         return 0
 
     session, _schema, _config, tables = _open(state, catalog, create=False)

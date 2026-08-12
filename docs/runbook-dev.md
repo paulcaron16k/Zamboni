@@ -64,7 +64,7 @@ zamboni remove-orphans          your.table --table-config c.json --yes
 | `expire` | Drops the old snapshots, which is the only thing that unreferences the superseded files. Deletes exactly the difference |
 | `remove-orphans` | Last, sweeping what nothing references: abandoned writes, and metadata versions dropped from the log |
 
-`./bin/demo maintenance` runs exactly this sequence — `src/himsdemo/cli.py` is the
+`./bin/zamboni-demo maintenance` runs exactly this sequence — `src/himsdemo/cli.py` is the
 worked example, and the two are kept in the same order deliberately.
 
 **The step most often left out is `expire`.** Without it, compaction and manifest

@@ -142,18 +142,18 @@ zamboni-demo maintenance
 zamboni-demo query           # identical rows, far fewer files
 ```
 
-**From a clone**, `./bin/demo` is the same program and keeps its state in
+**From a clone**, `./bin/zamboni-demo` is the same program and keeps its state in
 `data/healthims/`:
 
 ```bash
-./bin/demo clear
-./bin/demo mode cow        # Copy-on-Write is the default. Clear and repeat with "mode mor"
+./bin/zamboni-demo clear
+./bin/zamboni-demo mode cow        # Copy-on-Write is the default. Clear and repeat with "mode mor"
                            # and time the next-day ingestion to see performance difference.
-./bin/demo next-day        # Repeat 5 times -- each prints status; file counts climb
-./bin/demo query           # note "files scanned"
-./bin/demo maintenance     # compact + drop dangling deletes + expire + remove orphans
-./bin/demo query           # identical rows, far fewer files
-./bin/demo next-day        # "No More Data"
+./bin/zamboni-demo next-day        # Repeat 5 times -- each prints status; file counts climb
+./bin/zamboni-demo query           # note "files scanned"
+./bin/zamboni-demo maintenance     # compact + drop dangling deletes + expire + remove orphans
+./bin/zamboni-demo query           # identical rows, far fewer files
+./bin/zamboni-demo next-day        # "No More Data"
 ```
 
 The employees table is deliberately included as a control: a full daily replace leaves
@@ -212,7 +212,7 @@ The `on disk` line above counts parquet only, to stay comparable with `data file
 why it reports zero unreferenced. Superseded and unreferenced are different problems with
 different owners: expiry and orphan removal respectively.
 
-`./bin/demo maintenance --reclaim-now` lifts both. Storage then falls to exactly what is
+`./bin/zamboni-demo maintenance --reclaim-now` lifts both. Storage then falls to exactly what is
 live -- 120 parquet files to 1, with all 44 rows intact:
 
 ```
@@ -223,7 +223,7 @@ on disk       1      total    7.0KiB   0 superseded, 0 unreferenced
 That flag is a demo affordance, not a recommendation: the age guard is what stops orphan
 removal deleting a file another writer has written but not yet committed.
 
-`./bin/demo mode mor` replays the same five days as a merge-on-read table, where updates
+`./bin/zamboni-demo mode mor` replays the same five days as a merge-on-read table, where updates
 land as position deletes instead of rewrites. Those delete files are **written directly to
 simulate what Spark or Flink would emit** -- PyIceberg's `delete()` and `upsert()` are both
 copy-on-write, so it cannot produce them. The demo says so in its own output.
@@ -307,11 +307,11 @@ GROUP BY 1 ORDER BY 1;
 The SQL is the demo's own -- `src/himsdemo/queries.py` runs this exact statement -- so the
 README and the demo cannot drift into computing different things under one name.
 
-**Run it before and after `./bin/demo maintenance`.** The numbers do not move. Measured on
+**Run it before and after `./bin/zamboni-demo maintenance`.** The numbers do not move. Measured on
 the five-day demo: `hims_events` went from **60 live data files to 5**, and the output
 above was byte-identical either side, once through the pre-maintenance metadata pointer and
 once through the new one. That is the whole claim in one comparison -- compaction, expiry
-and orphan removal change how the data is stored and never what it says. `./bin/demo query`
+and orphan removal change how the data is stored and never what it says. `./bin/zamboni-demo query`
 runs this and three others for exactly that reason, and reports "files scanned" alongside,
 which *does* move.
 
@@ -329,7 +329,7 @@ directory can pick up a file a writer has not committed yet. It is fine against 
 warehouse, which nothing else is writing to, and it is not how you should read a live
 table.
 
-**Against a REST catalog** -- `./bin/demo --catalog lakekeeper` -- none of this applies:
+**Against a REST catalog** -- `./bin/zamboni-demo --catalog lakekeeper` -- none of this applies:
 DuckDB attaches the catalog with `ATTACH ... (TYPE ICEBERG)` and resolves tables by name,
 which is what a real deployment does.
 
@@ -490,7 +490,7 @@ cd dev-stack && docker compose up -d && uv run bootstrap.py
 
 export ZAMBONI_URI=http://localhost:8182/catalog
 export ZAMBONI_WAREHOUSE=zamboni
-./bin/demo --catalog lakekeeper next-day        # the demo, on Lakekeeper and MinIO
+./bin/zamboni-demo --catalog lakekeeper next-day        # the demo, on Lakekeeper and MinIO
 uv run pytest tests/test_dev_stack.py          # skipped when the stack is down
 ```
 

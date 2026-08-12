@@ -159,7 +159,7 @@ usable at all — a probe rather than a version comparison, so it stays true
 across upgrades.
 
 
-`zamboni describe` and `./bin/demo status` report these. Rules of thumb, with the
+`zamboni describe` and `./bin/zamboni-demo status` report these. Rules of thumb, with the
 reasoning so you can adapt them:
 
 | Signal | Concerning when | Why |

@@ -272,6 +272,15 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **`bin/zamboni` and `bin/demo` were broken by the distribution rename.** They
+  embed the project as a path dependency, and uv refused it: *"Package metadata
+  name `iceberg-zamboni` does not match given name `zamboni`"*. Testing the wheel
+  had not caught it, because the wheel is not what `bin/` builds.
+  `scripts/build-executable.py` duplicated `[project.scripts]` and hardcoded the
+  distribution name in `[tool.uv.sources]`; both now come from
+  `pyproject.toml`. `bin/demo` is consequently **`bin/zamboni-demo`**, matching
+  the console script a `pip install` puts on your PATH.
+
 - **`zamboni-demo` shipped as a command that could not run.** It resolved the
   demo's input data relative to the source tree, so an installed copy died on an
   unhandled `FileNotFoundError` pointing inside `site-packages`, and no data was
