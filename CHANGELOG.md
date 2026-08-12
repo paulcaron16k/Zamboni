@@ -345,6 +345,16 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### BREAKING
 
+- **The distribution is now `iceberg-zamboni`.** The import is still `zamboni`
+  and the repository is still `Zamboni`; only the PyPI name changes, because
+  `zamboni` there is a dormant registration by an unrelated project. Install
+  with `pip install "iceberg-zamboni[s3,sql]"`.
+
+- **The `demo` console script is now `zamboni-demo`.** Installing the package
+  put a bare `demo` on the user's PATH, which no library should claim globally —
+  and the collision would have been silent, with whichever package installed
+  last winning. `./bin/demo` inside the repository is unchanged.
+
 - **`table-config.json` is version 2: warehouse -> namespace -> table.** The file
   now has the shape every data engineer already has — an Iceberg warehouse is a
   Postgres/Snowflake **database**, a namespace is a **schema** — instead of a

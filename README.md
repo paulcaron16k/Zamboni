@@ -8,7 +8,7 @@ dangling-delete removal, manifest rewriting, snapshot expiry and orphan-file rem
 **without needing Trino or Spark**. It can drive either Trino or Spark if you have one.
 
 ```bash
-pipx install git+https://github.com/paulcaron16k/Zamboni    # not on PyPI yet -- see Install
+pipx install iceberg-zamboni       # the distribution name; you still `import zamboni`
 # Copy zamboni.yml.sample to $HOME/.zamboni.yml and edit
 cat ~/.zamboni.yml
 zamboni doctor                      # is this PyIceberg build usable?
@@ -23,26 +23,32 @@ numbers. This README is the *why* -- the evidence behind the design decisions.
 
 **Never into your system Python.** Pick by what you want:
 
-**Not on PyPI yet.** Install from the repository until it is. Note that the name `zamboni`
-on PyPI belongs to an unrelated NHL scraper, so `pip install zamboni` fetches somebody
-else's package -- the distribution name here will have to differ, and that decision has not
-been made.
+**The distribution is `iceberg-zamboni`; the import is `zamboni`.** They differ because
+`zamboni` on PyPI is a dormant registration by an unrelated project. Only the distribution
+name has to be globally unique, and the mismatch is ordinary — `beautifulsoup4` imports as
+`bs4`.
 
 **The CLI, isolated — recommended.** `pipx` gives it its own virtual environment and puts
 `zamboni` on your PATH:
 
 ```bash
-pipx install "git+https://github.com/paulcaron16k/Zamboni#egg=zamboni[s3,sql]"
-uv tool install --from "git+https://github.com/paulcaron16k/Zamboni" zamboni   # uv equivalent
+pipx install "iceberg-zamboni[s3,sql]"
+uv tool install "iceberg-zamboni[s3,sql]"     # the uv equivalent
 ```
 
 **The library, in your project's environment.** Activate a virtual environment first:
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
-pip install "zamboni[s3,sql] @ git+https://github.com/paulcaron16k/Zamboni"
+pip install "iceberg-zamboni[s3,sql]"
 
-uv add "zamboni[s3,sql] @ git+https://github.com/paulcaron16k/Zamboni"   # no activation needed
+uv add "iceberg-zamboni[s3,sql]"              # the uv equivalent; no activation needed
+```
+
+**From the repository**, for the unreleased tip:
+
+```bash
+pipx install "git+https://github.com/paulcaron16k/Zamboni"
 ```
 
 Extras: `s3` for object storage, `sql` for a local SQLite catalog, `bucket` for
@@ -75,9 +81,9 @@ Read this before depending on it.
 - **PyIceberg is capped at `<0.12`** and that is a safety measure, not conservatism --
   see [below](#why-pyiceberg-is-capped-at-012). TL;DR significant new functionality needs
   verification, and on current PyIceberg main branch there are failures.
-- **Not on PyPI yet.** Install from the repository; see [Install](#install). The
-  name `zamboni` is taken there by an unrelated project, so the distribution name
-  will have to differ.
+- **On PyPI as `iceberg-zamboni`**, imported as `zamboni`. See
+  [Install](#install); the names differ because `zamboni` on PyPI is a dormant
+  registration by an unrelated project.
 
 ## What it is, and what it is not
 
@@ -555,7 +561,7 @@ With `./zamboni.yml` and `./.env` present that is the whole cron line — see
 wrapper and how a multi-tenant fleet is scheduled.
 
 Each mutating verb takes `--engine` (default `local`, the PyIceberg one). **Trino works**
-(`pip install zamboni[trino]`, then `--engine trino --trino-host …`) for five of the six
+(`pip install "iceberg-zamboni[trino]"`, then `--engine trino --trino-host …`) for five of the six
 operations; Spark is declared but not yet implemented. `zamboni engines` reports exactly what
 each one does and does not do, which is worth reading before planning a migration —
 particularly that Trino cannot Z-order, so only your leading `sorted_by` column gets file

@@ -52,7 +52,12 @@ from .tableconfig import Retention, TableConfig, TableConfigError, TableSettings
 # disagree with the wheel it came from -- the failure mode of a hand-maintained
 # __version__ is that it goes stale precisely when it matters, in a bug report.
 try:
-    __version__ = _distribution_version("zamboni")
+    # The *distribution* name, which is not the import name: `zamboni` on PyPI
+    # belongs to an unrelated project. Getting this wrong fails soft --
+    # PackageNotFoundError below reports "0+unknown" -- so it would degrade
+    # `zamboni --version` silently, in precisely the situation where a version
+    # number is the thing being asked for. Pinned by test_version.py.
+    __version__ = _distribution_version("iceberg-zamboni")
 except PackageNotFoundError:  # pragma: no cover - importable but not installed
     __version__ = "0+unknown"
 

@@ -3,9 +3,15 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "zamboni"
+# The distribution name differs from the import name (`zamboni`) and from the
+# repository name (`Zamboni`), because `zamboni` on PyPI is a dormant
+# registration by an unrelated project. All three are independent by design --
+# `beautifulsoup4` imports as `bs4` -- and only this one has to be globally
+# unique. `iceberg-zamboni` rather than `zamboni-iceberg` so it sorts beside the
+# other `iceberg-*` packages. See ZMBNI-1808.
+name = "iceberg-zamboni"
 version = "0.1.0"
-description = "Iceberg table maintenance (compaction) for MinIO + Lakekeeper, without Trino or Spark"
+description = "Iceberg table maintenance -- compaction, Z-order, partition evolution, snapshot expiry and orphan-file removal -- without needing Trino or Spark"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -64,7 +70,11 @@ spark-connect = ["pyspark-client>=4.0,<5"]
 
 [project.scripts]
 zamboni = "zamboni.cli:main"
-demo = "himsdemo.cli:main"
+# Namespaced, not `demo`. Installing this put a bare `demo` on the user's PATH,
+# which is a name no library has any business claiming globally -- and the
+# collision would be silent, with whichever package installed last winning.
+# Inside the repository `./bin/demo` is unchanged.
+zamboni-demo = "himsdemo.cli:main"
 
 [dependency-groups]
 dev = [
@@ -73,7 +83,7 @@ dev = [
     "pytest>=8",
     "python-dotenv>=1.2.2",
     "ruff>=0.6",
-    "zamboni[bucket,sql,s3,trino]",
+    "iceberg-zamboni[bucket,sql,s3,trino]",
     # Matched to the dev stack's server, not to the extra's range. Iceberg 1.11
     # ships a Spark runtime for 4.0 and no later minor, so the server is 4.0.x;
     # pinning the client to the same minor means the dev-stack tests exercise a

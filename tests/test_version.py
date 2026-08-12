@@ -51,7 +51,7 @@ def test_the_package_reports_the_declared_version():
     this keeps passing until the next bump and then fails -- which is the point.
     """
     assert zamboni.__version__ == declared_version()
-    assert distribution_version("zamboni") == declared_version()
+    assert distribution_version("iceberg-zamboni") == declared_version()
 
 
 def test_the_version_banner_names_all_three_versions():

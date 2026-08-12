@@ -508,8 +508,8 @@ get_maintainer("spark")(session, {
 })
 ```
 
-For Spark, install `zamboni[spark-connect]` (~1.5MB, pure Python) rather than
-`zamboni[spark]` (~434MB and a JVM). The two are mutually exclusive: both
+For Spark, install `iceberg-zamboni[spark-connect]` (~1.5MB, pure Python) rather than
+`iceberg-zamboni[spark]` (~434MB and a JVM). The two are mutually exclusive: both
 provide the `pyspark` package.
 
 ### Iterating customer warehouses
@@ -615,7 +615,7 @@ The home-gamer path, and a perfectly good administrator path for a single
 warehouse. No cluster, no JVM, one command.
 
 ```bash
-pip install "zamboni[s3,sql]"
+pip install "iceberg-zamboni[s3,sql]"
 ```
 
 ### Setup, once
@@ -799,7 +799,7 @@ all. The alternative, a local `SparkSession`, starts a driver JVM in the cron
 process and makes your Java version this tool's problem.
 
 ```bash
-pip install "zamboni[spark-connect]"
+pip install "iceberg-zamboni[spark-connect]"
 ```
 
 ```bash
