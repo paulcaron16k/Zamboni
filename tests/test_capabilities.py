@@ -15,7 +15,9 @@ def test_probes_the_installed_build():
     # Every probe must resolve to a real bool, not None or a truthy object --
     # a probe that silently fails open would defeat the whole mechanism.
     for field in dataclasses.fields(caps):
-        if field.name == "version":
+        # `version` is a string and `pruning_evidence` records *how* a probe was
+        # settled rather than being one.
+        if field.name in ("version", "pruning_evidence"):
             continue
         assert isinstance(getattr(caps, field.name), bool), field.name
 
@@ -158,3 +160,95 @@ def test_doctor_reports_the_installed_version_and_every_probe():
         if field.name == "version":
             continue
         assert str(getattr(caps, field.name)) in text, f"{field.name} missing from doctor output"
+
+
+# -- the pruning probe is behavioural, not name-based (ZMBNI-1109) --------
+
+
+def test_a_build_that_does_not_prune_needs_no_probe():
+    """0.11.1 is every current user, and pays nothing for this.
+
+    The expensive check exists for a hazard that only arrives with pruning, so
+    a build without pruning short-circuits before touching the filesystem.
+    """
+    from zamboni.capabilities import _derivation_is_correct
+
+    safe, evidence = _derivation_is_correct(prunes=False)
+
+    assert safe
+    assert "not applicable" in evidence
+
+
+def test_a_pruning_build_is_settled_by_observation(monkeypatch):
+    from zamboni import capabilities
+
+    monkeypatch.setattr(capabilities, "_pruning_behaves", lambda: True)
+    safe, evidence = capabilities._derivation_is_correct(prunes=True)
+    assert safe
+    assert evidence.startswith("observed")
+
+    monkeypatch.setattr(capabilities, "_pruning_behaves", lambda: False)
+    safe, evidence = capabilities._derivation_is_correct(prunes=True)
+    assert not safe
+    assert evidence.startswith("observed")
+
+
+def test_an_unanswerable_probe_is_treated_as_unsafe(monkeypatch):
+    """`None` means we could not establish the answer, which is not the same as
+    establishing a good one. Refusing costs a skipped run; guessing costs rows."""
+    from zamboni import capabilities
+
+    monkeypatch.setattr(capabilities, "_pruning_behaves", lambda: None)
+
+    safe, evidence = capabilities._derivation_is_correct(prunes=True)
+
+    assert not safe
+    assert "unknown" in evidence
+
+
+def test_the_behavioural_probe_agrees_with_the_installed_build():
+    """The probe itself, run for real against whatever PyIceberg is installed.
+
+    Costs a few hundred milliseconds and earns it: this is the only test that
+    exercises the probe end to end, and a probe nobody has watched work is a
+    probe that quietly returns None.
+    """
+    from zamboni.capabilities import _pruning_behaves, detect
+
+    observed = _pruning_behaves()
+
+    assert observed is not None, "the probe could not run; it would report 'unknown'"
+    # 0.11.1 does not prune, so correctness here is trivially true; on a 0.12
+    # that prunes, this is the real answer.
+    assert (
+        observed is detect().manifest_pruning_is_safe or not detect().prunes_manifests_by_predicate
+    )
+
+
+def test_no_symbol_can_override_what_was_observed(monkeypatch):
+    """The point of ZMBNI-1109, pinned behaviourally.
+
+    `_build_delete_files_partition_predicate` is present on 0.12.0rc1, which
+    corrupts data, *and* on the builds that fix it. Its existence was never the
+    property. So removing it must not change the verdict, and adding one back
+    must not either -- if either did, a name would be deciding safety again and
+    the corrupting build would be declared safe.
+    """
+    from pyiceberg.table.update.snapshot import _SnapshotProducer
+
+    from zamboni import capabilities
+
+    monkeypatch.setattr(capabilities, "_pruning_behaves", lambda: False)
+
+    monkeypatch.setattr(
+        _SnapshotProducer, "_build_delete_files_partition_predicate", lambda *a: None, raising=False
+    )
+    with_symbol, _ = capabilities._derivation_is_correct(prunes=True)
+
+    monkeypatch.delattr(_SnapshotProducer, "_build_delete_files_partition_predicate", raising=False)
+    without_symbol, _ = capabilities._derivation_is_correct(prunes=True)
+
+    assert with_symbol is without_symbol is False, (
+        "the presence of a private symbol changed the safety verdict; that "
+        "symbol exists on corrupting builds too"
+    )

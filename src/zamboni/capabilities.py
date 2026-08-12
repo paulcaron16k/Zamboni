@@ -19,8 +19,11 @@ checkout of main installed with ``uv pip install -e``.
 from __future__ import annotations
 
 import inspect
+import logging
 from dataclasses import dataclass
 from functools import lru_cache
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,12 @@ class PyIcebergCapabilities:
     #: delete manifests; see :mod:`zamboni.deletes`.
     delete_manifests_writable: bool
 
+    #: *How* ``derives_delete_predicate`` was established. Reported by
+    #: ``zamboni doctor``, because "we proved it" and "we recognised a name" are
+    #: different confidences, and an operator deciding whether to trust a new
+    #: PyIceberg deserves to know which one they have.
+    pruning_evidence: str = "not applicable"
+
     @property
     def manifest_pruning_is_safe(self) -> bool:
         return self.derives_delete_predicate or not self.prunes_manifests_by_predicate
@@ -71,11 +80,15 @@ class PyIcebergCapabilities:
                 "compaction cannot be labelled as a replace snapshot."
             )
         if not self.manifest_pruning_is_safe:
+            # Says what was measured, not what we infer the cause to be. The
+            # previous wording asserted a mechanism -- "the producer does not
+            # derive that predicate" -- which the probe no longer checks
+            # directly, and which was guesswork about somebody else's code.
             return (
-                "_OverwriteFiles prunes manifests by predicate but the producer "
-                "does not derive that predicate from the removed data files. "
-                "Manifests holding removed files would be kept verbatim and "
-                "their rows counted twice."
+                "this build prunes manifests by predicate and does so "
+                f"incorrectly: {self.pruning_evidence}. A manifest holding "
+                "replaced files is kept verbatim, so their rows would be "
+                "counted twice. PyIceberg 0.12.0rc1 is such a build."
             )
         return None
 
@@ -87,6 +100,7 @@ class PyIcebergCapabilities:
             ("streaming writes", self.streaming_write_supported),
             ("manifest predicate pruning", self.prunes_manifests_by_predicate),
             ("derives delete predicate", self.derives_delete_predicate),
+            ("  established by", self.pruning_evidence),
             ("equality deletes readable", self.equality_deletes_readable),
             ("delete manifests writable", self.delete_manifests_writable),
         ]
@@ -100,21 +114,22 @@ def detect() -> PyIcebergCapabilities:
     from pyiceberg.table.snapshots import Operation
     from pyiceberg.table.update.snapshot import _OverwriteFiles, _SnapshotProducer
 
+    prunes = _mentions(
+        _OverwriteFiles._existing_manifests, "manifest_evaluator", if_unavailable=True
+    )
+    derives, evidence = _derivation_is_correct(prunes)
+
     return PyIcebergCapabilities(
         version=version("pyiceberg"),
         operation_is_injectable="operation"
         in inspect.signature(_SnapshotProducer.__init__).parameters,
         replace_summary_supported=_replace_summary_supported(Operation),
         streaming_write_supported=_streaming_write_supported(),
-        # Unknown -> assume it does prune. Combined with the reliable
-        # `derives_delete_predicate` hasattr probe, that makes an
-        # uninspectable build refuse rather than risk double-counted rows.
-        prunes_manifests_by_predicate=_mentions(
-            _OverwriteFiles._existing_manifests, "manifest_evaluator", if_unavailable=True
-        ),
-        derives_delete_predicate=hasattr(
-            _SnapshotProducer, "_build_delete_files_partition_predicate"
-        ),
+        # Unknown -> assume it does prune, so an uninspectable build has to
+        # earn its answer below rather than being taken on trust.
+        prunes_manifests_by_predicate=prunes,
+        derives_delete_predicate=derives,
+        pruning_evidence=evidence,
         # Unknown -> assume the "unsupported" guard is present, i.e. NOT
         # readable. Failing the other way would drop the equality-delete
         # blocker and let compaction resurrect deleted rows.
@@ -124,6 +139,117 @@ def detect() -> PyIcebergCapabilities:
         # delete manifest into one labelled as data.
         delete_manifests_writable=_delete_manifests_writable(),
     )
+
+
+def _derivation_is_correct(prunes: bool) -> tuple[bool, str]:
+    """Is this build's manifest pruning safe, and how do we know?
+
+    **By running it.** Not by looking for a symbol, and the reason is stronger
+    than fragility -- a name cannot answer this question at all.
+
+    ZMBNI-1109 began as a rename: the probe asked
+    ``hasattr(_SnapshotProducer, "_build_delete_files_partition_predicate")``,
+    that method appeared to move, and the answer flipped to False on a build
+    where the property held. 83 of 491 tests failed against a PyIceberg that
+    passes all 491. The obvious repair was to recognise the new name too.
+
+    Then the symbols were actually enumerated across three builds, and the
+    repair collapsed: ``_build_delete_files_partition_predicate`` is present on
+    **0.12.0rc1, which corrupts data**, and on both attempted fixes for it. The
+    method's *existence* was never the property. Its *behaviour* changed while
+    its name did not, so any name-based probe declares the corrupting build
+    safe. A second name in the list would not have helped; it would have made
+    the wrong answer arrive faster.
+
+    So the structural check is kept only for the cheap half -- does this build
+    prune at all -- and the expensive half is settled by
+    :func:`_pruning_behaves`, which does the operation and looks at the result.
+
+    * Does not prune -> nothing to be unsafe about, and no cost. This is
+      0.11.1, which is every current user.
+    * Prunes -> run the probe once per process (~150ms warm, ~600ms cold).
+
+    A build that changes behaviour without changing a name is exactly what
+    happened, and it is the only kind of check that catches it.
+    """
+    if not prunes:
+        return True, "not applicable -- this build does not prune"
+
+    observed = _pruning_behaves()
+    if observed is True:
+        return True, "observed -- an overwrite on a transformed partition kept the right rows"
+    if observed is False:
+        return False, "observed -- an overwrite on a transformed partition kept a replaced row"
+    return False, "unknown -- the behavioural probe could not run; assuming unsafe"
+
+
+def _pruning_behaves() -> bool | None:
+    """Do the smallest thing that would go wrong, and look at what survived.
+
+    Two rows in a day-partitioned table; replace one; count. A build that prunes
+    with a predicate derived from a *source column* keeps the manifest holding
+    the replaced row verbatim, so the old row survives beside its replacement
+    and three rows come back where two should.
+
+    The transform has to be non-identity. That is the whole shape of the bug:
+    a data file records its partition values already transformed, so comparing
+    a source column against a partition value only holds for identity.
+
+    Returns None when the probe could not run -- no catalog available, no
+    writable temp directory. That is not the same as a bad answer, and the
+    caller treats it as "assume unsafe" rather than as "unsafe".
+    """
+    try:
+        import datetime as dt
+        import tempfile
+
+        import pyarrow as pa
+        from pyiceberg.catalog.sql import SqlCatalog
+        from pyiceberg.partitioning import PartitionField, PartitionSpec
+        from pyiceberg.schema import Schema
+        from pyiceberg.transforms import DayTransform
+        from pyiceberg.types import IntegerType, NestedField, TimestampType
+    except ImportError:  # pragma: no cover - depends on the install
+        # `sql` is an optional extra; without it there is no catalog to build a
+        # table in, and the question cannot be settled here.
+        return None
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="zamboni-probe-") as root:
+            catalog = SqlCatalog(
+                "zamboni_probe", uri=f"sqlite:///{root}/c.db", warehouse=f"file://{root}"
+            )
+            catalog.create_namespace("probe")
+            table = catalog.create_table(
+                "probe.t",
+                schema=Schema(
+                    NestedField(1, "k", IntegerType(), required=False),
+                    NestedField(2, "ts", TimestampType(), required=False),
+                ),
+                partition_spec=PartitionSpec(
+                    PartitionField(source_id=2, field_id=1000, transform=DayTransform(), name="d")
+                ),
+                properties={"format-version": "2"},
+            )
+
+            arrow = pa.schema([pa.field("k", pa.int32()), pa.field("ts", pa.timestamp("us"))])
+            when = dt.datetime(2026, 1, 6, 12)
+
+            def rows(keys: list[int]) -> pa.Table:
+                return pa.table(
+                    {"k": pa.array(keys, type=pa.int32()), "ts": [when] * len(keys)},
+                    schema=arrow,
+                )
+
+            table.append(rows([1, 2]))
+            table.refresh()
+            table.overwrite(rows([1]), overwrite_filter="k == 1")
+            table.refresh()
+
+            return sorted(table.scan().to_arrow()["k"].to_pylist()) == [1, 2]
+    except Exception:  # pragma: no cover - any failure means "could not establish"
+        logger.debug("manifest-pruning behavioural probe did not complete", exc_info=True)
+        return None
 
 
 def _guard_anywhere_in_scan_planning() -> bool:

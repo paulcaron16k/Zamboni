@@ -272,6 +272,21 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **Manifest-pruning safety is decided by behaviour, not by a private symbol
+  name.** The probe asked whether
+  `_SnapshotProducer._build_delete_files_partition_predicate` existed. That
+  method is present on PyIceberg `0.12.0rc1`, **which corrupts data**, and on
+  the builds that fix it — its behaviour changed while its name did not, so no
+  name-based check could tell them apart. Zamboni now runs the smallest
+  operation that would go wrong (two rows in a day-partitioned table, replace
+  one, count) and looks at the result. `0.11.1` does not prune and short-circuits
+  at 3ms; a build that does prune pays ~1.7s once per process. `zamboni doctor`
+  reports whether the answer was observed or assumed.
+
+  This also unblocks PyIceberg 0.12: the unmodified suite passes against it —
+  496 tests plus 31 against live Lakekeeper, MinIO, Trino and Spark — where
+  before, 83 failed for this one reason.
+
 - **`.env` is now looked for under `$ZAMBONI_ROOT`**, after `--env` and
   `./.env` — the same order the profile already used. `docs/devops.md` puts the
   fleet-wide `.env` there, so the documented multi-tenant layout worked only
