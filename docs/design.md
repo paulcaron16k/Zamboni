@@ -599,7 +599,7 @@ sequenceDiagram
 
 | Constraint | Consequence |
 |---|---|
-| PyIceberg's SQL catalog needs SQLAlchemy ≥ 2; the machine's global env pins 1.4.x for Airflow | Everything runs from a locked `uv` venv; nothing resolves against global packages |
+| PyIceberg's SQL-catalog extra pins SQLAlchemy, which a shared site-packages need not satisfy | Everything runs from a locked `uv` venv; nothing resolves against global packages, so no global pin can conflict. Only the `sql` extra pulls SQLAlchemy in — a REST-catalog install never meets the constraint |
 | The `bin/zamboni` executable pins its Python from `.python-version` | The shipped executable runs the interpreter the tests ran on |
 | Lakekeeper OSS has no maintenance queues | Expiry and orphan removal run from this tool, scheduled by the operator |
 | A remote-signing Lakekeeper warehouse (`sts-enabled: false`, `push-s3-delete-disabled: true`) signs object GET/PUT only | `ListObjectsV2`, `HeadObject` and multi-object `DELETE` are refused, so compaction fails and no storage can be reclaimed. Needs STS-vended or direct credentials — measured in [live-verification.md](live-verification.md) |

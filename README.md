@@ -511,9 +511,10 @@ is the compose gateway rather than `minio` — are explained in
 
 ## Environment
 
-Everything runs from a locked virtualenv. Nothing resolves against global site-packages —
-that matters here because PyIceberg's SQL catalog needs SQLAlchemy 2.x while this machine's
-global environment pins 1.4.x for Airflow.
+Everything runs from a locked virtualenv, and nothing resolves against global site-packages.
+That is not fastidiousness: PyIceberg's SQL-catalog extra pins SQLAlchemy, and a shared
+site-packages is under no obligation to agree. A venv makes that a non-question rather than a
+resolution problem.
 
 ```bash
 uv sync            # builds .venv from uv.lock, Python pinned by .python-version

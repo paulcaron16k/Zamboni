@@ -419,6 +419,17 @@ def maintain(warehouse: str) -> None:
 If you run Airflow on Kubernetes, a mounted secret volume read inside the task
 is better still: it is rotatable without touching the DAG.
 
+**A `@task` shares the worker's interpreter, so Zamboni's dependency ranges and
+Airflow's have to intersect** — and Airflow pins tightly. The `BashOperator` form
+above does not share an interpreter, which is the durable reason to prefer it:
+one installation upgrades without asking the other's permission.
+
+If you do want the in-process form, note that only the `sql` extra brings a
+database driver stack with it. Against a REST catalog — Lakekeeper, Polaris,
+Nessie, Glue — `pip install iceberg-zamboni` shares very little with Airflow, and
+the question rarely arises. `pip install 'iceberg-zamboni[sql]'` into an Airflow
+environment is where to check the resolver's output before trusting it.
+
 ### What to check on any deployment
 
 - No secret appears in `ps aux` while a run is in progress.
