@@ -131,6 +131,20 @@ ingestion via frequent updates or transactional data. The Iceberg warehouse crea
 in data/healthims/iceberg_warehouse/ in namespace/schema healthims/ folder. The `iceberg_warehouse`
 folder is created _after_ the first `next-day` action.
 
+**From an install**, with no clone — the five days of input data ship in the wheel
+(212 KB), and the demo writes to `./zamboni-demo/` in whatever directory you run it from:
+
+```bash
+pipx install "iceberg-zamboni[sql]"
+zamboni-demo next-day        # x5
+zamboni-demo query           # note "files scanned"
+zamboni-demo maintenance
+zamboni-demo query           # identical rows, far fewer files
+```
+
+**From a clone**, `./bin/demo` is the same program and keeps its state in
+`data/healthims/`:
+
 ```bash
 ./bin/demo clear
 ./bin/demo mode cow        # Copy-on-Write is the default. Clear and repeat with "mode mor"

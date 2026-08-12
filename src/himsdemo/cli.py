@@ -20,13 +20,59 @@ from .ingest import ingest_day
 from .schema import SchemaDocument, create_tables, load_tables
 from .state import MODES, TOTAL_DAYS, DemoState
 
-DEFAULT_ROOT = Path(__file__).resolve().parent.parent.parent / "data" / "healthims"
+#: The five days of CSV and the two config files, wherever they are.
+#:
+#: In a checkout they are `data/healthims/`, three levels up from this module.
+#: In an installed copy they are `himsdemo/data/`, shipped in the wheel -- 212KB
+#: of inputs, which is what lets `pipx install iceberg-zamboni && zamboni-demo`
+#: work at all. Before that they were only ever found relative to the source
+#: tree, so the installed `zamboni-demo` crashed on a FileNotFoundError pointing
+#: at a path inside site-packages (ZMBNI-1809).
+#:
+#: The prose -- requirements, the event catalogue -- is deliberately *not*
+#: shipped. It is reference material rather than something the demo reads, and a
+#: URL serves it better than a copy in everyone's site-packages.
+_PACKAGED_INPUTS = Path(__file__).resolve().parent / "data"
+_CHECKOUT_INPUTS = Path(__file__).resolve().parent.parent.parent / "data" / "healthims"
+
+DOCS_URL = "https://github.com/paulcaron16k/Zamboni/tree/main/data/healthims"
+
+
+def default_inputs() -> Path:
+    """Where the demo reads from. A checkout wins, so `./bin/demo` in a working
+    tree uses the files you can edit rather than a stale installed copy."""
+    return _CHECKOUT_INPUTS if _CHECKOUT_INPUTS.is_dir() else _PACKAGED_INPUTS
+
+
+def default_root() -> Path:
+    """Where the demo writes.
+
+    In a checkout, the data directory, which is what `./bin/demo` has always
+    done and what the .gitignore already expects. Installed, `./zamboni-demo` in
+    the current directory -- visible, removable, and emphatically not inside
+    site-packages, which is read-only for a reason and shared between projects.
+    """
+    return _CHECKOUT_INPUTS if _CHECKOUT_INPUTS.is_dir() else Path.cwd() / "zamboni-demo"
+
+
+DEFAULT_ROOT = default_root()
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    state = DemoState.load(args.root)
+    root = args.root or default_root()
+    inputs = args.inputs or default_inputs()
+    if not (inputs / "table_schema.json").is_file():
+        print(
+            f"the demo's input data is missing from {inputs}. In a checkout it is "
+            "data/healthims/; installed, it ships inside the package. Reinstall, "
+            f"or point --inputs at a copy: {DOCS_URL}",
+            file=sys.stderr,
+        )
+        return 2
+    root.mkdir(parents=True, exist_ok=True)
+    state = DemoState.load(root, inputs=inputs)
     for warning in state.warnings:
         print(f"warning: {warning}", file=sys.stderr)
 
@@ -53,7 +99,8 @@ def _build_parser() -> argparse.ArgumentParser:
     # Same banner as `zamboni --version`: the demo ships from the same wheel, and
     # what it demonstrates depends on the same probed PyIceberg.
     parser.add_argument("--version", action="version", version=version_banner())
-    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help=argparse.SUPPRESS)
+    parser.add_argument("--root", type=Path, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--inputs", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--catalog",
         choices=catalogs.BACKENDS,

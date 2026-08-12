@@ -16,7 +16,16 @@ MODES = ("cow", "mor")
 
 @dataclass
 class DemoState:
+    #: Where the demo *writes*: the catalog, the warehouse, `demo.env`, spill
+    #: files. Must be writable, and is not where the inputs come from.
     root: Path
+    #: Where the demo *reads* its five days of CSV and its two config files.
+    #: Separate from `root` because an installed copy has them inside the
+    #: package, which is read-only -- and because a demo that writes into
+    #: site-packages is one that cannot be run twice, or by two users.
+    #: Defaults to `root` so a checkout, where the two genuinely are the same
+    #: directory, needs no ceremony.
+    inputs: Path | None = None
     write_mode: str = "cow"
     days_ingested: int = 0
     #: Set while a day is mid-ingest. Each hourly batch commits on its own, so
@@ -45,15 +54,19 @@ class DemoState:
         return self.root / ".spill"
 
     @property
+    def input_root(self) -> Path:
+        return self.inputs if self.inputs is not None else self.root
+
+    @property
     def schema_path(self) -> Path:
-        return self.root / "table_schema.json"
+        return self.input_root / "table_schema.json"
 
     @property
     def table_config_path(self) -> Path:
-        return self.root / "table-config.json"
+        return self.input_root / "table-config.json"
 
     def day_dir(self, day_no: int) -> Path:
-        return self.root / f"day{day_no}"
+        return self.input_root / f"day{day_no}"
 
     @property
     def has_more_days(self) -> bool:
@@ -62,8 +75,8 @@ class DemoState:
     # -- persistence -----------------------------------------------------
 
     @classmethod
-    def load(cls, root: Path) -> DemoState:
-        state = cls(root=root)
+    def load(cls, root: Path, inputs: Path | None = None) -> DemoState:
+        state = cls(root=root, inputs=inputs)
         if not state.env_path.exists():
             return state
         for line in state.env_path.read_text().splitlines():

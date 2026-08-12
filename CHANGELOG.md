@@ -272,6 +272,15 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **`zamboni-demo` shipped as a command that could not run.** It resolved the
+  demo's input data relative to the source tree, so an installed copy died on an
+  unhandled `FileNotFoundError` pointing inside `site-packages`, and no data was
+  in the wheel to find. The 17 input files (212 KB) now ship, and reads are
+  separated from writes so nothing is ever written into `site-packages` — the
+  demo writes to `./zamboni-demo/` when run from an install, and keeps using
+  `data/healthims/` in a checkout. `pipx install "iceberg-zamboni[sql]" &&
+  zamboni-demo next-day` now works with no clone.
+
 - **Manifest-pruning safety is decided by behaviour, not by a private symbol
   name.** The probe asked whether
   `_SnapshotProducer._build_delete_files_partition_predicate` existed. That

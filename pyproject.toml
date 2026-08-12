@@ -100,6 +100,23 @@ default-groups = ["dev"]
 [tool.hatch.build.targets.wheel]
 packages = ["src/zamboni", "src/himsdemo"]
 
+# The demo's inputs, 212KB, so `pipx install iceberg-zamboni && zamboni-demo`
+# works without a clone. Listed path by path rather than including
+# `data/healthims` wholesale: that directory also accumulates the generated
+# warehouse and catalog -- 9MB and growing after a run -- and a glob would ship
+# whatever happened to be lying there when the wheel was built.
+#
+# The prose in that directory is deliberately absent. It is reference material
+# the demo never reads, and `himsdemo.cli.DOCS_URL` points at it on GitHub.
+[tool.hatch.build.targets.wheel.force-include]
+"data/healthims/table_schema.json" = "himsdemo/data/table_schema.json"
+"data/healthims/table-config.json" = "himsdemo/data/table-config.json"
+"data/healthims/day1" = "himsdemo/data/day1"
+"data/healthims/day2" = "himsdemo/data/day2"
+"data/healthims/day3" = "himsdemo/data/day3"
+"data/healthims/day4" = "himsdemo/data/day4"
+"data/healthims/day5" = "himsdemo/data/day5"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # A marker rather than a -k expression, because CI has to select these

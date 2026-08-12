@@ -585,3 +585,74 @@ def test_reclaim_now_keeps_live_delete_files(demo_root, capsys):
             assert Path(path.replace("file://", "")).exists(), f"live file deleted: {path}"
     finally:
         session.close()
+
+
+# -- the demo has to work from an install, not just a clone (ZMBNI-1809) --
+
+
+def packaged_inputs() -> set[str]:
+    """What `pyproject.toml` promises to ship, as repo-relative paths."""
+    import tomllib
+
+    repo = Path(__file__).resolve().parent.parent
+    config = tomllib.loads((repo / "pyproject.toml").read_text())
+    include = config["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+    return set(include)
+
+
+def test_every_file_the_demo_reads_is_packaged():
+    """`zamboni-demo` used to ship as a console script that could not run.
+
+    Installed, it resolved its inputs relative to the source tree and died on a
+    FileNotFoundError pointing inside site-packages. The files are 212KB; the
+    fix was to ship them. This keeps them shipped: add a day6, rename
+    `table_schema.json`, and the wheel silently stops containing it otherwise.
+    """
+    promised = packaged_inputs()
+    missing = []
+
+    for name in ("table_schema.json", "table-config.json"):
+        if f"data/healthims/{name}" not in promised:
+            missing.append(name)
+    for day in range(1, TOTAL_DAYS + 1):
+        if f"data/healthims/day{day}" not in promised:
+            missing.append(f"day{day}")
+
+    assert not missing, f"the demo reads these and the wheel would not have them: {missing}"
+
+
+def test_the_prose_and_the_generated_state_are_not_packaged():
+    """Deliberately absent, for two different reasons.
+
+    The requirements and the event catalogue are reference material the demo
+    never opens -- a URL serves them better than a copy in everyone's
+    site-packages. The warehouse and catalog are *generated*, 9MB after a run,
+    and a wholesale include would ship whatever was lying in the directory when
+    the wheel happened to be built.
+    """
+    promised = packaged_inputs()
+
+    for path in promised:
+        assert not path.endswith((".md", ".docx")), f"prose is packaged: {path}"
+        assert "warehouse" not in path and not path.endswith(".db"), (
+            f"generated state is packaged: {path}"
+        )
+
+
+def test_the_demo_finds_its_inputs_from_a_checkout():
+    from himsdemo.cli import default_inputs
+
+    assert (default_inputs() / "table_schema.json").is_file()
+
+
+def test_reads_and_writes_are_separate_paths(tmp_path):
+    """Installed, the inputs sit in a read-only package directory. A demo that
+    writes its catalog beside them cannot be run twice, or by two users."""
+    from himsdemo.state import DemoState
+
+    state = DemoState(root=tmp_path / "work", inputs=tmp_path / "in")
+
+    assert state.catalog_path.parent == tmp_path / "work"
+    assert state.warehouse_path.parent == tmp_path / "work"
+    assert state.schema_path.parent == tmp_path / "in"
+    assert state.day_dir(1).parent == tmp_path / "in"
