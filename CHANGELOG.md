@@ -29,6 +29,20 @@ wrong way round. A minor rather than a patch because of the third of those --
 `spark` now means something different, and a version number is the only warning
 anyone gets.
 
+### Security
+
+- **Pre-release security review run against `v0.2.0..HEAD`** — the first under
+  [docs/releasing.md §3a](docs/releasing.md), now step 0 of the release
+  checklist. All eight checks clean: no secret reaches a log, `repr`, exception
+  or the process table; the credential-literal guard was mutation-verified; no
+  destructive default moved; the reclaim invariants still abort (70 tests); every
+  engine identifier is quoted; **zero** packages added, removed or version-changed
+  in `uv.lock`; the wheel and sdist carry no `.env`, catalog, warehouse or data
+  file; and the release workflow still publishes from OIDC with no stored secret.
+  Two observations recorded rather than fixed, neither a blocker: GitHub Actions
+  are pinned to movable tags rather than commit SHAs (ZMBNI-1817), and `spark-lib`
+  still floors at `pyspark>=3.5` where the Connect client requires `>=4.0`.
+
 ### BREAKING
 
 - **`spark` is now the Spark Connect *client*; the embedded library is

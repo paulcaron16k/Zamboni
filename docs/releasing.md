@@ -112,7 +112,14 @@ banner and the changelog all agree, so no two of them can drift.
 
 ## 3. Cutting a release
 
+**Step 0 is the security review** (§3a). It comes before the tag because the tag
+is the publication, and a release is the one artifact you cannot take back: PyPI
+never re-issues a version number, and anything shipped in a wheel is on other
+people's disks within minutes.
+
 ```bash
+# 0. The security review -- see 3a. Nothing below runs until it is clean.
+
 # 1. The suite, on the versions CI runs
 uv run pytest -q
 uv run mypy && uv run ruff check src tests scripts && uv run ruff format --check src tests scripts
@@ -192,6 +199,39 @@ from the same `pyproject.toml` but exercises none of that. The rename in `0.2.0`
 broke both `bin/` executables while the wheel installed and ran perfectly
 (ZMBNI-1810). Step 4 exists because CI checks `bin/` is not stale; it does not
 check that `bin/` still works, so run one of them.
+
+---
+
+## 3a. The security review
+
+**Run before every tag.** Not because a maintenance tool is a likely target, but
+because two of its properties make a mistake expensive: it holds warehouse
+credentials, and it deletes files. A defect in either is discovered by the person
+whose data is gone.
+
+Each item below is here because this codebase got it wrong at least once. That is
+the entry requirement -- a checklist of imagined risks goes stale and gets skipped;
+one where every line has a scar does not.
+
+| # | Check | Why it is on the list |
+|---|---|---|
+| 1 | **No secret reaches a log, a `repr`, an exception, or `ps aux`.** Read the diff for new logging, new exception messages, and anything interpolating settings | `S3Settings.__repr__` printed the secret access key. `--token` and friends put credentials in the process table, which is world-readable |
+| 2 | **No credential-shaped literal in any shipped file**, including docs and test fixtures | The README carried one for a whole release. `test_no_document_carries_a_credential_shaped_literal` guards it; confirm it still runs and still fails when it should |
+| 3 | **Destructive defaults are unchanged**, or the change is a `BREAKING` line naming what will now be deleted | `older_than_days`, `max_snapshot_age_days`, `min_snapshots_to_keep` and every `enabled` flag decide what a nightly run removes. §1 argues these are public API |
+| 4 | **The reclaim invariants still abort rather than delete** -- reachable-set completeness, location scoping, colocated-table refusal, the age guard, current-metadata protection | ZMBNI-507: orphan removal deleted another table's files when two tables shared a location. Reproduced end to end before it was fixed |
+| 5 | **Every identifier reaching engine SQL is quoted and escaped**, on both Trino and Spark | A backtick inside a Spark identifier could target a different table. Shipped as a `SAFETY` fix |
+| 6 | **Dependency delta reviewed**: what changed in `uv.lock`, whether any new package is one nobody chose, and whether the version floors still mean what the comments say | The `bucket` extra restated a dependency with a *looser* floor than upstream's, for a year, unnoticed |
+| 7 | **The wheel contains what it should and nothing else.** `python -m zipfile -l dist/*.whl` -- no `.env`, no catalog, no warehouse, no generated demo state | `force-include` lists the demo's inputs path by path precisely because globbing `data/healthims` would ship whatever a demo run left there -- 9MB of warehouse, after one run |
+| 8 | **The release workflow still publishes from OIDC, with no stored token**, and the tag-vs-version guard is intact | A stored token is a credential that can leak; the guard is what stops a mistyped tag burning a version number irrecoverably |
+
+**Where to record it.** One line in the release commit message or the changelog
+entry saying the review ran and what it found. A review with no written outcome is
+indistinguishable from a skipped one.
+
+**If an item fails**, the release stops. A `SAFETY` fix ships in a patch release
+even when it breaks a working pipeline (§1) -- the asymmetry is deliberate, and it
+applies here too: shipping a known unsafe operation to protect a schedule is the
+one trade this project does not make.
 
 ---
 
