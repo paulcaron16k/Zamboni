@@ -126,6 +126,11 @@ Spark 3.5.x has an **extended LTS running to November 2027** (security fixes onl
 and unverified is a real state; the run logs which Spark it reached, so a bug report
 carries the combination rather than requiring someone to reconstruct it.
 
+It will stay unverified, deliberately. A CI leg for 3.5 built today would be maintained
+for about a year and then retired with the LTS, for a combination nobody has reported
+using — so the gap is a choice rather than an omission, and it reopens the moment someone
+turns up on 3.5.
+
 Whichever you use, **the Iceberg runtime jar is yours to supply** and must match the Spark
 version — `iceberg-spark-runtime-3.5_2.13` or `-4.0_2.13`. Zamboni sets
 `spark.sql.extensions` and deliberately nothing else: a maintenance tool that invented
