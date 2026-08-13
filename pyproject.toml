@@ -75,10 +75,20 @@ trino = ["trino>=0.330.0"]
 # library. That was backwards for the common case: driving a cluster is what
 # most people want, and it was the name nobody guessed. ZMBNI-1816.
 spark = ["pyspark-client>=4.0,<5"]
-# The embedded Spark library: a driver JVM inside this process, no server
-# anywhere. Two orders of magnitude larger on disk than the client and it needs
-# a JDK, which is why it is not what `spark` means. Mutually exclusive with
-# `spark` -- both provide the `pyspark` module, so an environment has one.
+# The embedded Spark library: a driver JVM inside this process, and the only
+# route to a *classic* (non-Connect) cluster via `--spark-master spark://...`.
+# Two orders of magnitude larger on disk than the client and it needs a JDK,
+# which is why it is not what `spark` means. Mutually exclusive with `spark` --
+# both provide the `pyspark` module, so an environment has one.
+#
+# The 3.5 floor is deliberate and lower than `spark`'s 4.0. Connect cannot reach
+# a 3.5 cluster at all (pyspark-client did not exist before 4.0), so this is the
+# only path to one -- and 3.5 is not dead: Iceberg publishes
+# iceberg-spark-runtime-3.5 at its current 1.11.0, and Spark 3.5.x has an
+# *extended* LTS running to November 2027. Nothing in this maintainer is Spark-4
+# only. CI covers Connect against 4.0.4 and nothing else, so the classic path is
+# best effort at any version and the docs say so rather than implying a floor
+# means coverage. ZMBNI-1818.
 spark-lib = ["pyspark>=3.5,<5"]
 
 [project.scripts]

@@ -21,6 +21,24 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### Changed
+
+- **What "Spark works" means is now stated per connection path.** The security
+  review flagged `spark-lib`'s `pyspark>=3.5` floor as looser than the Connect
+  client's `>=4.0`. Investigating inverted the conclusion: Spark 3.5 carries an
+  *extended* LTS to **November 2027**, Iceberg still publishes
+  `iceberg-spark-runtime-3.5` at 1.11.0, and `pyspark-client` did not exist
+  before 4.0 -- so `spark-lib` with `--spark-master` is the **only** way to
+  drive a Spark 3.5 cluster. Raising the floor would have removed that for no
+  gain in verification, since CI covers Connect against 4.0.4 and the classic
+  path is untested at every version.
+
+  So the floor stays and the claim got fixed instead. README and
+  [docs/user_guide.md](docs/user_guide.md) now carry a verified/best-effort
+  table per path, and every Spark run logs the version it reached and how it
+  connected -- once per run -- so a failure on an untested combination names
+  the combination. ZMBNI-1818.
+
 ## [0.3.0] - 2026-08-13
 
 What the first publication exposed: two defects only a real install could show,

@@ -577,14 +577,36 @@ class SparkMaintainer(Maintainer):
                     "Connect attaches to a session someone else started, and a "
                     "master tells this process to start its own."
                 )
-            return SparkSession.builder.remote(remote).getOrCreate()
+            return self._announce(
+                SparkSession.builder.remote(remote).getOrCreate(), f"connect {remote}"
+            )
 
         builder = SparkSession.builder.appName("zamboni")
         if master := self._options.get("master"):
             builder = builder.master(master)
         for key, value in self._session_config().items():
             builder = builder.config(key, value)
-        return builder.getOrCreate()
+        return self._announce(
+            builder.getOrCreate(), f"master {self._options.get('master', 'default')}"
+        )
+
+    def _announce(self, session, how: str):
+        """Log the Spark we actually reached, once.
+
+        Which Spark ran is not something this package chooses -- Connect attaches
+        to whatever the operator started, and `--spark-master` to whatever the
+        cluster is. Only one path is covered by CI (Connect against 4.0.4); the
+        rest are best effort, and a run that goes wrong on an untested
+        combination should say which combination that was in its own log rather
+        than requiring someone to reconstruct it. ZMBNI-1818.
+
+        Once, not per statement: `connect()` is called for every operation and
+        `getOrCreate()` returns the same session each time.
+        """
+        if not getattr(self, "_announced", False):
+            logger.info("spark: %s, via %s", getattr(session, "version", "unknown version"), how)
+            self._announced = True
+        return session
 
     def _session_config(self) -> dict[str, str]:
         """Only what Iceberg needs; everything else is the operator's business.

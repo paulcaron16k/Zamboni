@@ -659,6 +659,48 @@ def test_spark_identifiers_are_backtick_quoted():
     assert "ALTER TABLE `iceberg`.`we``ird`.`ta-ble`" in sql
 
 
+def test_the_spark_version_reached_is_logged_once(caplog):
+    """Which Spark ran is not our choice, so the run has to record it.
+
+    CI covers Connect against 4.0.4 and nothing else; `--spark-master` is best
+    effort at any version, and `spark-lib` deliberately admits Spark 3.5 because
+    Connect cannot reach a 3.5 cluster at all. A failure on an untested
+    combination should name the combination in its own log rather than making
+    someone reconstruct it. Once, not per statement -- `connect()` runs for every
+    operation and `getOrCreate()` hands back the same session. ZMBNI-1818.
+    """
+    import logging
+
+    class FakeSession:
+        version = "3.5.9"
+
+    class FakeBuilder:
+        def appName(self, _):
+            return self
+
+        def master(self, _):
+            return self
+
+        def config(self, *_args, **_kwargs):
+            return self
+
+        def getOrCreate(self):
+            return FakeSession()
+
+    maintainer = spark(master="spark://host:7077")
+    with caplog.at_level(logging.INFO, logger="zamboni.maintainers.spark"):
+        first = maintainer._announce(FakeBuilder().getOrCreate(), "master spark://host:7077")
+        second = maintainer._announce(FakeBuilder().getOrCreate(), "master spark://host:7077")
+
+    assert isinstance(first, FakeSession) and isinstance(second, FakeSession)
+    announcements = [r for r in caplog.records if "3.5.9" in r.getMessage()]
+    assert len(announcements) == 1, "the version must be logged once per run, not per statement"
+    assert "spark://host:7077" in announcements[0].getMessage(), (
+        "the log must say how we got there -- Connect and a classic master are "
+        "different amounts of tested"
+    )
+
+
 # -- review findings (independent review of ZMBNI-15) ---------------------
 
 

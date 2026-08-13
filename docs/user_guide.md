@@ -519,9 +519,9 @@ get_maintainer("spark")(session, {
 })
 ```
 
-For Spark, install `iceberg-zamboni[spark]` (the Connect client: ~13MB, pure Python) rather than
-`iceberg-zamboni[spark]` (~434MB and a JVM). The two are mutually exclusive: both
-provide the `pyspark` package.
+For Spark, install `iceberg-zamboni[spark]` (the Connect client: ~13MB, pure
+Python) rather than `iceberg-zamboni[spark-lib]` (~472MB and a JDK). The two are
+mutually exclusive: both provide the `pyspark` module.
 
 ### Iterating customer warehouses
 
@@ -804,14 +804,29 @@ The most capable engine, and the most work to operate. Choose it when you need
 Z-order at a scale the local engine cannot hold in memory, or when you already
 run Spark.
 
-Use **Spark Connect**. The client is `pyspark-client` — about 1.5MB of pure
-Python — and it starts no JVM, so the machine running cron needs no Java at
-all. The alternative, a local `SparkSession`, starts a driver JVM in the cron
+Use **Spark Connect**. The client is `pyspark-client` — about 13MB installed,
+pure Python — and it starts no JVM, so the machine running cron needs no Java
+at all. The alternative, a local `SparkSession`, starts a driver JVM in the cron
 process and makes your Java version this tool's problem.
 
 ```bash
 pip install "iceberg-zamboni[spark]"
 ```
+
+**This is also the only path CI covers**, against Spark 4.0.4 with Iceberg 1.11,
+on every push. The two classic paths — `--spark-master local[*]` and
+`--spark-master spark://…` — are best effort: nothing in the maintainer is
+Spark-4 only, and nothing tests them either. They need `iceberg-zamboni[spark-lib]`
+(the embedded `pyspark`, ~472MB and a JDK) because `pyspark-client` cannot reach
+a classic master.
+
+**If your cluster is Spark 3.5**, Connect is not available to you — the client
+did not exist before 4.0 — so `spark-lib` with `--spark-master` is the only
+route, and its floor is 3.5 for exactly that reason. Iceberg still publishes
+`iceberg-spark-runtime-3.5` at 1.11.0, and Spark 3.5.x has an extended LTS to
+November 2027, so this is a supported combination upstream and an untested one
+here. Every run logs the Spark version it reached, so what happened is in the
+log rather than inferred.
 
 ```bash
 #!/usr/bin/env bash

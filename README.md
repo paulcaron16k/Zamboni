@@ -108,6 +108,29 @@ extensions or extras.
 the JVM is on. Pick `spark` if a cluster exists, `spark-lib` only if none does and you
 would rather carry half a gigabyte than run a server.
 
+### What "Spark works" has actually been run against
+
+The extras admit more combinations than CI exercises, and the honest thing is to say which
+is which rather than let a version floor imply coverage it does not have:
+
+| Path | Status |
+|---|---|
+| `--spark-remote sc://…` (Connect) | **Verified.** Spark 4.0.4 with Iceberg 1.11, on every push — the `spark` CI job builds the server and runs the live tests against it |
+| `--spark-master local[*]` (embedded) | Best effort. Nothing in the maintainer is Spark-4 only, and it is not exercised by CI |
+| `--spark-master spark://…` (classic cluster) | Best effort. Driver and cluster versions must match, which is why the `spark-lib` floor is 3.5 rather than 4.0 |
+
+**Spark 3.5 is admitted deliberately.** Connect cannot reach a 3.5 cluster at all —
+`pyspark-client` did not exist before 4.0 — so `spark-lib` is the only route to one. And
+3.5 is not dead: Iceberg publishes `iceberg-spark-runtime-3.5` at its current 1.11.0, and
+Spark 3.5.x has an **extended LTS running to November 2027** (security fixes only). Usable
+and unverified is a real state; the run logs which Spark it reached, so a bug report
+carries the combination rather than requiring someone to reconstruct it.
+
+Whichever you use, **the Iceberg runtime jar is yours to supply** and must match the Spark
+version — `iceberg-spark-runtime-3.5_2.13` or `-4.0_2.13`. Zamboni sets
+`spark.sql.extensions` and deliberately nothing else: a maintenance tool that invented
+`spark.sql.catalog.*` would be changing where your data is.
+
 ### Installation Best-Practices
 
 **Never into your system Python.** Pick by what you want:
