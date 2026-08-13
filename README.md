@@ -184,8 +184,8 @@ Read this before depending on it.
   ([SECURITY.md](SECURITY.md)), and there is no backport branch: fixes land on the latest
   `0.x`, or `1.x.x` once released, with a minor version, or possibly only patch
   version, increment. Contributors welcome.
-- **CI runs green.** Five jobs on every push and pull request -- six runs, since `test` is
-  a matrix over Python 3.11 and 3.13 -- including `dev-stack`, which brings up a real
+- **CI runs green.** Five jobs on every push and pull request, with `test` running once per
+  supported Python -- including `dev-stack`, which brings up a real
   Lakekeeper, Postgres and MinIO and runs the demo end to end, and `spark`, which builds a
   Spark Connect server with the Iceberg runtime. The badge above reports the current state
   rather than a claim about it.

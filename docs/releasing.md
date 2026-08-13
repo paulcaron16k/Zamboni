@@ -255,8 +255,8 @@ to either carry forward or break a promise to make. `0.x` is what allowed them t
 be fixed rather than lived with.
 
 **CI has executed, and this argument is settled.** It ran green on GitHub across
-six jobs, including a real Lakekeeper, Postgres and MinIO, and a built Spark
-Connect server (ZMBNI-905). `1.0.0` reads as "verified", and that part of the
+the whole workflow, including a real Lakekeeper, Postgres and MinIO, and a built
+Spark Connect server (ZMBNI-905). `1.0.0` reads as "verified", and that part of the
 claim is now backed.
 
 **The parts a 1.0 locks hardest have had one author.** The `table-config.json`

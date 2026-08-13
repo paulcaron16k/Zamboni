@@ -370,7 +370,7 @@ grows the capability. They are tracked so nobody re-investigates from scratch. W
 that **PyIceberg 0.12 does not lift any of them** — verified against `main`, see ZMBNI-1105 —
 so they are not waiting on ZMBNI-11.
 
-**Done since 0.1.0 — ZMBNI-905 and ZMBNI-18.** CI has executed, on GitHub, green: six jobs
+**Done since 0.1.0 — ZMBNI-905 and ZMBNI-18.** CI has executed, on GitHub, green: every job,
 including a real Lakekeeper, Postgres and MinIO, and a built Spark Connect server. The
 repository is public at [github.com/paulcaron16k/Zamboni](https://github.com/paulcaron16k/Zamboni),
 in that order — pushed private, CI run, then flipped, because publishing a repo whose CI has
