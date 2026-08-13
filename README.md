@@ -206,16 +206,17 @@ Nothing in the MinIO + Lakekeeper stack compacts tables today:
   exists on `duckdb-iceberg` main but is not in the shipped extension; loading `iceberg`
   in DuckDB 1.5.4 exposes 16 `iceberg_*` functions and that is not one of them.
 
-## Try it: the HIMS discharge demo
+## Try it: the Health Information Management System (HIMS) In-Patient discharge demo
 
 Five days of simulated hospital discharge ingestion, so you can watch small files
 accumulate and see what maintenance does about them. Copy-on-Write (CoW) and
 Merge-on-Read (MoR) are selectable, the default is `mode cow` - which is not optimal for
-ingestion via frequent updates or transactional data. The Iceberg warehouse created is
-in data/healthims/iceberg_warehouse/ in namespace/schema healthims/ folder. The `iceberg_warehouse`
-folder is created _after_ the first `next-day` action.
+ingestion via frequent updates or transactional data and why MoR mode was invented in Apache
+Iceberg V2 specification and improved in the V3 specification. The Iceberg warehouse created is
+in data/healthims/iceberg_warehouse/ in namespace (a.k.a. DB schema) healthims/ folder.s
+The `iceberg_warehouse` folder is created _after_ the first `next-day` action.
 
-**From an install**, with no clone — the five days of input data ship in the wheel
+**From an install**, with no clone — the five days of input CSV data ship in the wheel
 (212 KB), and the demo writes to `./zamboni-demo/` in whatever directory you run it from:
 
 ```bash
@@ -232,7 +233,7 @@ zamboni-demo query           # identical rows, far fewer files
 ```bash
 ./bin/zamboni-demo clear
 ./bin/zamboni-demo mode cow        # Copy-on-Write is the default. Clear and repeat with "mode mor"
-                           # and time the next-day ingestion to see performance difference.
+                                   # and time the next-day ingestion to see performance difference.
 ./bin/zamboni-demo next-day        # Repeat 5 times -- each prints status; file counts climb
 ./bin/zamboni-demo query           # note "files scanned"
 ./bin/zamboni-demo maintenance     # compact + drop dangling deletes + expire + remove orphans
@@ -391,13 +392,13 @@ GROUP BY 1 ORDER BY 1;
 The SQL is the demo's own -- `src/himsdemo/queries.py` runs this exact statement -- so the
 README and the demo cannot drift into computing different things under one name.
 
-**Run it before and after `./bin/zamboni-demo maintenance`.** The numbers do not move. Measured on
-the five-day demo: `hims_events` went from **60 live data files to 5**, and the output
-above was byte-identical either side, once through the pre-maintenance metadata pointer and
-once through the new one. That is the whole claim in one comparison -- compaction, expiry
-and orphan removal change how the data is stored and never what it says. `./bin/zamboni-demo query`
-runs this and three others for exactly that reason, and reports "files scanned" alongside,
-which *does* move.
+**Run it before and after `./bin/zamboni-demo maintenance`.** The metrics do not move, but the
+query latency does. Measured on the five-day demo: `hims_events` went from **60 live data files
+to 5**, and the output above was byte-identical either side, once through the pre-maintenance
+metadata pointer and once through the new one. That is the whole claim in one comparison --
+compaction, expiry and orphan removal change how the data is stored and never what it says.
+`./bin/zamboni-demo query` runs this and three others for exactly that reason, and reports
+"files scanned" alongside, which *does* move.
 
 **Skipping the pointer lookup.** If you would rather not ask the catalog, DuckDB can find
 the newest metadata itself, but it makes you say so:
