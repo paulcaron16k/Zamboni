@@ -21,6 +21,16 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### Changed
+
+- **CI tests every Python `pyproject.toml` claims**, not only the endpoints.
+  The matrix was 3.11 and 3.13 -- the floor and the development pin -- while the
+  classifiers promised 3.12 as well. Endpoints catch a 3.12-only *construct*,
+  which fails on the 3.11 leg, but not a 3.12-only runtime difference, which
+  passes both and breaks for whoever is on 3.12. The legs run in parallel, so
+  the third costs no wall-clock. 507 tests pass there, so the claim was true --
+  it simply had no evidence behind it.
+
 ### Security
 
 - **Every GitHub Action is pinned to a commit SHA**, with the release in a

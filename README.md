@@ -457,7 +457,7 @@ request:
 | Job | What it guards |
 |---|---|
 | `lint` | ruff check and format; mypy over `src` and `scripts`; `uv sync --frozen` fails on a stale lockfile; pre-commit and CI must pin the same ruff; every source file carries its SPDX tag |
-| `test` | The suite on Python **3.11 and 3.13** — the floor `pyproject.toml` claims and the version pinned for development |
+| `test` | The suite on Python **3.11, 3.12 and 3.13** — every version `pyproject.toml` carries a classifier for. 3.11 is the floor `requires-python` declares, 3.13 is the pinned development version, and 3.12 is tested because it is claimed |
 | `executables` | `bin/` regenerates to a no-op, and both PEP 723 scripts run **from outside the project directory** |
 | `spark` | Builds a Spark Connect server with the Iceberg runtime and S3A, then runs the live Spark tests against it |
 | `dev-stack` | The real thing: brings up Lakekeeper + Postgres + MinIO from `.env.sample`, bootstraps it, runs the dev-stack tests, then the demo end to end |
