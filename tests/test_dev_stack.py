@@ -642,7 +642,7 @@ def spark_env(env: dict[str, str]) -> dict[str, str]:
             "Spark Connect not running -- cd dev-stack && "
             "docker compose --profile spark up -d --wait spark"
         )
-    pytest.importorskip("pyspark", reason="install zamboni[spark-connect]")
+    pytest.importorskip("pyspark", reason="install zamboni[spark]")
     return env
 
 

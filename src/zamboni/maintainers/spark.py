@@ -554,8 +554,8 @@ class SparkMaintainer(Maintainer):
         server that rejects static conf. It also means the Iceberg extensions
         and the S3A credentials `remove-orphans` needs are the server operator's
         responsibility, and `zamboni doctor` cannot check them from here. The
-        payoff is that `zamboni[spark-connect]` is ~1.5MB against ~434MB, and a
-        developer needs no Java.
+        payoff is that `zamboni[spark]` is ~13MB against `zamboni[spark-lib]`'s
+        ~472MB, and a developer needs no Java.
 
         **Local** starts a driver JVM in this process, so the machine's Java
         version becomes ours: Spark 3.x wants Java 8/11/17, Spark 4 wants 17 or
@@ -565,9 +565,9 @@ class SparkMaintainer(Maintainer):
             from pyspark.sql import SparkSession
         except ImportError as exc:  # pragma: no cover - depends on the install
             raise EngineConfigProblem(
-                "the spark engine needs PySpark: install zamboni[spark] for a "
-                "local session, or zamboni[spark-connect] to drive a Spark "
-                "Connect server with --spark-remote."
+                "the spark engine needs PySpark: install zamboni[spark] to "
+                "drive a Spark Connect server with --spark-remote, or "
+                "zamboni[spark-lib] for an embedded local session."
             ) from exc
 
         if remote := self._options.get("remote"):

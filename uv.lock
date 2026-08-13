@@ -688,7 +688,7 @@ wheels = [
 
 [[package]]
 name = "iceberg-zamboni"
-version = "0.2.1"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
@@ -703,10 +703,10 @@ s3 = [
     { name = "s3fs" },
 ]
 spark = [
-    { name = "pyspark" },
-]
-spark-connect = [
     { name = "pyspark-client" },
+]
+spark-lib = [
+    { name = "pyspark" },
 ]
 sql = [
     { name = "pyiceberg", extra = ["sql-sqlite"] },
@@ -732,14 +732,14 @@ requires-dist = [
     { name = "pyarrow", specifier = ">=18" },
     { name = "pyiceberg", extras = ["pyarrow"], specifier = ">=0.11.1,<0.12" },
     { name = "pyiceberg", extras = ["sql-sqlite"], marker = "extra == 'sql'", specifier = ">=0.11.1,<0.12" },
-    { name = "pyspark", marker = "extra == 'spark'", specifier = ">=3.5,<5" },
-    { name = "pyspark-client", marker = "extra == 'spark-connect'", specifier = ">=4.0,<5" },
+    { name = "pyspark", marker = "extra == 'spark-lib'", specifier = ">=3.5,<5" },
+    { name = "pyspark-client", marker = "extra == 'spark'", specifier = ">=4.0,<5" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "s3fs", marker = "extra == 's3'", specifier = ">=2024.6.0" },
     { name = "trino", marker = "extra == 'trino'", specifier = ">=0.330.0" },
 ]
-provides-extras = ["s3", "sql", "trino", "spark", "spark-connect"]
+provides-extras = ["s3", "sql", "trino", "spark", "spark-lib"]
 
 [package.metadata.requires-dev]
 dev = [

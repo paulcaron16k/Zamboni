@@ -10,7 +10,7 @@ build-backend = "hatchling.build"
 # unique. `iceberg-zamboni` rather than `zamboni-iceberg` so it sorts beside the
 # other `iceberg-*` packages. See ZMBNI-1808.
 name = "iceberg-zamboni"
-version = "0.2.1"
+version = "0.3.0"
 description = "Iceberg table maintenance -- compaction, Z-order, partition evolution, snapshot expiry and orphan-file removal -- without needing Trino or Spark"
 readme = "README.md"
 license = "Apache-2.0"
@@ -62,19 +62,24 @@ Issues = "https://github.com/paulcaron16k/Zamboni/issues"
 s3 = ["s3fs>=2024.6.0"]
 # Local SQL catalog, used by the test suite and handy for dry runs.
 sql = ["pyiceberg[sql-sqlite]>=0.11.1,<0.12"]
-# Only needed for `--engine trino`. Optional so nobody installs a query-engine
-# client to compact a table locally.
+# A *client* for a Trino you already have -- the dev stack's `trino` compose
+# profile, or a cluster. Optional so nobody installs a query-engine client to
+# compact a table locally.
 trino = ["trino>=0.330.0"]
-# Only for `--engine spark`, and the heaviest thing here by a wide margin: a JVM
-# plus ~300MB of Spark. Emphatically optional -- the point of this tool is not
-# needing Spark.
-spark = ["pyspark>=3.5,<5"]
-# The same engine over Spark Connect (`--spark-remote sc://...`): the JVM lives
-# on the server, so this is 1.5MB of pure Python against pyspark's 434MB, and
-# the machine's Java version stops mattering. Mutually exclusive with `spark` --
-# both provide the `pyspark` package, so an environment installs one or the
-# other. Requires a Spark 4 server; pyspark-client did not exist before 4.0.
-spark-connect = ["pyspark-client>=4.0,<5"]
+# A *client* for a Spark you already have, over Spark Connect
+# (`--spark-remote sc://...`), symmetric with `trino`: the JVM lives on the
+# server, so this is pure Python and the machine's Java version stops mattering.
+# Requires Spark 4 -- pyspark-client did not exist before 4.0.
+#
+# This used to be called `spark-connect`, while `spark` meant the embedded
+# library. That was backwards for the common case: driving a cluster is what
+# most people want, and it was the name nobody guessed. ZMBNI-1816.
+spark = ["pyspark-client>=4.0,<5"]
+# The embedded Spark library: a driver JVM inside this process, no server
+# anywhere. Two orders of magnitude larger on disk than the client and it needs
+# a JDK, which is why it is not what `spark` means. Mutually exclusive with
+# `spark` -- both provide the `pyspark` module, so an environment has one.
+spark-lib = ["pyspark>=3.5,<5"]
 
 [project.scripts]
 zamboni = "zamboni.cli:main"
@@ -160,7 +165,7 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 no_implicit_optional = true
 
-# Installing zamboni[spark-connect] put `pyspark` in the dev environment, so
+# Installing zamboni[spark] put `pyspark` in the dev environment, so
 # mypy started following the import inside SparkMaintainer.connect() and on
 # into numpy's bundled stubs -- which use PEP 695 `type` statements and so are
 # rejected under `python_version = "3.11"`. That is numpy declaring a 3.12

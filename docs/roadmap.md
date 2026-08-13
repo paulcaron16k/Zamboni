@@ -353,7 +353,7 @@ uncertain at the time* is part of the record:
    concern was real and the profiles are the answer to it -- Trino is a JVM and
    the Spark image is 1.57GB, so nobody pays for either unless they ask. Spark is
    a **Connect server** rather than a standalone master, which was not in the
-   original framing: it puts the JVM in the container, so `zamboni[spark-connect]`
+   original framing: it puts the JVM in the container, so `zamboni[spark]`
    is ~1.5MB of pure Python against pyspark's 434MB and the developer's Java
    version stops being this project's problem.
 4. ~~**Is the schedule/journal layer in scope at all?**~~ **Answered: no, and

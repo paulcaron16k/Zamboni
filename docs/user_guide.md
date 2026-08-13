@@ -519,7 +519,7 @@ get_maintainer("spark")(session, {
 })
 ```
 
-For Spark, install `iceberg-zamboni[spark-connect]` (~1.5MB, pure Python) rather than
+For Spark, install `iceberg-zamboni[spark]` (the Connect client: ~13MB, pure Python) rather than
 `iceberg-zamboni[spark]` (~434MB and a JVM). The two are mutually exclusive: both
 provide the `pyspark` package.
 
@@ -810,7 +810,7 @@ all. The alternative, a local `SparkSession`, starts a driver JVM in the cron
 process and makes your Java version this tool's problem.
 
 ```bash
-pip install "iceberg-zamboni[spark-connect]"
+pip install "iceberg-zamboni[spark]"
 ```
 
 ```bash

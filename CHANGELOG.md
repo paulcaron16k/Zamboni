@@ -21,12 +21,28 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
-## [0.2.1] - 2026-08-13
+## [0.3.0] - 2026-08-13
 
-Two things the first publication exposed, both of which only a real install could
-show, one extra that never did anything, and a documentation correction.
+What the first publication exposed: two defects only a real install could show,
+and an extras list that had accumulated one entry doing nothing and two named the
+wrong way round. A minor rather than a patch because of the third of those --
+`spark` now means something different, and a version number is the only warning
+anyone gets.
 
 ### BREAKING
+
+- **`spark` is now the Spark Connect *client*; the embedded library is
+  `spark-lib`.** `spark` used to install `pyspark` -- 472MB and a JDK -- while
+  the client hid behind `spark-connect`, a name nobody guessed. That was
+  backwards: driving a Spark you already have is the common case, and it is what
+  `trino` means for Trino, so the two engines now read the same way.
+
+  **If you install `iceberg-zamboni[spark]`** and used a *local* session
+  (`--spark-master local[*]`), switch to `iceberg-zamboni[spark-lib]`. If you
+  used `--spark-remote`, you now get a 13MB install instead of a 472MB one and
+  need no JDK.
+  **If you install `iceberg-zamboni[spark-connect]`**, that extra is gone;
+  use `spark`. ZMBNI-1816.
 
 - **The `bucket` extra is removed.** It installed nothing: `pyiceberg[pyarrow]`
   is a hard dependency and already requires `pyiceberg-core`, so `[bucket]` only

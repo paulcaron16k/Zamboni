@@ -19,7 +19,96 @@ zamboni --db acme maintenance       # previews; --yes commits
 run it, an engine-capability table to choose with, secrets handling, and the memory
 numbers. This README is the *why* -- the evidence behind the design decisions.
 
+
+## Installation Use-Cases
+
+There are various ways to create and use an Iceberg DB. While Zamboni is for maintenance
+only, depending on how you _CREATE_ and _USE_ your Iceberg DB the installation varies.
+
+**Everything about *using* the tables is reference only.** Reading them with DuckDB,
+pandas, polars, Trino or a BI tool is outside what Zamboni does -- it compacts, sorts,
+expires and reclaims, and then gets out of the way. The reading tools are named below so
+you can see where a maintenance install sits in a working stack, not because this package
+provides, configures or supports them.
+
+### Dev -- `iceberg-zamboni[sql]`
+
+A laptop, no services, nothing to start. A local SQLite catalog and a warehouse directory,
+which is enough to write tables programmatically through the PyIceberg catalog and read
+them back with pandas or DuckDB. `zamboni-demo` runs on exactly this.
+
+```bash
+pipx install "iceberg-zamboni[sql]"
+zamboni-demo next-day        # five days of simulated ingestion, then maintain it
+```
+
+### Home Lab -- `iceberg-zamboni[s3]`
+
+A real catalog and a real object store, still on one machine: **Lakekeeper** (which brings
+Postgres) and **MinIO**, both from the dev stack's docker services. This is the smallest
+setup that behaves like production -- REST catalog, S3 paths, vended credentials -- and the
+best base for programmatic data science against the tables: pandas or polars, embedded
+DuckDB, SQLAlchemy.
+
+```bash
+cd dev-stack && docker compose up -d --wait      # Lakekeeper + Postgres + MinIO
+pipx install "iceberg-zamboni[s3]"
+zamboni maintenance --warehouse demo --yes
+```
+
+### Home Lab Professional -- `iceberg-zamboni[s3]` + Trino for *query*
+
+Home Lab, plus the dev stack's Trino profile:
+
+```bash
+cd dev-stack && docker compose --profile trino up -d trino
+```
+
+Trino is what lets **Apache Superset** and other BI tools query the Iceberg tables -- they
+speak SQL to an engine, and DuckDB will not serve them. **You do _NOT_ use Trino for
+maintenance here.** Compaction stays with the local engine: Trino cannot Z-order, cannot
+remove dangling deletes, and enforces retention floors that reject Zamboni's defaults.
+Adding Trino for BI does not mean adding `--engine trino`.
+
+The `s3` extra is unchanged -- Superset talks to Trino, not to Zamboni, so nothing here
+needs the `trino` extra either. That extra is only for `--engine trino`.
+
+### Enterprise -- `iceberg-zamboni[s3,spark]`
+
+Your Spark cluster does the heavy lifting: large-scale compaction and sorting, on hardware
+sized for it rather than on one machine's disk and CPU. IT provides the object store (MinIO
+on real disk, AWS S3, GCS), the REST catalog (Lakekeeper or Polaris), and the Spark
+master -- you point Zamboni at those services when you run it.
+
+```bash
+pip install "iceberg-zamboni[s3,spark]"
+zamboni maintenance --warehouse acme --engine spark \
+        --spark-remote sc://spark.internal:15002 --yes
+```
+
+`spark` here is the Spark **Connect client**, ~13MB and no JVM on your side. For BI, IT
+provides a Trino cluster -- again for query, not for maintenance.
+
 ## Install
+
+### Optional Package Extensions
+
+Depending on the installation use-case you are using, the installation requires different
+extensions or extras.
+
+| Extra | Purpose, and when you need it | Python dependencies |
+|---|---|---|
+| `s3` | Object-store access. Required whenever data files live in S3, MinIO or GCS rather than on a local path -- so for every use-case above except Dev. Provides the fsspec filesystem PyIceberg and orphan removal use to read, write, **list** and delete objects | `s3fs` |
+| `sql` | A local SQLite catalog, with no catalog server to run. Enough to create and open a warehouse on a laptop; used by the test suite, the demo, and dry runs. Not needed against a REST catalog such as Lakekeeper or Polaris | `pyiceberg[sql-sqlite]` (`sqlalchemy`) |
+| `trino` | The client for `--engine trino`, which runs five of the six operations as `ALTER TABLE … EXECUTE`. **Requires a local Trino stand-alone instance via `dev-stack --profile trino`, or an Enterprise Trino cluster** -- this extra is a client and starts nothing. Not needed to *query* through Trino from a BI tool | `trino` |
+| `spark` | The Spark **Connect** client for `--engine spark --spark-remote sc://…`, which runs all six operations through the Iceberg Spark procedures, Z-order included. **Requires a local Spark stand-alone instance via `dev-stack --profile spark`, or an Enterprise Spark master/cluster.** ~13MB on disk, pure Python, and **no JVM on your machine** -- the driver runs on the server. Needs Spark 4 | `pyspark-client` |
+| `spark-lib` | The **embedded** Spark library: a driver JVM inside this process, so no Spark server or cluster is required anywhere. The cost is why it is not the default -- **~472MB on disk** and **~470MB resident** for even a trivial session (measured: 440MB JVM + 34MB Python), rising toward `spark.driver.memory` (1GB by default) under real work, plus a JDK 17 or 21 you install yourself. Mutually exclusive with `spark`: both provide the `pyspark` module | `pyspark` |
+
+`spark` and `spark-lib` are the two halves of the same engine and the names say which side
+the JVM is on. Pick `spark` if a cluster exists, `spark-lib` only if none does and you
+would rather carry half a gigabyte than run a server.
+
+### Installation Best-Practices
 
 **Never into your system Python.** Pick by what you want:
 
@@ -29,7 +118,7 @@ name has to be globally unique, and the mismatch is ordinary — `beautifulsoup4
 `bs4`.
 
 **The CLI, isolated — recommended.** `pipx` gives it its own virtual environment and puts
-`zamboni` on your PATH:
+`zamboni` on your PATH. We include `sql` to run zamboni-demo:
 
 ```bash
 pipx install "iceberg-zamboni[s3,sql]"
@@ -50,10 +139,6 @@ uv add "iceberg-zamboni[s3,sql]"              # the uv equivalent; no activation
 ```bash
 pipx install "git+https://github.com/paulcaron16k/Zamboni"
 ```
-
-Extras: `s3` for object storage, `sql` for a local SQLite catalog, `trino` for
-`--engine trino`, and `spark-connect` for `--engine spark` — ~1.5MB and no JVM, where the
-`spark` extra pulls ~434MB and needs Java.
 
 ## Status: what depending on this commits you to
 
@@ -580,7 +665,7 @@ Each mutating verb takes `--engine` (default `local`, the PyIceberg one).
 Spark 4.0.4:
 
 ```bash
-pip install "iceberg-zamboni[spark-connect]"     # ~1.5MB and no JVM
+pip install "iceberg-zamboni[spark]"             # the Connect client: ~13MB, no JVM
 zamboni compact default.events --engine spark --spark-remote sc://localhost:15002 --yes
 ```
 
