@@ -48,7 +48,7 @@ flowchart LR
 ### Why not the alternatives
 
 - **Daft** — kept as a candidate for one reason (bucket-transform writes), which turned out
-  unnecessary: PyIceberg + `pyiceberg-core` handles bucket partitioning, proven by test.
+  unnecessary: PyIceberg handles bucket partitioning through its Rust core, proven by test.
   Daft also cannot read equality deletes and has no `replace`-snapshot primitive.
 - **Ray** — `Table.to_ray()` is `ray.data.from_arrow(self.to_arrow())`, materialising the
   whole table before Ray sees it; the distributed write API is documented as alpha.
@@ -584,7 +584,7 @@ sequenceDiagram
 | No streaming write path (`_dataframe_to_data_files` takes a `pa.Table`) | Bin-packing done locally; native path used when a build has it |
 | Partitioned streaming writes unsupported (apache/iceberg-python#2152) | Partitioned tables always bin-pack locally |
 | `add_files` cannot infer non-order-preserving partition values | Writes go through `_dataframe_to_data_files`, which derives the key from data |
-| Bucket transforms need the Rust core | `pyiceberg-core` is a declared extra |
+| The `bucket`, `truncate`, `year`, `month`, `day` and `hour` transforms compute partition values in the Rust core | Nothing to declare: `pyiceberg[pyarrow]`, which is a hard dependency, already requires `pyiceberg-core` |
 | `expire_snapshots()` is metadata-only and ignores most of the retention spec | Retention algorithm and file deletion implemented here (`expire.py`); PyIceberg is used only to commit the `RemoveSnapshotsUpdate` |
 | `FileIO` has no list operation | Orphan removal reaches `PyArrowFileIO._initialize_fs()` for a `pyarrow.fs` filesystem, which covers local paths and S3/MinIO alike |
 

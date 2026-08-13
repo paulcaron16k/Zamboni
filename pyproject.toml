@@ -60,9 +60,6 @@ Issues = "https://github.com/paulcaron16k/Zamboni/issues"
 [project.optional-dependencies]
 # Object-store access for a real MinIO/Lakekeeper warehouse.
 s3 = ["s3fs>=2024.6.0"]
-# Required only for bucket-partitioned tables: PyIceberg delegates the bucket
-# transform to its Rust core when writing.
-bucket = ["pyiceberg-core>=0.5.0"]
 # Local SQL catalog, used by the test suite and handy for dry runs.
 sql = ["pyiceberg[sql-sqlite]>=0.11.1,<0.12"]
 # Only needed for `--engine trino`. Optional so nobody installs a query-engine
@@ -94,7 +91,7 @@ dev = [
     "pytest>=8",
     "python-dotenv>=1.2.2",
     "ruff>=0.6",
-    "iceberg-zamboni[bucket,sql,s3,trino]",
+    "iceberg-zamboni[sql,s3,trino]",
     # Matched to the dev stack's server, not to the extra's range. Iceberg 1.11
     # ships a Spark runtime for 4.0 and no later minor, so the server is 4.0.x;
     # pinning the client to the same minor means the dev-stack tests exercise a

@@ -699,9 +699,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-bucket = [
-    { name = "pyiceberg-core" },
-]
 s3 = [
     { name = "s3fs" },
 ]
@@ -720,7 +717,7 @@ trino = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "iceberg-zamboni", extra = ["bucket", "s3", "sql", "trino"] },
+    { name = "iceberg-zamboni", extra = ["s3", "sql", "trino"] },
     { name = "mypy" },
     { name = "pre-commit" },
     { name = "pyspark-client" },
@@ -735,7 +732,6 @@ requires-dist = [
     { name = "pyarrow", specifier = ">=18" },
     { name = "pyiceberg", extras = ["pyarrow"], specifier = ">=0.11.1,<0.12" },
     { name = "pyiceberg", extras = ["sql-sqlite"], marker = "extra == 'sql'", specifier = ">=0.11.1,<0.12" },
-    { name = "pyiceberg-core", marker = "extra == 'bucket'", specifier = ">=0.5.0" },
     { name = "pyspark", marker = "extra == 'spark'", specifier = ">=3.5,<5" },
     { name = "pyspark-client", marker = "extra == 'spark-connect'", specifier = ">=4.0,<5" },
     { name = "python-dotenv", specifier = ">=1.0" },
@@ -743,11 +739,11 @@ requires-dist = [
     { name = "s3fs", marker = "extra == 's3'", specifier = ">=2024.6.0" },
     { name = "trino", marker = "extra == 'trino'", specifier = ">=0.330.0" },
 ]
-provides-extras = ["s3", "bucket", "sql", "trino", "spark", "spark-connect"]
+provides-extras = ["s3", "sql", "trino", "spark", "spark-connect"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "iceberg-zamboni", extras = ["bucket", "sql", "s3", "trino"] },
+    { name = "iceberg-zamboni", extras = ["sql", "s3", "trino"] },
     { name = "mypy", specifier = ">=1.14" },
     { name = "pre-commit", specifier = ">=4.6.1" },
     { name = "pyspark-client", specifier = ">=4.0.4,<4.1" },

@@ -94,19 +94,18 @@ DIST_NAME = _project()["name"]
 #:
 #: The rule for this list: an extra belongs here when its absence makes the
 #: executable *unable to do its job*, not when it enables an optional engine.
-#: S3 access, a local catalog, bucket transforms and the Trino client are all
-#: small and pure-Python-ish; the Spark clients require a server anyway, and
-#: anyone who has one has an environment to install into.
-BUNDLED_EXTRAS = ("bucket", "sql", "s3", "trino")
+#: S3 access, a local catalog and the Trino client are all small and
+#: pure-Python-ish; the Spark clients require a server anyway, and anyone who
+#: has one has an environment to install into.
+BUNDLED_EXTRAS = ("sql", "s3", "trino")
 
 
 def locked_requirements() -> list[str]:
     """Exact pins for the runtime dependency set, from uv.lock.
 
-    A CLI that cannot reach S3, cannot open a local warehouse, and cannot write
-    a bucket-partitioned table is not a usable executable, so those extras are
-    included and are small next to pyarrow. See :data:`BUNDLED_EXTRAS` for what
-    is deliberately left out and why.
+    A CLI that cannot reach S3 or open a local warehouse is not a usable
+    executable, so those extras are included and are small next to pyarrow. See
+    :data:`BUNDLED_EXTRAS` for what is deliberately left out and why.
     """
     extras: list[str] = []
     for extra in BUNDLED_EXTRAS:

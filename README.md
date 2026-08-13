@@ -51,9 +51,9 @@ uv add "iceberg-zamboni[s3,sql]"              # the uv equivalent; no activation
 pipx install "git+https://github.com/paulcaron16k/Zamboni"
 ```
 
-Extras: `s3` for object storage, `sql` for a local SQLite catalog, `bucket` for
-bucket-partitioned tables, `trino` for `--engine trino`, and `spark-connect` for
-`--engine spark` — ~1.5MB and no JVM, where the `spark` extra pulls ~434MB and needs Java.
+Extras: `s3` for object storage, `sql` for a local SQLite catalog, `trino` for
+`--engine trino`, and `spark-connect` for `--engine spark` — ~1.5MB and no JVM, where the
+`spark` extra pulls ~434MB and needs Java.
 
 ## Status: what depending on this commits you to
 

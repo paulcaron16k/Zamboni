@@ -24,7 +24,18 @@ Two categories beyond the usual set, because this tool deletes files:
 ## [0.2.1] - 2026-08-13
 
 Two things the first publication exposed, both of which only a real install could
-show, and a documentation correction.
+show, one extra that never did anything, and a documentation correction.
+
+### BREAKING
+
+- **The `bucket` extra is removed.** It installed nothing: `pyiceberg[pyarrow]`
+  is a hard dependency and already requires `pyiceberg-core`, so `[bucket]` only
+  restated that with a looser floor. `pip install "iceberg-zamboni[bucket]"` now
+  warns that the extra is unknown and installs exactly what it installed before.
+  **Nothing to do** -- bucket-partitioned tables work with a plain install, and
+  did before. Removing it rather than keeping an inert alias, because an extra
+  that exists and does nothing reads as a warning about a problem that does not
+  exist. ZMBNI-1815.
 
 ### Fixed
 
