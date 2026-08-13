@@ -1,0 +1,23 @@
+# SHA-pinned actions are safe and go stale silently, which is the trade this
+# file pays for. A pin means the workflow runs exactly the code that was
+# reviewed -- a retagged or compromised `v4` cannot reach `release.yml`, whose
+# job holds an OIDC token able to publish to PyPI. The cost is that a pin never
+# picks up a fix on its own, so something has to propose the bumps.
+#
+# Dependabot reads both the SHA and the `# v4.4.0` comment beside it, and
+# rewrites the pair together. Without the comment it would still work and the
+# pull requests would be unreadable, which is why the comment is not decoration.
+#
+# ZMBNI-1817.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    # One pull request per action rather than a batch: a workflow bump is
+    # reviewed by reading the action's diff, and a grouped update makes that
+    # several diffs behind one approval.
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci

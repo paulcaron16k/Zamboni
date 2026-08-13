@@ -21,6 +21,15 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### Security
+
+- **Every GitHub Action is pinned to a commit SHA**, with the release in a
+  trailing comment. They were pinned to movable refs, so each job ran whatever
+  `v4` or `release/v1` pointed at that morning — including the `release.yml`
+  job holding an OIDC credential that can publish to PyPI. `.github/dependabot.yml`
+  proposes monthly bumps so the pins do not rot, and two tests keep both halves
+  honest. Raised by the 0.3.0 security review; ZMBNI-1817.
+
 ### Changed
 
 - **What "Spark works" means is now stated per connection path.** The security

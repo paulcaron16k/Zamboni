@@ -300,3 +300,58 @@ def test_no_document_carries_a_credential_shaped_literal():
                 offenders.append(f"{doc.name}: {match.group(0)[:60]}")
 
     assert not offenders, f"credential-shaped literals in documentation: {offenders}"
+
+
+# -- supply chain ---------------------------------------------------------
+
+
+def test_every_github_action_is_pinned_to_a_commit_sha():
+    """A movable tag is code you have not reviewed running with your tokens.
+
+    `actions/checkout@v4` is whatever `v4` points at when the job starts, and a
+    tag can be moved. That matters most in `release.yml`, whose publish job holds
+    an OIDC credential able to push to PyPI -- the highest-value secret this
+    project has, and one that never appears in the repository to be stolen any
+    other way. Found by the first pre-release security review (§3a item 8) and
+    fixed in ZMBNI-1817.
+
+    The trailing `# v4.4.0` is required, not decorative: it is what makes a
+    Dependabot pull request legible, and what tells a reader which release the
+    forty hex characters are.
+    """
+    uses = re.compile(r"^\s*-?\s*uses:\s*(\S+)(.*)$", re.M)
+    sha_pinned = re.compile(r"^[^@]+@[0-9a-f]{40}$")
+    version_comment = re.compile(r"#\s*v?\d+\.\d+")
+
+    unpinned, uncommented = [], []
+    for workflow in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        for spec, rest in uses.findall(workflow.read_text()):
+            if spec.startswith("./"):
+                continue  # a local composite action is this repository's own code
+            if not sha_pinned.match(spec):
+                unpinned.append(f"{workflow.name}: {spec}")
+            elif not version_comment.search(rest):
+                uncommented.append(f"{workflow.name}: {spec[:20]}…")
+
+    assert not unpinned, (
+        f"these actions are pinned to a movable ref: {unpinned}. Pin the commit SHA "
+        "and put the release in a trailing comment"
+    )
+    assert not uncommented, (
+        f"these SHAs have no version comment: {uncommented}. Without it nobody can "
+        "tell what is pinned, and Dependabot's pull requests are unreadable"
+    )
+
+
+def test_dependabot_watches_the_actions_it_pins():
+    """Pinning without a bump path is how a pin becomes an old vulnerability.
+
+    A SHA never updates itself, so the same change that makes the workflows safe
+    also makes them stale by default. This asserts the other half exists.
+    """
+    config = ROOT / ".github" / "dependabot.yml"
+    assert config.is_file(), (
+        "actions are SHA-pinned with nothing proposing updates, so they will "
+        "silently rot; .github/dependabot.yml is what closes that loop"
+    )
+    assert "github-actions" in config.read_text()

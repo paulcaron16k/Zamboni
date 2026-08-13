@@ -222,7 +222,7 @@ one where every line has a scar does not.
 | 5 | **Every identifier reaching engine SQL is quoted and escaped**, on both Trino and Spark | A backtick inside a Spark identifier could target a different table. Shipped as a `SAFETY` fix |
 | 6 | **Dependency delta reviewed**: what changed in `uv.lock`, whether any new package is one nobody chose, and whether the version floors still mean what the comments say | The `bucket` extra restated a dependency with a *looser* floor than upstream's, for a year, unnoticed |
 | 7 | **The wheel contains what it should and nothing else.** `python -m zipfile -l dist/*.whl` -- no `.env`, no catalog, no warehouse, no generated demo state | `force-include` lists the demo's inputs path by path precisely because globbing `data/healthims` would ship whatever a demo run left there -- 9MB of warehouse, after one run |
-| 8 | **The release workflow still publishes from OIDC, with no stored token**, and the tag-vs-version guard is intact | A stored token is a credential that can leak; the guard is what stops a mistyped tag burning a version number irrecoverably |
+| 8 | **The release workflow still publishes from OIDC with no stored token**, the tag-vs-version guard is intact, and every action is still SHA-pinned | A stored token is a credential that can leak; the guard is what stops a mistyped tag burning a version number irrecoverably; and a movable action ref is code you have not reviewed running with that OIDC token (ZMBNI-1817) |
 
 **Where to record it.** One line in the release commit message or the changelog
 entry saying the review ran and what it found. A review with no written outcome is
