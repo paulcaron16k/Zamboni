@@ -123,11 +123,14 @@ deleting. Derived wrongly, that double-counts rows. `0.12.0rc1` derives it
 wrongly for any non-identity transform -- verified, the 25-line reproduction in
 [upstream-0.12-upsert-regression.md](upstream-0.12-upsert-regression.md) returns
 `[('a',1), ('a',2), ('b',1), ('b',1)]` on rc1 where the correct answer is
-`[('a',2), ('b',1)]`. The fix is on main after rc1 and the same reproduction
-returns the correct answer there.
+`[('a',2), ('b',1)]`. Filed as
+[#3758](https://github.com/apache/iceberg-python/issues/3758); the fix is on main
+after rc1 and lands via
+[#3780](https://github.com/apache/iceberg-python/pull/3780), and the same
+reproduction returns the correct answer there.
 
-**So the cap stays until 0.12 is released *with* that fix**, not until 0.12 is
-released. `pyproject.toml` pins `<0.12` and rc1 is exactly why.
+**`pyproject.toml` pins `<0.12` until a release carries that fix.** Each release
+candidate is tested as it appears; the supported range widens when one passes.
 
 > **A defect this table found in Zamboni, not in PyIceberg.** The
 > `derives_delete_predicate` probe looks for
@@ -139,7 +142,11 @@ released. `pyproject.toml` pins `<0.12` and rc1 is exactly why.
 > and Zamboni refuses to run at all on a fixed 0.12. It fails *safe* -- refusing
 > rather than risking double-counted rows -- but it is wrong, and it is the same
 > class of bug as the one `_guard_anywhere_in_scan_planning` was written to fix:
-> a probe keyed on one symbol that upstream renamed. Tracked as ZMBNI-1109.
+> a probe keyed on one symbol that upstream renamed. **Fixed in ZMBNI-1109:** the
+> pruning question is now settled by running an overwrite on a transformed
+> partition and counting the survivors, because no symbol's presence can answer
+> it -- the same name exists on the build that corrupts and on the ones that do
+> not.
 
 ---
 

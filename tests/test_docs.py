@@ -98,7 +98,11 @@ def test_doc_links_resolve():
 # -- the task backlog ----------------------------------------------------
 
 STATUSES = ("done", "inproject", "todo", "cancelled")
-ROW = re.compile(r"^\| (ZMBNI-\d+) \| ([^|]+?) \|(.*?)\| (\w+) \|([^|]*)\|", re.M)
+# The title cell accepts an escaped `\|`, which markdown requires for a literal
+# pipe. Without that, ZMBNI-1903 -- titled `table-config generate\|validate\|
+# summary` -- matched nothing, so it was counted by no summary and checked by no
+# test in this file. An invisible story is worse than a miscounted one.
+ROW = re.compile(r"^\| (ZMBNI-\d+) \| ((?:\\\||[^|])+?) \|(.*?)\| (\w+) \|([^|]*)\|", re.M)
 
 
 def backlog_rows() -> list[tuple[str, str, str, str, str]]:

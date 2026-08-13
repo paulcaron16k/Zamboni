@@ -10,7 +10,7 @@ build-backend = "hatchling.build"
 # unique. `iceberg-zamboni` rather than `zamboni-iceberg` so it sorts beside the
 # other `iceberg-*` packages. See ZMBNI-1808.
 name = "iceberg-zamboni"
-version = "0.2.0"
+version = "0.2.1"
 description = "Iceberg table maintenance -- compaction, Z-order, partition evolution, snapshot expiry and orphan-file removal -- without needing Trino or Spark"
 readme = "README.md"
 license = "Apache-2.0"
@@ -45,6 +45,17 @@ dependencies = [
     "pyyaml>=6.0",
     "python-dotenv>=1.0",
 ]
+
+[project.urls]
+# Without these the PyPI page has no route anywhere -- which mattered more here
+# than usual, because the docs are deliberately *not* shipped in the wheel
+# (ZMBNI-1809) and are meant to be reached by link. Metadata cannot be edited in
+# place on PyPI, so a missing URL costs a release to add. ZMBNI-1812.
+Homepage = "https://github.com/paulcaron16k/Zamboni"
+Repository = "https://github.com/paulcaron16k/Zamboni"
+Documentation = "https://github.com/paulcaron16k/Zamboni#readme"
+Changelog = "https://github.com/paulcaron16k/Zamboni/blob/main/CHANGELOG.md"
+Issues = "https://github.com/paulcaron16k/Zamboni/issues"
 
 [project.optional-dependencies]
 # Object-store access for a real MinIO/Lakekeeper warehouse.

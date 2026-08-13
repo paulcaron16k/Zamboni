@@ -104,10 +104,13 @@ class DemoState:
         return state
 
     def save(self) -> None:
+        # Deferred: `cli` imports this module, so a top-level import is a cycle.
+        from .cli import invocation
+
         self.root.mkdir(parents=True, exist_ok=True)
         marker = f"INGESTING_DAY={self.ingesting_day}\n" if self.ingesting_day else ""
         self.env_path.write_text(
-            "# zamboni HIMS demo state. Safe to read; edit via ./bin/zamboni-demo.\n"
+            f"# zamboni HIMS demo state. Safe to read; edit via {invocation()}.\n"
             f"WRITE_MODE={self.write_mode}\n"
             f"DAYS_INGESTED={self.days_ingested}\n" + marker
         )

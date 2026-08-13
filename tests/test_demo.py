@@ -656,3 +656,62 @@ def test_reads_and_writes_are_separate_paths(tmp_path):
     assert state.warehouse_path.parent == tmp_path / "work"
     assert state.schema_path.parent == tmp_path / "in"
     assert state.day_dir(1).parent == tmp_path / "in"
+
+
+def test_the_demo_names_a_command_the_reader_can_actually_run(monkeypatch):
+    """`./bin/zamboni-demo` does not exist for someone who pipx-installed this.
+
+    Every "run X next" hint said it anyway, which sends a first-time user to a
+    path that is not there -- the same class of defect as shipping data the
+    installed copy could not find (ZMBNI-1809), just cheaper. ZMBNI-1811.
+    """
+    from himsdemo import cli
+
+    monkeypatch.setattr(cli, "_CHECKOUT_INPUTS", Path("/nonexistent"))
+    assert cli.invocation() == "zamboni-demo"
+
+    monkeypatch.setattr(cli, "_CHECKOUT_INPUTS", Path(__file__).parent)
+    assert cli.invocation() == "./bin/zamboni-demo"
+
+
+def test_no_user_facing_hint_hardcodes_the_checkout_path():
+    """The guard, because the literal is easy to reintroduce.
+
+    Any `./bin/` inside a printed or raised string is wrong for an installed
+    copy; it has to come from `invocation()`. Docstrings and comments are
+    describing the checkout and are left alone.
+    """
+    import ast
+
+    offenders = []
+    for path in (Path(__file__).parent.parent / "src" / "himsdemo").glob("*.py"):
+        tree = ast.parse(path.read_text())
+        # `invocation()` is where the literal is *supposed* to live.
+        allowed = {
+            id(sub)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "invocation"
+            for sub in ast.walk(node)
+        }
+        docstrings = {
+            id(node.body[0].value)
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef))
+            and node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+        }
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and "./bin/" in node.value
+                and id(node) not in docstrings
+                and id(node) not in allowed
+            ):
+                offenders.append(f"{path.name}:{node.lineno}")
+
+    assert not offenders, (
+        f"{offenders} hardcode './bin/' in a runtime string; use invocation() so the "
+        "hint matches how the demo was actually started"
+    )

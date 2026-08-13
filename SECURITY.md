@@ -92,10 +92,11 @@ writing and no backport branch; a data-loss fix ships as a patch release, and
 a working pipeline — such changes are marked `SAFETY` in the changelog and say
 what changed and why.
 
-Note that "latest" includes the PyIceberg you have installed. Zamboni caps it at
-`<0.12` because 0.12 corrupts data on a partitioned `upsert`
-([apache/iceberg-python#3758](https://github.com/apache/iceberg-python/issues/3758));
-that cap is a safety measure, and removing it locally is not supported.
+Note that "latest" includes the PyIceberg you have installed. PyIceberg 0.11.x is
+fully supported; Zamboni caps at `<0.12` while the 0.12 release candidates are
+tested, currently for
+[apache/iceberg-python#3758](https://github.com/apache/iceberg-python/issues/3758).
+Removing the cap locally is not supported.
 
 ## Disclosure
 

@@ -8,7 +8,7 @@ want what to do next, there is exactly one answer and it is RM-1.
 
 | Feature | Epic | Outcome |
 |---|---|---|
-| RM-1 — PyIceberg 0.12 | ZMBNI-11 | **Open, blocked upstream.** Branch written and verified; see below |
+| RM-1 — PyIceberg 0.12 | ZMBNI-11 | **Open, waiting on the 0.12 release.** Branch written and verified; see below |
 | RM-2 — Maintainer interface | ZMBNI-12 | Delivered 2026-08-03 |
 | RM-3 — Zamboni vs Trino vs Spark | ZMBNI-13 | Delivered 2026-08-03 — [engine-comparison.md](engine-comparison.md) |
 | RM-4 — Trino maintainer | ZMBNI-14 | Delivered 2026-08-04, verified against Trino 483 |
@@ -44,9 +44,9 @@ what a plan believed at the time is part of why it chose what it chose.
 
 | Fact | How | Consequence |
 |---|---|---|
-| ~~PyIceberg 0.12 is **not released** — PyPI's latest is 0.11.1, with no rc~~ **Superseded 2026-08-11: `0.12.0rc1` is on PyPI; the latest *stable* is still 0.11.1** | PyPI JSON API | RM-1 still develops against the checkout, because rc1 carries a data-corruption defect — see below |
+| ~~PyIceberg 0.12 is **not released** — PyPI's latest is 0.11.1, with no rc~~ **Superseded 2026-08-11: `0.12.0rc1` is on PyPI; the latest *stable* is still 0.11.1** | PyPI JSON API | RM-1 develops against the checkout until a release candidate carries the fix for [#3758](https://github.com/apache/iceberg-python/issues/3758) |
 | ~~That checkout is on `main` at `154288fb` (2026-07-27), **397 commits** past `pyiceberg-0.11.1`~~ **Now `32f036c5`, 19 commits past `pyiceberg-0.12.0rc1`** | `git log` | Large surface for private-API drift — and it drifted: two probes now key on symbols that moved (ZMBNI-1109) |
-| **`0.12.0rc1` corrupts a partitioned `upsert`**; main after rc1 does not | the 25-line reproduction in [upstream-0.12-upsert-regression.md](upstream-0.12-upsert-regression.md), run against both on 2026-08-11 | The `<0.12` cap lifts when 0.12 is released **with** the fix, not when 0.12 is released |
+| `0.12.0rc1` reproduces [#3758](https://github.com/apache/iceberg-python/issues/3758); main after rc1 does not | the 25-line reproduction in [upstream-0.12-upsert-regression.md](upstream-0.12-upsert-regression.md), run against both on 2026-08-11 | The supported range includes 0.12 once a release carries the fix ([#3780](https://github.com/apache/iceberg-python/pull/3780)) |
 | Trino has **no Z-order and no sort during `optimize`** | Trino Iceberg connector docs | A common interface cannot treat ordering as universally available |
 | Trino enforces **retention floors** (`iceberg.expire-snapshots.min-retention`, `remove-orphan-files.min-retention`, both default `7d`) | same | Zamboni's 5-day/3-day defaults are *rejected*, not honoured. Must fail at plan time |
 | Spark removes dangling deletes via the `remove-dangling-deletes` option on `rewrite_data_files`; `rewrite_position_delete_files` is a separate procedure that *compacts* delete files; Trino has neither | Iceberg Spark procedures docs, corrected by RM-3 | Dangling-delete removal is Spark-only, and Spark can do what *we* cannot. An earlier draft of this row attributed it to the wrong procedure |

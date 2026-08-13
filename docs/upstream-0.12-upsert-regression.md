@@ -1,11 +1,18 @@
 # PyIceberg 0.12: `upsert` duplicates rows on a partitioned table
 
 **Filed upstream as [apache/iceberg-python#3758](https://github.com/apache/iceberg-python/issues/3758)** on 2026-08-06.
+**Fix: [apache/iceberg-python#3780](https://github.com/apache/iceberg-python/pull/3780)** --
+*bug: fix Upsert duplicated rows on partitioned tables*. Open at the time of
+writing; it is the PR expected to close the issue, and the reproduction below
+returns the correct answer against it.
 
-**Status: blocks ZMBNI-11, and is why `pyproject.toml` caps PyIceberg at
-`<0.12`.** Found by ZMBNI-1103 while auditing what unreleased PyIceberg
-changes. This is an upstream defect, not ours, and the reproduction below uses
-no Zamboni code.
+**Status: open upstream, and why `pyproject.toml` caps PyIceberg at `<0.12`.**
+Found by ZMBNI-1103 while auditing what unreleased PyIceberg changes. This is an
+upstream defect, not ours, and the reproduction below uses no Zamboni code.
+
+**This document is a candidate for deletion.** Its reproduction is a test, and
+once it is one -- ours, upstream's, or both -- the prose adds nothing a reader
+cannot get from the issue and the PR. Tracked as ZMBNI-1813.
 
 **Severity: silent data corruption.** No error is raised. The table simply ends
 up with rows that should have been replaced, plus rows duplicated outright, and
@@ -154,9 +161,11 @@ ZMBNI-604 and 704–706 stay blocked. 0.12 lifts neither.
 
 ## Consequences for ZMBNI-11
 
-0.12 cannot be adopted for a deployment that upserts into partitioned tables
-until this is fixed upstream, regardless of what Zamboni does — the corruption
-happens in the ingest job, not in maintenance.
+A deployment that upserts into partitioned tables wants a 0.12 carrying
+[#3780](https://github.com/apache/iceberg-python/pull/3780), regardless of what
+Zamboni does — the defect is in the ingest job, not in maintenance. The
+supported range widens to include 0.12 once a release carries the fix and the
+suite passes against it.
 
 The capability probes do not and should not catch this. They answer "can this
 build do X", and this build *can* upsert; it simply does it wrongly. A probe for

@@ -58,6 +58,21 @@ def default_root() -> Path:
 DEFAULT_ROOT = default_root()
 
 
+def invocation() -> str:
+    """How to spell this command back to whoever is running it.
+
+    Every "run X next" hint used to say `./bin/zamboni-demo`, which is right in a
+    checkout and wrong for the person who just ran `pipx install iceberg-zamboni`
+    -- there is no `bin/` there, and the command on their PATH is bare
+    `zamboni-demo`. Telling someone to run a path that does not exist is the same
+    class of defect as ZMBNI-1809, just cheaper.
+
+    Keyed on the same signal as `default_inputs()` and `default_root()`, so all
+    three agree about which of the two situations we are in.
+    """
+    return "./bin/zamboni-demo" if _CHECKOUT_INPUTS.is_dir() else "zamboni-demo"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -165,13 +180,13 @@ def _has_catalog(state: DemoState, catalog) -> bool:
 
 def _print_status(state: DemoState, catalog) -> None:
     if not _has_catalog(state, catalog):
-        print("\n  No tables yet -- run './bin/zamboni-demo next-day'.\n")
+        print(f"\n  No tables yet -- run '{invocation()} next-day'.\n")
         return
 
     session, schema, config, tables = _open(state, catalog, create=False)
     try:
         if not tables:
-            print("\n  No tables yet -- run './bin/zamboni-demo next-day'.\n")
+            print(f"\n  No tables yet -- run '{invocation()} next-day'.\n")
             return
         collected = [
             stats.collect(tables[d.name], config) for d in schema.tables if d.name in tables
@@ -215,7 +230,7 @@ def _mode(state: DemoState, args: argparse.Namespace) -> int:
     if state.days_ingested > 0:
         print(
             f"refusing to switch to {args.value}: {state.days_ingested} day(s) already "
-            f"ingested as {state.write_mode}.\nRun './bin/zamboni-demo clear' first.",
+            f"ingested as {state.write_mode}.\nRun '{invocation()} clear' first.",
             file=sys.stderr,
         )
         return 2
@@ -239,7 +254,7 @@ def _next_day(state: DemoState, args: argparse.Namespace) -> int:
         # the resulting file counts would measure the crash, not the write mode.
         print(
             f"Day {state.ingesting_day} was interrupted mid-ingest and is partly loaded.\n"
-            "Run './bin/zamboni-demo clear' and start again -- replaying it would distort "
+            f"Run '{invocation()} clear' and start again -- replaying it would distort "
             "the file counts this demo reports.",
             file=sys.stderr,
         )
@@ -270,7 +285,7 @@ def _status(state: DemoState, args: argparse.Namespace) -> int:
 def _maintenance(state: DemoState, args: argparse.Namespace) -> int:
     catalog = args.demo_catalog
     if state.days_ingested == 0 or not _has_catalog(state, catalog):
-        print("nothing ingested yet -- run './bin/zamboni-demo next-day' first")
+        print(f"nothing ingested yet -- run '{invocation()} next-day' first")
         return 0
 
     from zamboni import TableCompactor
@@ -375,7 +390,7 @@ def _indent(text: str, width: int) -> None:
 def _query(state: DemoState, args: argparse.Namespace) -> int:
     catalog = args.demo_catalog
     if state.days_ingested == 0 or not _has_catalog(state, catalog):
-        print("nothing ingested yet -- run './bin/zamboni-demo next-day' first")
+        print(f"nothing ingested yet -- run '{invocation()} next-day' first")
         return 0
 
     session, _schema, _config, tables = _open(state, catalog, create=False)

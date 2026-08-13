@@ -145,9 +145,14 @@ def run_all(con, tables: dict[str, Table]) -> list[QueryResult]:
 def run(con, query: Query, tables: dict[str, Table]) -> QueryResult:
     missing = [name for name in query.reads if name not in tables]
     if missing:
+        # Imported here, not at module scope: `cli` imports this module, so a
+        # top-level import would close a cycle. By the time this runs, `cli` is
+        # loaded.
+        from .cli import invocation
+
         raise KeyError(
             f"{query.title!r} reads {missing}, which do not exist yet -- "
-            "run './bin/zamboni-demo next-day' first"
+            f"run '{invocation()} next-day' first"
         )
     used = {name: tables[name] for name in query.reads}
     data_files, delete_files = _files_read(used.values())

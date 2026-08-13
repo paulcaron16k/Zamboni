@@ -21,6 +21,42 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-13
+
+Two things the first publication exposed, both of which only a real install could
+show, and a documentation correction.
+
+### Fixed
+
+- **The demo told new users to run a command that does not exist.** Every "run X
+  next" hint said `./bin/zamboni-demo` -- right in a checkout, a dead path for
+  anyone who ran `pipx install iceberg-zamboni`, where the command is bare
+  `zamboni-demo`. `invocation()` now keys off the same signal as
+  `default_inputs()` and `default_root()`, and an AST guard fails the build if
+  the literal comes back. ZMBNI-1811.
+
+- **The PyPI page had no links.** `[project.urls]` was missing entirely, so the
+  published page carried no Homepage, Repository, Changelog or Issues link. That
+  is worse here than usual: the docs are deliberately not shipped in the wheel
+  and are meant to be reached by link. PyPI metadata cannot be edited in place,
+  which is what makes this a release rather than a commit. ZMBNI-1812.
+
+### Changed
+
+- **The PyIceberg 0.12 position is stated without drama.** 0.11.x is fully
+  supported; each 0.12 release candidate is tested as it appears; issues found
+  are reported upstream and fixed, and the supported range widens when a release
+  passes. The README section is now a one-row table naming the open issue
+  ([#3758](https://github.com/apache/iceberg-python/issues/3758)) and its fix
+  ([#3780](https://github.com/apache/iceberg-python/pull/3780)) -- those are the
+  source of detail, so there is no second copy here to keep current.
+  ZMBNI-1814.
+
+- **The README said Spark was "declared but not yet implemented".** It has been
+  implemented and verified against Spark 4.0.4 since 0.2.0. Spark now leads the
+  engine section with its own install line, ahead of Trino, because it is the
+  more complete of the two -- it Z-orders and Trino does not.
+
 ## [0.2.0] - 2026-08-12
 
 **Three engines, a public repository, and a name on PyPI.** 0.1.0 was one

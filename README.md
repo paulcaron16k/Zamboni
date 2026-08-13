@@ -78,9 +78,8 @@ Read this before depending on it.
   rather than a claim about it.
 - **Verified against real infrastructure.** Every operation has been run against a
   live Lakekeeper + MinIO, and against real Trino 483 and Spark 4.0.4 servers.
-- **PyIceberg is capped at `<0.12`** and that is a safety measure, not conservatism --
-  see [below](#why-pyiceberg-is-capped-at-012). TL;DR significant new functionality needs
-  verification, and on current PyIceberg main branch there are failures.
+- **PyIceberg 0.11.x is fully supported**, and `pyproject.toml` caps at `<0.12` while the
+  0.12 release candidates are being tested -- see [below](#why-pyiceberg-is-capped-at-012).
 - **On PyPI as `iceberg-zamboni`**, imported as `zamboni`. See
   [Install](#install); the names differ because `zamboni` on PyPI is a dormant
   registration by an unrelated project.
@@ -575,14 +574,29 @@ With `./zamboni.yml` and `./.env` present that is the whole cron line — see
 **[docs/devops.md](docs/devops.md)**, which also covers why there is deliberately no shell
 wrapper and how a multi-tenant fleet is scheduled.
 
-Each mutating verb takes `--engine` (default `local`, the PyIceberg one). **Trino works**
-(`pip install "iceberg-zamboni[trino]"`, then `--engine trino --trino-host …`) for five of the six
-operations; Spark is declared but not yet implemented. `zamboni engines` reports exactly what
-each one does and does not do, which is worth reading before planning a migration —
-particularly that Trino cannot Z-order, so only your leading `sorted_by` column gets file
-skipping. The `--yes` rule holds on every
-engine: where one cannot preview an operation, a run without `--yes` is *refused* rather than
-executed or dressed up as a dry run it did not perform.
+Each mutating verb takes `--engine` (default `local`, the PyIceberg one).
+
+**Spark works** — all six operations, over the Iceberg Spark procedures, verified against
+Spark 4.0.4:
+
+```bash
+pip install "iceberg-zamboni[spark-connect]"     # ~1.5MB and no JVM
+zamboni compact default.events --engine spark --spark-remote sc://localhost:15002 --yes
+```
+
+**Trino works** for five of the six — it cannot remove dangling deletes:
+
+```bash
+pip install "iceberg-zamboni[trino]"
+zamboni compact default.events --engine trino --trino-host localhost --yes
+```
+
+Spark comes first because it is the more complete of the two: it Z-orders and Trino does
+not, so on Trino only your leading `sorted_by` column gets file skipping. `zamboni engines`
+reports exactly what each one does and refuses, which is worth reading before planning a
+migration. The `--yes` rule holds on every engine: where one cannot preview an operation, a
+run without `--yes` is *refused* rather than executed or dressed up as a dry run it did not
+perform.
 
 `expire` and `remove-orphans` are dry-run without `--yes`, like `compact`. Both take
 `--table-config` for the [`retention`](docs/table-config.md#retention) block, and both
@@ -686,32 +700,38 @@ bit-interleaving expression in `sort_expression`.
 
 ## Why PyIceberg is capped at `<0.12`
 
-`pyproject.toml` pins `pyiceberg[pyarrow]>=0.11.1,<0.12`. That upper bound is a **safety measure**,
-and it is the first thing you will hit if you try to use a newer PyIceberg alongside this.
+`pyproject.toml` pins `pyiceberg[pyarrow]>=0.11.1,<0.12`. **0.11.x is fully supported**;
+the cap is a held position while the 0.12 release candidates are tested, not a judgement
+about 0.12.
 
-PyIceberg 0.12 corrupts data on a partitioned `upsert`: the row it was told to replace
-survives *alongside* its replacement, and a row it never touched is duplicated — with no
-error raised. Reproduced in 25 lines using no Zamboni code, and filed upstream as
-[apache/iceberg-python#3758](https://github.com/apache/iceberg-python/issues/3758). The
-full write-up is
+Zamboni is tested against each 0.12 release candidate as it appears. Issues found are
+reported upstream and fixed; that is ordinary, and it is how a cap gets lifted rather than
+a reason to keep one. Currently open:
+
+| Issue | What it is | Fix |
+|---|---|---|
+| [iceberg-python#3758](https://github.com/apache/iceberg-python/issues/3758) | `upsert` on a *partitioned* table keeps the replaced row beside its replacement and duplicates an untouched one, silently. Overwrite's new manifest pruning keeps a non-matching manifest verbatim, including the entries being deleted | [#3780](https://github.com/apache/iceberg-python/pull/3780), open |
+
+The issue and its PR are the source of detail; there is no second copy here. Our own
+reproduction and the mechanism are in
 [docs/upstream-0.12-upsert-regression.md](docs/upstream-0.12-upsert-regression.md).
 
 Two things worth being clear about:
 
-- **Zamboni's own operations are fine on 0.12** — the whole suite passes there apart from
-  the demo, whose ingest upserts. What is unsafe is any *write* path going through
-  overwrite on a partitioned table, which is most merge-style ingestion. The cap protects
-  your ingest, not our maintenance.
+- **This is an ingest hazard, not a maintenance one.** Zamboni's own operations pass on
+  0.12 -- what the defect reaches is any *write* path going through overwrite on a
+  partitioned table, which is most merge-style ingestion. The cap protects your ingest.
 - **The cap is deliberate, not staleness.** The original bound was open-ended, which meant
   the day 0.12 published, any `uv lock --upgrade` would have pulled it in with nobody
   touching this code.
 
-It lifts when 0.12 is released *and* the regression is fixed. A `feature/pyiceberg-0.12`
-branch is written and verified against unreleased main, waiting for that.
+When 0.12 releases and the suite passes against it, the supported range will include it.
 
-Note the capability probes do **not** catch this, and should not: they answer "can this
-build do X", and this build *can* upsert — it simply does it wrongly. A probe for
-correctness would have to write data and read it back, which is a test, not a probe.
+Note the capability probes do not catch a defect like this by design: they answer "can this
+build do X", and such a build *can* upsert -- it simply does it wrongly. Proving
+correctness means writing data and reading it back, which is a test, not a probe. Where a
+probe genuinely must ask about behaviour rather than structure, it runs the operation --
+see [Capability detection](#capability-detection-not-version-checks).
 
 ## Capability detection, not version checks
 
