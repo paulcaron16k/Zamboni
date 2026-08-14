@@ -18,7 +18,12 @@ license-files = ["LICENSE"]
 requires-python = ">=3.11"
 keywords = ["iceberg", "lakehouse", "compaction", "maintenance", "pyiceberg", "duckdb"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    # Beta from 0.3.0 onward, not Production/Stable: the scope is delivered
+    # and verified against live infrastructure, but the `table-config.json`
+    # schema and the defaults deciding what gets deleted have had one author.
+    # Trove's ladder is coarser than semver -- 4 is where a 0.x tool that works
+    # and is not yet promising stability belongs. See docs/releasing.md §4.
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
     "License :: OSI Approved :: Apache Software License",

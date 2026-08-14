@@ -23,6 +23,14 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Changed
 
+- **The PyPI development status is Beta**, not Alpha. Alpha understated where
+  this is: the scope is delivered, every operation is verified against a live
+  Lakekeeper and MinIO plus real Trino and Spark servers, and CI runs green on
+  three Pythons. It is deliberately not Production/Stable -- that waits on the
+  same two things `1.0.0` does, a maintenance cycle against a warehouse we did
+  not build and a second user on the config schema. Takes effect on the next
+  release; PyPI metadata cannot be edited in place.
+
 - **CI tests every Python `pyproject.toml` claims**, not only the endpoints.
   The matrix was 3.11 and 3.13 -- the floor and the development pin -- while the
   classifiers promised 3.12 as well. Endpoints catch a 3.12-only *construct*,
