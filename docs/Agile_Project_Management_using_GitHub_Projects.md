@@ -1,9 +1,9 @@
 # Agile project management using GitHub Projects
 
-> Converted from `Agile Project Managment using GitHub Projects.docx`. This first
-> pass is a faithful reformatting — the structure, claims and code are the
-> source document's. A review pass follows; see [Review notes](#review-notes) at
-> the end for what has been checked against a live repository and what has not.
+> Converted from `Agile Project Managment using GitHub Projects.docx`, then
+> reviewed against a live repository. Every API claim below was probed rather
+> than trusted; [What was verified](#what-was-verified) records each check and
+> the two questions still open.
 
 **GitHub Projects (v2)** provides a flexible system for running Agile development
 natively alongside the source code. GitHub offers REST API endpoints for project
@@ -81,24 +81,39 @@ mutation.
 
 ### 1. Adding an issue to a project (REST)
 
+The route differs by owner type, and getting it wrong is a 404 that looks like a
+missing project:
+
 ```bash
+# User-owned project
 curl -X POST \
   -H "Authorization: Bearer $GITHUB_TOKEN" \
   -H "Accept: application/vnd.github+json" \
-  https://api.github.com/orgs/ORG/projectsV2/PROJECT_NUMBER/items \
+  https://api.github.com/users/USERNAME/projectsV2/PROJECT_NUMBER/items \
   -d '{"content_id": 12345678, "content_type": "Issue"}'
+
+# Organization-owned project
+#   https://api.github.com/orgs/ORG/projectsV2/PROJECT_NUMBER/items
 ```
 
-`content_id` is the global node ID of the issue or pull request being attached.
+`content_id` is the global node ID of the issue or pull request, not its number.
+
+Both routes are real: requesting a project that does not exist returns a 404
+whose `documentation_url` points at `rest/projects/items`, which is GitHub
+saying it resolved the route and found no such project. A misspelled route
+returns a generic 404 instead — a useful way to tell the two apart while
+debugging.
 
 ### 2. Querying project data (GraphQL)
 
 Query the `projectV2` object to pull items together with their custom field
-values:
+values. Use `user(login:)` for a user-owned project and `organization(login:)`
+for an org-owned one — both expose `projectV2`, and neither reaches the other's
+projects.
 
 ```graphql
 query {
-  organization(login: "YOUR_ORG_NAME") {
+  organization(login: "YOUR_ORG_NAME") {   # or: user(login: "USERNAME")
     projectV2(number: YOUR_PROJECT_NUMBER) {
       id
       title
@@ -308,25 +323,57 @@ jobs:
 
 ---
 
-## Review notes
+## What was verified
 
-Recorded during conversion; **not yet resolved**. The review pass addresses
-these.
+Checked against a live repository on 2026-08-14 with `gh api`, because a guide
+whose examples 404 is worse than no guide. Six of the source's claims needed
+correcting.
 
-- The source's REST example posted to a bare `https://github.com` with no path.
-  A plausible endpoint has been substituted and is **unverified**.
-- The workflow's Python setup step read `python-python:`, corrected here to
-  `python-version:`.
-- The Python listing had its newlines stripped by the document conversion
-  (`import osimport sysimport json`) and has been reconstructed. The logic is the
-  source's; it has not been executed.
-- Every GraphQL example is rooted at `organization(login:)`. A **user-owned**
-  repository needs `user(login:)`, which matters for this repository.
-- **Issue types** are presented as generally available. They are an
-  organization-level feature.
-- The workflow triggers on `demilestoned` and, in the source, on `project_card`
-  — the latter belongs to the classic projects API and does not fire for
-  Projects v2.
-- All inline citations from the source (largely video and blog links) were
-  dropped in favour of the structure itself; the authoritative reference is
-  GitHub's own Projects documentation.
+| Claim | Result |
+|---|---|
+| A REST API exists for project items | **True.** `/users/{user}/projectsV2/{n}/items` and `/orgs/{org}/…` both resolve |
+| The source's REST example | **Wrong** — it posted to a bare `https://github.com` with no path. Replaced with both real routes |
+| GraphQL is rooted at `organization(login:)` | **Incomplete.** `User.projectV2` and `Organization.projectV2` both exist; a user-owned project is unreachable via `organization()` |
+| Sprints use an `Iteration` custom field | **True.** `ProjectV2CustomFieldType` enumerates `TEXT, SINGLE_SELECT, MULTI_SELECT, NUMBER, DATE, ITERATION` |
+| Sub-issues give epic → story hierarchy | **True.** `Issue.parent`, `Issue.subIssues` and `Issue.subIssuesSummary` are all present |
+| **Issue types** (`Epic` as a first-class type) | **Not universally available.** `/repos/{owner}/{repo}/issues/types` returns 404 on a user-owned repository — it is an organization feature. Use labels or sub-issues instead |
+| `python-python: '3.11'` in the workflow | **Typo**, corrected to `python-version` |
+| The Python listing | Reconstructed — the docx conversion had stripped its newlines. **Not executed** |
+
+### Still open
+
+- **Which event fires for a Projects v2 change.** The source used `project_card`,
+  which belongs to the classic projects API and does not fire for Projects v2.
+  GitHub's workflow-events reference does not list a `projects_v2_item` trigger
+  either. What *is* confirmed is that the `issues` event now carries
+  `field_added` and `field_removed` activity types alongside `typed`/`untyped` —
+  which look like the intended replacement, and are the first thing to try.
+- **Whether the automation script runs.** Its logic is sound on inspection and
+  every query it sends matches the schema, but it has not been executed against
+  a real project.
+
+---
+
+## Applying this to Zamboni
+
+Concrete consequences for this repository, which is **user-owned and public**:
+
+- **Use `user(login: "paulcaron16k")`** in every GraphQL example above, and
+  `/users/paulcaron16k/projectsV2/…` in every REST call. The `orgs/` form
+  returns 404 here.
+- **Issue types are unavailable.** Epics have to be sub-issue parents, labels,
+  or a project single-select field. Sub-issues are the closest fit and are
+  confirmed present.
+- **Issue numbers are shared with pull requests and start at 1.** #1–#4 are
+  already spent on Dependabot PRs, so the first issue is #5. The `ZMBNI-xxxx`
+  scheme's number-spacing (epic 11 owning 1101–1106) cannot be reproduced —
+  keep those identifiers in issue *titles*, where the 130 existing references in
+  code and docs still resolve to them.
+- **`GITHUB_TOKEN` cannot reach a user or org project.** Automation needs a PAT
+  with `project` scope or a GitHub App token in a repository secret — which is
+  a stored credential, and worth weighing against
+  [releasing.md §3a](releasing.md) item 8 before adding one.
+- **Sprints are a poor fit today.** Every open story is blocked on an upstream
+  release, so an iteration field would measure waiting rather than work. The
+  backlog and epic views earn their keep first; add `Sprints` when
+  IWS starts producing findings that flow.
