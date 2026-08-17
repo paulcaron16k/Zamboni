@@ -21,6 +21,24 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### Added
+
+- **A monthly version watch, in place of a nightly test run.** Every `<` bound in
+  `pyproject.toml` is a decision with an expiry date -- `pyiceberg<0.12` is a
+  data-corruption workaround, the dev group's `pyspark-client<4.1` is matched to
+  the dev stack's server -- and nothing announced when one went stale.
+  Dependabot cannot: its `uv` ecosystem updates `uv.lock` and not
+  `pyproject.toml`, so with `<4.1` written down the most it can offer is a 4.0.x
+  patch. `scripts/version_watch.py` asks PyPI about every cap the file declares,
+  ignores pre-releases and fully yanked versions, and keeps one issue current.
+  Seconds, no containers, no matrix. It found `pyspark-client` 4.2.0 on its first
+  run.
+
+  A nightly re-run of the suite was considered and rejected: every input to the
+  tests is pinned -- `uv.lock`, exact image tags, pinned Maven jars, SHA-pinned
+  actions -- so against an unchanged commit it re-proves the tick that commit
+  already has.
+
 ### Changed
 
 - **The PyPI development status is Beta**, not Alpha. Alpha understated where

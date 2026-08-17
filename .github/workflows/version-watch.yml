@@ -1,0 +1,108 @@
+# Once a month, ask PyPI whether anything has been released above a version cap
+# this project declares, and keep exactly one issue up to date about it.
+#
+# **Not a test run.** It starts no containers and runs no matrix: every input to
+# this repository's tests is pinned -- uv.lock for Python, exact image tags in
+# dev-stack/.env.sample, pinned Maven jars in the Spark image, SHA-pinned actions
+# -- so re-running the suite against an unchanged commit re-proves the tick that
+# commit already has. What *does* change without a commit is upstream publishing
+# a release our own bounds refuse to install, and that is a question one HTTPS
+# request answers. The whole job is seconds; there is nothing here to guard with
+# a "has anything changed" check.
+#
+# The caps are read out of pyproject.toml rather than listed here, so a new one
+# is watched the day it is written. Why Dependabot cannot do this -- it updates
+# uv.lock and not pyproject.toml, so a cap is precisely what it will not edit --
+# is in scripts/version_watch.py.
+#
+# **This is disabled after 60 days without repository activity**, which GitHub
+# does to every scheduled workflow in a public repository. A monthly job is well
+# inside that, but a quiet quarter stops the watcher silently, so the day a run
+# is missing is not the day to conclude the caps are fine. Re-enable it from the
+# Actions tab, or fire it by hand with `gh workflow run version-watch.yml`.
+name: Version watch
+
+on:
+  schedule:
+    # 04:17 UTC on the 1st. Off the hour on purpose: GitHub delays scheduled
+    # runs under load, and the top of every hour is when the load is.
+    - cron: "17 4 1 * *"
+  workflow_dispatch:
+
+# Read the repository, write one issue. Nothing here needs more, and this
+# workflow's whole output is an issue body.
+permissions:
+  contents: read
+  issues: write
+
+env:
+  UV_VERSION: "0.11.26"
+
+jobs:
+  caps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      # `--no-project` because the script is standard library only: no sync, no
+      # dependency resolution, and it cannot be broken by a lockfile change.
+      # Redirected rather than piped through `tee`: the default shell has no
+      # pipefail, and a PyPI that could not be reached exits 2 -- which must not
+      # be swallowed into "every cap is fine".
+      - name: Ask PyPI about every declared cap
+        id: watch
+        run: |
+          uv run --no-project scripts/version_watch.py > body.md
+          cat body.md
+
+      - name: Open, update or close the issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FINDINGS: ${{ steps.watch.outputs.findings }}
+          TITLE: Upstream releases above our declared version caps
+        run: |
+          set -euo pipefail
+
+          # Idempotent, and it makes the issue filterable in the UI. Looking the
+          # issue up by label rather than by title means a human can rename it.
+          gh label create version-watch --force \
+            --color ededed --description "Opened by .github/workflows/version-watch.yml"
+
+          number=$(gh issue list --label version-watch --state open \
+                     --limit 1 --json number --jq '.[0].number // empty')
+
+          if [ "$FINDINGS" != "true" ]; then
+            if [ -n "$number" ]; then
+              gh issue comment "$number" --body \
+                "Every declared cap is the newest release on PyPI again. Closing; a future run reopens a new issue if that changes."
+              gh issue close "$number"
+              echo "closed #$number: caps are clear"
+            else
+              echo "caps are clear, no open issue"
+            fi
+            exit 0
+          fi
+
+          if [ -z "$number" ]; then
+            gh issue create --title "$TITLE" --label version-watch --body-file body.md
+            exit 0
+          fi
+
+          # Editing a body notifies nobody, so a changed finding set gets a
+          # comment and an unchanged one stays quiet. The first line of the body
+          # is a fingerprint of the findings written for exactly this comparison
+          # -- comparing whole bodies would fire every month on the date alone.
+          before=$(gh issue view "$number" --json body --jq .body | head -1)
+          after=$(head -1 body.md)
+          gh issue edit "$number" --body-file body.md
+          if [ "$before" != "$after" ]; then
+            gh issue comment "$number" --body \
+              "The set of caps with a newer release upstream has changed. Updated body above."
+            echo "updated #$number and commented: findings changed"
+          else
+            echo "updated #$number: same findings as last run"
+          fi
