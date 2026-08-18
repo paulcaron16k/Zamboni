@@ -11,8 +11,9 @@ interesting. It is about what counts as *done*.
 ## Getting set up
 
 ```bash
+make doctor             # uv, the venv and its pip, the matrix Pythons, docker, the subnet
 make                    # every target, and which dev stack is currently up
-make venv               # builds .venv from uv.lock; the Python is pinned too
+make venv               # builds .venv from uv.lock; the Python is pinned, and pip is inside it
 uv run pre-commit install
 
 make test               # the suite; no Docker needed
@@ -36,9 +37,11 @@ make spark-stack-start && make test-spark     # ... plus Spark Connect
 make stack-status                             # what is up right now
 ```
 
-[docs/runbook-dev.md](docs/runbook-dev.md) covers running each maintenance step
-by hand; [docs/user_guide.md](docs/user_guide.md) is the user-facing reference
-and the fastest way to understand what the tool is for.
+[ONBOARDING.md](ONBOARDING.md) is the worked version of all of this, with a
+checkpoint after each step and the reading order that makes a first change
+review in one pass. [docs/runbook-dev.md](docs/runbook-dev.md) covers running
+each maintenance step by hand; [docs/user_guide.md](docs/user_guide.md) is the
+user-facing reference and the fastest way to understand what the tool is for.
 
 ## The five rules
 

@@ -60,11 +60,33 @@ define require_venv
   printf '  building it from uv.lock now (the package plus the dev group)\n'; \
   $(MAKE) --no-print-directory venv; \
 fi
+$(ensure_pip)
 @if [ -n "$$VIRTUAL_ENV" ] && \
    [ "$$(cd "$$VIRTUAL_ENV" 2>/dev/null && pwd -P)" != "$$(cd '$(VENV)' && pwd -P)" ]; then \
   printf '\033[33mwarning: VIRTUAL_ENV is %s\033[0m\n' "$$VIRTUAL_ENV"; \
   printf '  every target here runs `uv`, which uses %s regardless of what is activated.\n' '$(VENV)'; \
   printf '  Deactivate to avoid confusion; the run below is not using the activated one.\n'; \
+fi
+endef
+
+# `uv sync` alone does not put pip in the environment, and the failure that
+# causes is silent and off-target: with .venv activated but no pip inside it,
+# `pip install x` runs whichever pip is next on PATH and installs into *that*
+# interpreter. Measured here before adding this: `pip` resolved to
+# ~/.local/bin/pip, a Python **3.10** pip, against a 3.13 project -- so the
+# package lands in the user's global site-packages for a Python this project does
+# not use, and the next `uv run` cannot see it.
+#
+# `uv venv --seed` covers a new environment and `uv pip install pip` repairs an
+# existing one. Verified that `uv sync` prunes neither, so this is a one-time fix
+# rather than a fight with every sync.
+define ensure_pip
+@if [ ! -x '$(VENV)/bin/pip' ]; then \
+  printf '\033[33mwarning: %s has no pip -- installing it now\033[0m\n' '$(VENV)'; \
+  printf '  Without it, `pip install` in the activated venv silently targets another\n'; \
+  printf '  interpreter. `uv add` and `uv pip install` remain the right way to add a\n'; \
+  printf '  dependency here, because they go through uv.lock; this is about the accident.\n'; \
+  uv pip install pip >/dev/null; \
 fi
 endef
 
@@ -109,9 +131,87 @@ help:
 	@printf '\n\033[1mStack\033[0m  now: \033[36m%s\033[0m  (local | trino | spark | none)\n' "$(stack_type)"
 	@printf '\n'
 
-venv: ## create .venv from uv.lock -- the package plus the dev dependencies
+venv: ## create .venv from uv.lock -- the package, the dev dependencies, and pip
+	@if [ ! -d '$(VENV)' ]; then uv venv --seed; fi
 	uv sync
-	@printf 'ready: %s -- %s\n' '$(VENV)' "$$($(PY) --version)"
+	$(ensure_pip)
+	@printf 'ready: %s -- %s, pip %s\n' '$(VENV)' "$$($(PY) --version)" \
+	  "$$($(VENV)/bin/pip --version | awk '{print $$2}')"
+
+doctor: ## can this machine run everything? checks the toolchain, not the code
+	@fail=0; warn=0; \
+	printf '\033[1mZamboni preflight\033[0m -- the machine, not the code\n\n'; \
+	if command -v uv >/dev/null; then \
+	  printf '  \033[32mok\033[0m    uv %s\n' "$$(uv --version | awk '{print $$2}')"; \
+	else \
+	  printf '  \033[31mFAIL\033[0m  uv is not installed -- every target here runs through it\n'; \
+	  printf '        https://docs.astral.sh/uv/getting-started/installation/\n'; \
+	  fail=$$((fail+1)); \
+	fi; \
+	ci_uv=$$(awk -F'"' '/UV_VERSION:/ {print $$2}' .github/workflows/ci.yml); \
+	if command -v uv >/dev/null && [ "$$(uv --version | awk '{print $$2}')" != "$$ci_uv" ]; then \
+	  printf '  \033[36minfo\033[0m  CI pins uv %s; yours differs. `uv sync --frozen` keeps the lock honest either way\n' "$$ci_uv"; \
+	fi; \
+	if [ -x '$(PY)' ]; then \
+	  printf '  \033[32mok\033[0m    %s  %s\n' '$(VENV)' "$$($(PY) --version)"; \
+	  if [ -x '$(VENV)/bin/pip' ]; then \
+	    printf '  \033[32mok\033[0m    pip is inside the venv (%s)\n' \
+	      "$$($(VENV)/bin/pip --version | awk '{print $$2}')"; \
+	  else \
+	    printf '  \033[33mwarn\033[0m  no pip in the venv -- `pip install` would target another interpreter\n'; \
+	    printf '        make venv\n'; warn=$$((warn+1)); \
+	  fi; \
+	else \
+	  printf '  \033[33mwarn\033[0m  no %s yet -- any target builds it, or run `make venv`\n' '$(VENV)'; \
+	  warn=$$((warn+1)); \
+	fi; \
+	for v in $(MATRIX); do \
+	  if uv python find "$$v" >/dev/null 2>&1; then \
+	    printf '  \033[32mok\033[0m    Python %s, for make test-matrix\n' "$$v"; \
+	  else \
+	    printf '  \033[33mwarn\033[0m  no Python %s -- make test-matrix will fetch it (uv python install %s)\n' "$$v" "$$v"; \
+	    warn=$$((warn+1)); \
+	  fi; \
+	done; \
+	if ! command -v docker >/dev/null; then \
+	  printf '  \033[33mwarn\033[0m  no docker -- everything except the stack targets still works\n'; \
+	  warn=$$((warn+1)); \
+	elif ! docker info >/dev/null 2>&1; then \
+	  printf '  \033[33mwarn\033[0m  docker is installed but the daemon is not reachable\n'; \
+	  warn=$$((warn+1)); \
+	else \
+	  printf '  \033[32mok\033[0m    docker %s, daemon reachable\n' "$$(docker version --format '{{.Server.Version}}' 2>/dev/null)"; \
+	  printf '  \033[36minfo\033[0m  stack: %s\n' "$(stack_type)"; \
+	  if $(MAKE) -s stack-subnet >/dev/null 2>&1; then \
+	    printf '  \033[32mok\033[0m    %s is free, or held by our own stack\n' '$(SUBNET)'; \
+	  else \
+	    printf '  \033[31mFAIL\033[0m  %s is held by a network that is not ours\n' '$(SUBNET)'; \
+	    fail=$$((fail+1)); \
+	  fi; \
+	fi; \
+	if [ -f '$(STACK)/.env' ]; then \
+	  printf '  \033[32mok\033[0m    %s/.env exists\n' '$(STACK)'; \
+	else \
+	  printf '  \033[36minfo\033[0m  no %s/.env -- the stack-start targets write it from .env.sample\n' '$(STACK)'; \
+	fi; \
+	if [ -f .git/hooks/pre-commit ]; then \
+	  printf '  \033[32mok\033[0m    the pre-commit hook is installed\n'; \
+	else \
+	  printf '  \033[33mwarn\033[0m  no pre-commit hook -- uv run pre-commit install\n'; \
+	  warn=$$((warn+1)); \
+	fi; \
+	if command -v gh >/dev/null && gh extension list 2>/dev/null | grep -q gh-agile; then \
+	  printf '  \033[32mok\033[0m    gh with the agile extension, for the issue board\n'; \
+	else \
+	  printf '  \033[36minfo\033[0m  no `gh agile` -- only needed to file or move issues\n'; \
+	  printf '        gh extension install paulcaron16k/gh-agile\n'; \
+	fi; \
+	printf '\n%s blocker(s), %s warning(s)\n' "$$fail" "$$warn"; \
+	if [ "$$fail" -gt 0 ]; then exit 1; fi; \
+	if [ -x '$(PY)' ]; then \
+	  printf '\n\033[1mAnd what this PyIceberg can do\033[0m -- a different question, same word:\n'; \
+	  uv run zamboni doctor; \
+	fi
 
 venv-frozen: ## same, but fail if uv.lock is stale against pyproject.toml (CI: lint)
 	uv sync --frozen
@@ -339,7 +439,7 @@ clean: ## remove caches and the generated demo warehouse
 clean-venv: ## delete .venv; `make venv` rebuilds it from uv.lock
 	rm -rf $(VENV)
 
-.PHONY: all help venv venv-frozen \
+.PHONY: all help venv venv-frozen doctor \
         lint ruff format format-check typecheck precommit ruff-pin \
         test test-matrix test-docs test-executables ci \
         test-local test-trino test-spark test-demo \

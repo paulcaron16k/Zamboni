@@ -500,15 +500,26 @@ bypassed hook is worse than none. Run it with `make test`, below.
 
 ```bash
 make                      # the target list, and which stack is currently up
-make venv                 # .venv from uv.lock — the package plus the dev dependencies
+make doctor               # can this machine run everything? checks the toolchain, not the code
+make venv                 # .venv from uv.lock — the package, the dev dependencies, and pip
 make ci                   # every CI check that needs no containers
 ```
+
+New here, or setting up a machine: **[ONBOARDING.md](ONBOARDING.md)** is the worked
+version of this section, with a checkpoint after each step.
 
 Every target that runs Python goes through `uv`, so it uses `.venv` built from `uv.lock` and
 never whatever is installed globally. Each calls a `require_venv` guard first: if `.venv` is
 missing it **warns and builds it** rather than telling you to, because `uv sync` is
 deterministic here and there is only one right answer. If a *different* virtualenv is
 activated it warns about that too — `uv` ignores it, which is confusing precisely once.
+
+**pip is installed inside `.venv` deliberately**, with `uv venv --seed`. `uv sync` does not
+put it there, and the failure that causes is silent and lands somewhere else: with `.venv`
+activated but no pip in it, `pip install x` runs whichever pip is next on `PATH` and installs
+into *that* interpreter — on one machine here, a Python 3.10 pip against a 3.13 project. Any
+target repairs it. Adding a real dependency is still `uv add`, because that updates `uv.lock`;
+the seeded pip is there so an accident stays inside the virtualenv.
 
 ### The CI jobs, one at a time
 

@@ -48,7 +48,7 @@ def test_the_requirements_table_still_carries_its_evidence():
 #: joined the list when they were written: a contributor guide that names a test
 #: which no longer exists, or points at a moved runbook, is worse than none --
 #: it is the first thing an outside contributor reads.
-ROOT_DOCS = ("README.md", "CHANGELOG.md", "SECURITY.md", "CONTRIBUTING.md")
+ROOT_DOCS = ("README.md", "CHANGELOG.md", "SECURITY.md", "CONTRIBUTING.md", "ONBOARDING.md")
 
 
 def all_docs() -> list[Path]:
