@@ -555,7 +555,38 @@ make stack-stop             # stop everything, keep the warehouse
 make stack-clean            # stop everything and delete the volumes
 ```
 
-The start targets write `dev-stack/.env` from the sample if it is missing, check the pinned
+Which states exist, which target moves you along each edge, and what each state lets you
+run:
+
+```mermaid
+flowchart LR
+  N["<b>none</b><br/>no containers<br/><br/><i>every target above<br/>that needs nothing</i>"]
+  L["<b>local</b><br/>Lakekeeper · Postgres · MinIO<br/><br/>make test-local<br/>make test-demo"]
+  LT["<b>local+trino</b><br/><br/>make test-trino"]
+  LS["<b>local+spark</b><br/><br/>make test-spark"]
+  LTS["<b>local+trino+spark</b><br/><br/>make test-trino<br/>make test-spark"]
+
+  N -->|local-stack-start| L
+  N -->|trino-stack-start| LT
+  N -->|spark-stack-start| LS
+  L -->|trino-stack-start| LT
+  L -->|spark-stack-start| LS
+  LT -->|spark-stack-start| LTS
+  LS -->|trino-stack-start| LTS
+
+  L -.->|stack-stop| N
+  LT -.->|stack-stop| N
+  LS -.->|stack-stop| N
+  LTS -.->|stack-stop| N
+```
+
+The edge the table cannot express is the one that goes *backwards*: **starting an engine takes
+`test-local` and `test-demo` away.** Those two require no engine at all, so `local+trino` is
+not a superset of `local` — it is a different state, and `make stack-stop` is how you get the
+first two back. Every other transition only adds.
+
+`make stack-status` prints which of these you are in. The start targets write
+`dev-stack/.env` from the sample if it is missing, check the pinned
 subnet is free, and bootstrap the warehouse. `local-stack-stop`, `trino-stack-stop` and
 `spark-stack-stop` are the same teardown, which names both profiles — a plain
 `docker compose down` leaves the engine container standing.
