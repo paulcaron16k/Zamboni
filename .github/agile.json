@@ -1,0 +1,22 @@
+{
+  "keys": [
+    {
+      "key": "ZMBNI",
+      "name": "Zamboni",
+      "repo": "paulcaron16k/Zamboni"
+    }
+  ],
+  "project": {
+    "key": "ZMBNI",
+    "name": "Zamboni",
+    "number": 23
+  },
+  "sprint": {
+    "ahead": 2,
+    "autocreate": true,
+    "cadence_days": 14,
+    "name_template": "{key} Sprint {n}",
+    "start_day": "monday",
+    "template": "2-week"
+  }
+}

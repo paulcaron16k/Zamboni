@@ -165,8 +165,8 @@ rejects password/token/secret keys by name.
    against the current schema, every `CompactionConfig` field is mentioned in the
    user guide, no doc carries a credential-shaped literal, and every GitHub
    Action is pinned to a SHA that dependabot watches. It also validates the
-   `docs/tasks.md` backlog (statuses, completion dates, epic/story consistency,
-   `FR-` references). If you add a checkable claim, add the check.
+   `FR-` references in every doc against `plan.md`, and the hash of the frozen
+   `docs/tasks_historical.md`. If you add a checkable claim, add the check.
 4. **Workarounds explain themselves in place** — `_surviving_manifests` in
    `evolution.py`, `_guard_anywhere_in_scan_planning` in `capabilities.py`, the
    `fs.s3.impl` mapping in the compose file. Several things here look like
@@ -179,8 +179,11 @@ rejects password/token/secret keys by name.
    moved. Those need a `BREAKING` or `SAFETY` changelog entry — see
    docs/releasing.md.
 7. Commit messages are long and explain *why*: what was wrong, how it was found,
-   what was rejected, what it cost. Reference the `ZMBNI-` story; adding one to
-   `docs/tasks.md` is part of a change that has none.
+   what was rejected, what it cost. Reference the GitHub issue (`#123`, or the
+   equivalent `ZMBNI-123` key form); filing one with `gh agile story` is part of a
+   change that has none. Epics and stories are issues on project #23 —
+   `docs/tasks_historical.md` is the markdown backlog they replaced, frozen and
+   hash-pinned, with an id map in its header for the `ZMBNI-` ids in older commits.
 8. The ruff rev in `.pre-commit-config.yaml` must equal the ruff version in
    `uv.lock` — CI checks it. Bump both together.
 
@@ -191,5 +194,6 @@ engine-capability table, secrets, memory numbers) · `docs/design.md` (why
 maintenance is necessary and how the pieces fit) · `docs/engine-comparison.md`
 (where the seam is and why) · `docs/runbook.md` and `docs/runbook-dev.md`
 (operator triage; running each step by hand) · `docs/releasing.md` (what a
-release may change) · `docs/plan.md` and `docs/tasks.md` (requirements and
-backlog, both test-enforced).
+release may change) · `docs/plan.md` (requirements, test-enforced) ·
+`docs/tasks_historical.md` (why 125 delivered stories were done the way they
+were).

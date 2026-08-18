@@ -41,6 +41,16 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Changed
 
+- **Epics and stories are GitHub issues, not rows in a markdown file.** Ids came
+  from us before -- `ZMBNI-1xx` per epic, assigned by hand -- and now they come
+  from GitHub, tracked on project #23 with the `gh agile` extension.
+  `docs/tasks.md` is `docs/tasks_historical.md`: frozen, hash-pinned by a test,
+  and carrying a map from every migrated id to the issue it became, because 147
+  commit messages cite those ids and cannot be rewritten. Four of its five tests
+  are gone -- three are now covered by GitHub or by `gh agile validate`, and the
+  story-count check died with the hand-written totals it existed to police. The
+  fifth, FR traceability, was broadened to every document instead.
+
 - **The PyPI development status is Beta**, not Alpha. Alpha understated where
   this is: the scope is delivered, every operation is verified against a live
   Lakekeeper and MinIO plus real Trino and Spark servers, and CI runs green on

@@ -3,7 +3,9 @@
 **What was built, what proves it, and what is deliberately left out.**
 
 Design rationale lives in [design.md](design.md); this document is the delivery record.
-Day-to-day operation is [runbook.md](runbook.md). Outstanding work is tracked in [tasks.md](tasks.md).
+Day-to-day operation is [runbook.md](runbook.md). Outstanding work is tracked in
+[GitHub issues](https://github.com/paulcaron16k/Zamboni/issues); [tasks_historical.md](tasks_historical.md) is the backlog it
+replaced.
 
 | | |
 |---|---|

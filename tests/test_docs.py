@@ -95,107 +95,80 @@ def test_doc_links_resolve():
     assert checked > 20, f"only {checked} relative links found; the pattern stopped matching"
 
 
-# -- the task backlog ----------------------------------------------------
+# -- the frozen backlog, and the traceability that outlived it -----------
 
-STATUSES = ("done", "inproject", "todo", "cancelled")
-# The title cell accepts an escaped `\|`, which markdown requires for a literal
-# pipe. Without that, ZMBNI-1903 -- titled `table-config generate\|validate\|
-# summary` -- matched nothing, so it was counted by no summary and checked by no
-# test in this file. An invisible story is worse than a miscounted one.
-ROW = re.compile(r"^\| (ZMBNI-\d+) \| ((?:\\\||[^|])+?) \|(.*?)\| (\w+) \|([^|]*)\|", re.M)
+#: sha256 of `docs/tasks_historical.md` as it was frozen. See the test below for
+#: why this is a pin rather than a prohibition.
+HISTORICAL_SHA256 = "859979971c60fba83d679f1a511244bf3a0834f1a894e659f4751adf93867803"
 
 
-def backlog_rows() -> list[tuple[str, str, str, str, str]]:
-    return ROW.findall((DOCS / "tasks.md").read_text())
+def test_the_historical_backlog_is_frozen():
+    """The archive may not drift, and repairing it must be a deliberate act.
 
+    `docs/tasks_historical.md` stopped being a tracker when epics and stories
+    moved to GitHub issues. What is left is a record of decisions, cited by 147
+    commit messages, and a record that can be revised quietly is one nothing else
+    should cite.
 
-def epic_of(story_id: str) -> str:
-    """ZMBNI-505 -> ZMBNI-5, ZMBNI-1007 -> ZMBNI-10."""
-    number = story_id.split("-")[1]
-    return f"ZMBNI-{number[:-2]}"
+    A pin rather than a read-only rule, because two invariants meet in that file
+    and both are wanted. It stays inside `linking_docs()` and the cited-test
+    sweep, so a document it links to cannot be renamed without something failing
+    -- but the repair is an edit to a file that is supposed to be immutable. The
+    pin resolves that: fix the link, re-pin the hash in the same commit, and the
+    edit is visible in review instead of being either forbidden or silent.
 
+    Four tests were deleted when this arrived, and only one was a loss:
 
-def split_backlog():
-    epics, stories = {}, {}
-    for task_id, _title, _desc, status, done_at in backlog_rows():
-        target = stories if len(task_id.split("-")[1]) >= 3 else epics
-        target[task_id] = (status, done_at.strip())
-    return epics, stories
+    * the status vocabulary and the state/date consistency are what
+      `gh agile validate` and GitHub's own `closedAt` now check;
+    * the story-count summary existed only because the totals were hand-written,
+      and a board computes them -- there is nothing left to disagree with;
+    * **epic completeness has no replacement.** `gh agile validate` checks
+      story-has-epic, epic-has-stories, state-against-status, type labels and
+      sprint invariants, and never that an epic's children are closed before the
+      epic is. Filed as a gap; recorded here so the loss is not silent.
+    """
+    import hashlib
 
-
-def test_every_backlog_status_is_one_of_the_declared_four():
-    _epics, stories = split_backlog()
-    assert stories, "no stories parsed from tasks.md; the table format changed"
-    bad = {i: s for i, (s, _) in stories.items() if s not in STATUSES}
-    assert not bad, f"undeclared statuses: {bad}"
-
-
-def test_the_story_count_summary_matches_the_rows():
-    """A hand-written total is a hand-written error. It was wrong on all four
-    numbers when first written, so it is computed and then checked."""
-    from collections import Counter
-
-    _epics, stories = split_backlog()
-    counts = Counter(status for status, _ in stories.values())
-    text = (DOCS / "tasks.md").read_text()
-    line = next(ln for ln in text.splitlines() if ln.startswith("**Story counts:**"))
-
-    for status in STATUSES:
-        assert f"{counts[status]} {status}" in line, (
-            f"summary says something other than {counts[status]} for {status!r}: {line}"
-        )
-    assert f"({len(stories)} stories)" in line
-
-
-def test_an_epic_is_only_done_when_all_its_stories_are():
-    """Otherwise the top table reads as finished work that is not finished --
-    which is exactly the mistake this test was written in response to."""
-    epics, stories = split_backlog()
-    for epic_id, (status, _) in epics.items():
-        children = [s for i, (s, _) in stories.items() if epic_of(i) == epic_id]
-        assert children, f"{epic_id} has no stories"
-        open_children = [s for s in children if s in ("todo", "inproject")]
-        if status == "done":
-            assert not open_children, (
-                f"{epic_id} is marked done but has open stories: {open_children}"
-            )
-        else:
-            assert open_children, f"{epic_id} is {status} but every story is closed"
-
-
-def test_closed_stories_carry_a_completion_date_and_open_ones_do_not():
-    _epics, stories = split_backlog()
-    for task_id, (status, done_at) in stories.items():
-        if status in ("done", "cancelled"):
-            assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", done_at), (
-                f"{task_id} is {status} but completed-at is {done_at!r}"
-            )
-        else:
-            assert not done_at, f"{task_id} is {status} but carries completed-at {done_at!r}"
+    path = DOCS / "tasks_historical.md"
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert digest == HISTORICAL_SHA256, (
+        f"{path.name} has changed: {digest}\n"
+        "It is the archive, not a tracker -- open work belongs in a GitHub issue. "
+        "If the edit is a link repair, re-pin HISTORICAL_SHA256 in the same commit."
+    )
 
 
 def test_every_referenced_fr_exists_in_the_plan():
-    """A backlog citing a requirement that does not exist is worse than one
-    citing none: it reads as traceability."""
+    """A document citing a requirement that does not exist is worse than one
+    citing none: it reads as traceability.
+
+    Every document rather than the backlog alone. The check used to read
+    `tasks.md`, so it died with it -- and scoping it to one file was always the
+    weaker version, since a `{Feature}_Plan_and_WBS.md` is exactly where an FR
+    reference will be written from now on. Broadening it cost nothing: 186
+    citations across four documents, none dangling.
+    """
     plan = (DOCS / "plan.md").read_text()
     declared = set(re.findall(r"\| (FR-\d+\.\d+)", plan))
     assert declared, "no FR ids found in plan.md"
 
     cited: set[str] = set()
-    for _id, _title, desc, _status, _done in backlog_rows():
+    for doc in all_docs():
+        text = doc.read_text()
         # Ranges are written "FR-7.12-7.14" with an en dash. Matching only the
         # leading id would check one endpoint of each range and silently pass a
         # dangling upper bound, so expand them.
         # The upper bound may repeat the group ("FR-9.1-9.2") or not ("FR-9.1-2").
         # A greedy `(\d+)` after the dash swallows the group and turns 9.1-9.2
         # into 9.1..9.9, so the optional group prefix is consumed explicitly.
-        for group, lo, hi in re.findall(r"FR-(\d+)\.(\d+)[\u2013-](?:\d+\.)?(\d+)", desc):
+        for group, lo, hi in re.findall(r"FR-(\d+)\.(\d+)[\u2013-](?:\d+\.)?(\d+)", text):
             if int(hi) >= int(lo):
                 cited |= {f"FR-{group}.{n}" for n in range(int(lo), int(hi) + 1)}
-        cited |= set(re.findall(r"FR-\d+\.\d+", desc))
+        cited |= set(re.findall(r"FR-\d+\.\d+", text))
 
     missing = sorted(cited - declared)
-    assert not missing, f"tasks.md cites requirements absent from plan.md: {missing}"
+    assert not missing, f"documents cite requirements absent from plan.md: {missing}"
     assert len(cited) > 30, f"only {len(cited)} requirements cited; the ranges are not expanding"
 
 

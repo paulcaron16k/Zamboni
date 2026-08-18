@@ -3,7 +3,7 @@
 **Five of the six features below shipped. One is blocked upstream.** This is now
 largely a record of a plan and how it turned out, kept for the reasoning rather
 than for the schedule: each feature says what it was *for*, and the evidence it
-was chosen on. If you want current status, [tasks.md](tasks.md) has it; if you
+was chosen on. If you want current status, the [issues](https://github.com/paulcaron16k/Zamboni/issues) have it; if you
 want what to do next, there is exactly one answer and it is RM-1.
 
 | Feature | Epic | Outcome |
@@ -15,7 +15,7 @@ want what to do next, there is exactly one answer and it is RM-1.
 | RM-5 — Spark maintainer | ZMBNI-15 | Delivered 2026-08-07, verified against Spark 4.0.4 |
 | RM-6 — Zamboni vs ice-keeper | ZMBNI-16 | Delivered 2026-08-03 — [ice-keeper-comparison.md](ice-keeper-comparison.md) |
 
-**Status still lives in tasks.md only.** The outcome column above is a pointer,
+**Status lives in GitHub issues only.** The outcome column above is a pointer,
 not a second ledger: it records *that* something landed and when, and nothing
 about what remains inside it. Two places recording progress is two places to
 disagree.

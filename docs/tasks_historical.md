@@ -1,4 +1,47 @@
-# Zamboni — Task backlog
+# Zamboni — Task backlog (historical)
+
+> **Frozen 2026-08-18. This file is no longer written to.** Epics and stories are
+> GitHub issues now, on [project #23](https://github.com/users/paulcaron16k/projects/23),
+> and their ids come from GitHub rather than from us. `test_the_historical_backlog_is_frozen`
+> pins these bytes, so an edit fails the suite. That is deliberate: what is below
+> is a record of decisions, and a record that can be revised quietly is one
+> nothing else should cite.
+>
+> **The 11 `todo` rows below are not open work**, and the four `inproject` epics
+> are not in progress. Each was recreated as an issue -- see the map -- and the
+> status here is frozen at what it was on the last day the file was authoritative.
+> Nothing in this file tracks anything.
+>
+> **Why a map and not a sentence.** 157 distinct `ZMBNI-` ids appear here, and 147
+> references to them appear in commit messages. Those cannot be rewritten, so the
+> ids have to stay resolvable.
+
+## Where the open work went
+
+| was | title | now |
+|---|---|---|
+| `ZMBNI-6` (epic) | Metadata hygiene | [#5](https://github.com/paulcaron16k/Zamboni/issues/5) |
+| `ZMBNI-7` (epic) | Format-version coverage | [#6](https://github.com/paulcaron16k/Zamboni/issues/6) |
+| `ZMBNI-11` (epic) | PyIceberg 0.12 | [#7](https://github.com/paulcaron16k/Zamboni/issues/7) |
+| `ZMBNI-18` (epic) | Licence and publication | [#8](https://github.com/paulcaron16k/Zamboni/issues/8) |
+| `ZMBNI-604` | Rewrite partially dangling delete manifests | [#9](https://github.com/paulcaron16k/Zamboni/issues/9) |
+| `ZMBNI-704` | V3 row rewriting with lineage | [#10](https://github.com/paulcaron16k/Zamboni/issues/10) |
+| `ZMBNI-705` | Equality deletes | [#11](https://github.com/paulcaron16k/Zamboni/issues/11) |
+| `ZMBNI-706` | V3 deletion vectors | [#12](https://github.com/paulcaron16k/Zamboni/issues/12) |
+| `ZMBNI-1101` | The branch and the path dependency | [#13](https://github.com/paulcaron16k/Zamboni/issues/13) |
+| `ZMBNI-1102` | Re-probe and record the delta | [#14](https://github.com/paulcaron16k/Zamboni/issues/14) |
+| `ZMBNI-1103` | Audit the private APIs we drive | [#15](https://github.com/paulcaron16k/Zamboni/issues/15) |
+| `ZMBNI-1104` | Adopt streaming writes | [#16](https://github.com/paulcaron16k/Zamboni/issues/16) |
+| `ZMBNI-1105` | Re-verify on 0.12 | [#17](https://github.com/paulcaron16k/Zamboni/issues/17) |
+| `ZMBNI-1106` | Decide the support window | [#18](https://github.com/paulcaron16k/Zamboni/issues/18) |
+| `ZMBNI-1813` | Make the 0.12 reproduction a test, then delete the document | [#19](https://github.com/paulcaron16k/Zamboni/issues/19) |
+
+Prerequisites that were done without an issue of their own: the `type:epic`,
+`type:story`, `type:bug` and `key:ZMBNI` labels, board #23 with its 2-week
+cadence, and `ZMBNI Sprint 1`–`3`. The migration itself is
+[#20](https://github.com/paulcaron16k/Zamboni/issues/20).
+
+---
 
 Project key **ZMBNI**. Epics are ZMBNI-1…10; stories are numbered within their epic
 (ZMBNI-1xx under epic 1, and so on).
@@ -183,7 +226,7 @@ has not been specified yet — that is deliberate signal, not an omission.
 | ZMBNI-1003 | Configuration specification | [table-config.md](table-config.md) | done | 2026-08-03 |
 | ZMBNI-1004 | Live-verification record | What a remote-signing warehouse blocks, and the four bugs the run surfaced. [live-verification.md](live-verification.md) | done | 2026-08-03 |
 | ZMBNI-1005 | Dev-stack guide | [../dev-stack/README.md](../dev-stack/README.md) | done | 2026-08-03 |
-| ZMBNI-1006 | This backlog | [tasks.md](tasks.md) | done | 2026-08-03 |
+| ZMBNI-1006 | This backlog | [tasks_historical.md](tasks_historical.md) | done | 2026-08-03 |
 | ZMBNI-1007 | Operator runbook | [runbook.md](runbook.md): the six-verb order with why each position matters, cadence derived from the retention windows rather than invented, how to *measure* the orphan guard against your longest compaction, what to watch, all four exit codes, and recovery per failure mode. Writing it surfaced that five verbs dry-run without `--yes` but never said so in `--help` — fixed, with a test | done | 2026-08-03 |
 
 ---

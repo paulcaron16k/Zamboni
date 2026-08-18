@@ -132,8 +132,11 @@ Documentation here is checked mechanically where it can be:
   `from`/`to`; this is why that was caught before a reader copied it.
 - `test_the_guide_documents_every_run_control` — a new `CompactionConfig` field
   with no mention in the guide fails the suite.
-- The backlog in [docs/tasks.md](docs/tasks.md) is checked for status values,
-  completion dates, epic/story consistency and cited requirement ids.
+- `test_every_referenced_fr_exists_in_the_plan` — any document citing an
+  `FR-` id that plan.md does not declare fails the suite. It reads every
+  document, so a new plan doc is covered the day it is written.
+- `test_the_historical_backlog_is_frozen` — `docs/tasks_historical.md` is
+  hash-pinned. It is the archive of the ZMBNI backlog, not a tracker.
 
 If you add a claim that could be checked mechanically, add the check.
 
@@ -144,9 +147,19 @@ found, what was rejected and why, and what it cost. A reader six months later
 should be able to reconstruct the reasoning without the conversation that
 produced it.
 
-Reference the `ZMBNI-` story where one exists. If your change does not fit an
-existing story, adding one to [docs/tasks.md](docs/tasks.md) is part of the
-change; the story counts are checked by the suite.
+Reference the GitHub issue: `#123`, or `ZMBNI-123` — the key form is accepted
+anywhere an issue number is, and `gh agile` resolves it. If your change does
+not fit an open issue, filing one is part of the change:
+
+```bash
+gh agile story "What it is" --epic <n> --intent "..." --acceptance "..."
+```
+
+Epics and stories live on [board #23](https://github.com/users/paulcaron16k/projects/23).
+**Ids are GitHub's now.** Older
+commits cite hand-assigned `ZMBNI-` ids from when the backlog was a markdown
+file; [docs/tasks_historical.md](docs/tasks_historical.md) is that file, frozen,
+and its header maps every id that moved to the issue it became.
 
 ## Non-obvious workarounds carry their reason
 

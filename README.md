@@ -513,8 +513,10 @@ engine with, secrets handling, and the local engine's measured memory ceiling.
 - **[docs/devops.md](docs/devops.md)** — running it in production: the cron line, `zamboni.yml`
   and `.env`, why there is no shell wrapper, and the multi-tenant layout for one
   warehouse per customer.
-- **[docs/tasks.md](docs/tasks.md)** — the ZMBNI backlog: what is done, what is left, and
-  what is deliberately not being done.
+- **[docs/tasks_historical.md](docs/tasks_historical.md)** — the ZMBNI backlog as it stood
+  when tracking moved to GitHub: 125 delivered stories with the reasoning behind each, and
+  a map from every migrated id to its issue. Frozen. Current work is on
+  [board #23](https://github.com/users/paulcaron16k/projects/23).
 - **[docs/roadmap.md](docs/roadmap.md)** — the six features planned beyond `v0.1.0`, five of
   which shipped. Mostly a record now: what each was for, the evidence it was chosen on, and
   the one place the sequencing was wrong. The remaining item is PyIceberg 0.12, blocked
