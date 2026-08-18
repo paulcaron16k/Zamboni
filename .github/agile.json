@@ -1,4 +1,14 @@
 {
+  "boards": [
+    {
+      "name": "Sprint board",
+      "type": "scrum"
+    },
+    {
+      "name": "Kanban",
+      "type": "kanban"
+    }
+  ],
   "keys": [
     {
       "key": "ZMBNI",
