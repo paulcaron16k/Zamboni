@@ -468,20 +468,94 @@ failure; `spark` selects its tests by marker and fails if any of them *skipped*,
 those fixtures skip on a closed port by design. Without both, a stack that never started
 yields a suite of skips and a tick that means nothing was tested.
 
-The `executables` job has already earned its place in advance: `bin/` was found stale
-against three separate changes, which is exactly what that job exists to catch and exactly
-what nothing caught while CI was not running.
+The `executables` job earned its place before it ever ran: `bin/` was found stale against
+three separate changes, each of which this job would have caught and nothing else did.
+
+The other two workflows do not gate anything.
+[version-watch.yml](.github/workflows/version-watch.yml) runs on the 1st of the month and
+asks PyPI whether anything has been released above a version cap `pyproject.toml` declares —
+`pyiceberg<0.12` and the dev group's `pyspark-client<4.1` are both waiting on a release that
+has to be tested before the bound moves. It keeps one issue current and starts no containers.
+There is deliberately **no nightly re-run of the suite**: every input to these tests is
+pinned — `uv.lock`, exact image tags in `dev-stack/.env.sample`, pinned Maven jars in the
+Spark image, SHA-pinned actions — so against an unchanged commit it would re-prove the tick
+that commit already has. [release.yml](.github/workflows/release.yml) publishes to PyPI on a
+`v*.*.*` tag, running the suite again first.
 
 Locally, [.pre-commit-config.yaml](.pre-commit-config.yaml) runs the fast checks on every
 commit:
 
 ```bash
-uv run pre-commit install
+uv run pre-commit install     # `make venv` is what installs pre-commit itself
 uv run pre-commit run --all-files
 ```
 
 The full suite stays out of the hook deliberately — a four-minute hook gets bypassed, and a
-bypassed hook is worse than none.
+bypassed hook is worse than none. Run it with `make test`, below.
+
+## Running Tests
+
+**`make` on its own prints every target.** Each one names the CI job it corresponds to, so
+"did I break CI" is answerable before pushing rather than after:
+
+```bash
+make                      # the target list, and which stack is currently up
+make venv                 # .venv from uv.lock — the package plus the dev dependencies
+make ci                   # every CI check that needs no containers
+```
+
+Every target that runs Python goes through `uv`, so it uses `.venv` built from `uv.lock` and
+never whatever is installed globally. Each calls a `require_venv` guard first: if `.venv` is
+missing it **warns and builds it** rather than telling you to, because `uv sync` is
+deterministic here and there is only one right answer. If a *different* virtualenv is
+activated it warns about that too — `uv` ignores it, which is confusing precisely once.
+
+### The CI jobs, one at a time
+
+| CI job | Run it locally | Needs |
+|---|---|---|
+| `lint` | `make lint` | nothing |
+| `test` | `make test` | nothing |
+| `test`, all three Pythons | `make test-matrix` | nothing; restores `.venv` afterwards |
+| `executables` | `make test-executables` | nothing |
+| `dev-stack` | `make test-local`, then `make test-demo` | the local stack |
+| `dev-stack`, Trino leg | `make test-trino` | Trino in the stack |
+| `spark` | `make test-spark` | Spark in the stack |
+
+`make lint` is the whole job; its pieces are separate targets for a tighter loop while
+editing — `make format` writes the formatting fix, and there are `make ruff`,
+`make format-check`, `make typecheck`, `make precommit` and `make ruff-pin` (the check that
+`.pre-commit-config.yaml` and `uv.lock` name the same ruff, without which every commit
+churns). `make test-docs` runs the documentation invariants alone in under a second, which
+is the one to keep running while editing prose.
+
+### The dev stack, per engine
+
+The base stack is Lakekeeper, Postgres and MinIO. Each engine is a compose profile on top,
+and adding one does not disturb what is already running:
+
+```bash
+make local-stack-start      # Lakekeeper + Postgres + MinIO, no engine
+make trino-stack-start      # ... plus Trino          (--profile trino)
+make spark-stack-start      # ... plus Spark Connect  (--profile spark)
+
+make stack-status           # local, local+trino, local+spark, local+trino+spark, or none
+make stack-stop             # stop everything, keep the warehouse
+make stack-clean            # stop everything and delete the volumes
+```
+
+The start targets write `dev-stack/.env` from the sample if it is missing, check the pinned
+subnet is free, and bootstrap the warehouse. `local-stack-stop`, `trino-stack-stop` and
+`spark-stack-stop` are the same teardown, which names both profiles — a plain
+`docker compose down` leaves the engine container standing.
+
+**A test target that needs a stack refuses the wrong one rather than skipping.** The
+fixtures in `tests/test_dev_stack.py` skip when a port is closed, by design, so a green run
+against a stack that never started would mean nothing was tested. `make test-spark` checks
+that Spark is in the running stack, sets `ZAMBONI_REQUIRE_DEV_STACK=1`, selects by marker,
+and **fails if anything skipped** — the same three guards CI uses. `make test-local` also
+requires that *no* engine is running, since one left over from an earlier session changes
+what the dev-stack tests exercise.
 
 ## Contributing, security, licence
 
@@ -600,12 +674,19 @@ A Lakekeeper + Postgres + MinIO stack, configured so reclamation works, lives in
 [dev-stack/](dev-stack/):
 
 ```bash
-cp dev-stack/.env.sample dev-stack/.env
-cd dev-stack && docker compose up -d && uv run bootstrap.py
+make local-stack-start                         # .env, compose up, bootstrap; see Running Tests
+make test-local                                # the stack tests, refusing to skip
 
 export ZAMBONI_URI=http://localhost:8182/catalog
 export ZAMBONI_WAREHOUSE=zamboni
 ./bin/zamboni-demo --catalog lakekeeper next-day        # the demo, on Lakekeeper and MinIO
+```
+
+The equivalent by hand, if you would rather see what those targets do:
+
+```bash
+cp dev-stack/.env.sample dev-stack/.env
+cd dev-stack && docker compose up -d --wait && uv run bootstrap.py
 uv run pytest tests/test_dev_stack.py          # skipped when the stack is down
 ```
 

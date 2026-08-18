@@ -4,6 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
+`make` with no target prints every entry point, each labelled with the CI job it
+corresponds to, plus which dev stack is currently up. Prefer the make targets —
+`make ci` is every CI check that needs no containers, and `make test-spark` /
+`test-trino` / `test-local` refuse the wrong stack instead of skipping against it.
+The raw commands below are what those targets run.
+
 Environment — always `uv`, never bare `pip`/`python`. `uv sync` resolves from
 `uv.lock` alone; CI runs `uv sync --frozen`, so a dependency edit that forgot to
 re-lock cannot reach `main`.

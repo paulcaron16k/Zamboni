@@ -556,6 +556,7 @@ def live_request():
     )
 
 
+@pytest.mark.trino
 @pytest.mark.parametrize(
     "operation_name",
     ["compact", "rewrite-manifests", "apply-properties", "expire", "remove-orphans"],
@@ -578,6 +579,7 @@ def test_trino_accepts_every_statement_we_generate(trino_env, session, trino_tab
     assert operation.value in result.describe()
 
 
+@pytest.mark.trino
 def test_trino_compaction_actually_compacts(trino_env, session, trino_table):
     """Not just accepted -- effective."""
     from zamboni.maintainers import Operation
@@ -594,6 +596,7 @@ def test_trino_compaction_actually_compacts(trino_env, session, trino_table):
     assert tbl.scan().to_arrow().num_rows == 12, "compaction changed the data"
 
 
+@pytest.mark.trino
 def test_trino_enforces_the_retention_floor_we_validate_against(trino_env, session, trino_table):
     """Pins the premise of TrinoMaintainer.validate(). If a deployment lowers
     the floor this fails, which is the right outcome: the guidance would then be

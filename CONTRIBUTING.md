@@ -11,11 +11,12 @@ interesting. It is about what counts as *done*.
 ## Getting set up
 
 ```bash
-uv sync                 # builds .venv from uv.lock; the Python is pinned too
+make                    # every target, and which dev stack is currently up
+make venv               # builds .venv from uv.lock; the Python is pinned too
 uv run pre-commit install
 
-uv run pytest                                   # the suite; no Docker needed
-uv run pytest --ignore=tests/test_dev_stack.py  # explicitly skip the stack tests
+make test               # the suite; no Docker needed
+make ci                 # lint, suite, executables, version caps -- all of CI bar the stacks
 ```
 
 `uv sync` rather than `pip install -e .` is the whole point of this project's
@@ -24,12 +25,15 @@ to be installed globally. CI runs `uv sync --frozen`, which fails if the lockfil
 is stale against `pyproject.toml` — so a dependency edit that forgot to re-lock
 cannot reach `main`.
 
-For anything touching storage, credentials or an engine, bring up the dev stack:
+For anything touching storage, credentials or an engine, bring up the dev stack. One
+target per engine, and the test target refuses the wrong stack rather than skipping
+against it:
 
 ```bash
-cd dev-stack && cp .env.sample .env
-docker compose up -d --wait && uv run bootstrap.py
-uv run pytest tests/test_dev_stack.py
+make local-stack-start && make test-local     # Lakekeeper + Postgres + MinIO
+make trino-stack-start && make test-trino     # ... plus Trino
+make spark-stack-start && make test-spark     # ... plus Spark Connect
+make stack-status                             # what is up right now
 ```
 
 [docs/runbook-dev.md](docs/runbook-dev.md) covers running each maintenance step

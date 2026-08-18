@@ -150,7 +150,15 @@ testpaths = ["tests"]
 # A marker rather than a -k expression, because CI has to select these
 # exactly: the Spark fixtures skip on a closed port, so a filter that
 # quietly matched nothing would report a green Spark job that ran no Spark.
-markers = ["spark: live tests against the dev stack's Spark Connect server"]
+markers = [
+    "spark: live tests against the dev stack's Spark Connect server",
+    # Trino's tests were selected by fixture alone until `make test-trino`
+    # needed to name them. A `-k trino` expression would have worked today and
+    # is the thing the comment above rules out: it matches on a name, so
+    # renaming a test silently shrinks the set, and a set that quietly became
+    # empty reports a green Trino run that ran no Trino.
+    "trino: live tests against the dev stack's Trino server",
+]
 
 [tool.ruff]
 line-length = 100
