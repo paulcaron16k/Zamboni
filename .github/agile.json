@@ -17,6 +17,7 @@
     }
   ],
   "project": {
+    "issue_title_prefix": "key",
     "key": "ZMBNI",
     "name": "Zamboni",
     "number": 23
