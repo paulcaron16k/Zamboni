@@ -18,15 +18,36 @@ from zamboni.tableconfig import (
     ZOrder,
 )
 
-MINIMAL = {
-    "version": SPEC_VERSION,
-    "tables": {
+
+def v2(tables: dict, **root) -> dict:
+    """A version-2 document from ``{"ns.table": settings}``.
+
+    Tests care about settings, not about the nesting, so they keep writing flat
+    identifiers and this puts them where the format wants them. The split here
+    is safe because these are fixtures with one-level namespaces -- production
+    code never splits, it reads the namespace the file states.
+    """
+    grouped: dict[str, dict] = {}
+    for identifier, settings in tables.items():
+        namespace, _, name = identifier.rpartition(".")
+        grouped.setdefault(namespace, {})[name] = settings
+    doc = {
+        "version": SPEC_VERSION,
+        "warehouse": "acme",
+        "namespaces": {ns: {"tables": t} for ns, t in grouped.items()},
+    }
+    doc.update(root)
+    return doc
+
+
+MINIMAL = v2(
+    {
         "analytics.events": {
             "partition": [{"column": "occurred_at", "transform": "day"}],
             "ordering": {"mode": "zorder", "zorder": {"columns": ["customer_id", "product_id"]}},
         }
-    },
-}
+    }
+)
 
 
 def test_parses_a_minimal_document():
@@ -49,7 +70,7 @@ def test_days_to_months_evolution_is_on_by_default():
 
 def test_a_table_can_opt_out_of_evolution():
     raw = json.loads(json.dumps(MINIMAL))
-    raw["tables"]["analytics.events"]["partition_evolution"] = {"enabled": False}
+    raw["namespaces"]["analytics"]["tables"]["events"]["partition_evolution"] = {"enabled": False}
     settings = TableConfig.from_dict(raw).for_table("analytics.events")
     assert settings.partition_evolution.enabled is False
 
@@ -68,7 +89,7 @@ def test_unknown_table_falls_back_to_defaults():
 
 def test_typos_are_rejected_not_ignored():
     """A silently ignored key would produce the wrong layout with no signal."""
-    raw = {"tables": {"a.b": {"partiton": []}}}
+    raw = v2({"a.b": {"partiton": []}})
     with pytest.raises(TableConfigError, match="unknown key"):
         TableConfig.from_dict(raw)
 
@@ -108,14 +129,14 @@ def test_round_trips_through_json(tmp_path):
     ],
 )
 def test_rejects_contradictory_blocks(block, message):
-    raw = {"tables": {"a.b": block}}
+    raw = v2({"a.b": block})
     with pytest.raises(TableConfigError, match=message):
         TableConfig.from_dict(raw).validate()
 
 
 def test_evolution_must_go_coarser():
-    raw = {
-        "tables": {
+    raw = v2(
+        {
             "a.b": {
                 "partition": [{"column": "ts", "transform": "month"}],
                 "partition_evolution": {
@@ -123,15 +144,15 @@ def test_evolution_must_go_coarser():
                 },
             }
         }
-    }
+    )
     with pytest.raises(TableConfigError, match="must move to a coarser granularity"):
         TableConfig.from_dict(raw).validate()
 
 
 def test_evolution_rule_must_match_a_declared_partition_field():
     """Silently doing nothing is the worst response to a mismatched rule."""
-    raw = {
-        "tables": {
+    raw = v2(
+        {
             "a.b": {
                 "partition": [{"column": "region", "transform": "identity"}],
                 "partition_evolution": {
@@ -139,7 +160,7 @@ def test_evolution_rule_must_match_a_declared_partition_field():
                 },
             }
         }
-    }
+    )
     with pytest.raises(TableConfigError, match="no partition field uses transform 'day'"):
         TableConfig.from_dict(raw).validate()
 
@@ -153,9 +174,52 @@ def test_zorder_bit_budget_is_enforced():
         ).validate("t")
 
 
-def test_table_keys_must_be_qualified():
-    with pytest.raises(TableConfigError, match=r"'namespace\.table'"):
-        TableConfig.from_dict({"tables": {"events": {}}}).validate()
+def test_a_table_name_cannot_contain_a_dot():
+    """The ambiguity version 2 exists to remove.
+
+    In version 1 a key was `namespace.table` and the split was guessed with
+    `rpartition` -- so `raw.telemetry.events` was read as namespace
+    ('raw','telemetry') by the local engine while Trino quoted a single schema
+    named `raw.telemetry`. Putting a dot in the table name would reintroduce
+    exactly that, so it is refused where an author can see it.
+    """
+    raw = {
+        "version": SPEC_VERSION,
+        "warehouse": "acme",
+        "namespaces": {"analytics": {"tables": {"raw.events": {}}}},
+    }
+    with pytest.raises(TableConfigError, match="cannot contain a dot"):
+        TableConfig.from_dict(raw).validate()
+
+
+def test_a_nested_namespace_is_allowed_and_kept_whole():
+    """Discouraged, not forbidden: the dots live in a field that *means*
+    namespace, so splitting them is safe rather than a guess."""
+    raw = {
+        "version": SPEC_VERSION,
+        "warehouse": "acme",
+        "namespaces": {"raw.telemetry": {"tables": {"events": {}}}},
+    }
+    config = TableConfig.from_dict(raw)
+    config.validate()
+
+    assert "raw.telemetry.events" in config.tables
+    assert config.namespace_of("raw.telemetry.events") == ("raw", "telemetry")
+
+
+def test_the_version_1_shape_is_named_rather_than_puzzled_over():
+    """`unknown key(s) ['tables']` is what the generic check would say, and it
+    tells nobody what to do about it."""
+    with pytest.raises(TableConfigError, match="version 1 shape"):
+        TableConfig.from_dict({"version": 1, "tables": {"db.events": {}}}).validate()
+
+
+def test_the_warehouse_is_required():
+    """It asserts rather than selects, and an optional assertion is absent in
+    precisely the files nobody thought carefully about."""
+    raw = {"version": SPEC_VERSION, "namespaces": {"db": {"tables": {"events": {}}}}}
+    with pytest.raises(TableConfigError, match="'warehouse' is required"):
+        TableConfig.from_dict(raw).validate()
 
 
 def test_rejects_a_future_spec_version():
@@ -164,8 +228,8 @@ def test_rejects_a_future_spec_version():
 
 
 def test_duplicate_partition_field_names_rejected():
-    raw = {
-        "tables": {
+    raw = v2(
+        {
             "a.b": {
                 "partition": [
                     {"column": "x", "transform": "identity", "name": "same"},
@@ -173,7 +237,7 @@ def test_duplicate_partition_field_names_rejected():
                 ]
             }
         }
-    }
+    )
     with pytest.raises(TableConfigError, match="duplicate partition field name"):
         TableConfig.from_dict(raw).validate()
 
@@ -211,7 +275,7 @@ def test_shipped_example_is_valid():
 
 
 def test_retention_defaults_are_iceberg_s_own():
-    settings = TableConfig.from_dict({"tables": {"a.b": {}}}).for_table("a.b")
+    settings = TableConfig.from_dict(v2({"a.b": {}})).for_table("a.b")
     assert settings.retention.expire_snapshots.enabled is True
     assert settings.retention.remove_orphan_files.enabled is True
     # 3 days is Iceberg's documented default, sized to the longest write.
@@ -221,9 +285,8 @@ def test_retention_defaults_are_iceberg_s_own():
 
 
 def test_retention_parses_and_round_trips(tmp_path):
-    raw = {
-        "version": 1,
-        "tables": {
+    raw = v2(
+        {
             "a.b": {
                 "retention": {
                     "expire_snapshots": {
@@ -234,8 +297,8 @@ def test_retention_parses_and_round_trips(tmp_path):
                     "remove_orphan_files": {"enabled": True, "older_than_days": 7},
                 }
             }
-        },
-    }
+        }
+    )
     config = TableConfig.from_dict(raw)
     config.validate()
     retention = config.for_table("a.b").retention
@@ -249,8 +312,8 @@ def test_retention_parses_and_round_trips(tmp_path):
 
 
 def test_a_table_can_disable_reclaim():
-    raw = {
-        "tables": {
+    raw = v2(
+        {
             "a.b": {
                 "retention": {
                     "expire_snapshots": {"enabled": False},
@@ -258,7 +321,7 @@ def test_a_table_can_disable_reclaim():
                 }
             }
         }
-    }
+    )
     retention = TableConfig.from_dict(raw).for_table("a.b").retention
     assert not retention.expire_snapshots.enabled
     assert not retention.remove_orphan_files.enabled
@@ -266,8 +329,8 @@ def test_a_table_can_disable_reclaim():
 
 def test_orphan_removal_without_expiry_is_rejected():
     """Snapshots hold references, so orphan removal alone reclaims almost nothing."""
-    raw = {
-        "tables": {
+    raw = v2(
+        {
             "a.b": {
                 "retention": {
                     "expire_snapshots": {"enabled": False},
@@ -275,7 +338,7 @@ def test_orphan_removal_without_expiry_is_rejected():
                 }
             }
         }
-    }
+    )
     with pytest.raises(TableConfigError, match="almost nothing would be reclaimable"):
         TableConfig.from_dict(raw).validate()
 
@@ -292,17 +355,17 @@ def test_orphan_removal_without_expiry_is_rejected():
 )
 def test_retention_rejects_bad_input(block, message):
     with pytest.raises(TableConfigError, match=message):
-        TableConfig.from_dict({"tables": {"a.b": {"retention": block}}}).validate()
+        TableConfig.from_dict(v2({"a.b": {"retention": block}})).validate()
 
 
 def test_a_table_overrides_the_default_retention():
-    raw = {
-        "defaults": {"retention": {"remove_orphan_files": {"older_than_days": 30}}},
-        "tables": {
+    raw = v2(
+        {
             "a.b": {"retention": {"remove_orphan_files": {"older_than_days": 1}}},
             "a.c": {},
         },
-    }
+        defaults={"retention": {"remove_orphan_files": {"older_than_days": 30}}},
+    )
     config = TableConfig.from_dict(raw)
     assert config.for_table("a.b").retention.remove_orphan_files.older_than_days == 1
     assert config.for_table("a.c").retention.remove_orphan_files.older_than_days == 30

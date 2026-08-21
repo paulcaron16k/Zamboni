@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Delete files under a table's location that nothing references.
 
 This is the most dangerous operation in the package: it decides what to delete

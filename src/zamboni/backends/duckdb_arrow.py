@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Default rewrite backend: PyIceberg reads, DuckDB sorts, PyIceberg writes.
 
 Reads go through :class:`pyiceberg.io.pyarrow.ArrowScan` over a hand-filtered
@@ -19,7 +20,9 @@ it -- rather than writing Parquet ourselves and registering it with
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 
 import pyarrow as pa
@@ -147,11 +150,155 @@ class DuckDBArrowBackend(RewriteBackend):
         # ArrowScan emits large_string/large_binary where schema_to_pyarrow
         # declares string/binary, so the cast is load-bearing, not cosmetic.
         # DataScan.to_arrow_batch_reader does the same thing upstream.
-        arrow_scan = self._arrow_scan(ctx)
         target_schema = _projected_arrow_schema(ctx)
         return pa.RecordBatchReader.from_batches(
-            target_schema, arrow_scan.to_record_batches(tasks)
+            target_schema, self._batches_with_read_ahead(tasks, ctx)
         ).cast(target_schema)
+
+    def _batches_with_read_ahead(
+        self, tasks: list[FileScanTask], ctx: RewriteContext
+    ) -> Iterator[pa.RecordBatch]:
+        """A bounded window of ``to_record_batches`` calls, one task each.
+
+        This is what makes CHUNKED bound anything, and it was measured rather
+        than reasoned about (ZMBNI-1906). Handing PyIceberg the whole task list
+        buffers most of the group, for two compounding reasons in
+        ``ArrowScan.to_record_batches``:
+
+        * ``batches_for_task`` materialises **an entire data file** into a list
+          before yielding any of it, deliberately -- the comment says so -- to
+          keep the work inside the executor.
+        * it drives that with ``executor.map(batches_for_task, tasks)``, which
+          submits *every* task immediately and returns results in order. Tasks
+          that finish early hold their whole materialised file until the
+          consumer reaches them.
+
+        So peak memory scaled with the group. Reading one task at a time makes
+        it scale with the largest **file** instead. Measured with file size held
+        at ~28MB while the group grew 4x:
+
+        ====== ============== ==========
+        group  all tasks      per task
+        ====== ============== ==========
+        224MB  +822MB         +392MB
+        447MB  +1088MB        +408MB
+        894MB  +1111MB        +434MB
+        ====== ============== ==========
+
+        Flat, which is the property that matters; the absolute figure is one
+        file plus Arrow allocator retention.
+
+        **This costs throughput**, and the cost grows with round-trip time,
+        because the parallelism being given up is what hid the latency. Measured
+        against the dev stack's MinIO through Lakekeeper with vended credentials
+        -- 228MB in 96 files, the small-file shape compaction actually gets --
+        with a proxy injecting per-request RTT:
+
+        ======== ========== =========== ======
+        RTT      per file   all at once ratio
+        ======== ========== =========== ======
+        direct    7.4s       6.5s       1.14x
+        0ms       11.3s      10.1s      1.12x
+        10ms      19.1s      15.2s      1.26x
+        30ms      34.4s      24.7s      1.39x
+        ======== ========== =========== ======
+
+        The 0ms row is the proxy's own overhead as a control: it moves both
+        columns and leaves the ratio alone, so the latency rows are the latency
+        and not the harness. Peak memory was 0.53x-0.61x of all-at-once at every
+        RTT -- the memory win does not decay.
+
+        So it is cheaper on object storage than the ~1.5x measured on local
+        files, up to somewhere past 30ms of RTT. That is why it lives on the
+        CHUNKED path only: AUTO uses CHUNKED for groups above
+        ``memory_budget_bytes``, where bounded memory is the whole point, and
+        leaves small groups on the materialising path where speed is.
+
+        **The window is the answer to that** (ZMBNI-1909), and it is sized in
+        bytes rather than files because bytes are what the memory contract is
+        denominated in. ``read_ahead_bytes`` admits as many whole files as fit,
+        capped by ``max_read_ahead_files``, so many small files -- the shape
+        compaction actually gets, and the one with the most round trips to hide
+        -- get real concurrency, while a few large ones fall back towards one at
+        a time, which is the case where memory is the binding constraint. Peak
+        stays bounded by the window plus the file being handed over, never by
+        the group. ``read_ahead_bytes=0`` restores the strictly serial read.
+
+        The submission is deliberately **not** ``executor.map``: that is the
+        upstream mistake this method exists to avoid, since map submits every
+        task at once and the window would be the group again. A new read starts
+        only as a finished one is handed to the consumer, which bounds what is
+        *outstanding* rather than merely what is running.
+
+        Measured on the same harness as the serial figures above -- 228MB in 96
+        files, MinIO through Lakekeeper, per-request RTT injected by a proxy --
+        with the default 64MiB window:
+
+        ====== ========== ========== ============
+        RTT    serial     window     unbounded
+        ====== ========== ========== ============
+        10ms   20.8s      15.3s      15.9s
+        30ms   36.2s      25.8s      26.3s
+        ====== ========== ========== ============
+
+        **The window matches unbounded speed** at both latencies -- the whole
+        cost of ZMBNI-1906 was serialised round trips, and a window of two files
+        is enough to hide them. It gives back some of the memory to do it:
+        +356MB against serial's +295MB and unbounded's +494MB at 10ms, so about
+        70% of unbounded rather than 60%.
+
+        And it stays flat, which is the point. With 28MB files and the group
+        quadrupling, peak growth went 692MB, 840MB, 784MB -- against unbounded's
+        822MB, 1088MB, 1111MB. Bounded by the window, not by the group.
+
+        **And it does not cost Z-order anything**, which is the reason to prefer
+        it over capping group size. DuckDB still receives the entire group as
+        one stream and spills its sort to disk, so the ordering sees every row
+        it would have seen. A capped group cannot say that: N sub-groups sort
+        independently and produce N overlapping ranges.
+        """
+        window = ctx.config.read_ahead_bytes
+        if window <= 0:
+            for task in tasks:
+                yield from self._arrow_scan(ctx).to_record_batches([task])
+            return
+
+        def read(task: FileScanTask) -> list[pa.RecordBatch]:
+            # A fresh ArrowScan per call: cheap, and it keeps threads off shared
+            # mutable state. PyIceberg reads tasks concurrently itself, so the
+            # io underneath is expected to take it.
+            return list(self._arrow_scan(ctx).to_record_batches([task]))
+
+        max_files = ctx.config.max_read_ahead_files
+        pending: deque[tuple[Future[list[pa.RecordBatch]], int]] = deque()
+        remaining = iter(tasks)
+
+        def fill() -> None:
+            while len(pending) < max_files:
+                # `pending and` admits the first file unconditionally, so one
+                # larger than the whole window still makes progress rather than
+                # deadlocking against its own size.
+                if pending and sum(size for _, size in pending) >= window:
+                    return
+                task = next(remaining, None)
+                if task is None:
+                    return
+                pending.append((pool.submit(read, task), task.file.file_size_in_bytes))
+
+        with ThreadPoolExecutor(max_workers=max_files) as pool:
+            try:
+                fill()
+                while pending:
+                    future, _ = pending.popleft()
+                    batches = future.result()
+                    fill()
+                    yield from batches
+            finally:
+                # An abandoned generator -- a consumer that stops early, or an
+                # exception downstream -- must not leave reads running against
+                # the object store. At most `max_files` are ever outstanding.
+                for future, _ in pending:
+                    future.cancel()
 
     # -- sort ------------------------------------------------------------
 

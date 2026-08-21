@@ -3,17 +3,61 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "zamboni"
-version = "0.1.0"
-description = "Iceberg table maintenance (compaction) for MinIO + Lakekeeper, without Trino or Spark"
+# The distribution name differs from the import name (`zamboni`) and from the
+# repository name (`Zamboni`), because `zamboni` on PyPI is a dormant
+# registration by an unrelated project. All three are independent by design --
+# `beautifulsoup4` imports as `bs4` -- and only this one has to be globally
+# unique. `iceberg-zamboni` rather than `zamboni-iceberg` so it sorts beside the
+# other `iceberg-*` packages. See ZMBNI-1808.
+name = "iceberg-zamboni"
+version = "0.3.0"
+description = "Iceberg table maintenance -- compaction, Z-order, partition evolution, snapshot expiry and orphan-file removal -- without needing Trino or Spark"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
+keywords = ["iceberg", "lakehouse", "compaction", "maintenance", "pyiceberg", "duckdb"]
+classifiers = [
+    # Beta from 0.3.0 onward, not Production/Stable: the scope is delivered
+    # and verified against live infrastructure, but the `table-config.json`
+    # schema and the defaults deciding what gets deleted have had one author.
+    # Trove's ladder is coarser than semver -- 4 is where a 0.x tool that works
+    # and is not yet promising stability belongs. See docs/releasing.md §4.
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: System :: Systems Administration",
+]
 dependencies = [
-    # BRANCH feature/pyiceberg-0.12: relaxed from >=0.11.1 because the
-    # ../iceberg-python checkout is *newer* than 0.11.1 while still declaring
-    # version 0.11.0 -- main has not been bumped for the 0.12 cycle. The
-    # constraint would otherwise reject the very build we are here to test.
-    "pyiceberg[pyarrow]>=0.11.0",
+    # BRANCH feature/pyiceberg-0.12: the cap main carries -- `<0.12`, for the
+    # partitioned-upsert corruption in docs/upstream-0.12-upsert-regression.md --
+    # is dropped here, because testing the build it excludes is what this branch
+    # is for. Everywhere else the two agree.
+    #
+    # The *floor* is main's again. It was relaxed to >=0.11.1 -> >=0.11.0 when the
+    # ../iceberg-python checkout still declared `version = "0.11.0"` on a tree
+    # newer than the 0.11.1 release, so main's floor rejected the very build under
+    # test. That checkout now declares 0.12.0 and satisfies >=0.11.1 on its own,
+    # so the workaround is deleted rather than carried: a relaxed floor that is no
+    # longer load-bearing is one an eventual merge to main would have to notice.
+    # BRANCH feature/pyiceberg-0.12: `pyiceberg-core` is named explicitly, and on
+    # 0.12 it is not optional. Upstream moved the Rust core **out of the
+    # `[pyarrow]` extra** into an extra of its own, while
+    # `transforms.pyarrow_transform` still delegates to it for every non-identity
+    # transform -- so `pyiceberg[pyarrow]` alone cannot write a day-, month-,
+    # year-, hour-, bucket- or truncate-partitioned table on 0.12. It raises
+    # `NotInstalledError` from inside PyIceberg's own writer.
+    #
+    # On 0.11.1 this needs no declaration: `[pyarrow]` requires the core, which
+    # is what `test_the_rust_core_arrives_with_the_base_install` pins on main --
+    # and that test is the tripwire that caught this, exactly as its docstring
+    # said it would.
+    "pyiceberg[pyarrow,pyiceberg-core]>=0.11.1",
     "duckdb>=1.5.0",
     "pyarrow>=18",
     # zamboni.yml and .env: the DevOps surface (docs/devops.md), not optional.
@@ -21,21 +65,64 @@ dependencies = [
     "python-dotenv>=1.0",
 ]
 
+[project.urls]
+# Without these the PyPI page has no route anywhere -- which mattered more here
+# than usual, because the docs are deliberately *not* shipped in the wheel
+# (ZMBNI-1809) and are meant to be reached by link. Metadata cannot be edited in
+# place on PyPI, so a missing URL costs a release to add. ZMBNI-1812.
+Homepage = "https://github.com/paulcaron16k/Zamboni"
+Repository = "https://github.com/paulcaron16k/Zamboni"
+Documentation = "https://github.com/paulcaron16k/Zamboni#readme"
+Changelog = "https://github.com/paulcaron16k/Zamboni/blob/main/CHANGELOG.md"
+Issues = "https://github.com/paulcaron16k/Zamboni/issues"
+
 [project.optional-dependencies]
 # Object-store access for a real MinIO/Lakekeeper warehouse.
 s3 = ["s3fs>=2024.6.0"]
-# Required only for bucket-partitioned tables: PyIceberg delegates the bucket
-# transform to its Rust core when writing.
-bucket = ["pyiceberg-core>=0.5.0"]
 # Local SQL catalog, used by the test suite and handy for dry runs.
+# BRANCH feature/pyiceberg-0.12: uncapped for the same reason as the runtime
+# dependency above, and it has to be. The dev group installs
+# `iceberg-zamboni[sql,s3,trino]`, so this extra is always present -- leaving
+# `<0.12` here while dropping it there would keep the resolver refusing exactly
+# the build this branch exists to test, with nothing in the diff to show why.
+# The two pyiceberg constraints move together or not at all.
 sql = ["pyiceberg[sql-sqlite]>=0.11.1"]
-# Only needed for `--engine trino`. Optional so nobody installs a query-engine
-# client to compact a table locally.
+# A *client* for a Trino you already have -- the dev stack's `trino` compose
+# profile, or a cluster. Optional so nobody installs a query-engine client to
+# compact a table locally.
 trino = ["trino>=0.330.0"]
+# A *client* for a Spark you already have, over Spark Connect
+# (`--spark-remote sc://...`), symmetric with `trino`: the JVM lives on the
+# server, so this is pure Python and the machine's Java version stops mattering.
+# Requires Spark 4 -- pyspark-client did not exist before 4.0.
+#
+# This used to be called `spark-connect`, while `spark` meant the embedded
+# library. That was backwards for the common case: driving a cluster is what
+# most people want, and it was the name nobody guessed. ZMBNI-1816.
+spark = ["pyspark-client>=4.0,<5"]
+# The embedded Spark library: a driver JVM inside this process, and the only
+# route to a *classic* (non-Connect) cluster via `--spark-master spark://...`.
+# Two orders of magnitude larger on disk than the client and it needs a JDK,
+# which is why it is not what `spark` means. Mutually exclusive with `spark` --
+# both provide the `pyspark` module, so an environment has one.
+#
+# The 3.5 floor is deliberate and lower than `spark`'s 4.0. Connect cannot reach
+# a 3.5 cluster at all (pyspark-client did not exist before 4.0), so this is the
+# only path to one -- and 3.5 is not dead: Iceberg publishes
+# iceberg-spark-runtime-3.5 at its current 1.11.0, and Spark 3.5.x has an
+# *extended* LTS running to November 2027. Nothing in this maintainer is Spark-4
+# only. CI covers Connect against 4.0.4 and nothing else, so the classic path is
+# best effort at any version and the docs say so rather than implying a floor
+# means coverage. ZMBNI-1818.
+spark-lib = ["pyspark>=3.5,<5"]
 
 [project.scripts]
 zamboni = "zamboni.cli:main"
-demo = "himsdemo.cli:main"
+# Namespaced, not `demo`. Installing this put a bare `demo` on the user's PATH,
+# which is a name no library has any business claiming globally -- and the
+# collision would be silent, with whichever package installed last winning.
+# Inside the repository `./bin/demo` is unchanged.
+zamboni-demo = "himsdemo.cli:main"
 
 [dependency-groups]
 dev = [
@@ -44,7 +131,13 @@ dev = [
     "pytest>=8",
     "python-dotenv>=1.2.2",
     "ruff>=0.6",
-    "zamboni[bucket,sql,s3,trino]",
+    "iceberg-zamboni[sql,s3,trino]",
+    # Matched to the dev stack's server, not to the extra's range. Iceberg 1.11
+    # ships a Spark runtime for 4.0 and no later minor, so the server is 4.0.x;
+    # pinning the client to the same minor means the dev-stack tests exercise a
+    # matched pair rather than Connect's cross-version skew, which is Spark's
+    # promise to keep and not a thing this suite should be proving.
+    "pyspark-client>=4.0.4,<4.1",
 ]
 
 [tool.uv.sources]
@@ -67,8 +160,37 @@ default-groups = ["dev"]
 [tool.hatch.build.targets.wheel]
 packages = ["src/zamboni", "src/himsdemo"]
 
+# The demo's inputs, 212KB, so `pipx install iceberg-zamboni && zamboni-demo`
+# works without a clone. Listed path by path rather than including
+# `data/healthims` wholesale: that directory also accumulates the generated
+# warehouse and catalog -- 9MB and growing after a run -- and a glob would ship
+# whatever happened to be lying there when the wheel was built.
+#
+# The prose in that directory is deliberately absent. It is reference material
+# the demo never reads, and `himsdemo.cli.DOCS_URL` points at it on GitHub.
+[tool.hatch.build.targets.wheel.force-include]
+"data/healthims/table_schema.json" = "himsdemo/data/table_schema.json"
+"data/healthims/table-config.json" = "himsdemo/data/table-config.json"
+"data/healthims/day1" = "himsdemo/data/day1"
+"data/healthims/day2" = "himsdemo/data/day2"
+"data/healthims/day3" = "himsdemo/data/day3"
+"data/healthims/day4" = "himsdemo/data/day4"
+"data/healthims/day5" = "himsdemo/data/day5"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A marker rather than a -k expression, because CI has to select these
+# exactly: the Spark fixtures skip on a closed port, so a filter that
+# quietly matched nothing would report a green Spark job that ran no Spark.
+markers = [
+    "spark: live tests against the dev stack's Spark Connect server",
+    # Trino's tests were selected by fixture alone until `make test-trino`
+    # needed to name them. A `-k trino` expression would have worked today and
+    # is the thing the comment above rules out: it matches on a name, so
+    # renaming a test silently shrinks the set, and a set that quietly became
+    # empty reports a green Trino run that ran no Trino.
+    "trino: live tests against the dev stack's Trino server",
+]
 
 [tool.ruff]
 line-length = 100
@@ -103,3 +225,17 @@ ignore_missing_imports = true
 warn_unused_ignores = false
 warn_redundant_casts = true
 no_implicit_optional = true
+
+# Installing zamboni[spark] put `pyspark` in the dev environment, so
+# mypy started following the import inside SparkMaintainer.connect() and on
+# into numpy's bundled stubs -- which use PEP 695 `type` statements and so are
+# rejected under `python_version = "3.11"`. That is numpy declaring a 3.12
+# floor for its own stubs, not a problem in this codebase, and dropping our
+# floor to make a third party's stubs parse would trade a real check for a
+# cosmetic one. Skip them instead; we do not type-check other people's code.
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*", "pyspark", "pyspark.*"]
+# Both the bare name and the wildcard: the syntax error is raised while
+# processing `numpy` itself, which "numpy.*" does not match.
+follow_imports = "skip"
+follow_imports_for_stubs = true

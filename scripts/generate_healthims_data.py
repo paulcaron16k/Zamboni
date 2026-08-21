@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Generate the five days of HIMS discharge CSVs the demo ingests.
 
 Run once; the output is committed. Everything is seeded, so regenerating

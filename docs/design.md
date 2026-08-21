@@ -1,6 +1,7 @@
 # Zamboni — High-Level Design
 
-**Iceberg table maintenance for MinIO + Lakekeeper, without Trino or Spark.**
+**Iceberg table maintenance for MinIO + Lakekeeper, without *needing* Trino or Spark —
+and able to drive either when you have one.**
 
 | | |
 |---|---|
@@ -25,7 +26,7 @@ job**, and each candidate is missing it for a different reason:
 | PyIceberg 0.11.1 (latest release) | No | `table.maintenance` exposes only `expire_snapshots()`, which is metadata-only and deletes no files |
 | DuckDB Iceberg extension (released) | No | Loading `iceberg` in DuckDB 1.5.4 exposes 16 `iceberg_*` functions; `iceberg_rewrite_data_files` is not among them |
 | duckdb-iceberg `main` | Partially | Has `iceberg_rewrite_data_files`, but unreleased, **V2-only**, refuses partition-spec evolution, and never sorts |
-| Trino / Spark | Yes | Excluded by requirement |
+| Trino / Spark | Yes | Capable, but a requirement of this project is not needing a cluster. Both are now supported *engines* — see §3 — so having one is an option rather than a precondition |
 
 ### The approach
 
@@ -47,7 +48,7 @@ flowchart LR
 ### Why not the alternatives
 
 - **Daft** — kept as a candidate for one reason (bucket-transform writes), which turned out
-  unnecessary: PyIceberg + `pyiceberg-core` handles bucket partitioning, proven by test.
+  unnecessary: PyIceberg handles bucket partitioning through its Rust core, proven by test.
   Daft also cannot read equality deletes and has no `replace`-snapshot primitive.
 - **Ray** — `Table.to_ray()` is `ray.data.from_arrow(self.to_arrow())`, materialising the
   whole table before Ray sees it; the distributed write API is documented as alpha.
@@ -234,8 +235,17 @@ flowchart TB
     ZO["zorder<br/><i>Morton SQL</i>"]
     CM["committer<br/><i>replace snapshot</i>"]
   end
-  CLI["cli"] --> TC & CI & CO
-  CO["compactor<br/><i>orchestration</i>"] --> PR --> PL & EV
+  subgraph Engines["Engines — one operation, three implementations"]
+    MT["maintainers<br/><i>Maintainer ABC, capability declarations</i>"]
+    LO["local<br/><i>PyIceberg + DuckDB</i>"]
+    TR["trino<br/><i>ALTER TABLE … EXECUTE</i>"]
+    SP["spark<br/><i>CALL system.*, via Connect</i>"]
+  end
+  CLI["cli"] --> TC & CI & MN
+  MN["maintenance<br/><i>the run: order, skips, exit code</i>"] --> MT
+  MT --> LO & TR & SP
+  LO --> CO["compactor<br/><i>orchestration</i>"]
+  CO --> PR --> PL & EV
   CO --> BE --> ZO
   CO --> CM
   CAP -.gates.-> CM & BE & PR
@@ -243,8 +253,22 @@ flowchart TB
   CI --> TC
 ```
 
+`maintenance` is the entry point for both the CLI and an application: `zamboni
+maintenance` is a printing adapter over `zamboni.maintain()`, so the operation order, the
+skip when one operation is fulfilled by another, which exceptions are refusals rather than
+failures, and when to stop after a safety abort exist once rather than twice.
+
 | Module | Responsibility |
 |---|---|
+| `maintenance` | One run: every operation, in order, over every table. Shared by the CLI and `zamboni.maintain()` |
+| `maintainers` | The engine seam: `Maintainer` ABC, three-valued support, per-operation capability declarations |
+| `maintainers/local` | PyIceberg + DuckDB, in this process. The only engine with partition evolution, and the only one that previews everything |
+| `maintainers/trino` | `ALTER TABLE … EXECUTE` against a coordinator. No Z-order, no dangling-delete removal |
+| `maintainers/spark` | Iceberg stored procedures over Spark Connect, so no JVM is needed here |
+| `settings` | `zamboni.yml` and `.env` discovery and precedence; the multi-tenant layout |
+| `config` | `CompactionConfig`: how a run executes, as opposed to what the layout should be |
+| `cli` | Argument parsing, printing, exit codes. Deliberately thin |
+| `units` | One byte formatter, because four modules had diverged on it |
 | `tableconfig` | The `table-config.json` specification: parse, validate, merge defaults |
 | `catalog_import` | Extract `x-iceberg` blocks from a Singer catalog into a config |
 | `capabilities` | Probe the installed PyIceberg structurally; gate unsafe builds |
@@ -284,8 +308,25 @@ delta is in [roadmap.md RM-1](roadmap.md).
 
 The six mutating operations are Iceberg's, not Zamboni's, and Trino and Spark implement most
 of them already. `zamboni.maintainers` is the seam that lets an operator ask for "maintain
-this table" instead of "maintain this table with PyIceberg". `LocalMaintainer` is the
-PyIceberg engine; Trino and Spark are declared but not implemented.
+this table" instead of "maintain this table with PyIceberg". All three engines are
+implemented: `LocalMaintainer` (PyIceberg + DuckDB), `TrinoMaintainer` (`ALTER TABLE …
+EXECUTE`), and `SparkMaintainer` (the Iceberg stored procedures, over Spark Connect so no
+JVM is needed on the calling host). Each has been run against a real server — Trino 483 and
+Spark 4.0.4 — and both are exercised by CI.
+
+What the three engines do *not* have is a common feature set, which is the reason the seam
+is shaped the way it is:
+
+| | local | trino | spark |
+|---|---|---|---|
+| Z-order | yes | **no** | yes |
+| Partition evolution | **yes** | no | no |
+| Dangling-delete removal | partial (whole manifests) | **no** | yes (per file) |
+| Output file size control | yes | **no** | yes |
+| Preview without committing | **every operation** | none | `remove-orphans` only |
+
+`zamboni engines` prints this from the declarations rather than from a table someone
+maintained by hand.
 
 The seam sits at the *operation*, and that is forced rather than chosen. Generating SQL is
 unavailable to us — we drive metadata through PyIceberg and are the only one of the three
@@ -316,32 +357,50 @@ Full reference: **[table-config.md](table-config.md)**. Worked example:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
+  "warehouse": "acme",
   "defaults": {
     "partition_evolution": {
       "enabled": true,
       "rules": [{ "from": "day", "to": "month", "older_than_days": 90 }]
     }
   },
-  "tables": {
-    "analytics.events": {
-      "partition": [
-        { "column": "occurred_at", "transform": "day" },
-        { "column": "tenant_id", "transform": "bucket", "num_buckets": 16 }
-      ],
-      "ordering": {
-        "mode": "zorder",
-        "zorder": { "columns": ["customer_id", "product_id"], "precision_bits": 16 }
-      },
-      "target_file_size_bytes": 268435456,
-      "min_input_files": 4
+  "namespaces": {
+    "analytics": {
+      "tables": {
+        "events": {
+          "partition": [
+            { "column": "occurred_at", "transform": "day" },
+            { "column": "tenant_id", "transform": "bucket", "num_buckets": 16 }
+          ],
+          "ordering": {
+            "mode": "zorder",
+            "zorder": { "columns": ["customer_id", "product_id"], "precision_bits": 16 }
+          },
+          "target_file_size_bytes": 268435456,
+          "min_input_files": 4
+        }
+      }
     }
   }
 }
 ```
 
+**The document is warehouse → namespace → table**, which is `database.schema.table` in
+Postgres or Snowflake terms. Version 1 keyed tables by a dotted string and left the split to
+be *guessed*: `rpartition` resolved `raw.telemetry.events` to namespace `('raw','telemetry')`
+in the local engine and to a single schema named `raw.telemetry` in Trino, the same key
+naming two different tables with no error anywhere. Stating the namespace and forbidding a
+dot in the table name removes the guess rather than handling it.
+
+`warehouse` is required and **asserts** rather than selects. `--warehouse`/`--db`, the
+profile, or the per-customer directory chooses; this confirms, so a config copied into the
+wrong tenant's directory is an error before anything is touched.
+
 | Section | Purpose | Default |
 |---|---|---|
+| `warehouse` | Which warehouse this file describes | **required** |
+| `namespaces.<ns>.tables.<name>` | Per-table settings; the name may not contain a dot | — |
 | `partition` | Iceberg partition fields | none (unpartitioned) |
 | `partition_evolution` | How partitioning ages | **enabled**, day→month at 90 days |
 | `ordering` | `none` \| `sort` \| `zorder` | `none` |
@@ -349,7 +408,8 @@ Full reference: **[table-config.md](table-config.md)**. Worked example:
 | `min_input_files` | Compaction threshold | 2 |
 
 `defaults` applies to every table; a table's block overrides it **per section**, so what you
-read in one block is what applies. Unknown keys are rejected.
+read in one block is what applies. Unknown keys are rejected. `namespaces.<ns>` is an object
+wrapping `tables` so namespace-level defaults can be added without a further version bump.
 
 ---
 
@@ -524,7 +584,7 @@ sequenceDiagram
 | No streaming write path (`_dataframe_to_data_files` takes a `pa.Table`) | Bin-packing done locally; native path used when a build has it |
 | Partitioned streaming writes unsupported (apache/iceberg-python#2152) | Partitioned tables always bin-pack locally |
 | `add_files` cannot infer non-order-preserving partition values | Writes go through `_dataframe_to_data_files`, which derives the key from data |
-| Bucket transforms need the Rust core | `pyiceberg-core` is a declared extra |
+| The `bucket`, `truncate`, `year`, `month`, `day` and `hour` transforms compute partition values in the Rust core | Nothing to declare: `pyiceberg[pyarrow]`, which is a hard dependency, already requires `pyiceberg-core` |
 | `expire_snapshots()` is metadata-only and ignores most of the retention spec | Retention algorithm and file deletion implemented here (`expire.py`); PyIceberg is used only to commit the `RemoveSnapshotsUpdate` |
 | `FileIO` has no list operation | Orphan removal reaches `PyArrowFileIO._initialize_fs()` for a `pyarrow.fs` filesystem, which covers local paths and S3/MinIO alike |
 
@@ -539,7 +599,7 @@ sequenceDiagram
 
 | Constraint | Consequence |
 |---|---|
-| PyIceberg's SQL catalog needs SQLAlchemy ≥ 2; the machine's global env pins 1.4.x for Airflow | Everything runs from a locked `uv` venv; nothing resolves against global packages |
+| PyIceberg's SQL-catalog extra pins SQLAlchemy, which a shared site-packages need not satisfy | Everything runs from a locked `uv` venv; nothing resolves against global packages, so no global pin can conflict. Only the `sql` extra pulls SQLAlchemy in — a REST-catalog install never meets the constraint |
 | The `bin/zamboni` executable pins its Python from `.python-version` | The shipped executable runs the interpreter the tests ran on |
 | Lakekeeper OSS has no maintenance queues | Expiry and orphan removal run from this tool, scheduled by the operator |
 | A remote-signing Lakekeeper warehouse (`sts-enabled: false`, `push-s3-delete-disabled: true`) signs object GET/PUT only | `ListObjectsV2`, `HeadObject` and multi-object `DELETE` are refused, so compaction fails and no storage can be reclaimed. Needs STS-vended or direct credentials — measured in [live-verification.md](live-verification.md) |
@@ -569,6 +629,24 @@ sequenceDiagram
 - **A remote-signing Lakekeeper warehouse permits no reclamation.** Its signer refuses
   `ListObjectsV2`, `HeadObject` and multi-object `DELETE`, so compaction fails and nothing
   can be freed. See [live-verification.md](live-verification.md).
+- **Compaction holds roughly one data file in memory, not one partition.** The streaming
+  path reads one file per call and bin-packs the result, so peak scales with the largest
+  *file* and a partition larger than RAM still compacts. It was not always so: reading the
+  whole task list at once made peak grow with the group, because PyIceberg materialises each
+  file and submits every task before the consumer drains any. Group size still governs how
+  long a rewrite takes, what a failure wastes, and how large the orphan guard must be.
+- **Nested namespaces need different SQL on each engine, and each rejects the other's.**
+  Verified against live servers: Trino addresses `raw.telemetry.events` as
+  `"ice"."raw.telemetry"."events"` — one schema identifier containing a dot, which is what
+  `nested-namespace-enabled` turns on — and fails the per-level form with "Too many dots in
+  table name"; Spark requires `` `ice`.`raw`.`telemetry`.`events` `` and refuses a dot
+  inside a part. Zamboni emits the right form for each, so this is handled rather than left
+  to the operator, but a layout needing two incompatible spellings does not map onto
+  `database.schema.table` and is worth avoiding.
+- **Spark's `remove-orphans` needs credentials Zamboni cannot supply.** It lists through
+  Hadoop S3A rather than Iceberg FileIO, so it needs `spark.hadoop.fs.s3a.*` on the Spark
+  server. Every other operation runs on the catalog's vended credentials. Get it wrong and
+  exactly one of the six fails while the rest pass.
 
 
 ### 6.6 Safety invariants for deletion

@@ -1,8 +1,14 @@
 # Zamboni vs Trino vs Spark
 
 What each engine can actually do, where the same-sounding operation differs, and
-what that means for the maintainer interface. This is the analysis
-[roadmap.md RM-3](roadmap.md) calls for; the interface it recommends is RM-2.
+what that means for the maintainer interface.
+
+**Written before any of the engines existed, and revised now that all three do.**
+It began as the analysis [roadmap.md RM-3](roadmap.md) called for, recommending
+an interface that had not been built; §6 now records which of its predictions
+held. Where a claim has since been checked against a running server, it says so
+-- several were wrong, and the corrections are more interesting than the
+agreements.
 
 **Method.** Parameter names and defaults are quoted from primary sources, read on
 2026-08-03: the Iceberg `docs/docs/spark-procedures.md` source and the Trino
@@ -21,10 +27,32 @@ dropping inapplicable ones. Both are recorded in §3 and §6.
 
 ## 1. The three surfaces
 
-### Zamboni (v0.1.0, PyIceberg 0.11.1)
+### Zamboni (v0.2.0, PyIceberg 0.11.1)
 
-Six mutating verbs plus `describe`/`plan`. Configuration is declarative
-(`table-config.json`), not per-invocation arguments.
+Six mutating verbs plus `describe`, `plan`, `doctor`, `engines` and
+`table-config`. The shape of the surface is the difference worth noting: Trino
+and Spark take **per-invocation arguments**, Zamboni takes a **declarative file**
+and derives the arguments from it.
+
+| Verb | What it does | Where its parameters come from |
+|---|---|---|
+| `compact` | Rewrite small files; sort or Z-order while doing it | `table-config.json` layout; `--target-file-size-bytes`, `--min-input-files`, `--memory-mode` for how the run executes |
+| `expire` | The spec's retention algorithm, then delete the files it orphans | `retention.expire_snapshots`; `--max-snapshot-age-days`, `--min-snapshots-to-keep` |
+| `remove-orphans` | List storage, diff against the reachable set, age-guard, delete | `retention.remove_orphan_files`; `--older-than-days` |
+| `remove-dangling-deletes` | Drop delete files that apply to no live data file | `retention.remove_dangling_deletes` |
+| `rewrite-manifests` | Regroup manifest entries by partition so predicates prune | `retention.rewrite_manifests`; `--min-input-manifests` |
+| `apply-properties` | Set the metadata-retention table properties | `retention.metadata` |
+| `maintenance` | All six, in the runbook order, over every configured table | the profile's `operations` list |
+
+Two consequences of the declarative shape, both visible in the table above.
+Layout intent (`partition`, `ordering`, `partition_evolution`) has **no CLI flag
+at all** on the engine-neutral path -- it is a property of the table that
+analysts own, not of the run. And retention lives in the file rather than in the
+invocation, so what may be deleted is reviewable in version control rather than
+being an argument somebody typed at 02:00.
+
+`maintenance` is also the API: `zamboni.maintain()` runs the same loop and
+returns the same exit code, so an application does not reimplement the order.
 
 ### Trino — `ALTER TABLE … EXECUTE`
 
@@ -56,6 +84,69 @@ Zamboni counterparts: `target-file-size-bytes` (512 MB), `min-input-files` (5),
 `partial-progress.enabled` (false), `use-starting-sequence-number` (true),
 `output-spec-id`, `remove-dangling-deletes` (false), `delete-ratio-threshold`
 (0.3), `rewrite-job-order`.
+
+---
+
+## 1a. What PyIceberg 0.12 provides
+
+Zamboni's local engine *is* PyIceberg, so the comparison has a fourth column
+that moves on its own. Measured on 2026-08-11 by installing each line and
+running Zamboni's own capability probes -- `zamboni doctor` -- rather than
+reading release notes:
+
+| Probe | 0.11.1 (current release) | 0.12.0rc1 | main @ `32f036c5` |
+|---|---|---|---|
+| `operation_is_injectable` | yes | yes | yes |
+| `replace_summary_supported` | no | no | no |
+| `streaming_write_supported` | **no** | **yes** | **yes** |
+| `prunes_manifests_by_predicate` | **no** | **yes** | **yes** |
+| `derives_delete_predicate` | no | no | no *(see below)* |
+| `equality_deletes_readable` | no | no | no |
+| `delete_manifests_writable` | no | no | no |
+
+**What 0.12 gives Zamboni.** One thing, and it is real: `_dataframe_to_data_files`
+accepts a `RecordBatchReader`, so the writer bin-packs a stream itself and the
+CHUNKED path stops doing that by hand -- for unpartitioned tables only, since
+partitioned streaming is [apache/iceberg-python#2152](https://github.com/apache/iceberg-python/issues/2152).
+
+**What it does not give.** The two blockers this project has been waiting on are
+untouched. Equality deletes are still refused by scan planning, so a table
+carrying them is still blocked for compaction (ZMBNI-705). `ManifestWriterV2`
+still hardcodes `content: data`, so dangling-delete removal is still limited to
+dropping whole manifests (ZMBNI-604). Neither lifts, and both were re-probed
+rather than assumed.
+
+**What it took away, and got back.** 0.12 added manifest pruning to the overwrite
+path, which is a performance win and a correctness hazard: a manifest the
+predicate does not match is kept *verbatim*, including entries the operation is
+deleting. Derived wrongly, that double-counts rows. `0.12.0rc1` derives it
+wrongly for any non-identity transform -- verified, the 25-line reproduction in
+[upstream-0.12-upsert-regression.md](upstream-0.12-upsert-regression.md) returns
+`[('a',1), ('a',2), ('b',1), ('b',1)]` on rc1 where the correct answer is
+`[('a',2), ('b',1)]`. Filed as
+[#3758](https://github.com/apache/iceberg-python/issues/3758); the fix is on main
+after rc1 and lands via
+[#3780](https://github.com/apache/iceberg-python/pull/3780), and the same
+reproduction returns the correct answer there.
+
+**`pyproject.toml` pins `<0.12` until a release carries that fix.** Each release
+candidate is tested as it appears; the supported range widens when one passes.
+
+> **A defect this table found in Zamboni, not in PyIceberg.** The
+> `derives_delete_predicate` probe looks for
+> `_SnapshotProducer._build_delete_files_partition_predicate`. The upstream fix
+> derives the filter from the deleted files' *recorded* partition values, in
+> `_OverwriteFiles._deleted_files_partition_filters` -- a different name on a
+> different class. So the probe returns `False` on a build where the property it
+> is testing for genuinely holds, `manifest_pruning_is_safe` comes out `False`,
+> and Zamboni refuses to run at all on a fixed 0.12. It fails *safe* -- refusing
+> rather than risking double-counted rows -- but it is wrong, and it is the same
+> class of bug as the one `_guard_anywhere_in_scan_planning` was written to fix:
+> a probe keyed on one symbol that upstream renamed. **Fixed in ZMBNI-1109:** the
+> pruning question is now settled by running an overwrite on a transformed
+> partition and counting the survivors, because no symbol's presence can answer
+> it -- the same name exists on the build that corrupts and on the ones that do
+> not.
 
 ---
 
@@ -197,27 +288,43 @@ The seam is forced: operation-level is the only level all three implement.
 
 ---
 
-## 6. Consequences for ZMBNI-12
+## 6. What the interface became
 
-Concrete requirements this analysis puts on the interface:
+This section was written before any of it existed, as six requirements the
+analysis put on a future interface. All six shipped, so it is more useful as a
+record of which predictions held. `zamboni engines` prints the live version of
+this; what follows is what the analysis got right and wrong.
 
-1. **Capability is per operation, not per engine** — driven by §3 row 3: preview
-   exists for one Spark operation and no others.
-2. **Support is not binary.** `expire` on Trino works but cannot honour
-   `max_ref_age_days`; `remove-dangling-deletes` on Zamboni works but only for
-   whole manifests. The interface needs *supported / partially supported with a
-   named limitation / unsupported*, not a boolean.
-3. **Config translation validates, it does not just format.** Trino's floors
-   (§3 row 1) mean a valid `table-config.json` can be invalid for a given engine.
-   That check belongs at plan time.
-4. **An operation may be fulfilled by another operation.** Spark does
-   dangling-delete removal as a compaction option (§3 row 6).
-5. **Guarantee level is part of the contract** (§4), and `describe()` should
-   report it.
-6. **Parameters translate, they do not pass through** (§3 rows 2, 4, 11).
+| Predicted | Shipped as | Held? |
+|---|---|---|
+| Capability is per operation, not per engine | `MaintainerCapabilities.of(operation)`, and `can_preview` is per operation | yes |
+| Support is three-valued, not boolean | `Support.FULL/PARTIAL/UNSUPPORTED`, and an `OperationSupport` that is not FULL **refuses to construct** without a named limitation | yes, and stricter than proposed |
+| Config translation validates, not just formats | `Maintainer.validate(operation, request)` at plan time; Trino's retention floors reject valid configs there | yes |
+| An operation may be fulfilled by another | `OperationSupport.fulfilled_by`; Spark's dangling-delete removal rides on `rewrite_data_files`, and `maintenance` skips the second run | yes |
+| Guarantee level is part of the contract | `OperationSupport.invariants`, reported by `describe()` | yes |
+| Parameters translate, they do not pass through | `MaintenanceRequest` carries intent; each maintainer renders it | yes |
 
-**Deferred to implementation, deliberately.** Whether Trino's `optimize_manifests`
-clustering is equivalent to ours, and whether `use-starting-sequence-number`
-matches our sequence-number preservation, are claims that should be verified
-against a running engine (ZMBNI-1403, ZMBNI-1407) rather than asserted from
-documentation. They are recorded here as open, not as answered.
+**One thing the analysis did not anticipate.** Layout capabilities are not
+operations, and had nowhere to live. Z-order and partition evolution are
+settings in `table-config.json`, so they fitted neither `Operation` nor
+`OperationSupport`, and for a while existed only as prose inside a limitation
+string -- which meant `zamboni table-config summary` warned about Z-order on
+Trino from a hardcoded literal. `LayoutFeature` and a declared
+`MaintainerCapabilities.layout` were added later so that warning derives from
+the same declarations everything else does.
+
+**And the two claims deferred to implementation were both answered by running
+them**, which is why they were deferred rather than asserted:
+
+- Trino's `optimize_manifests` takes no arguments at all, so it is not
+  configurably equivalent to ours; output size comes from the
+  `commit.manifest.target-size-bytes` table property.
+- Spark's `use-starting-sequence-number` defaults true, matching our
+  sequence-number preservation. Confirmed against Spark 4.0.4 rather than from
+  the documentation.
+
+A third answer arrived unasked: **nested namespaces need mutually incompatible
+SQL.** Trino addresses `raw.telemetry.events` as `"ice"."raw.telemetry"."events"`
+and rejects the per-level form; Spark requires `` `ice`.`raw`.`telemetry`.`events` ``
+and rejects a dot inside a part. Each refuses the other's spelling of the same
+table. Nothing in the documentation of either says so.

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Group live data files into independently committable rewrite units.
 
 The grouping rules mirror duckdb-iceberg's native planner

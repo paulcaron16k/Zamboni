@@ -110,7 +110,7 @@ def test_retention_window_protects_recent_data(session, daily):
 
 def test_evolution_condenses_days_into_a_month(session, daily):
     before_ids = sorted(daily.scan().to_arrow()["id"].to_pylist())
-    config = TableConfig(defaults=settings(), tables={})
+    config = TableConfig(warehouse="w", defaults=settings())
 
     result = TableCompactor.from_table_config(
         session, "db.daily", config, base=CompactionConfig()
@@ -129,7 +129,7 @@ def test_evolution_condenses_days_into_a_month(session, daily):
 
 
 def test_new_data_still_lands_in_the_daily_spec(session, daily):
-    config = TableConfig(defaults=settings(), tables={})
+    config = TableConfig(warehouse="w", defaults=settings())
     TableCompactor.from_table_config(session, "db.daily", config).execute()
 
     tbl = session.table("db.daily")
@@ -143,7 +143,7 @@ def test_new_data_still_lands_in_the_daily_spec(session, daily):
 
 def test_manifest_spec_matches_file_spec(session, daily):
     """The corruption check: a month file must live in a month-spec manifest."""
-    config = TableConfig(defaults=settings(), tables={})
+    config = TableConfig(warehouse="w", defaults=settings())
     TableCompactor.from_table_config(session, "db.daily", config).execute()
 
     pairs = manifest_spec_agreement(session.table("db.daily"))
@@ -156,7 +156,7 @@ def test_manifest_spec_matches_file_spec(session, daily):
 
 def test_partition_values_survive_a_round_trip(session, daily):
     """Predicates must still prune correctly after evolution."""
-    config = TableConfig(defaults=settings(), tables={})
+    config = TableConfig(warehouse="w", defaults=settings())
     TableCompactor.from_table_config(session, "db.daily", config).execute()
 
     tbl = session.table("db.daily")
@@ -175,7 +175,7 @@ def test_new_partition_field_gets_a_fresh_id(session, daily):
     `last-partition-id` to prevent ("partition fields with the same ID may
     contain different data types").
     """
-    config = TableConfig(defaults=settings(), tables={})
+    config = TableConfig(warehouse="w", defaults=settings())
     TableCompactor.from_table_config(session, "db.daily", config).execute()
 
     tbl = session.table("db.daily")
@@ -211,7 +211,7 @@ def test_snapshot_summary_labels_use_each_file_s_own_spec(session, capsys):
     for d in range(1, 6):
         tbl.append(pa.table({"id": [d], "ts": [dt.datetime(2026, 1, d)]}, schema=TS_ARROW))
 
-    config = TableConfig(defaults=settings(), tables={})
+    config = TableConfig(warehouse="w", defaults=settings())
     TableCompactor.from_table_config(session, "db.summarised", config).execute()
 
     summary = session.table("db.summarised").current_snapshot().summary
@@ -249,12 +249,12 @@ def test_evolution_honours_the_overwrite_escape_hatch(session):
         tbl.append(pa.table({"id": [d], "ts": [dt.datetime(2026, 1, d)]}, schema=TS_ARROW))
 
     config = TableConfig(
+        warehouse="w",
         defaults=TableSettings(
             partition_evolution=PartitionEvolution(
                 enabled=True, rules=(EvolutionRule("day", "month", 90),)
             )
         ),
-        tables={},
     )
     result = TableCompactor.from_table_config(
         session,
@@ -287,12 +287,12 @@ def test_an_atomic_commit_records_every_evolved_group(session):
         tbl.append(pa.table({"id": [day], "ts": [dt.datetime(2026, month, day)]}, schema=TS_ARROW))
 
     config = TableConfig(
+        warehouse="w",
         defaults=TableSettings(
             partition_evolution=PartitionEvolution(
                 enabled=True, rules=(EvolutionRule("day", "month", 90),)
             )
         ),
-        tables={},
     )
     result = TableCompactor.from_table_config(
         session, "db.evolved_many", config, base=CompactionConfig()
@@ -325,12 +325,12 @@ COMPOUND_SPEC = PartitionSpec(
 )
 
 EVOLVE_CONFIG = TableConfig(
+    warehouse="w",
     defaults=TableSettings(
         partition_evolution=PartitionEvolution(
             enabled=True, rules=(EvolutionRule("day", "month", 90),)
         )
     ),
-    tables={},
 )
 
 

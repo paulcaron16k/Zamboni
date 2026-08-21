@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Generate ``table-config.json`` from a Meltano / Singer catalog.
 
 Analysts already describe streams in the catalog, so layout intent belongs next
@@ -53,6 +54,7 @@ from typing import Any
 
 from .tableconfig import (
     DEFAULT_SETTINGS,
+    NamespaceSettings,
     TableConfig,
     TableConfigError,
     TableSettings,
@@ -97,6 +99,7 @@ def load_catalog(path: str | Path) -> dict[str, Any]:
 def config_from_catalog(
     catalog: dict[str, Any],
     *,
+    warehouse: str,
     namespace: str | None = None,
     defaults: TableSettings | None = None,
     source: str | None = None,
@@ -104,6 +107,8 @@ def config_from_catalog(
     """Build a :class:`TableConfig` from a Singer catalog.
 
     Args:
+        warehouse: Which warehouse the generated file describes. Required, and
+            recorded in the file so it cannot be applied to the wrong one.
         namespace: Iceberg namespace for streams whose catalog entry does not
             name one. Streams still unresolved after that are skipped rather
             than guessed at.
@@ -128,7 +133,8 @@ def config_from_catalog(
 
         raw = dict(raw)
         table_override = raw.pop("table", None)
-        identifier = _identifier_for(entry, table_override, namespace)
+        resolved = _identifier_for(entry, table_override, namespace)
+        identifier = ".".join(resolved) if resolved else None
         if identifier is None:
             reason = (
                 "could not resolve a 'namespace.table' identifier; set "
@@ -141,9 +147,17 @@ def config_from_catalog(
         settings.validate(f"{EXTENSION_KEY}({stream_id})")
         imported.append(ImportedStream(stream_id, identifier, settings, origin))
 
+    grouped: dict[str, dict[str, TableSettings]] = {}
+    for stream in imported:
+        namespace_name, table_name = stream.identifier.rsplit(".", 1)
+        grouped.setdefault(namespace_name, {})[table_name] = stream.settings
+
     config = TableConfig(
+        warehouse=warehouse,
         defaults=defaults if defaults is not None else DEFAULT_SETTINGS,
-        tables={s.identifier: s.settings for s in imported},
+        namespaces={
+            name: NamespaceSettings(tables=tables) for name, tables in sorted(grouped.items())
+        },
         source=source,
     )
     config.validate()
@@ -165,13 +179,21 @@ def _extension_for(entry: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
 
 def _identifier_for(
     entry: dict[str, Any], table_override: str | None, namespace: str | None
-) -> str | None:
-    """Resolve the Iceberg ``namespace.table`` this stream lands in."""
+) -> tuple[str, str] | None:
+    """Resolve the ``(namespace, table)`` this stream lands in.
+
+    A pair, not a dotted string. The caller needs to know where the namespace
+    ends, and a dotted `table` override would put that back to being guessed --
+    which is the whole thing table-config version 2 removed. An override with a
+    dot in it is therefore split here, at its last dot, *once*, and the result
+    is carried as two values from then on.
+    """
     if table_override:
         if "." in table_override:
-            return table_override
+            head, _, leaf = table_override.rpartition(".")
+            return (head, leaf)
         if namespace:
-            return f"{namespace}.{table_override}"
+            return (namespace, table_override)
         return None
 
     name = entry.get("stream") or entry.get("tap_stream_id")
@@ -183,7 +205,7 @@ def _identifier_for(
     # explicit namespace argument over either, because the destination namespace
     # is a property of the warehouse, not of the source system.
     if namespace:
-        return f"{namespace}.{_leaf_name(entry, name)}"
+        return (namespace, _leaf_name(entry, name))
 
     schema_name = None
     for md in entry.get("metadata") or ():
@@ -191,9 +213,12 @@ def _identifier_for(
             schema_name = (md.get("metadata") or {}).get("schema-name")
             break
     if schema_name:
-        return f"{schema_name}.{_leaf_name(entry, name)}"
+        return (schema_name, _leaf_name(entry, name))
 
-    return name if "." in name else None
+    if "." in name:
+        head, _, leaf = name.rpartition(".")
+        return (head, leaf)
+    return None
 
 
 def _leaf_name(entry: dict[str, Any], name: str) -> str:

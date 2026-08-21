@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The PyIceberg + DuckDB maintainer: what Zamboni was before it had a seam.
 
 Extracted with no behaviour change. The 331 tests that already covered these
@@ -17,6 +18,7 @@ from typing import TYPE_CHECKING
 from ..capabilities import detect
 from . import (
     EngineConfigProblem,
+    LayoutFeature,
     Maintainer,
     MaintainerCapabilities,
     MaintenanceRequest,
@@ -65,6 +67,10 @@ class LocalMaintainer(Maintainer):
         probes = detect()
         return MaintainerCapabilities(
             engine=cls.name,
+            # The only engine with partition evolution, and one of two that can
+            # Z-order. Worth stating plainly: "no cluster" is not the same as
+            # "less capable" on layout.
+            layout=frozenset(LayoutFeature),
             operations={
                 Operation.COMPACT: cls._compact_support(probes),
                 Operation.EXPIRE: OperationSupport(

@@ -16,9 +16,9 @@ export ZAMBONI_WAREHOUSE=zamboni
 Then, from the project root:
 
 ```bash
-./bin/demo --catalog lakekeeper clear
-./bin/demo --catalog lakekeeper next-day
-./bin/demo --catalog lakekeeper maintenance --reclaim-now
+./bin/zamboni-demo --catalog lakekeeper clear
+./bin/zamboni-demo --catalog lakekeeper next-day
+./bin/zamboni-demo --catalog lakekeeper maintenance --reclaim-now
 uv run pytest tests/test_dev_stack.py        # 12 tests; skipped if the stack is down
 ```
 
@@ -97,6 +97,7 @@ the gateway address has to be knowable in advance to go in `.env`. If
 | `.env` | Yours; **gitignored**. `cp .env.sample .env` |
 | `bootstrap.py` | Bootstraps Lakekeeper and creates the warehouse. Idempotent; `--show` prints config without changing anything |
 | `trino/iceberg.properties` | Trino's Iceberg catalog, pointed at this Lakekeeper. Mounted read-only |
+| `spark/Dockerfile` | Spark Connect plus the Iceberg runtime and an S3A filesystem. Built, not pulled |
 
 `tests/test_dev_stack.py::test_env_sample_and_env_declare_the_same_keys` fails if
 the two `.env` files drift apart, so the template stays usable.
@@ -130,6 +131,55 @@ Two settings in `trino/iceberg.properties` are worth knowing:
 Verified working end to end: a table written by PyIceberg through Lakekeeper is
 readable from Trino, and `ALTER TABLE … EXECUTE optimize` compacted it from six
 data files to one.
+
+## Spark (optional)
+
+Also its own profile, and a **Spark Connect** server rather than a standalone
+master:
+
+```bash
+docker compose --profile spark up -d --wait spark   # first run builds; ~2-3 min
+uv run pytest tests/test_dev_stack.py -m spark
+```
+
+Connect is the whole reason these tests are cheap. The client is
+`pyspark-client` — about 1.5MB of pure Python, against pyspark's 434MB — and it
+starts **no JVM**, so nothing on your machine needs Java and this project does
+not have to care which version you have. The JVM is in the container, which is
+also what lets the server be Spark 4 while your laptop is whatever it is.
+
+Point Zamboni at it with `--spark-remote`:
+
+```bash
+zamboni compact db.events --engine spark --spark-remote sc://localhost:15012
+```
+
+Three things here are worth knowing before you copy this into a real deployment.
+
+- **Two credential paths run side by side.** Iceberg FileIO reads and writes on
+  Lakekeeper's vended STS credentials, exactly like Trino. But
+  `remove_orphan_files` lists through Hadoop's S3A filesystem, which knows
+  nothing about Iceberg and needs its own static keys. Get that wrong and
+  *exactly one* of the six operations fails while the other five pass.
+- **Those keys must be on the server.** `spark.hadoop.*` is read when Spark
+  builds its Hadoop configuration at startup, so a Connect client cannot supply
+  them. Zamboni cannot hand Spark the credentials it lists with; whoever
+  operates the server has to have done it.
+- **`s3://` is not `s3a://`.** Lakekeeper advertises table locations with the
+  `s3` scheme and hadoop-aws registers only `s3a`, so without
+  `fs.s3.impl=org.apache.hadoop.fs.s3a.S3AFileSystem` orphan removal dies on
+  `UnsupportedFileSystemException: No FileSystem for scheme "s3"` from inside
+  Iceberg's `FileSystemWalker`.
+
+The session timezone is deliberately `America/New_York`, not UTC. Zamboni
+computes `older_than` on the client and sends it as a typed literal; a UTC
+server cannot tell a correct literal from one missing its offset, so a UTC dev
+stack would certify a bug this project has already had once. Any non-UTC zone
+does the job — `test_the_expiry_timestamp_is_read_as_the_instant_we_meant`
+fails with that explanation if someone sets it back.
+
+The Connect port is **15012**, not Spark's default 15002, so a checkout of
+iceberg-python with its own Connect server running does not collide.
 
 ---
 

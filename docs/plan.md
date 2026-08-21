@@ -3,11 +3,13 @@
 **What was built, what proves it, and what is deliberately left out.**
 
 Design rationale lives in [design.md](design.md); this document is the delivery record.
-Day-to-day operation is [runbook.md](runbook.md). Outstanding work is tracked in [tasks.md](tasks.md).
+Day-to-day operation is [runbook.md](runbook.md). Outstanding work is tracked in
+[GitHub issues](https://github.com/paulcaron16k/Zamboni/issues); [tasks_historical.md](tasks_historical.md) is the backlog it
+replaced.
 
 | | |
 |---|---|
-| Status | All planned operations implemented. 327 tests passing. Verified against a live Lakekeeper 0.13.1 + MinIO — [live-verification.md](live-verification.md) |
+| Status | All planned operations implemented. 501 tests, 470 of which need no Docker. Verified against a live Lakekeeper 0.13.1 + MinIO — [live-verification.md](live-verification.md) |
 | In scope | Data-file compaction, layout ordering, partition evolution, dangling-delete removal, manifest rewriting, snapshot expiry, orphan-file removal, metadata retention |
 | Out of scope | Rewriting a *partially* dangling delete manifest; splitting one partition across manifests; format-version 3 row rewriting |
 | Demo | [../data/healthims](../data/healthims) — five days of simulated hospital discharge ingest |
@@ -120,7 +122,7 @@ test stops existing, so this table cannot rot silently.
 | FR-5.2 | The document round-trips through JSON | `test_round_trips_through_json`, `test_retention_parses_and_round_trips` |
 | FR-5.3 | Contradictions are refused at load | `test_rejects_contradictory_blocks`, `test_evolution_must_go_coarser`, `test_one_evolution_rule_per_source_granularity` |
 | FR-5.4 | A rule must name a partition field the table actually declares | `test_evolution_rule_must_match_a_declared_partition_field` |
-| FR-5.5 | Table keys are namespace-qualified; defaults apply to unknown tables | `test_table_keys_must_be_qualified`, `test_unknown_table_falls_back_to_defaults` |
+| FR-5.5 | Table keys are namespace-qualified; defaults apply to unknown tables | `test_a_table_name_cannot_contain_a_dot`, `test_a_nested_namespace_is_allowed_and_kept_whole`, `test_the_warehouse_is_required`, `test_the_version_1_shape_is_named_rather_than_puzzled_over`, `test_unknown_table_falls_back_to_defaults` |
 | FR-5.6 | The shipped example validates | `test_shipped_example_is_valid` |
 | FR-5.7 | `x-iceberg` blocks are imported from stream metadata or the schema root | `test_imports_from_stream_metadata`, `test_imports_from_the_schema_root` |
 | FR-5.8 | Streams without a block are reported, not silently skipped | `test_streams_without_the_block_are_reported_not_swallowed` |
@@ -205,6 +207,9 @@ test stops existing, so this table cannot rot silently.
 | FR-11.8 | The declarations match the analysis they came from | `test_declarations_match_the_engine_comparison`, `test_describe_reports_limitations_so_they_are_discoverable`, `test_identifiers_are_always_quoted` |
 | FR-11.10 | The local engine's declaration follows the installed PyIceberg rather than a constant | `test_dangling_deletes_becomes_full_when_the_writer_can_write_one`, `test_compaction_becomes_full_when_equality_deletes_are_readable`, `test_an_unusable_build_makes_compaction_unsupported`, `test_streaming_writes_are_declared_when_available`, `test_the_warehouse_limitation_is_not_probe_derived` |
 | FR-11.9 | The default engine is local, and every mutating verb accepts `--engine` | `test_the_default_engine_is_local`, `test_every_mutating_verb_accepts_an_engine`, `test_engines_reports_what_each_one_refuses` |
+| FR-11.11 | Spark emits the procedure calls its version actually accepts | `test_the_exact_spark_statement_for_each_operation`, `test_expire_takes_a_timestamp_where_trino_takes_a_duration`, `test_zorder_reaches_spark`, `test_sort_by_table_order_selects_the_strategy_without_an_expression`, `test_procedure_arguments_take_a_plain_identifier_not_quoted_sql`, `test_spark_identifiers_are_backtick_quoted`, `test_a_backticked_identifier_survives_into_the_procedure_argument`, `test_the_timestamp_carries_an_explicit_utc_offset`, `test_compaction_honours_the_dangling_delete_settings`, `test_compact_declares_the_dangling_delete_side_effect`, `test_the_preview_flag_is_an_argument_not_a_string_splice`, `test_no_other_operation_can_be_asked_for_a_preview`, `test_chunked_reads_one_data_file_at_a_time`, `test_chunked_still_sorts_across_the_whole_group`, `test_read_ahead_zero_reads_strictly_one_file_at_a_time`, `test_read_ahead_overlaps_reads_without_unbounding_them`, `test_a_file_larger_than_the_window_still_makes_progress`, `test_read_ahead_preserves_row_order_across_files`, `test_the_read_ahead_settings_are_validated`, `test_cli_defaults_match_the_dataclass`, `test_every_operational_knob_is_reachable_from_the_command_line`, `test_the_documented_configurations_are_valid`, `test_the_guide_documents_every_run_control`, `test_no_document_carries_a_credential_shaped_literal`, `test_one_call_runs_every_operation_in_order`, `test_it_actually_compacts`, `test_nothing_commits_without_asking`, `test_an_operation_disabled_in_the_config_is_skipped_not_failed`, `test_an_unsupported_operation_is_skipped_not_failed`, `test_a_safety_abort_stops_that_table_and_reports_exit_4`, `test_the_worst_exit_code_wins_not_the_last`, `test_the_cli_and_the_api_agree_on_the_exit_code`, `test_the_secret_flags_are_removed_and_say_where_to_put_the_value`, `test_a_key_id_is_still_a_flag`, `test_a_group_readable_env_file_stops_the_run`, `test_a_read_only_env_file_is_accepted`, `test_only_zamboni_variables_are_read_from_the_file`, `test_a_discovered_foreign_env_file_is_ignored_not_refused`, `test_a_foreign_env_file_named_explicitly_is_an_error`, `test_the_s3_settings_repr_redacts_the_secret`, `test_every_engine_declares_its_layout_features`, `test_trino_is_the_engine_without_zorder`, `test_partition_evolution_is_local_only`, `test_engines_reports_the_layout_features`, `test_a_warning_disappears_when_the_engine_gains_the_feature`, `test_spark_accepts_every_statement_we_generate`, `test_spark_compaction_actually_compacts`, `test_zorder_is_accepted_by_the_server`, `test_only_remove_orphans_previews`, `test_remove_orphans_reaches_storage_on_the_servers_own_credentials`, `test_the_expiry_timestamp_is_read_as_the_instant_we_meant` |
+| FR-11.12 | An operation fulfilled by another is not run twice | `test_dangling_delete_removal_is_the_compaction_statement`, `test_maintenance_skips_an_operation_another_already_fulfilled`, `test_maintenance_still_runs_it_when_the_fulfilling_operation_did_not` |
+| FR-11.13 | Spark's orphan floor is caught at plan time, before a JVM starts | `test_the_orphan_floor_is_two_days_not_one` |
 
 ### FR-10 — Versioning and releases
 
@@ -227,7 +232,7 @@ implicit.
 
 Three layers, because each catches what the others cannot.
 
-**Unit and integration** — 314 of the 327 tests, against a SQL catalog over a temporary
+**Unit and integration** — 470 of the 501 tests, against a SQL catalog over a temporary
 directory. Fast, hermetic, and where every logic branch is exercised. Blind to anything about object storage.
 
 **Safety by omission** — the tests that matter most assert the tool **refuses**.
@@ -283,8 +288,8 @@ Known and accepted:
 ## 6. Not in scope
 
 Out of scope **for `v0.1.0`, which is PyIceberg-only**. Two of these are limitations of that
-choice rather than of the operations, and [roadmap.md](roadmap.md) plans an engine that does
-not share them — Spark's `rewrite_position_delete_files` rewrites partially dangling delete
+choice rather than of the operations, and the Spark engine [roadmap.md](roadmap.md) planned
+-- since delivered -- does not share them — Spark's `rewrite_position_delete_files` rewrites partially dangling delete
 files (ZMBNI-1505). What follows is the scope of *this* implementation.
 
 - **Rewriting a partially dangling delete manifest** — blocked by

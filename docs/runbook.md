@@ -1,163 +1,20 @@
-# Operator runbook
+# Operator runbook: when a maintenance cycle fails
 
-How to run Zamboni against a real warehouse: in what order, how often, and which
-number to change when something looks wrong.
+A nightly run exited non-zero, or did nothing, or did something you did not
+expect. This is how to find out what happened.
 
-Design rationale is in [design.md](design.md); this is the operational half.
-Where a number here is measured rather than chosen, it says so.
-
----
-
-## 0. Before the first run
-
-**Check the warehouse can reclaim storage at all.** This is the one precondition
-worth verifying before anything else, because a warehouse that cannot reclaim
-looks completely healthy: reads work, writes work, compaction appears to succeed.
-
-```bash
-uv run scripts/verify-live.py --port 8181 --warehouse your_warehouse \
-    --s3-host <host> --s3-port <port>
-```
-
-If `test_the_warehouse_vends_credentials_rather_than_signing` fails, stop. A
-remote-signing Lakekeeper warehouse refuses `ListObjectsV2`, `HeadObject` and
-multi-object `DELETE`, so `expire` will commit and free nothing while
-`remove-orphans` cannot run at all. Measured, not theoretical — see
-[live-verification.md](live-verification.md). The fix is a warehouse with
-`sts-enabled: true`, or direct S3 credentials.
-
-**Then dry-run everything.** One rule, no exceptions: **without `--yes`, nothing is
-committed.** Every mutating verb previews and says so.
-
-```bash
-zamboni describe  your.table          # read-only: layout, blockers, warnings
-zamboni plan      your.table          # what compaction would rewrite, and what it skips
-zamboni expire    your.table          # what retention would expire and delete
-zamboni remove-orphans your.table     # what is unreferenced, and what the guard holds back
-```
+For setting maintenance up in the first place, see
+[user_guide.md](user_guide.md). For running each step by hand and the reasoning
+behind the sequence, see [runbook-dev.md](runbook-dev.md). Design rationale is
+in [design.md](design.md).
 
 ---
 
-## 1. The order, and why each position matters
+## 1. Start with the exit code
 
-Run all six as one sequence. The order is not arbitrary — three of the five gaps
-between them are load-bearing.
+The exit code tells you which of four quite different things happened, and it
+is the fastest way to avoid investigating the wrong one.
 
-```bash
-zamboni compact                 your.table --table-config c.json --yes
-zamboni apply-properties        your.table --table-config c.json --yes
-zamboni remove-dangling-deletes your.table --table-config c.json --yes
-zamboni rewrite-manifests       your.table --table-config c.json --yes
-zamboni expire                  your.table --table-config c.json --yes
-zamboni remove-orphans          your.table --table-config c.json --yes
-```
-
-| Step | Why here |
-|---|---|
-| `compact` | Rewrites data files. Frees **no storage** — the files it supersedes are still referenced by the snapshot it compacted out of, which is what keeps time travel working |
-| `apply-properties` | Anywhere before `remove-orphans`. Trimming the metadata log is what makes stale `metadata.json` unreferenced for the last step to find, so only that ordering constraint is real |
-| `remove-dangling-deletes` | After compaction, because compaction is what *creates* dangling deletes: it applies them and writes files with a higher sequence number |
-| `rewrite-manifests` | After the delete removal, so the manifests it emptied are gone before we decide how to regroup what remains |
-| `expire` | Drops the old snapshots, which is the only thing that unreferences the superseded files. Deletes exactly the difference |
-| `remove-orphans` | Last, sweeping what nothing references: abandoned writes, and metadata versions dropped from the log |
-
-`./bin/demo maintenance` runs exactly this sequence — `src/himsdemo/cli.py` is the
-worked example, and the two are kept in the same order deliberately.
-
-**The step most often left out is `expire`.** Without it, compaction and manifest
-rewriting make queries faster and storage *larger*.
-
----
-
-## 2. Cadence
-
-There is no schedule to recommend, because the useful one falls out of your own
-retention settings. The arithmetic:
-
-**Compaction** is driven by ingest. One commit produces at least one data file,
-one manifest, one manifest list and one `metadata.json`, and nothing is updated
-in place. So after *N* commits you have ≥ *N* of each. In the demo, one commit
-per hour of activity gave 58 data files in five days — at which point metadata
-was **340 KiB describing 218 KiB of data**, and a query for one day opened one
-manifest per data file it read. Compact often enough that the count stays in the
-tens, not the thousands: `commits_per_day × days_between_runs` is the number to
-keep an eye on.
-
-**Expiry and orphan removal are gated by their own windows**, so running them
-more often than the window is cheap but reclaims nothing:
-
-| | Default | Reclaims nothing until |
-|---|---|---|
-| `expire_snapshots.max_snapshot_age_days` | 5 (Iceberg's) | a snapshot is 5 days old |
-| `remove_orphan_files.older_than_days` | 3 (Iceberg's) | an unreferenced file is 3 days old |
-
-So a nightly run of the whole sequence is a reasonable default: compaction does
-work every night, and the two reclaim steps do nothing for the first few nights
-and then steady out. They will report that plainly rather than looking broken:
-
-```
-5 file(s) (7.0KiB) left in place: younger than the 3-day age guard
-```
-
-**Run it on one schedule, not six.** The steps are ordered for a reason and
-splitting them across cron entries reintroduces the gap the order closes.
-
----
-
-## 3. Sizing the orphan guard
-
-The single most consequential number here, because it is the one that can destroy
-data if set wrong.
-
-**The rule:** `older_than_days` must exceed the longest single write the warehouse
-performs. A file that has been written but not yet committed is indistinguishable
-from an orphan — there is no flag on it, nothing in the catalog refers to it, and
-the age guard is the only thing standing between it and deletion.
-
-**The trap:** the longest write is usually *your own compaction*, not your ingest.
-A tap writing hourly micro-batches commits in seconds. A compaction rewriting a
-large partition can run for a long time and writes every output file before it
-commits anything — which is exactly the window the guard protects.
-
-**Measure it rather than guess.** Time your largest compaction:
-
-```bash
-time zamboni compact your.biggest.table --table-config c.json --yes
-```
-
-Then set `older_than_days` to comfortably more than that, and never less than
-Iceberg's default of 3. If your longest compaction is 4 hours, 3 days is already
-17× headroom; if it is two days, 3 is too tight.
-
-**What the guard does not protect.** Long-running *readers*. A query holding a
-file list while the file is deleted underneath it fails, and file mtime is the
-wrong clock for that — the file may be days old and still in use. Snapshot
-retention is the mechanism there: keep `max_snapshot_age_days` longer than your
-longest query.
-
-**`--reclaim-now` / a zero guard.** Only on a warehouse nothing else is writing.
-It prints a warning for that reason. The demo uses it so storage visibly falls;
-production should not.
-
----
-
-## 4. What to watch
-
-`zamboni describe` and `./bin/demo status` report these. Rules of thumb, with the
-reasoning so you can adapt them:
-
-| Signal | Concerning when | Why |
-|---|---|---|
-| data files per partition | growing run to run | compaction is not keeping up with ingest, or `min_input_files` is set too high |
-| average file size | far below `target_file_size_bytes` | same, and each small file costs a separate object open |
-| metadata bytes vs data bytes | metadata approaching or exceeding data | planning cost now dominates. The demo hit this in five days |
-| manifests per data file | approaching 1:1 | the metadata tier has stopped being an index and become a second copy of the file list — `rewrite-manifests` is the answer |
-| unreferenced files | growing across runs | either the guard is holding them (expected, and reported) or deletion is failing. Check `N file(s) could not be deleted` |
-| `! dangling-delete-files` | present after maintenance | `remove-dangling-deletes` is disabled or was skipped |
-
----
-
-## 5. Exit codes
 
 | Code | Means | Do |
 |---|---|---|
@@ -173,6 +30,178 @@ marked for deletion still referenced after the commit. During live verification
 this fired on a real keying bug and prevented the deletion of every live file. If
 you see it, the message names the condition; do not work around it with a
 narrower scope.
+
+---
+
+---
+
+## 2. Get the logs, and get a stack trace
+
+**Capture stderr.** That is the whole requirement, and a cron line can do it:
+
+```cron
+17 3 * * * cd /srv/zamboni && zamboni maintenance --yes --verbose >> /var/log/zamboni/cron.log 2>&1
+```
+
+`2>&1` is the load-bearing part. Redirecting only stdout captures the summary
+and loses the traceback, which is the one thing you cannot reconstruct
+afterwards.
+
+[devops.md §1](devops.md) argues against a shell wrapper, and it is right about
+the thing it is arguing against: a wrapper must never loop the six verbs or the
+tables, because that order is load-bearing and `maintenance` already owns it.
+There are two narrow reasons to have one anyway, and neither involves
+reimplementing anything:
+
+- **A dated log file.** `%` is special in a crontab and has to be escaped, so
+  `date +%F` in a cron line is a quoting trap. In a script it is ordinary.
+- **`set -euo pipefail`** if you do anything before the `zamboni` call — start a
+  Trino, wait for a Spark server — so a failed prerequisite stops the run
+  instead of proceeding into a maintenance that cannot work.
+
+If neither applies, the cron line above is complete and a wrapper adds nothing.
+When one does:
+
+```bash
+#!/usr/bin/env bash
+# /usr/local/bin/zamboni-nightly
+set -euo pipefail
+
+LOG=/var/log/zamboni/$(date +%F).log
+cd /srv/zamboni
+
+# --verbose logs every operation and its result. `2>&1` matters: the stack
+# trace of an unexpected failure goes to stderr, and it is the one thing you
+# cannot reconstruct after the fact.
+exec zamboni maintenance --table-config table-config.json --yes --verbose \
+     >> "$LOG" 2>&1
+```
+
+What each part buys you:
+
+| | Why |
+|---|---|
+| `set -euo pipefail` | a failed prerequisite stops the run instead of continuing into a maintenance that cannot work |
+| `>> "$LOG" 2>&1` | **stderr is where the traceback is.** Redirecting only stdout captures the summary and loses the cause |
+| `--verbose` | one line per table per operation, so you can see how far it got |
+| dated log file | a failure at 03:00 on Tuesday is still readable on Friday, and `date +%F` is awkward inside a crontab |
+| `exec` | the wrapper does not sit between cron and the exit code |
+
+Note what is *not* in it: no loop over verbs, no loop over tables, no `source
+.env`, no flag assembly. Those belong to `maintenance`, `--env` and `--profile`
+respectively, and a wrapper that takes them on is the one devops.md warns
+about.
+
+Without `--verbose`, Zamboni prints per-table results but not the operation
+boundaries, so a failure looks like it happened "somewhere in the run". With it,
+the last line before the traceback names the table and the operation.
+
+**Getting a traceback at all.** Expected conditions — a blocked table, a failed
+safety check, a bad flag — exit with codes 2/3/4 and a message rather than a
+traceback, because they are answers rather than crashes. An unexpected failure
+prints a full Python traceback to stderr. If you have a message but want the
+frames, re-run the single operation that failed with `-v`:
+
+```bash
+zamboni -v remove-orphans acme.events --table-config table-config.json
+```
+
+Note there is no `--yes` there. Reproducing a failure in preview mode is safe
+and is almost always enough, because the operations do their listing, planning
+and checking before they commit anything.
+
+---
+
+## 3. Ask the table what state it is in
+
+`zamboni describe` is read-only and is the first thing to run against a table
+that behaved oddly:
+
+```console
+$ zamboni describe acme.events
+```
+
+It reports the live data-file count and bytes, a size histogram, the partition
+specs in use, the sort order id, delete-file counts, and any blockers or
+warnings. Blockers are what produce exit 3; they are named, not inferred.
+
+For a *per-partition* view — which is what you want when compaction is not
+keeping up, or when you are sizing memory — use `zamboni plan`. It prints one
+line per group it would build and one per partition it is skipping, with the
+reason:
+
+```console
+$ zamboni plan acme.events --table-config table-config.json
+acme.events: 3 group(s), 41 file(s), target 134217728 bytes, snapshot 1169625616853321267
+  skipped spec=0 partition=(2026-08-07): 1 candidate file(s) < min_input_files=2
+```
+
+The `maintenance --status` flag reports file counts and bytes before and after
+the whole cycle, which is how you answer "did anything actually happen":
+
+```bash
+zamboni maintenance --table-config table-config.json --status --yes
+```
+
+### A health check for monitoring
+
+`maintenance` in preview mode changes nothing, touches every configured table,
+and exits non-zero if the catalog is unreachable or a table is blocked. That
+makes it a usable liveness check:
+
+```bash
+# exits 0 if every configured table is reachable and unblocked
+zamboni maintenance --table-config table-config.json >/dev/null
+```
+
+Pair it with `zamboni doctor`, which reports whether the installed PyIceberg is
+usable at all — a probe rather than a version comparison, so it stays true
+across upgrades.
+
+
+`zamboni describe` and `./bin/zamboni-demo status` report these. Rules of thumb, with the
+reasoning so you can adapt them:
+
+| Signal | Concerning when | Why |
+|---|---|---|
+| data files per partition | growing run to run | compaction is not keeping up with ingest, or `min_input_files` is set too high |
+| average file size | far below `target_file_size_bytes` | same, and each small file costs a separate object open |
+| metadata bytes vs data bytes | metadata approaching or exceeding data | planning cost now dominates. The demo hit this in five days |
+| manifests per data file | approaching 1:1 | the metadata tier has stopped being an index and become a second copy of the file list — `rewrite-manifests` is the answer |
+| unreferenced files | growing across runs | either the guard is holding them (expected, and reported) or deletion is failing. Check `N file(s) could not be deleted` |
+| `! dangling-delete-files` | present after maintenance | `remove-dangling-deletes` is disabled or was skipped |
+
+---
+
+---
+
+## 4. Common failures, and what they mean
+
+**`remove-orphans` alone fails, everything else passes.** On Spark, this is the
+S3A credential path — see Mode 4 in [user_guide.md](user_guide.md). On the local
+engine, it is usually a catalog that remote-signs rather than vending
+credentials, which refuses the bucket listing orphan removal needs.
+
+**Everything succeeds and storage does not fall.** Expected until `expire` has
+a window to work in. Compaction frees nothing by itself: the files it supersedes
+are still referenced by the snapshot it compacted out of, which is what keeps
+time travel working. Check the `on disk` line against `data files`; `N
+superseded` means the files are being retained deliberately.
+
+**Unreferenced file counts grow every run.** Either the age guard is holding
+them, which is reported explicitly (`5 file(s) left in place: younger than the
+3-day age guard`), or deletion is failing — look for `N file(s) could not be
+deleted`, which is a permissions answer, not a Zamboni one.
+
+**A run took far longer than usual, or the host ran out of memory.** Compaction
+holds roughly twice a partition's on-disk size in RAM, and an unpartitioned
+table is one partition. `zamboni plan` shows the groups it would build. See the
+memory section of [user_guide.md](user_guide.md).
+
+**Exit 3 on a table that used to work.** Something started writing equality
+deletes to it — usually a Flink or merge-on-read pipeline. PyIceberg cannot read
+them, so the table is refused rather than compacted into something that
+resurrects deleted rows.
 
 ---
 

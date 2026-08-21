@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Rewrite backend interface.
 
 A backend turns one :class:`~zamboni.planner.FileGroup` into a list of new

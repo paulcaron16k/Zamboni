@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Helpers for producing table states PyIceberg cannot write on its own.
 
 **Not part of the maintenance API.** Nothing in `zamboni` calls this at

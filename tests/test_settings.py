@@ -16,6 +16,23 @@ import pytest
 from zamboni import settings
 
 
+@pytest.fixture(autouse=True)
+def restore_environment():
+    """`load_env` writes into `os.environ`, and nothing undid it.
+
+    Every test here that loads a dotenv file left its variables set for the rest
+    of the session. It never failed because pytest collects `test_cli.py` before
+    `test_settings.py` alphabetically, so the tests that would trip over a stray
+    `ZAMBONI_WAREHOUSE` happened to run first -- and this project runs
+    `pytest-randomly`, which does not promise that order. A latent flake rather
+    than a passing suite.
+    """
+    saved = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
+
+
 def write(tmp_path: Path, name: str, text: str) -> Path:
     path = tmp_path / name
     path.write_text(text)
@@ -166,7 +183,9 @@ def test_the_profile_beats_zamboni_root_from_the_environment(tmp_path, monkeypat
 
 
 def test_env_values_are_loaded(tmp_path, monkeypatch):
+    monkeypatch.delenv("ZAMBONI_CREDENTIAL", raising=False)
     path = write(tmp_path, ".env", "ZAMBONI_CREDENTIAL=id:secret\n")
+    path.chmod(0o600)  # required since ZMBNI-1812; the file holds credentials
 
     applied = settings.load_env(path)
 
@@ -178,7 +197,7 @@ def test_a_real_environment_variable_beats_the_file(tmp_path, monkeypatch):
     """Deliberate: a container or systemd unit that injects secrets properly
     must not be overridden by a stale .env left in the working directory."""
     monkeypatch.setenv("ZAMBONI_CREDENTIAL", "from-environment")
-    write(tmp_path, ".env", "ZAMBONI_CREDENTIAL=from-file\n")
+    write(tmp_path, ".env", "ZAMBONI_CREDENTIAL=from-file\n").chmod(0o600)
 
     settings.load_env(tmp_path / ".env")
 
@@ -188,7 +207,8 @@ def test_a_real_environment_variable_beats_the_file(tmp_path, monkeypatch):
 def test_resolve_loads_env_before_the_profile(tmp_path, monkeypatch):
     """Order matters: the profile's own defaults read ZAMBONI_*, so a .env that
     sets ZAMBONI_WAREHOUSE has to be in effect before the profile is built."""
-    write(tmp_path, ".env", "ZAMBONI_WAREHOUSE=from-env\n")
+    monkeypatch.delenv("ZAMBONI_WAREHOUSE", raising=False)
+    write(tmp_path, ".env", "ZAMBONI_WAREHOUSE=from-env\n").chmod(0o600)
     write(tmp_path, "zamboni.yml", "engine: local\n")
     monkeypatch.setenv("ZAMBONI_ROOT", str(tmp_path))
 
@@ -196,3 +216,146 @@ def test_resolve_loads_env_before_the_profile(tmp_path, monkeypatch):
 
     assert env_file == tmp_path / ".env"
     assert profile.warehouse == "from-env"
+
+
+# -- the dotenv file must be ours, and private (ZMBNI-1812) ---------------
+
+
+def test_a_group_readable_env_file_stops_the_run(tmp_path):
+    """A hard error, not a warning. A warning on a nightly cron job is a line in
+    a log nobody opens, and the file holds a catalog token."""
+    path = write(tmp_path, ".env", "ZAMBONI_TOKEN=t\n")
+    path.chmod(0o644)
+
+    with pytest.raises(settings.ProfileError, match="chmod 600"):
+        settings.load_env(path)
+
+
+def test_a_read_only_env_file_is_accepted(tmp_path):
+    """0400 is stricter than 0600, so refusing it for not being exactly 0600
+    would reject a credential file for being too safe."""
+    path = write(tmp_path, ".env", "ZAMBONI_TOKEN=t\n")
+    path.chmod(0o400)
+
+    assert settings.load_env(path)["ZAMBONI_TOKEN"] == "t"
+
+
+def test_only_zamboni_variables_are_read_from_the_file(tmp_path, monkeypatch):
+    """A `.env` in a working directory is very often shared with docker compose
+    or a framework. Loading all of it would mean Zamboni silently changing the
+    environment of everything downstream of it."""
+    monkeypatch.delenv("ZAMBONI_TOKEN", raising=False)
+    path = write(
+        tmp_path, ".env", "ZAMBONI_TOKEN=ours\nPOSTGRES_PASSWORD=theirs\nAWS_SECRET=theirs\n"
+    )
+    path.chmod(0o600)
+
+    applied = settings.load_env(path)
+
+    assert applied == {"ZAMBONI_TOKEN": "ours"}
+    assert "POSTGRES_PASSWORD" not in os.environ
+    assert "AWS_SECRET" not in os.environ
+
+
+def test_a_discovered_foreign_env_file_is_ignored_not_refused(tmp_path):
+    """Somebody else's `.env` sharing our working directory is not ours to read
+    and not ours to complain about -- including its mode."""
+    path = write(tmp_path, ".env", "POSTGRES_PASSWORD=theirs\n")
+    path.chmod(0o644)
+
+    assert settings.load_env(path) == {}
+
+
+def test_a_foreign_env_file_named_explicitly_is_an_error(tmp_path):
+    """`--env` means the operator meant *that* file, so silence would hide a
+    typo that leaves a run with no credentials at all."""
+    path = write(tmp_path, "other.env", "POSTGRES_PASSWORD=theirs\n")
+    path.chmod(0o600)
+
+    with pytest.raises(settings.ProfileError, match=r"no ZAMBONI_\* variables"):
+        settings.load_env(path, explicit=True)
+
+
+def test_resolve_reports_no_env_file_when_it_ignored_one(tmp_path, monkeypatch):
+    """`--verbose` and error messages must not name a file we did not read."""
+    write(tmp_path, ".env", "POSTGRES_PASSWORD=theirs\n").chmod(0o644)
+
+    _profile, env_file = settings.resolve(start=tmp_path)
+
+    assert env_file is None
+
+
+# -- discovery and engine settings (ZMBNI-406/407/408) --------------------
+
+
+def test_the_env_file_is_looked_for_under_zamboni_root(tmp_path, monkeypatch):
+    """docs/devops.md puts `.env` at $ZAMBONI_ROOT and calls it fleet-wide
+    credentials. Only the working directory was searched, so that layout worked
+    when the cron line's `cd` happened to make them the same directory and
+    silently produced a credential-less run from anywhere else."""
+    root = tmp_path / "srv"
+    root.mkdir()
+    (root / ".env").write_text("ZAMBONI_TOKEN=fleet\n")
+    (root / ".env").chmod(0o600)
+    monkeypatch.setenv("ZAMBONI_ROOT", str(root))
+    monkeypatch.delenv("ZAMBONI_TOKEN", raising=False)
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    assert settings.find_env(start=elsewhere) == root / ".env"
+
+
+def test_a_foreign_env_in_the_working_directory_does_not_mask_the_fleet_one(tmp_path, monkeypatch):
+    """Somebody else's `.env` sharing the working directory is not ours, so it
+    must not stand between us and the file that is."""
+    root = tmp_path / "srv"
+    root.mkdir()
+    (root / ".env").write_text("ZAMBONI_TOKEN=fleet\n")
+    (root / ".env").chmod(0o600)
+    monkeypatch.setenv("ZAMBONI_ROOT", str(root))
+
+    here = tmp_path / "project"
+    here.mkdir()
+    (here / ".env").write_text("POSTGRES_PASSWORD=theirs\n")
+
+    assert settings.find_env(start=here) == root / ".env"
+
+
+def test_finding_no_env_file_is_not_an_error(tmp_path, monkeypatch):
+    """A container or systemd unit injecting secrets properly needs none, and
+    that is the deployment shape devops.md recommends."""
+    monkeypatch.setenv("ZAMBONI_ROOT", str(tmp_path / "absent"))
+    assert settings.find_env(start=tmp_path) is None
+
+
+def test_engine_settings_live_in_the_profile(tmp_path):
+    """A host, a port, a user and a catalog name are not secrets, and this file
+    is defined as everything that is not one. They had nowhere else to live but
+    a flag or the credentials file."""
+    path = write(
+        tmp_path,
+        "zamboni.yml",
+        "engine: trino\ntrino:\n  host: trino.internal\n  port: 8080\n  catalog: iceberg\n",
+    )
+
+    profile = settings.load_profile(path)
+
+    assert profile.engines["trino"] == {
+        "host": "trino.internal",
+        "port": "8080",
+        "catalog": "iceberg",
+    }
+
+
+def test_a_typo_in_an_engine_block_is_refused(tmp_path):
+    path = write(tmp_path, "zamboni.yml", "trino:\n  hostname: trino.internal\n")
+
+    with pytest.raises(settings.ProfileError, match="unknown key"):
+        settings.load_profile(path)
+
+
+def test_no_engine_setting_is_named_like_a_secret():
+    """The profile is meant to be committed. Rejecting a credential key by name
+    beats trusting the convention that nobody will put one here."""
+    for allowed in settings.ENGINE_SETTINGS.values():
+        assert not {"password", "token", "secret", "credential"} & set(allowed)

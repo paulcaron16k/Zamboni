@@ -126,6 +126,113 @@ services:
       - ./trino/iceberg.properties:/etc/trino/catalog/iceberg.properties:ro
     networks: [zamboni]
 
+  # Spark, for ZMBNI-913. Same posture as Trino: heaviest thing in the stack, so
+  # it sits behind its own profile --
+  #
+  #   docker compose --profile spark up -d --wait
+  #
+  # A **Spark Connect** server, not a standalone master, because the point is
+  # that a developer needs no JVM: `zamboni[spark-connect]` is ~1.5MB of Python
+  # against ~434MB of pyspark, and the machine's Java version stops being ours.
+  #
+  # Two credential paths run side by side here, and that is the real lesson of
+  # this service rather than an artefact of the dev stack:
+  #
+  #   * Iceberg FileIO reads and writes through **vended STS credentials** from
+  #     Lakekeeper, per table -- the same mechanism Trino uses, requested by the
+  #     access-delegation header below.
+  #   * `remove_orphan_files` lists through **Hadoop S3A**, which knows nothing
+  #     about Iceberg and so needs its own static keys. That is ZMBNI-1504's
+  #     finding made concrete: get this wrong and exactly one of the six
+  #     operations fails while the rest pass.
+  #
+  # `spark.hadoop.*` is read when this server builds its Hadoop configuration at
+  # startup, so a Connect *client* cannot supply it. Whoever runs the server
+  # owns those credentials; Zamboni cannot hand them over at call time.
+  spark:
+    build:
+      context: ./spark
+      args:
+        SPARK_VERSION: ${SPARK_VERSION}
+        ICEBERG_VERSION: ${ICEBERG_VERSION}
+    image: zamboni-dev-spark:${SPARK_VERSION}-iceberg${ICEBERG_VERSION}
+    profiles: [spark]
+    depends_on:
+      lakekeeper:
+        condition: service_healthy
+      createbucket:
+        condition: service_completed_successfully
+    ports:
+      - "${SPARK_CONNECT_PORT}:15002"
+    healthcheck:
+      # The port opens well before the server is serving; a JVM plus catalog
+      # init is slow, hence the long start_period.
+      test: ["CMD-SHELL", "curl -sf http://localhost:4040 >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+    command:
+      - /opt/spark/sbin/start-connect-server.sh
+      - --conf
+      - spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+      - --conf
+      - spark.sql.catalog.iceberg=org.apache.iceberg.spark.SparkCatalog
+      - --conf
+      - spark.sql.catalog.iceberg.type=rest
+      - --conf
+      - spark.sql.catalog.iceberg.uri=http://lakekeeper:8181/catalog
+      - --conf
+      - spark.sql.catalog.iceberg.warehouse=${WAREHOUSE_NAME}
+      # Ask Lakekeeper to vend credentials. Without this header the catalog
+      # returns table metadata the FileIO then cannot open.
+      - --conf
+      - spark.sql.catalog.iceberg.header.X-Iceberg-Access-Delegation=vended-credentials
+      - --conf
+      - spark.sql.catalog.iceberg.io-impl=org.apache.iceberg.aws.s3.S3FileIO
+      # The gateway address, matching S3_GATEWAY and Trino's iceberg.properties:
+      # the warehouse advertises it to every client, and per-table storage
+      # config beats client config, so `minio:9000` would be overridden anyway.
+      - --conf
+      - spark.sql.catalog.iceberg.s3.endpoint=http://${S3_GATEWAY}:${MINIO_PORT}
+      - --conf
+      - spark.sql.catalog.iceberg.s3.path-style-access=true
+      - --conf
+      - spark.sql.defaultCatalog=iceberg
+      # --- the S3A path, for remove_orphan_files only ---------------------
+      # Lakekeeper advertises table locations as `s3://`, and hadoop-aws
+      # registers only `s3a`. Without this mapping the operation dies on
+      # `UnsupportedFileSystemException: No FileSystem for scheme "s3"` from
+      # inside Iceberg's FileSystemWalker -- while the other five operations,
+      # which never touch Hadoop, keep working. S3AFileSystem reads its settings
+      # from the `fs.s3a.*` keys below whichever scheme instantiated it.
+      - --conf
+      - spark.hadoop.fs.s3.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
+      - --conf
+      - spark.hadoop.fs.AbstractFileSystem.s3.impl=org.apache.hadoop.fs.s3a.S3A
+      - --conf
+      - spark.hadoop.fs.s3a.endpoint=http://${S3_GATEWAY}:${MINIO_PORT}
+      - --conf
+      - spark.hadoop.fs.s3a.endpoint.region=${S3_REGION}
+      - --conf
+      - spark.hadoop.fs.s3a.access.key=${MINIO_ROOT_USER}
+      - --conf
+      - spark.hadoop.fs.s3a.secret.key=${MINIO_ROOT_PASSWORD}
+      - --conf
+      - spark.hadoop.fs.s3a.path.style.access=true
+      - --conf
+      - spark.hadoop.fs.s3a.connection.ssl.enabled=false
+      - --conf
+      - spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider
+      # --- deliberately not UTC -------------------------------------------
+      # Zamboni sends `older_than` as a typed literal computed on the client. A
+      # UTC server reads a UTC literal correctly whether or not the literal
+      # carries an offset, so a UTC session here would pass the bug ZMBNI-1507
+      # fixed and this stack would certify it. See tests/test_dev_stack.py.
+      - --conf
+      - spark.sql.session.timeZone=${SPARK_SESSION_TIMEZONE}
+    networks: [zamboni]
+
 networks:
   # The subnet is pinned, not left to Docker, because the S3 endpoint the
   # warehouse advertises is this network's *gateway* address. That address is

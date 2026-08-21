@@ -51,7 +51,7 @@ def test_the_package_reports_the_declared_version():
     this keeps passing until the next bump and then fails -- which is the point.
     """
     assert zamboni.__version__ == declared_version()
-    assert distribution_version("zamboni") == declared_version()
+    assert distribution_version("iceberg-zamboni") == declared_version()
 
 
 def test_the_version_banner_names_all_three_versions():
@@ -166,3 +166,27 @@ def test_the_release_convention_is_documented():
 
     for topic in ("BREAKING", "SAFETY", "vMAJOR.MINOR.PATCH", "table-config.json"):
         assert topic in text, f"docs/releasing.md does not cover {topic}"
+
+
+def test_the_security_review_precedes_the_tag():
+    """The rule is that no tag is cut without a security review first.
+
+    A rule living only in someone's head is a rule that gets skipped on the
+    release where it mattered. This asserts the checklist still carries it, and
+    still carries it *before* the irreversible step -- a review documented after
+    the publish instructions is a review nobody runs.
+    """
+    text = (PROJECT / "docs" / "releasing.md").read_text()
+
+    assert "## 3a. The security review" in text, (
+        "docs/releasing.md has no security-review section; the release checklist "
+        "must say what to check before a tag, not merely that someone should look"
+    )
+    assert text.index("## 3a. The security review") > text.index("## 3. Cutting a release")
+    assert "# 0. The security review" in text, (
+        "the review is documented but not in the checklist itself, so following "
+        "the steps in order skips it"
+    )
+    # It precedes the one step that cannot be undone.
+    checklist = text[text.index("## 3. Cutting a release") :]
+    assert checklist.index("# 0. The security review") < checklist.index("git push --tags")

@@ -1,8 +1,24 @@
 # PyIceberg 0.12: `upsert` duplicates rows on a partitioned table
 
-**Status: blocks ZMBNI-11.** Found by ZMBNI-1103 while auditing what unreleased
-PyIceberg changes. This is an upstream defect, not ours, and the reproduction
-below uses no Zamboni code.
+**Filed upstream as [apache/iceberg-python#3758](https://github.com/apache/iceberg-python/issues/3758)**
+on 2026-08-06, from the reproduction below.
+**Fixed by [apache/iceberg-python#3780](https://github.com/apache/iceberg-python/pull/3780)** --
+*bug: fix delete_data_file on partitioned tables* -- **merged 2026-08-19**, and the
+issue closed with it.
+
+**Status: fixed upstream, unreleased.** `pyproject.toml` still caps PyIceberg at
+`<0.12` because the fix is on `main` and no 0.12 has been published: PyPI's latest
+final is 0.11.1 and the only 0.12 artifact is `0.12.0rc1`, which predates the
+fix. The cap lifts when 0.12.0 is released, not when the fix merged.
+
+Found by ZMBNI-1103 while auditing what unreleased PyIceberg changes. This is an
+upstream defect, not ours, and the reproduction below uses no Zamboni code.
+
+**This document is a candidate for deletion**, tracked as
+[#19](https://github.com/paulcaron16k/Zamboni/issues/19). Its reproduction is a
+test, and once it is one -- ours, upstream's, or both -- the prose adds nothing a
+reader cannot get from the issue and the PR. Upstream now has one:
+`0bf4d13d Add regression tests for upsert and delete on transformed partitions`.
 
 **Severity: silent data corruption.** No error is raised. The table simply ends
 up with rows that should have been replaced, plus rows duplicated outright, and
@@ -165,12 +181,13 @@ ZMBNI-604 and 704–706 stay blocked. 0.12 lifts neither.
 
 ---
 
-## Status: a fix exists and it works
+## The fix, and what it cost us
 
-A fix was written against `7d0f5031` and verified here on 2026-08-06. It builds
-the pruning filter over **partition field names and transformed values** —
-already in the domain a manifest evaluator binds against — instead of over
-source columns, which is exactly the mismatch above.
+First verified here on 2026-08-06 as an uncommitted patch in the
+`../iceberg-python` working tree; merged upstream as #3780 on 2026-08-19. It
+builds the pruning filter over **partition field names and transformed values** —
+already in the domain a manifest evaluator binds against — instead of over source
+columns, which is exactly the mismatch above.
 
 Measured against it:
 
@@ -186,9 +203,18 @@ recorded above were entirely this one defect.
 `_build_delete_files_partition_filters`**, which broke our derivation probe: a
 single-name `hasattr` reported no derivation, `manifest_pruning_is_safe` went
 false, and Zamboni refused to run on the very build that fixes the bug. The safe
-direction, and still wrong. The probe now matches a set of names
-(`DERIVATION_METHODS`), pinned by
-`test_the_derivation_probe_survives_a_rename`.
+direction, and still wrong.
+
+The first repair was to match a *set* of names. That was abandoned once the
+symbols were enumerated across builds: `_build_delete_files_partition_predicate`
+is present on **0.12.0rc1, which corrupts data**, and on both attempted fixes for
+it, so no name-based probe can separate them — a second name in the list would
+only have made the wrong answer arrive faster. The probe is now **behavioural**:
+it performs an overwrite on a transformed partition and counts what survived.
+`test_a_pruning_build_is_settled_by_observation` and
+`test_no_symbol_can_override_what_was_observed` pin that, and on this branch the
+probe reports `observed -- an overwrite on a transformed partition kept the right
+rows`.
 
 ---
 

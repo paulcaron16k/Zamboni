@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Regroup manifest entries so partition predicates can prune them.
 
 A query prunes in two stages: first manifests, using the partition bounds each

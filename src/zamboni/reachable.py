@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Every file a table currently references.
 
 This is the most safety-critical module in the package. Snapshot expiry and

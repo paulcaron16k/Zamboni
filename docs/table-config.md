@@ -1,4 +1,4 @@
-# `table-config.json` — specification (version 1)
+# Iceberg Maintainer `table-config.json` — specification (version 2)
 
 The declarative layout target for each Iceberg table. Data Engineers and Analysts author
 it; the compactor reads it and works out what rewriting that implies. Nothing in it names
@@ -13,42 +13,120 @@ Two ways to author it:
 
 ---
 
-## Document shape
+## The model: warehouse → namespace → table
+
+One file describes **one warehouse**, and it says which:
+
+| Iceberg | Postgres / Snowflake | Where it lives |
+|---|---|---|
+| warehouse (catalog) | **database** | `warehouse` at the root of this file |
+| namespace | **schema** | a key under `namespaces` |
+| table | table | a key under that namespace's `tables` |
+
+That is the shape every data engineer already has, and version 2 exists to make it
+explicit. Note that Snowflake's *warehouse* means compute, not a container — the thing
+Iceberg calls a warehouse is Snowflake's **database**.
 
 ```json
 {
-  "version": 1,
+  "version": 2,
+  "warehouse": "acme",
   "defaults": {
     "partition_evolution": {
       "enabled": true,
       "rules": [{ "from": "day", "to": "month", "older_than_days": 90 }]
     }
   },
-  "tables": {
-    "analytics.events": {
-      "description": "Clickstream fact table",
-      "partition": [
-        { "column": "occurred_at", "transform": "day" },
-        { "column": "tenant_id", "transform": "bucket", "num_buckets": 16 }
-      ],
-      "ordering": {
-        "mode": "zorder",
-        "zorder": { "columns": ["customer_id", "product_id"], "precision_bits": 16 }
-      },
-      "target_file_size_bytes": 268435456,
-      "min_input_files": 4
-    },
-    "analytics.audit_log": {
-      "partition": [{ "column": "occurred_at", "transform": "day" }],
-      "partition_evolution": { "enabled": false }
+  "namespaces": {
+    "analytics": {
+      "tables": {
+        "events": {
+          "description": "Clickstream fact table",
+          "partition": [
+            { "column": "occurred_at", "transform": "day" },
+            { "column": "tenant_id", "transform": "bucket", "num_buckets": 16 }
+          ],
+          "ordering": {
+            "mode": "zorder",
+            "zorder": { "columns": ["customer_id", "product_id"], "precision_bits": 16 }
+          },
+          "target_file_size_bytes": 268435456,
+          "min_input_files": 4
+        },
+        "audit_log": {
+          "partition": [{ "column": "occurred_at", "transform": "day" }],
+          "partition_evolution": { "enabled": false }
+        }
+      }
     }
   }
 }
 ```
 
+### `warehouse` is required, and it asserts rather than selects
+
+It does not choose which warehouse to maintain — `--warehouse`/`--db`, the profile, or the
+per-customer directory does that. It is checked against whichever was chosen, and a
+mismatch stops the run:
+
+```console
+zamboni: error: configs/globex/table-config.json declares warehouse 'acme', but this run
+is maintaining 'globex'. One of the two is wrong; the file is the one that travels
+between directories.
+```
+
+That is the mistake the multi-tenant layout invites: copy `acme`'s config into `globex`'s
+directory, forget to edit one line, and maintain the wrong tenant's tables all night. It
+is required rather than optional because an optional assertion is missing from exactly the
+files nobody thought carefully about.
+
+### Table names cannot contain a dot
+
+A dot separates namespace levels, so one in a table name would be ambiguous — and that
+ambiguity is the reason this format has a version 2.
+
+Version 1 keyed tables by a dotted string, `"analytics.events"`, and the split had to be
+*guessed*. It was guessed with `rpartition`, the last dot winning. For a one-level
+namespace that is always right. For `raw.telemetry.events` it produced:
+
+| | resolved as |
+|---|---|
+| local engine (PyIceberg) | namespace `('raw','telemetry')`, table `events` |
+| Trino, Spark | a single namespace literally named `raw.telemetry` |
+
+The same key, two different tables, no error anywhere. Stating the namespace and forbidding
+dots in the table name removes the guess rather than papering over it.
+
+### Nested namespaces work, and are still worth avoiding
+
+A dot inside a `namespace` key means nesting, unambiguously — the dots are in a field whose
+meaning is "namespace", so splitting them is safe. `"raw.telemetry"` is the namespace
+`raw` → `telemetry`.
+
+They are supported and discouraged, because **each engine spells them differently and
+rejects the other's spelling.** Verified against a live Trino 483 and Spark 4.0.4 with a
+genuinely nested namespace:
+
+| Form | Trino | Spark |
+|---|---|---|
+| `"ice"."raw.telemetry"."events"` | reads | `Namespace parts cannot contain '.'` |
+| `` `ice`.`raw`.`telemetry`.`events` `` | `Too many dots in table name` | reads |
+
+Zamboni emits the right form for each engine, so this is handled rather than left to you.
+But a layout that needs two incompatible spellings does not map onto
+`database.schema.table`, and `zamboni table-config summary` will point it out. Prefer one
+level where you can.
+
+---
+
+## Inheritance
+
 `defaults` applies to every table. A table's own block overrides it **per section**: a
 table that declares `ordering` replaces the default ordering entirely rather than having
 individual keys blended, so what you read in one block is what applies.
+
+There is deliberately no namespace-level `defaults` yet. `namespaces.<name>` is an object
+rather than a bare table map precisely so one can be added without another format change.
 
 **Unknown keys are rejected.** A typo like `"partiton"` would otherwise silently leave a
 table unpartitioned — exactly the class of mistake this file exists to prevent.
@@ -299,10 +377,18 @@ extractors:
             zorder: {columns: [customer_id, product_id]}
 ```
 
+To make a Meltano tap emit or generate a catalog using the selection and metadata
+rules specified in your meltano.yml file, run meltano invoke --dump=catalog <tap-name>
+in your terminal. This command processes your rules on the fly and prints the resulting
+Singer catalog to STDOUT.  Note, if you have a mapper and alias stream names or re-name
+partition or sort columns, the schema landed in Iceberg will differ from the source
+catalog - you will have to manually edit/adjust.
+
 Then generate:
 
 ```bash
-zamboni from-catalog .meltano/catalog.json --namespace analytics -o table-config.json
+meltano invoke --dump=catalog tap-postgres > .meltano/pg_catalog.json
+zamboni from-catalog .meltano/pg_catalog.json --namespace analytics -o table-config.json
 zamboni validate-config table-config.json
 zamboni compact analytics.events --table-config table-config.json --yes
 ```

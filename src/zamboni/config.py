@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Configuration for compaction runs."""
 
 from __future__ import annotations
@@ -25,18 +26,38 @@ class MemoryMode(enum.Enum):
     PyIceberg's writer in a single call. Simplest, and fine for small groups.
 
     CHUNKED streams the group as Arrow record batches and accumulates them into
-    bounded slices, writing one slice at a time. Peak memory is roughly one
-    output file rather than one partition. Any ``ORDER BY`` is executed by
+    bounded slices, writing one slice at a time. Any ``ORDER BY`` is executed by
     DuckDB, which spills its sort to ``temp_directory`` on disk -- that is where
     the "batch/chunk via local temp files" behaviour actually comes from.
 
-    AUTO picks per group by comparing the group's on-disk size against
-    ``memory_budget_bytes``.
+    **CHUNKED bounds peak memory by the largest data *file*, not by the group.**
+    That is true as of ZMBNI-1906 and was not true before it: this docstring
+    previously claimed a bound the code did not deliver ("peak memory is roughly
+    one output file"), and measurement showed CHUNKED was indistinguishable from
+    IN_MEMORY, both growing linearly with the group.
 
-    Note: PyIceberg 0.11.1 has no streaming write path of its own --
-    ``_dataframe_to_data_files`` accepts a ``pa.Table`` only, and
-    ``bin_pack_record_batches`` does not exist in this release -- so CHUNKED
-    does the bin-packing itself before calling into the writer.
+    The cause was upstream and is worked around in
+    :meth:`~zamboni.backends.duckdb_arrow.DuckDBArrowBackend._batches_one_file_at_a_time`,
+    which explains it. Reading one task per call instead of handing over the
+    whole list makes peak flat as the group grows. Measured end to end with file
+    size held at ~28MB:
+
+    ====== ================ ===============
+    group  before (CHUNKED) after (CHUNKED)
+    ====== ================ ===============
+    224MB  +822MB           +541MB
+    447MB  +1088MB          +527MB
+    894MB  +1111MB          +577MB
+    ====== ================ ===============
+
+    Flat is the property; the absolute figure is one materialised data file plus
+    Arrow allocator retention and DuckDB's own footprint. Smaller files cost
+    less: the same ~675MB group in 7MB files peaks at +362MB against +475MB in
+    28MB files.
+
+    IN_MEMORY remains linear in the group -- 2.3x to 3.4x measured -- which is
+    what it is for. AUTO exists to choose between them, and the budget below is
+    what makes that choice.
     """
 
     AUTO = "auto"
@@ -56,7 +77,31 @@ class CompactionConfig:
         rewrite_all: Rewrite every live data file, including files that already
             meet the target size.
         memory_mode: See :class:`MemoryMode`.
+        read_ahead_bytes: How much of the group CHUNKED may have in flight at
+            once, in on-disk bytes. The window is sized in **bytes rather than
+            files** because that is what the memory contract is denominated in:
+            many small files get real concurrency, which is exactly the case
+            that needs it -- lots of files means lots of round trips -- while a
+            few large ones fall back to reading one at a time, which is exactly
+            the case where memory is the constraint. Peak is therefore bounded
+            by this plus one file, not by the group.
+
+            0 disables it, which is ZMBNI-1906's behaviour: strictly one file at
+            a time. That was measured 1.12x-1.39x slower than unbounded reads as
+            round-trip time rose from 0 to 30ms, because serialising the reads
+            serialises the latency too. 64MiB is enough window to hide most of
+            that on a same-region bucket without giving the bound back.
+        max_read_ahead_files: Ceiling on concurrent reads regardless of
+            ``read_ahead_bytes``.
         memory_budget_bytes: Group size above which ``AUTO`` chooses CHUNKED.
+            256MiB, lowered from 1GiB by ZMBNI-1906. The old value predates
+            CHUNKED actually bounding anything: crossing it bought nothing, so
+            it was set high to avoid paying for a slower path. Now that the
+            bounded path works, the trade is real -- IN_MEMORY on a 1GiB group
+            was measured at ~2.3GiB of peak growth, which is more than a small
+            host has, while CHUNKED costs roughly 1.5x on read and stays flat.
+            Raise it if your maintenance host has memory to spare and you would
+            rather have the speed.
         temp_directory: Where DuckDB spills sorts and hash tables. ``None``
             leaves DuckDB's default in place.
         sort_by_table_order: Order rewritten rows by the table's declared sort
@@ -93,7 +138,13 @@ class CompactionConfig:
     min_input_files: int = 2
     rewrite_all: bool = False
     memory_mode: MemoryMode = MemoryMode.AUTO
-    memory_budget_bytes: int = 1 * 1024 * 1024 * 1024
+    memory_budget_bytes: int = 256 * 1024 * 1024
+    read_ahead_bytes: int = 64 * 1024 * 1024
+    #: Hard cap on files in flight, whatever ``read_ahead_bytes`` allows. A
+    #: group of ten-thousand 4KB files would otherwise open ten-thousand
+    #: connections to satisfy a 64MiB window, which is a way to be rate-limited
+    #: rather than a way to be fast.
+    max_read_ahead_files: int = 8
     temp_directory: str | None = None
     sort_by_table_order: bool = False
     sort_expression: str | None = None
@@ -113,6 +164,10 @@ class CompactionConfig:
                 f"target_file_size_bytes must be >= {MIN_TARGET_FILE_SIZE_BYTES}, "
                 f"got {self.target_file_size_bytes}"
             )
+        if self.read_ahead_bytes < 0:
+            raise ValueError(f"read_ahead_bytes must be >= 0, got {self.read_ahead_bytes}")
+        if self.max_read_ahead_files < 1:
+            raise ValueError(f"max_read_ahead_files must be >= 1, got {self.max_read_ahead_files}")
         if self.min_input_files < 1:
             raise ValueError(f"min_input_files must be >= 1, got {self.min_input_files}")
         chosen = [

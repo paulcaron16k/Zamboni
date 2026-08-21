@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Iceberg table maintenance without Trino or Spark.
 
 Compaction, ordering and partition evolution; snapshot expiry, orphan-file
@@ -17,17 +18,46 @@ from .backends.base import RewriteBackend, RewriteContext, RewriteOutput
 from .capabilities import PyIcebergCapabilities, detect
 from .committer import ConcurrentModification, ReplaceCommitter, UnsupportedPyIceberg
 from .compactor import CompactionBlocked, CompactionResult, TableCompactor
-from .config import CompactionConfig, MemoryMode
+from .config import CompactionConfig, MemoryMode, config_from_table_settings
+from .deletes import DanglingDeleteCleaner
+from .expire import RetentionPolicy, SnapshotExpirer
+from .maintainers import (
+    EngineConfigProblem,
+    LayoutFeature,
+    Maintainer,
+    MaintainerCapabilities,
+    MaintenanceRequest,
+    Operation,
+    OperationSupport,
+    PreviewUnavailable,
+    Support,
+    UnsupportedOperation,
+    engines_lacking,
+)
+from .maintainers import available as available_engines
+from .maintainers import get as get_maintainer
+from .maintenance import RUNBOOK_ORDER, MaintenanceReport, Outcome, maintain
+from .manifests import ManifestRewriter
+from .orphans import OrphanCleaner
 from .planner import CompactionPlan, CompactionPlanner, FileGroup
 from .profile import Finding, Severity, TableProfile, profile_table
+from .reachable import reachable_files
 from .session import CatalogSession, S3Settings
+from .settings import Profile
+from .settings import resolve as resolve_settings
+from .tableconfig import Retention, TableConfig, TableConfigError, TableSettings
 
 # Read from the installed distribution rather than repeated as a literal here.
 # pyproject.toml is the single source of truth, so `zamboni --version` cannot
 # disagree with the wheel it came from -- the failure mode of a hand-maintained
 # __version__ is that it goes stale precisely when it matters, in a bug report.
 try:
-    __version__ = _distribution_version("zamboni")
+    # The *distribution* name, which is not the import name: `zamboni` on PyPI
+    # belongs to an unrelated project. Getting this wrong fails soft --
+    # PackageNotFoundError below reports "0+unknown" -- so it would degrade
+    # `zamboni --version` silently, in precisely the situation where a version
+    # number is the thing being asked for. Pinned by test_version.py.
+    __version__ = _distribution_version("iceberg-zamboni")
 except PackageNotFoundError:  # pragma: no cover - importable but not installed
     __version__ = "0+unknown"
 
@@ -57,7 +87,20 @@ def version_banner() -> str:
     return f"zamboni {__version__} (pyiceberg {pyiceberg}, python {python})"
 
 
+#: The supported API. Everything here is covered by the compatibility promise in
+#: docs/releasing.md; anything reachable but absent from this list is internal
+#: and may move in a patch release.
+#:
+#: This was compaction-only until ZMBNI-915 -- `TableCompactor` and its
+#: config, and nothing for the other five operations. An application that
+#: wanted to expire snapshots had to import `zamboni.expire`, which is exactly
+#: the kind of private-path dependency a public surface exists to prevent. The
+#: engine-neutral entry point for an integrator is `get_maintainer`; the
+#: operation classes below are the local engine's own vocabulary and are
+#: exported because `--engine local` is the default and its results carry
+#: detail the generic `Reportable` does not.
 __all__ = [
+    "RUNBOOK_ORDER",
     "CatalogSession",
     "CompactionBlocked",
     "CompactionConfig",
@@ -65,21 +108,50 @@ __all__ = [
     "CompactionPlanner",
     "CompactionResult",
     "ConcurrentModification",
+    "DanglingDeleteCleaner",
+    "EngineConfigProblem",
     "FileGroup",
     "Finding",
+    "LayoutFeature",
+    "Maintainer",
+    "MaintainerCapabilities",
+    "MaintenanceReport",
+    "MaintenanceRequest",
+    "ManifestRewriter",
     "MemoryMode",
+    "Operation",
+    "OperationSupport",
+    "OrphanCleaner",
+    "Outcome",
+    "PreviewUnavailable",
+    "Profile",
     "PyIcebergCapabilities",
     "ReplaceCommitter",
+    "Retention",
+    "RetentionPolicy",
     "RewriteBackend",
     "RewriteContext",
     "RewriteOutput",
     "S3Settings",
     "Severity",
+    "SnapshotExpirer",
+    "Support",
     "TableCompactor",
+    "TableConfig",
+    "TableConfigError",
     "TableProfile",
+    "TableSettings",
+    "UnsupportedOperation",
     "UnsupportedPyIceberg",
     "__version__",
+    "available_engines",
+    "config_from_table_settings",
     "detect",
+    "engines_lacking",
+    "get_maintainer",
+    "maintain",
     "profile_table",
+    "reachable_files",
+    "resolve_settings",
     "version_banner",
 ]

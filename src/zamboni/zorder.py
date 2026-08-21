@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Multi-key Z-order (Morton order) as DuckDB SQL.
 
 Neither Iceberg, PyIceberg, nor duckdb-iceberg has any notion of z-order --

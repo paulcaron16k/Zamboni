@@ -1,4 +1,5 @@
-"""`./bin/demo` -- the HIMS discharge maintenance demo.
+# SPDX-License-Identifier: Apache-2.0
+"""`./bin/zamboni-demo` -- the HIMS discharge maintenance demo.
 
 The intended arc is ingest -> status -> query -> maintenance -> status -> query,
 with the developer free to inspect the catalog in between. Commands that change
@@ -19,13 +20,74 @@ from .ingest import ingest_day
 from .schema import SchemaDocument, create_tables, load_tables
 from .state import MODES, TOTAL_DAYS, DemoState
 
-DEFAULT_ROOT = Path(__file__).resolve().parent.parent.parent / "data" / "healthims"
+#: The five days of CSV and the two config files, wherever they are.
+#:
+#: In a checkout they are `data/healthims/`, three levels up from this module.
+#: In an installed copy they are `himsdemo/data/`, shipped in the wheel -- 212KB
+#: of inputs, which is what lets `pipx install iceberg-zamboni && zamboni-demo`
+#: work at all. Before that they were only ever found relative to the source
+#: tree, so the installed `zamboni-demo` crashed on a FileNotFoundError pointing
+#: at a path inside site-packages (ZMBNI-1809).
+#:
+#: The prose -- requirements, the event catalogue -- is deliberately *not*
+#: shipped. It is reference material rather than something the demo reads, and a
+#: URL serves it better than a copy in everyone's site-packages.
+_PACKAGED_INPUTS = Path(__file__).resolve().parent / "data"
+_CHECKOUT_INPUTS = Path(__file__).resolve().parent.parent.parent / "data" / "healthims"
+
+DOCS_URL = "https://github.com/paulcaron16k/Zamboni/tree/main/data/healthims"
+
+
+def default_inputs() -> Path:
+    """Where the demo reads from. A checkout wins, so `./bin/zamboni-demo` in a working
+    tree uses the files you can edit rather than a stale installed copy."""
+    return _CHECKOUT_INPUTS if _CHECKOUT_INPUTS.is_dir() else _PACKAGED_INPUTS
+
+
+def default_root() -> Path:
+    """Where the demo writes.
+
+    In a checkout, the data directory, which is what `./bin/zamboni-demo` has always
+    done and what the .gitignore already expects. Installed, `./zamboni-demo` in
+    the current directory -- visible, removable, and emphatically not inside
+    site-packages, which is read-only for a reason and shared between projects.
+    """
+    return _CHECKOUT_INPUTS if _CHECKOUT_INPUTS.is_dir() else Path.cwd() / "zamboni-demo"
+
+
+DEFAULT_ROOT = default_root()
+
+
+def invocation() -> str:
+    """How to spell this command back to whoever is running it.
+
+    Every "run X next" hint used to say `./bin/zamboni-demo`, which is right in a
+    checkout and wrong for the person who just ran `pipx install iceberg-zamboni`
+    -- there is no `bin/` there, and the command on their PATH is bare
+    `zamboni-demo`. Telling someone to run a path that does not exist is the same
+    class of defect as ZMBNI-1809, just cheaper.
+
+    Keyed on the same signal as `default_inputs()` and `default_root()`, so all
+    three agree about which of the two situations we are in.
+    """
+    return "./bin/zamboni-demo" if _CHECKOUT_INPUTS.is_dir() else "zamboni-demo"
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    state = DemoState.load(args.root)
+    root = args.root or default_root()
+    inputs = args.inputs or default_inputs()
+    if not (inputs / "table_schema.json").is_file():
+        print(
+            f"the demo's input data is missing from {inputs}. In a checkout it is "
+            "data/healthims/; installed, it ships inside the package. Reinstall, "
+            f"or point --inputs at a copy: {DOCS_URL}",
+            file=sys.stderr,
+        )
+        return 2
+    root.mkdir(parents=True, exist_ok=True)
+    state = DemoState.load(root, inputs=inputs)
     for warning in state.warnings:
         print(f"warning: {warning}", file=sys.stderr)
 
@@ -52,7 +114,8 @@ def _build_parser() -> argparse.ArgumentParser:
     # Same banner as `zamboni --version`: the demo ships from the same wheel, and
     # what it demonstrates depends on the same probed PyIceberg.
     parser.add_argument("--version", action="version", version=version_banner())
-    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help=argparse.SUPPRESS)
+    parser.add_argument("--root", type=Path, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--inputs", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--catalog",
         choices=catalogs.BACKENDS,
@@ -117,13 +180,13 @@ def _has_catalog(state: DemoState, catalog) -> bool:
 
 def _print_status(state: DemoState, catalog) -> None:
     if not _has_catalog(state, catalog):
-        print("\n  No tables yet -- run './bin/demo next-day'.\n")
+        print(f"\n  No tables yet -- run '{invocation()} next-day'.\n")
         return
 
     session, schema, config, tables = _open(state, catalog, create=False)
     try:
         if not tables:
-            print("\n  No tables yet -- run './bin/demo next-day'.\n")
+            print(f"\n  No tables yet -- run '{invocation()} next-day'.\n")
             return
         collected = [
             stats.collect(tables[d.name], config) for d in schema.tables if d.name in tables
@@ -167,7 +230,7 @@ def _mode(state: DemoState, args: argparse.Namespace) -> int:
     if state.days_ingested > 0:
         print(
             f"refusing to switch to {args.value}: {state.days_ingested} day(s) already "
-            f"ingested as {state.write_mode}.\nRun './bin/demo clear' first.",
+            f"ingested as {state.write_mode}.\nRun '{invocation()} clear' first.",
             file=sys.stderr,
         )
         return 2
@@ -191,7 +254,7 @@ def _next_day(state: DemoState, args: argparse.Namespace) -> int:
         # the resulting file counts would measure the crash, not the write mode.
         print(
             f"Day {state.ingesting_day} was interrupted mid-ingest and is partly loaded.\n"
-            "Run './bin/demo clear' and start again -- replaying it would distort "
+            f"Run '{invocation()} clear' and start again -- replaying it would distort "
             "the file counts this demo reports.",
             file=sys.stderr,
         )
@@ -222,7 +285,7 @@ def _status(state: DemoState, args: argparse.Namespace) -> int:
 def _maintenance(state: DemoState, args: argparse.Namespace) -> int:
     catalog = args.demo_catalog
     if state.days_ingested == 0 or not _has_catalog(state, catalog):
-        print("nothing ingested yet -- run './bin/demo next-day' first")
+        print(f"nothing ingested yet -- run '{invocation()} next-day' first")
         return 0
 
     from zamboni import TableCompactor
@@ -327,7 +390,7 @@ def _indent(text: str, width: int) -> None:
 def _query(state: DemoState, args: argparse.Namespace) -> int:
     catalog = args.demo_catalog
     if state.days_ingested == 0 or not _has_catalog(state, catalog):
-        print("nothing ingested yet -- run './bin/demo next-day' first")
+        print(f"nothing ingested yet -- run '{invocation()} next-day' first")
         return 0
 
     session, _schema, _config, tables = _open(state, catalog, create=False)

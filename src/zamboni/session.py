@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Catalog + compute-engine wiring.
 
 A :class:`CatalogSession` owns both halves of a maintenance run so they cannot
@@ -166,6 +167,28 @@ class S3Settings:
     region: str = "us-east-1"
     path_style_access: bool = True
     extra: dict[str, str] = field(default_factory=dict)
+
+    def __repr__(self) -> str:
+        """Redacted, because the default dataclass repr is not.
+
+        A frozen dataclass prints every field, so `secret_access_key` appeared
+        in full anywhere this object reached a formatted string -- a traceback
+        rendered with locals, a `logger.debug("%s", settings)`, an error
+        aggregator, `pytest --showlocals`. Nothing in this package logs it
+        today, which is precisely why it would have gone unnoticed until
+        something did.
+
+        The key id is kept: it is an identifier rather than a secret, and it is
+        the field you need when the answer is "wrong credentials".
+        """
+        secret = "***" if self.secret_access_key else None
+        return (
+            f"S3Settings(endpoint={self.endpoint!r}, "
+            f"access_key_id={self.access_key_id!r}, "
+            f"secret_access_key={secret!r}, region={self.region!r}, "
+            f"path_style_access={self.path_style_access!r}, "
+            f"extra={{{len(self.extra)} key(s)}})"
+        )
 
     def as_properties(self) -> dict[str, str]:
         props = {

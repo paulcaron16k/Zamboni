@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The maintainer contract: one operation, several engines.
 
 The six operations are Iceberg's, not Zamboni's. Trino and Spark implement most
@@ -54,6 +55,37 @@ class Operation(StrEnum):
     REMOVE_DANGLING_DELETES = "remove-dangling-deletes"
     REWRITE_MANIFESTS = "rewrite-manifests"
     APPLY_PROPERTIES = "apply-properties"
+
+
+class LayoutFeature(StrEnum):
+    """Layout capabilities that are *not* operations.
+
+    Z-order and partition evolution are settings in `table-config.json`, not
+    verbs, so `OperationSupport` has nowhere to put them -- they lived only as
+    prose inside COMPACT's `limitations`, which no caller can read. That was
+    fine until `zamboni table-config summary` needed to warn that a Z-order the
+    operator just configured does nothing on Trino, and got the answer from a
+    hardcoded string. Two places recording the same fact, one generated from
+    code and one not, is exactly the drift this module exists to prevent: the
+    day Trino gains Z-order, `zamboni engines` would be right and the summary
+    stale.
+
+    Membership means "does something meaningful", not "does it identically".
+    Trino sorts by identity transforms only and stamps `sort_order_id=unsorted`
+    when it skips any; that nuance stays in COMPACT's limitations, where the
+    reason can be written down.
+    """
+
+    #: Multi-column clustering. The one that decides an engine for most small
+    #: deployments, and the one Trino cannot do at all.
+    ZORDER = "zorder"
+    #: Ordering by declared sort columns.
+    SORT = "sort"
+    #: Rewriting aged partitions to a coarser transform without moving where new
+    #: data lands.
+    PARTITION_EVOLUTION = "partition-evolution"
+    #: Control over the size of the files a compaction emits.
+    TARGET_FILE_SIZE = "target-file-size"
 
 
 class Support(StrEnum):
@@ -127,6 +159,10 @@ class OperationSupport:
 class MaintainerCapabilities:
     engine: str
     operations: dict[Operation, OperationSupport] = field(default_factory=dict)
+    #: Which layout features this engine can actually deliver. No default: an
+    #: engine that forgot to declare would silently read as "none of them", and
+    #: a summary would then warn about a Z-order that works perfectly well.
+    layout: frozenset[LayoutFeature] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
         missing = [op for op in Operation if op not in self.operations]
@@ -144,6 +180,9 @@ class MaintainerCapabilities:
     def can_preview(self, operation: Operation) -> bool:
         return self.of(operation).can_preview
 
+    def can(self, feature: LayoutFeature) -> bool:
+        return feature in self.layout
+
     def describe(self) -> str:
         rows = [f"  engine: {self.engine}"]
         for operation in Operation:
@@ -154,6 +193,9 @@ class MaintainerCapabilities:
                 line += f", via {support.fulfilled_by.value}"
             rows.append(line)
             rows.extend(f"      - {limitation}" for limitation in support.limitations)
+        rows.append(
+            "  layout: " + (", ".join(sorted(self.layout)) if self.layout else "none declared")
+        )
         return "\n".join(rows)
 
 
@@ -284,8 +326,20 @@ def _load_builtins() -> None:
 
 _load_builtins()
 
+
+def engines_lacking(feature: LayoutFeature) -> tuple[str, ...]:
+    """Registered engines that cannot deliver ``feature``.
+
+    The question a warning needs to answer, asked of the declarations rather
+    than of a string somebody typed. Returns names in `available()` order so
+    the message is stable between runs.
+    """
+    return tuple(name for name in available() if not get(name).capabilities().can(feature))
+
+
 __all__ = [
     "EngineConfigProblem",
+    "LayoutFeature",
     "Maintainer",
     "MaintainerCapabilities",
     "MaintenanceRequest",
@@ -296,6 +350,7 @@ __all__ = [
     "Support",
     "UnsupportedOperation",
     "available",
+    "engines_lacking",
     "get",
     "register",
 ]

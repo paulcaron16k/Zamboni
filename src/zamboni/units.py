@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Byte formatting, in one place.
 
 This existed four times -- in `orphans`, `profile`, `deletes` and

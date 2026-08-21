@@ -94,7 +94,8 @@ profile without editing it.
 
 ## 3. `.env` — the secrets, separately
 
-Found automatically at `./.env`, or given with `--env`. Copy
+Found at `--env`, then `./.env`, then `$ZAMBONI_ROOT/.env` -- the same order
+as the profile. Copy
 [env.sample](../env.sample), which lists every variable Zamboni reads.
 
 **Why a file rather than the crontab.** Cron gives a job almost no environment,
@@ -125,7 +126,7 @@ acme, after:
 
 This is what makes a nightly log answer "did it help" without a second tool. The
 numbers to watch, and what they mean when they go the wrong way, are in
-[runbook.md §4](runbook.md).
+[runbook.md §3](runbook.md).
 
 ---
 
@@ -144,10 +145,17 @@ $ZAMBONI_ROOT/
     initech/table-config.json
 ```
 
-`--warehouse acme` reads `$ZAMBONI_ROOT/configs/acme/table-config.json`. Nothing
-else changes between customers, which is the point: the per-customer surface is
-one file in a predictable place, so provisioning a new customer is writing that
-file and adding a cron line.
+`--warehouse acme` -- or `--db acme`, the same flag -- reads
+`$ZAMBONI_ROOT/configs/acme/table-config.json`. Nothing else changes between
+customers, which is the point: the per-customer surface is one file in a
+predictable place, so provisioning a new customer is writing that file and
+adding a cron line.
+
+**That file names its warehouse too, and is checked against this one.** The
+directory selects; the `warehouse` key in the file confirms. It exists because
+this layout invites exactly one mistake -- copy `acme`'s config into `globex`'s
+directory, forget to edit a line, maintain the wrong tenant's tables all night --
+and one line of assertion turns that into an error before anything is touched.
 
 ### One invocation per warehouse, not one loop
 
@@ -166,9 +174,16 @@ stops the rest. Per-warehouse invocation gives you:
 - **Retries and timeouts that already exist.** Your scheduler has them. A loop
   inside Zamboni would be reimplementing a job runner badly.
 
-For a small fleet where that is overkill, `--all-warehouses` runs every warehouse
-the catalog reports, continuing past a failure and exiting non-zero if any failed.
-It is a convenience, not the recommended shape, and it says so in `--help`.
+There is deliberately **no `--all-warehouses`**. An earlier draft of this
+document described one in detail, including what its `--help` said; no such flag
+was ever written. The claim is removed rather than the flag added, because every
+argument above is an argument against it: a loop inside Zamboni would have one
+exit code, one log, no staggering, and would be reimplementing the retry and
+timeout logic your scheduler already has.
+
+For a small fleet where per-warehouse cron lines feel like overkill, generate
+them -- `zamboni warehouses` exists for exactly that, and is the subject of the
+next section.
 
 ### Discovery generates the schedule; it is not the scheduler
 
@@ -195,7 +210,7 @@ What Zamboni owns is doing the work correctly and reporting what happened.
 
 ### When one customer fails
 
-Exit codes are unchanged from [runbook.md §5](runbook.md) — 0 success, 2 usage,
+Exit codes are unchanged from [runbook.md §1](runbook.md) — 0 success, 2 usage,
 3 refused, 4 a safety check aborted — and `maintenance` returns the *worst* code
 any operation produced, so a partial failure is never reported as success.
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Remove delete files that no longer apply to any live data file.
 
 Compaction applies deletes as it rewrites: the surviving rows are written

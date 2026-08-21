@@ -1,0 +1,78 @@
+# Publish to PyPI on a version tag.
+#
+# **Trusted publishing, not an API token.** PyPI mints a short-lived credential
+# from GitHub's OIDC identity for this repository, workflow and environment, so
+# there is no long-lived secret in the repository settings to leak, rotate or
+# forget. It requires a one-time setup on PyPI (Publishing -> add a pending
+# publisher for `iceberg-zamboni`, owner `paulcaron16k`, repo `Zamboni`,
+# workflow `release.yml`, environment `pypi`) and nothing after that.
+#
+# The tag is the trigger, matching docs/releasing.md's `vMAJOR.MINOR.PATCH`
+# convention -- so publishing is `git tag -a v0.2.0 && git push --tags` and
+# nothing else. There is deliberately no manual `workflow_dispatch`: a release
+# that can be fired without a tag is a release nobody can reconstruct later.
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  # The full suite runs again here rather than trusting the run from the commit
+  # this tag points at. Cheap, and the alternative is publishing an artifact
+  # whose tests were green on a different tree.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run ruff check src tests scripts
+      - run: uv run mypy
+      - run: uv run pytest -q --ignore=tests/test_dev_stack.py
+
+      # The tag must agree with the version in pyproject.toml. A mismatch here
+      # means a v0.2.0 tag publishing 0.1.0, which is unrecoverable on PyPI:
+      # a version number can never be reused, even after deletion.
+      - name: The tag matches the declared version
+        run: |
+          tagged="${GITHUB_REF_NAME#v}"
+          declared=$(uv run python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          test "$tagged" = "$declared" \
+            || { echo "::error::tag $GITHUB_REF_NAME does not match pyproject version $declared"; exit 1; }
+
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.26"
+      - run: uv build
+      # Catches a malformed README before PyPI rejects the upload, which it does
+      # after the version is already consumed.
+      - run: uvx twine check dist/*
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # the whole point: OIDC instead of a stored token
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Where the demo's tables live: a local SQLite catalog, or the dev stack.
 
 Two backends, one interface, because they differ in more than a connection
@@ -14,7 +15,7 @@ string:
   on its delete-profile, which may purge immediately or after a delay.
 
 Selection is by ``--catalog`` or ``ZAMBONI_DEMO_CATALOG``; the default stays
-``sqlite`` so `./bin/demo` works with no Docker and no configuration.
+``sqlite`` so `./bin/zamboni-demo` works with no Docker and no configuration.
 """
 
 from __future__ import annotations

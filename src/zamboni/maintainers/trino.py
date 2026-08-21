@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Trino, over ``ALTER TABLE … EXECUTE``.
 
 Four of Zamboni's six operations map to a Trino table procedure. Argument names,
@@ -34,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import (
     EngineConfigProblem,
+    LayoutFeature,
     Maintainer,
     MaintainerCapabilities,
     MaintenanceRequest,
@@ -79,6 +81,12 @@ def qualified(table: str, *, catalog: str) -> str:
     Split on the *last* dot, so a nested namespace stays one schema identifier:
     Trino addresses ``a.b.c`` as schema ``a.b``, which is why
     ``iceberg.rest-catalog.nested-namespace-enabled`` is set in the dev stack.
+
+    Confirmed against a live Trino 483 with a genuinely nested namespace rather
+    than taken from the documentation: ``"iceberg"."nstest.deep"."events"``
+    reads, and the multi-level spelling fails with "Too many dots in table
+    name". Spark requires exactly the spelling Trino rejects -- see
+    :func:`zamboni.maintainers.spark.qualified`.
     """
     namespace, _, name = table.rpartition(".")
     if not namespace:
@@ -161,6 +169,11 @@ class TrinoMaintainer(Maintainer):
     def capabilities(cls) -> MaintainerCapabilities:
         return MaintainerCapabilities(
             engine=cls.name,
+            # No Z-order -- verified against the connector source, see COMPACT's
+            # limitations below -- and no control over output file size, since
+            # `file_size_threshold` selects inputs rather than sizing outputs.
+            # Partition evolution has no procedure at all.
+            layout=frozenset({LayoutFeature.SORT}),
             operations={
                 Operation.COMPACT: OperationSupport(
                     Operation.COMPACT,

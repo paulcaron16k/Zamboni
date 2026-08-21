@@ -9,6 +9,7 @@ verified.
 
 from __future__ import annotations
 
+import datetime
 from dataclasses import replace
 
 import pytest
@@ -195,12 +196,14 @@ def test_an_unknown_engine_names_the_ones_that_exist():
         maintainers.get("presto")
 
 
-def test_the_spark_stub_refuses_to_pretend_it_ran():
-    """Trino is implemented (ZMBNI-14); Spark is not (ZMBNI-15). A stub that
-    returned a plausible-looking result would be the worst outcome here."""
-    with pytest.raises(NotImplementedError, match="not implemented yet"):
+def test_spark_refuses_to_return_a_preview_it_cannot_produce():
+    """Both non-local engines are implemented now (ZMBNI-14, ZMBNI-15), so the
+    stub assertion this replaces is gone. What still needs pinning is that
+    `execute(dry_run=True)` on an operation Spark cannot preview raises rather
+    than returning something that reads like a plan."""
+    with pytest.raises(PreviewUnavailable, match="cannot preview"):
         SparkMaintainer(None).execute(
-            Operation.COMPACT, "db.events", request=request(), dry_run=False
+            Operation.COMPACT, "db.events", request=request(), dry_run=True
         )
 
 
@@ -481,3 +484,344 @@ def test_the_warehouse_limitation_is_not_probe_derived(monkeypatch):
 
     assert support.support is Support.PARTIAL
     assert "remote-signing" in support.limitations[0]
+
+
+# -- ZMBNI-15: the statements Spark actually receives ----------------------
+
+
+FROZEN_NOW = datetime.datetime(2026, 8, 7, 12, 0, 0, tzinfo=datetime.UTC)
+
+
+@pytest.fixture(autouse=True)
+def frozen_clock(monkeypatch):
+    """Spark takes `older_than` as a literal timestamp computed on this host, so
+    an exact-statement assertion needs a fixed clock. Pinning it also documents
+    the exposure: the value is ours, not the engine's."""
+    from zamboni.maintainers import spark as spark_module
+
+    monkeypatch.setattr(spark_module, "_utc_now", lambda: FROZEN_NOW)
+
+
+def spark(**overrides):
+    return SparkMaintainer(None, {"catalog": "iceberg", **overrides})
+
+
+def spark_request(**compaction):
+    """Always carries a CompactionConfig.
+
+    An earlier version passed None when given no overrides, so the options block
+    was skipped and the test asserting `partial-progress.enabled` was checking a
+    statement that could never occur in practice -- `_request_for` always builds
+    one for compact and maintenance.
+    """
+    from zamboni.config import CompactionConfig
+
+    return MaintenanceRequest(
+        retention=full_retention().retention,
+        compaction=CompactionConfig(**compaction),
+    )
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected"),
+    [
+        (
+            Operation.EXPIRE,
+            (
+                "CALL system.expire_snapshots(table => 'iceberg.db.events', "
+                "older_than => TIMESTAMP '2026-07-31 12:00:00+00:00', retain_last => 2)"
+            ),
+        ),
+        (
+            Operation.REMOVE_ORPHANS,
+            (
+                "CALL system.remove_orphan_files(table => 'iceberg.db.events', "
+                "older_than => TIMESTAMP '2026-07-31 12:00:00+00:00')"
+            ),
+        ),
+        (
+            Operation.REWRITE_MANIFESTS,
+            "CALL system.rewrite_manifests(table => 'iceberg.db.events')",
+        ),
+        (
+            Operation.APPLY_PROPERTIES,
+            (
+                "ALTER TABLE `iceberg`.`db`.`events` SET TBLPROPERTIES ("
+                "'write.metadata.previous-versions-max' = '3', "
+                "'write.metadata.delete-after-commit.enabled' = 'true')"
+            ),
+        ),
+    ],
+)
+def test_the_exact_spark_statement_for_each_operation(operation, expected):
+    assert spark().statement_for(operation, "db.events", spark_request()) == expected
+
+
+def test_expire_takes_a_timestamp_where_trino_takes_a_duration():
+    """The same setting, two vocabularies -- what MaintenanceRequest is for.
+
+    Trino: `retention_threshold => '7d'`. Spark: a *typed literal* timestamp,
+    computed on this host. Both forms were learned by running them -- an
+    expression is rejected by the parser, a bare string by the type checker.
+    """
+    sql = spark().statement_for(Operation.EXPIRE, "db.events", spark_request())
+
+    assert "older_than => TIMESTAMP '2026-07-31 12:00:00+00:00'" in sql
+    assert "'7d'" not in sql
+    assert "current_timestamp()" not in sql, "an expression is rejected by Spark's parser"
+
+
+def test_the_orphan_floor_is_two_days_not_one():
+    """Spark refuses under 24 hours, and exactly 1 day is refused too: the
+    timestamp is computed here and evaluated moments later, so it is short by
+    the round trip. Both verified against a live Spark."""
+    assert spark().validate(Operation.REMOVE_ORPHANS, spark_request_with_orphan_days(1))
+    assert spark().validate(Operation.REMOVE_ORPHANS, spark_request_with_orphan_days(0))
+    assert not spark().validate(Operation.REMOVE_ORPHANS, spark_request_with_orphan_days(2))
+
+
+def spark_request_with_orphan_days(days: int) -> MaintenanceRequest:
+    from zamboni.config import CompactionConfig
+    from zamboni.tableconfig import RemoveOrphanFilesSettings
+
+    base = full_retention().retention
+    return MaintenanceRequest(
+        retention=replace(
+            base,
+            remove_orphan_files=RemoveOrphanFilesSettings(enabled=True, older_than_days=days),
+        ),
+        compaction=CompactionConfig(),
+    )
+
+
+def test_zorder_reaches_spark():
+    """Spark is the only non-local engine that can Z-order, so this is the one
+    capability the Trino maintainer had to declare missing."""
+    sql = spark().statement_for(
+        Operation.COMPACT, "db.events", spark_request(zorder_columns=["a", "b"])
+    )
+
+    assert "strategy => 'sort'" in sql
+    assert "sort_order => 'zorder(a, b)'" in sql
+
+
+def test_sort_by_table_order_selects_the_strategy_without_an_expression():
+    """Spark defaults `sort_order` to the table's own, which is exactly what the
+    setting means -- so naming one would override the thing being asked for."""
+    sql = spark().statement_for(
+        Operation.COMPACT, "db.events", spark_request(sort_by_table_order=True)
+    )
+
+    assert "strategy => 'sort'" in sql
+    assert "sort_order =>" not in sql
+
+
+def test_compaction_always_asks_spark_to_drop_dangling_deletes():
+    sql = spark().statement_for(Operation.COMPACT, "db.events", spark_request())
+
+    assert "'remove-dangling-deletes', 'true'" in sql
+
+
+def test_dangling_delete_removal_is_the_compaction_statement():
+    """Not a separate procedure in Spark. Both must emit the same SQL, or the
+    `fulfilled_by` declaration is a lie."""
+    request = spark_request()
+    compact = spark().statement_for(Operation.COMPACT, "db.events", request)
+    dangling = spark().statement_for(Operation.REMOVE_DANGLING_DELETES, "db.events", request)
+
+    assert compact == dangling
+
+
+def test_partial_progress_is_passed_explicitly_not_left_to_a_default():
+    """Iceberg's default is false and ZMBNI-106 chose the same locally. Sending
+    it makes the two agree visibly rather than by coincidence."""
+    off = spark().statement_for(Operation.COMPACT, "db.events", spark_request())
+    on = spark().statement_for(Operation.COMPACT, "db.events", spark_request(partial_progress=True))
+
+    assert "'partial-progress.enabled', 'false'" in off
+    assert "'partial-progress.enabled', 'true'" in on
+
+
+def test_procedure_arguments_take_a_plain_identifier_not_quoted_sql():
+    """`table => 'db.events'` is a string argument. Backticks belong in
+    ALTER TABLE and would be part of the name here."""
+    call = spark().statement_for(Operation.REWRITE_MANIFESTS, "db.events", spark_request())
+    alter = spark().statement_for(Operation.APPLY_PROPERTIES, "db.events", spark_request())
+
+    assert "`" not in call
+    assert "`iceberg`.`db`.`events`" in alter
+
+
+def test_spark_identifiers_are_backtick_quoted():
+    """Spark quotes with backticks where Trino uses double quotes."""
+    sql = spark().statement_for(Operation.APPLY_PROPERTIES, "we`ird.ta-ble", spark_request())
+
+    assert "ALTER TABLE `iceberg`.`we``ird`.`ta-ble`" in sql
+
+
+def test_the_spark_version_reached_is_logged_once(caplog):
+    """Which Spark ran is not our choice, so the run has to record it.
+
+    CI covers Connect against 4.0.4 and nothing else; `--spark-master` is best
+    effort at any version, and `spark-lib` deliberately admits Spark 3.5 because
+    Connect cannot reach a 3.5 cluster at all. A failure on an untested
+    combination should name the combination in its own log rather than making
+    someone reconstruct it. Once, not per statement -- `connect()` runs for every
+    operation and `getOrCreate()` hands back the same session. ZMBNI-1818.
+    """
+    import logging
+
+    class FakeSession:
+        version = "3.5.9"
+
+    class FakeBuilder:
+        def appName(self, _):
+            return self
+
+        def master(self, _):
+            return self
+
+        def config(self, *_args, **_kwargs):
+            return self
+
+        def getOrCreate(self):
+            return FakeSession()
+
+    maintainer = spark(master="spark://host:7077")
+    with caplog.at_level(logging.INFO, logger="zamboni.maintainers.spark"):
+        first = maintainer._announce(FakeBuilder().getOrCreate(), "master spark://host:7077")
+        second = maintainer._announce(FakeBuilder().getOrCreate(), "master spark://host:7077")
+
+    assert isinstance(first, FakeSession) and isinstance(second, FakeSession)
+    announcements = [r for r in caplog.records if "3.5.9" in r.getMessage()]
+    assert len(announcements) == 1, "the version must be logged once per run, not per statement"
+    assert "spark://host:7077" in announcements[0].getMessage(), (
+        "the log must say how we got there -- Connect and a classic master are "
+        "different amounts of tested"
+    )
+
+
+# -- review findings (independent review of ZMBNI-15) ---------------------
+
+
+def test_a_backticked_identifier_survives_into_the_procedure_argument():
+    """The first implementation derived the plain identifier by stripping every
+    backtick off the quoted form. `quote()` doubles an embedded backtick to
+    escape it, so stripping collapsed the escape and the delimiters together and
+    ``we`ird.ta-ble`` silently became ``weird.ta-ble`` -- a *different table*,
+    targeted with no error, by operations that delete files."""
+    sql = spark().statement_for(Operation.REWRITE_MANIFESTS, "we`ird.ta-ble", spark_request())
+
+    assert "table => 'iceberg.we`ird.ta-ble'" in sql
+    assert "weird" not in sql
+
+
+def test_the_timestamp_carries_an_explicit_utc_offset():
+    """A bare wall-clock is read in `spark.sql.session.timeZone`, not UTC.
+
+    Verified against a live session in America/New_York: our UTC value was
+    shifted four hours later, so every expiry cut deeper than asked, and a
+    1-day orphan interval fell under Spark's 24h floor. The offset removes the
+    ambiguity without touching the operator's session timezone.
+    """
+    sql = spark().statement_for(Operation.EXPIRE, "db.events", spark_request())
+
+    assert "TIMESTAMP '2026-07-31 12:00:00+00:00'" in sql
+
+
+@pytest.mark.parametrize(
+    ("retention_enabled", "policy", "expected"),
+    [
+        (True, "report", "true"),
+        (False, "report", "false"),
+        (True, "block", "false"),
+    ],
+)
+def test_compaction_honours_the_dangling_delete_settings(retention_enabled, policy, expected):
+    """Hard-coded `true` meant an operator who disabled dangling-delete removal,
+    or set `block` specifically so compaction would refuse rather than touch
+    delete files, got them deleted anyway and silently. Iceberg's option accepts
+    false; nothing forced the hard-coding."""
+    from zamboni.config import CompactionConfig
+    from zamboni.tableconfig import RemoveDanglingDeletesSettings
+
+    request = MaintenanceRequest(
+        retention=replace(
+            full_retention().retention,
+            remove_dangling_deletes=RemoveDanglingDeletesSettings(enabled=retention_enabled),
+        ),
+        compaction=CompactionConfig(dangling_delete_policy=policy),
+    )
+
+    sql = spark().statement_for(Operation.COMPACT, "db.events", request)
+
+    assert f"'remove-dangling-deletes', '{expected}'" in sql
+
+
+def test_compact_declares_the_dangling_delete_side_effect():
+    """An operator reading `zamboni engines` for `compact` must be able to learn
+    that it also touches delete files. Previously that coupling was recorded
+    only under remove-dangling-deletes."""
+    support = SparkMaintainer.capabilities().of(Operation.COMPACT)
+
+    assert any("dangling" in invariant for invariant in support.invariants)
+
+
+def test_the_preview_flag_is_an_argument_not_a_string_splice():
+    """`execute` used to add the flag by `str.replace`-ing the built statement,
+    so a preview that failed to match its own needle would silently delete for
+    real. Asking the builder for it means there is nothing to mismatch."""
+    maintainer = spark()
+
+    preview = maintainer.statement_for(
+        Operation.REMOVE_ORPHANS, "db.events", spark_request(), dry_run=True
+    )
+    live = maintainer.statement_for(Operation.REMOVE_ORPHANS, "db.events", spark_request())
+
+    assert "dry_run => true" in preview
+    assert "dry_run" not in live
+
+
+def test_no_other_operation_can_be_asked_for_a_preview():
+    """`can_preview` says only remove-orphans previews; the builder must agree,
+    rather than accepting the flag and dropping it."""
+    with pytest.raises(PreviewUnavailable):
+        spark().execute(Operation.COMPACT, "db.events", request=spark_request(), dry_run=True)
+
+
+# -- layout features (ZMBNI-1907) -----------------------------------------
+
+
+def test_every_engine_declares_its_layout_features():
+    """A missing declaration reads as "none of them", which would make the
+    config summary warn about a Z-order that works perfectly well."""
+    for name in maintainers.available():
+        capabilities = maintainers.get(name).capabilities()
+        assert capabilities.layout, f"{name} declares no layout features"
+
+
+def test_trino_is_the_engine_without_zorder():
+    """Pins the fact the whole engine-choice section of the user guide turns on."""
+    from zamboni.maintainers import LayoutFeature
+
+    assert maintainers.engines_lacking(LayoutFeature.ZORDER) == ("trino",)
+    assert LocalMaintainer.capabilities().can(LayoutFeature.ZORDER)
+    assert SparkMaintainer.capabilities().can(LayoutFeature.ZORDER)
+
+
+def test_partition_evolution_is_local_only():
+    from zamboni.maintainers import LayoutFeature
+
+    assert set(maintainers.engines_lacking(LayoutFeature.PARTITION_EVOLUTION)) == {
+        "spark",
+        "trino",
+    }
+
+
+def test_engines_reports_the_layout_features():
+    """`zamboni engines` is the generated answer, so it has to carry this too --
+    otherwise the summary derives from a declaration nobody can read."""
+    text = TrinoMaintainer.capabilities().describe()
+
+    assert "layout:" in text
+    assert "zorder" not in text.split("layout:")[1]

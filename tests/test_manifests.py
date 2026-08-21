@@ -305,12 +305,12 @@ def test_multi_spec_tables_keep_one_manifest_per_spec(session):
         tbl.append(pa.table({"id": [d], "ts": [dt.datetime(2026, 1, d)]}, schema=TS_ARROW))
 
     config = TableConfig(
+        warehouse="w",
         defaults=TableSettings(
             partition_evolution=PartitionEvolution(
                 enabled=True, rules=(EvolutionRule("day", "month", 90),)
             )
         ),
-        tables={},
     )
     TableCompactor.from_table_config(
         session, "db.evolved_manifests", config, base=CompactionConfig()

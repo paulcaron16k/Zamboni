@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Command-line entry point.
 
 The verbs, ordered by how much they change:
@@ -45,6 +46,7 @@ import logging
 import os
 import sys
 from dataclasses import replace
+from pathlib import Path
 
 from . import maintainers, settings, version_banner
 from .capabilities import detect
@@ -53,13 +55,21 @@ from .compactor import CompactionBlocked, TableCompactor
 from .config import CompactionConfig, MemoryMode
 from .maintainers import (
     EngineConfigProblem,
+    LayoutFeature,
     MaintenanceRequest,
     Operation,
     PreviewUnavailable,
     UnsupportedOperation,
 )
 from .session import CatalogSession, S3Settings
-from .tableconfig import DEFAULT_SETTINGS, PartitionEvolution, TableConfig
+from .tableconfig import (
+    DEFAULT_SETTINGS,
+    NamespaceSettings,
+    PartitionEvolution,
+    TableConfig,
+    TableConfigError,
+    TableSettings,
+)
 
 USAGE = """\
 getting started
@@ -118,6 +128,15 @@ def _apply_profile(args: argparse.Namespace, profile) -> None:
     if getattr(args, "engine", None) == "local" and profile.engine != "local":
         args.engine = profile.engine
 
+    # Engine connection settings from the profile, gap-filled the same way.
+    # `--trino-host` beats `trino: {host: ...}` beats nothing; the flag defaults
+    # already carry ZAMBONI_TRINO_HOST, so a None here means nobody said.
+    for engine_name, block in profile.engines.items():
+        for key, value in block.items():
+            attribute = f"{engine_name}_{key}"
+            if hasattr(args, attribute) and not getattr(args, attribute):
+                setattr(args, attribute, value)
+
     # Per-warehouse table configuration, the multi-tenant layout in
     # docs/devops.md section 5: $ZAMBONI_ROOT/configs/{warehouse}/table-config.json
     if getattr(args, "table_config", None) is None and getattr(args, "warehouse", None):
@@ -169,6 +188,10 @@ def main(argv: list[str] | None = None) -> int:
         return _from_catalog(args)
     if args.command == "validate-config":
         return _validate_config(args)
+    if args.command == "table-config" and args.table_config_command == "validate":
+        return _validate_config(args)
+    if args.command == "table-config" and args.table_config_command == "summary":
+        return _table_config_summary(args)
 
     try:
         session = _session_from(args)
@@ -184,6 +207,9 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "warehouses":
             return _warehouses(session, args)
+
+        if args.command == "table-config":
+            return _table_config_generate(session, args)
 
         if args.command == "expire":
             return _expire(session, args)
@@ -274,6 +300,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "from-catalog", help="generate table-config.json from a Meltano/Singer catalog"
     )
     fc.add_argument("catalog", help="path to the Singer catalog JSON")
+    fc.add_argument(
+        "--warehouse",
+        "--db",
+        dest="warehouse",
+        required=True,
+        help="which warehouse the generated file describes. Recorded in it, and "
+        "checked on every run, so a config cannot be applied to the wrong one.",
+    )
     fc.add_argument("-o", "--output", default="table-config.json")
     fc.add_argument("--namespace", help="Iceberg namespace for streams that do not name one")
     fc.add_argument(
@@ -284,6 +318,35 @@ def _build_parser() -> argparse.ArgumentParser:
 
     vc = sub.add_parser("validate-config", help="check a table-config.json")
     vc.add_argument("config", help="path to table-config.json")
+
+    # `table-config` groups the three things an operator does to that file.
+    # `validate-config` stays as it is: it shipped in 0.1.0 and removing a verb
+    # is breaking under docs/releasing.md, which for this tool is not a cost
+    # worth paying to tidy a name. It is now an alias of `table-config validate`
+    # rather than a second implementation.
+    tc = sub.add_parser("table-config", help="create, check and explain a table-config.json")
+    tc_sub = tc.add_subparsers(dest="table_config_command", required=True)
+
+    tcg = tc_sub.add_parser(
+        "generate",
+        help="write a starter table-config.json describing the catalog as it is today",
+    )
+    tcg.add_argument("-o", "--output", default="table-config.json")
+    tcg.add_argument("--namespace", help="only this namespace; default is every table")
+    tcg.add_argument("--force", action="store_true", help="overwrite an existing output file")
+    _add_catalog_args(tcg)
+
+    tcv = tc_sub.add_parser(
+        "validate", help="check that a table-config.json parses and means something"
+    )
+    tcv.add_argument("config", help="path to table-config.json")
+
+    tcs = tc_sub.add_parser(
+        "summary",
+        help="what this config would do, per table, including the defaults you did not write",
+    )
+    tcs.add_argument("config", help="path to table-config.json")
+    tcs.add_argument("--table", help="only this table")
 
     for name, help_text in [
         ("describe", "profile a table without changing it"),
@@ -455,14 +518,48 @@ def _add_engine_arg(p: argparse.ArgumentParser) -> None:
         default=os.environ.get("ZAMBONI_TRINO_CATALOG"),
         help="the Trino catalog holding the Iceberg tables. Default `iceberg`.",
     )
+    # Spark had no flags at all until ZMBNI-913 -- the maintainer read `remote`,
+    # `master` and `catalog` from its options, and nothing on the CLI ever put
+    # them there. `--engine spark` was reachable and unconfigurable.
+    p.add_argument(
+        "--spark-remote",
+        default=os.environ.get("ZAMBONI_SPARK_REMOTE"),
+        help="Spark Connect endpoint, e.g. sc://localhost:15002. Needs no JVM "
+        "here; the server owns the Iceberg extensions and the S3 credentials "
+        "`remove-orphans` lists with.",
+    )
+    p.add_argument(
+        "--spark-master",
+        default=os.environ.get("ZAMBONI_SPARK_MASTER"),
+        help="Spark master for a local driver, e.g. local[*]. Mutually "
+        "exclusive with --spark-remote.",
+    )
+    p.add_argument(
+        "--spark-catalog",
+        default=os.environ.get("ZAMBONI_SPARK_CATALOG"),
+        help="the Spark catalog holding the Iceberg tables. Default `iceberg`.",
+    )
 
 
 def _add_catalog_args(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("catalog")
     g.add_argument("--uri", default=os.environ.get("ZAMBONI_URI"), help="REST catalog endpoint")
-    g.add_argument("--warehouse", default=os.environ.get("ZAMBONI_WAREHOUSE"))
-    g.add_argument("--credential", default=os.environ.get("ZAMBONI_CREDENTIAL"))
-    g.add_argument("--token", default=os.environ.get("ZAMBONI_TOKEN"))
+    # `--db` is the same flag. Iceberg says warehouse, Lakekeeper says warehouse,
+    # and everyone who has used a database says database -- the concept maps to
+    # a Postgres/Snowflake *database*, with an Iceberg namespace as its schema.
+    # `--catalog` is deliberately not offered: it already means the engine's
+    # catalog in `--trino-catalog`/`--spark-catalog`, and a Singer catalog file
+    # in `from-catalog`, so a bare one would be the most ambiguous flag here.
+    g.add_argument(
+        "--warehouse",
+        "--db",
+        dest="warehouse",
+        default=os.environ.get("ZAMBONI_WAREHOUSE"),
+        help="the warehouse (Iceberg catalog) to maintain -- a database, in "
+        "Postgres/Snowflake terms. `--db` is an alias.",
+    )
+    _add_removed_secret_flag(g, "--credential", "ZAMBONI_CREDENTIAL")
+    _add_removed_secret_flag(g, "--token", "ZAMBONI_TOKEN")
     g.add_argument("--oauth2-server-uri", default=os.environ.get("ZAMBONI_OAUTH2_SERVER_URI"))
     g.add_argument("--scope", default=os.environ.get("ZAMBONI_SCOPE"))
     g.add_argument(
@@ -474,14 +571,23 @@ def _add_catalog_args(p: argparse.ArgumentParser) -> None:
     s = p.add_argument_group("s3 / minio")
     s.add_argument("--s3-endpoint", default=os.environ.get("ZAMBONI_S3_ENDPOINT"))
     s.add_argument("--s3-access-key-id", default=os.environ.get("ZAMBONI_S3_ACCESS_KEY_ID"))
-    s.add_argument("--s3-secret-access-key", default=os.environ.get("ZAMBONI_S3_SECRET_ACCESS_KEY"))
+    _add_removed_secret_flag(s, "--s3-secret-access-key", "ZAMBONI_S3_SECRET_ACCESS_KEY")
     s.add_argument("--s3-region", default=os.environ.get("ZAMBONI_S3_REGION", "us-east-1"))
+
+
+#: Defaults come from the dataclass, never repeated as literals here.
+#: `--memory-budget-bytes` was written as `1 << 30`, so when ZMBNI-1906 lowered
+#: the dataclass default to 256MiB the change reached Python callers and *not*
+#: the CLI -- every command-line run kept the old 1GiB threshold and the fix
+#: silently did not apply to the people most likely to need it. A default that
+#: exists in two places is a default that will disagree in one of them.
+_DEFAULTS = CompactionConfig()
 
 
 def _add_config_args(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("compaction")
     g.add_argument("--target-file-size-bytes", type=int)
-    g.add_argument("--min-input-files", type=int, default=2)
+    g.add_argument("--min-input-files", type=int, default=_DEFAULTS.min_input_files)
     g.add_argument("--rewrite-all", action="store_true")
     g.add_argument(
         "--partial-progress",
@@ -493,7 +599,27 @@ def _add_config_args(p: argparse.ArgumentParser) -> None:
     g.add_argument(
         "--memory-mode", choices=[m.value for m in MemoryMode], default=MemoryMode.AUTO.value
     )
-    g.add_argument("--memory-budget-bytes", type=int, default=1 << 30)
+    g.add_argument(
+        "--memory-budget-bytes",
+        type=int,
+        default=_DEFAULTS.memory_budget_bytes,
+        help="group size above which AUTO streams instead of materialising. "
+        "Raise it to trade memory for speed on a host that has memory.",
+    )
+    g.add_argument(
+        "--read-ahead-bytes",
+        type=int,
+        default=_DEFAULTS.read_ahead_bytes,
+        help="how much of a group the streaming path may have in flight, in "
+        "on-disk bytes. 0 reads strictly one file at a time, which is slower "
+        "against object storage because it serialises the round trips.",
+    )
+    g.add_argument(
+        "--max-read-ahead-files",
+        type=int,
+        default=_DEFAULTS.max_read_ahead_files,
+        help="ceiling on concurrent reads regardless of --read-ahead-bytes.",
+    )
     g.add_argument("--temp-directory")
     g.add_argument(
         "--sort-by",
@@ -510,6 +636,33 @@ def _add_config_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--dangling-delete-policy", choices=["report", "block"], default="report")
 
 
+class _RemovedSecretFlag(argparse.Action):
+    """A flag that exists only to explain that it no longer exists.
+
+    Deleting the argument outright would produce `unrecognized arguments:
+    --token`, which tells an operator nothing about where to put the value
+    instead -- and the people hitting it are running a script that worked
+    yesterday. This says what to do, and exits 2 like any other usage error.
+    """
+
+    def __init__(self, option_strings, dest, variable: str = "", **kwargs) -> None:
+        self.variable = variable
+        super().__init__(option_strings, dest, nargs="?", help=argparse.SUPPRESS, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None) -> None:
+        parser.error(
+            f"{option_string} was removed: a secret on the command line is "
+            "readable by any local user from `ps` or /proc/<pid>/cmdline, and "
+            f"your shell history keeps it. Set {self.variable} in the "
+            "environment or in a .env file (mode 600) instead -- see "
+            "docs/user_guide.md#secrets."
+        )
+
+
+def _add_removed_secret_flag(parser, flag: str, variable: str) -> None:
+    parser.add_argument(flag, action=_RemovedSecretFlag, variable=variable, default=None)
+
+
 def _session_from(args: argparse.Namespace) -> CatalogSession:
     if args.local_warehouse:
         return CatalogSession.for_local(warehouse_path=args.local_warehouse)
@@ -522,22 +675,29 @@ def _session_from(args: argparse.Namespace) -> CatalogSession:
 
     s3 = None
     if args.s3_endpoint:
-        if not (args.s3_access_key_id and args.s3_secret_access_key):
+        secret = os.environ.get("ZAMBONI_S3_SECRET_ACCESS_KEY")
+        if not (args.s3_access_key_id and secret):
             raise ValueError(
-                "--s3-endpoint also needs --s3-access-key-id and --s3-secret-access-key"
+                "--s3-endpoint also needs --s3-access-key-id (or "
+                "ZAMBONI_S3_ACCESS_KEY_ID) and ZAMBONI_S3_SECRET_ACCESS_KEY. "
+                "The secret has no flag on purpose -- see "
+                "docs/user_guide.md#secrets."
             )
         s3 = S3Settings(
             endpoint=args.s3_endpoint,
             access_key_id=args.s3_access_key_id,
-            secret_access_key=args.s3_secret_access_key,
+            secret_access_key=secret,
             region=args.s3_region,
         )
 
     return CatalogSession.for_lakekeeper(
         uri=args.uri,
         warehouse=args.warehouse,
-        credential=args.credential,
-        token=args.token,
+        # Environment only: the flags that used to set these were removed
+        # because a command line is world-readable. `_RemovedSecretFlag` says so
+        # if anyone passes the old ones.
+        credential=os.environ.get("ZAMBONI_CREDENTIAL"),
+        token=os.environ.get("ZAMBONI_TOKEN"),
         oauth2_server_uri=args.oauth2_server_uri,
         scope=args.scope,
         s3=s3,
@@ -551,6 +711,8 @@ def _operational_config(args: argparse.Namespace) -> CompactionConfig:
         partial_progress=args.partial_progress,
         memory_mode=MemoryMode(args.memory_mode),
         memory_budget_bytes=args.memory_budget_bytes,
+        read_ahead_bytes=args.read_ahead_bytes,
+        max_read_ahead_files=args.max_read_ahead_files,
         temp_directory=args.temp_directory,
         branch=args.branch,
         snapshot_operation=args.snapshot_operation,
@@ -566,6 +728,8 @@ def _config_from(args: argparse.Namespace) -> CompactionConfig:
         partial_progress=args.partial_progress,
         memory_mode=MemoryMode(args.memory_mode),
         memory_budget_bytes=args.memory_budget_bytes,
+        read_ahead_bytes=args.read_ahead_bytes,
+        max_read_ahead_files=args.max_read_ahead_files,
         temp_directory=args.temp_directory,
         sort_by_table_order=args.sort_by_table_order,
         sort_expression=args.sort_expression,
@@ -580,27 +744,44 @@ def _compactor_for(session: CatalogSession, args: argparse.Namespace) -> TableCo
     if not args.table_config:
         return TableCompactor(session, args.table, _config_from(args))
 
-    table_config = TableConfig.load(args.table_config)
+    table_config = _load_table_config(args)
     # The file owns layout; the flags still own how the run executes.
     return TableCompactor.from_table_config(
         session, args.table, table_config, base=_operational_config(args)
     )
 
 
+def _engine_options(args: argparse.Namespace) -> dict[str, str]:
+    """Connection settings for the named engine, and only that engine.
+
+    Per engine, not merged: `catalog` means a different thing to each, and one
+    flat dict made --trino-catalog configure Spark. It did, before ZMBNI-913.
+    """
+    by_engine = {
+        "trino": (
+            ("host", "trino_host"),
+            ("port", "trino_port"),
+            ("user", "trino_user"),
+            ("catalog", "trino_catalog"),
+            ("version", "trino_version"),
+        ),
+        "spark": (
+            ("remote", "spark_remote"),
+            ("master", "spark_master"),
+            ("catalog", "spark_catalog"),
+        ),
+    }
+    return {
+        key: value
+        for key, attribute in by_engine.get(getattr(args, "engine", "local"), ())
+        if (value := getattr(args, attribute, None))
+    }
+
+
 def _maintainer_for(session: CatalogSession, args: argparse.Namespace):
     """The engine named by ``--engine``, defaulting to the local one."""
-    options = {
-        key: value
-        for key, value in (
-            ("host", getattr(args, "trino_host", None)),
-            ("port", getattr(args, "trino_port", None)),
-            ("user", getattr(args, "trino_user", None)),
-            ("catalog", getattr(args, "trino_catalog", None)),
-            ("version", getattr(args, "trino_version", None)),
-        )
-        if value
-    }
-    return maintainers.get(getattr(args, "engine", "local"))(session, options)
+    engine = getattr(args, "engine", "local")
+    return maintainers.get(engine)(session, _engine_options(args))
 
 
 def _request_for(args: argparse.Namespace) -> MaintenanceRequest:
@@ -611,14 +792,32 @@ def _request_for(args: argparse.Namespace) -> MaintenanceRequest:
     make every other engine translate *out of* ours instead of *from* the
     config.
     """
-    table_config = TableConfig.load(args.table_config) if args.table_config else None
+    table_config = _load_table_config(args) if args.table_config else None
     # Mirrors what _compactor_for did: without a config file the flags *are* the
     # layout, so the full flag-derived config is used; with one, the file owns
     # layout and only the operational half comes from the flags. Only compact
     # needs either -- the reclaim verbs take no compaction arguments at all.
     compaction = None
     if args.command in ("compact", "maintenance"):
-        compaction = _operational_config(args) if table_config else _config_from(args)
+        if table_config is None:
+            compaction = _config_from(args)
+        else:
+            # Translate the file's declared *layout* -- ordering, sizing -- on top
+            # of the operational flags. Passing only `_operational_config` here
+            # meant `ordering.mode: zorder` never left the config file for any
+            # non-local engine, because `config_from_table_settings` is otherwise
+            # reached solely through `TableCompactor.from_table_config`. Spark is
+            # the one other engine that can Z-order, so the capability was real
+            # in the maintainer and unreachable from the CLI.
+            from .config import config_from_table_settings
+
+            table = getattr(args, "table", None)
+            settings = (
+                table_config.for_table(table)
+                if table and table in table_config.tables
+                else DEFAULT_SETTINGS
+            )
+            compaction = config_from_table_settings(settings, _operational_config(args))
     return MaintenanceRequest(
         retention=_retention_for(args),
         compaction=compaction,
@@ -657,7 +856,7 @@ def _retention_for(args: argparse.Namespace):
 
     if not args.table_config:
         return Retention()
-    return TableConfig.load(args.table_config).for_table(args.table).retention
+    return _load_table_config(args).for_table(args.table).retention
 
 
 def _expire(session: CatalogSession, args: argparse.Namespace) -> int:
@@ -796,11 +995,14 @@ def _apply_properties(session: CatalogSession, args: argparse.Namespace) -> int:
 def _maintenance(session: CatalogSession, args: argparse.Namespace) -> int:
     """Every operation, in the runbook order, over every configured table.
 
-    One exit code: the **worst** any operation produced, so a partial failure is
-    never reported as success. That matters more here than anywhere else in the
-    CLI, because this is the entry point a cron line calls and nobody reads.
+    A thin adapter over :func:`zamboni.maintenance.maintain`, which is the same
+    function an application calls. The loop used to live here, and the user
+    guide told integrators to write their own copy of it -- so the operation
+    order, the `fulfilled_by` skip, which exceptions are refusals, and when to
+    stop all existed twice. Printing and exit codes are the CLI's business;
+    everything else is shared.
     """
-    from .maintainers import Operation
+    from .maintenance import maintain
 
     profile = args.zamboni_profile
     tables = _tables_to_maintain(args, profile)
@@ -811,35 +1013,95 @@ def _maintenance(session: CatalogSession, args: argparse.Namespace) -> int:
             "that declares some."
         )
         return 2
+    if not args.table_config:
+        print(
+            "no table config. maintenance needs one: it carries the retention "
+            "that decides what may be deleted.",
+            file=sys.stderr,
+        )
+        return 2
 
-    operations = [Operation(name) for name in profile.operations]
     before = _status_snapshot(session, tables) if args.status else None
+    seen: set[str] = set()
 
-    worst = 0
-    failures: list[str] = []
-    for table in tables:
-        print(f"\n{table}")
-        print("  " + "-" * 68)
-        for operation in operations:
-            code = _run_one(session, args, operation, table)
-            worst = max(worst, code)
-            if code:
-                failures.append(f"{table} {operation.value} (exit {code})")
-                if code == 4:
-                    # A safety check aborted. Everything after it on this table
-                    # reads the same state, so continuing would be doing more
-                    # work on a warehouse we have just said we do not trust.
-                    print(f"  stopping this table: {operation.value} aborted")
-                    break
+    def show(outcome) -> None:
+        if outcome.table not in seen:
+            seen.add(outcome.table)
+            print(f"\n{outcome.table}")
+            print("  " + "-" * 68)
+        stream = sys.stderr if outcome.exit_code else sys.stdout
+        print(f"  {outcome.operation.value}: {outcome.detail}", file=stream)
+
+    report = maintain(
+        session,
+        table_config=_load_table_config(args),
+        tables=tables,
+        engine=getattr(args, "engine", "local"),
+        engine_options=_engine_options(args),
+        operations=[Operation(name) for name in profile.operations],
+        commit=bool(args.yes),
+        base_config=_operational_config(args),
+        observer=show,
+    )
 
     if before is not None:
         _print_status_delta(session, tables, before)
 
-    if failures:
+    if not args.yes:
+        # Unconditional, by ZMBNI-911: three verbs used to print this only when
+        # they found work, so the one rule -- nothing commits without --yes --
+        # was visible on some runs and not others.
+        print("\n  dry run -- re-run with --yes to commit every operation above.")
+
+    if report.failures:
         print("\nfailed:", file=sys.stderr)
-        for failure in failures:
-            print(f"  {failure}", file=sys.stderr)
-    return worst
+        for failure in report.failures:
+            print(
+                f"  {failure.table} {failure.operation.value} (exit {failure.exit_code})",
+                file=sys.stderr,
+            )
+    return report.exit_code
+
+
+def _already_fulfilled(session: CatalogSession, args: argparse.Namespace, operation, done: set):
+    """The operation this one rides on, if that already ran in this sequence.
+
+    Declared per engine via ``OperationSupport.fulfilled_by``. Only skips when
+    the fulfilling operation actually ran: a profile listing
+    `remove-dangling-deletes` without `compact` still gets its work done.
+    """
+    # No try/except. An earlier version swallowed everything here with the
+    # comment "capability lookup must not fail a run", which was not true: the
+    # very next step calls the same `capabilities()` through `check_supported`,
+    # unguarded, so a genuine failure surfaced moments later anyway -- with a
+    # worse stack trace, and after silently skipping the skip. Worse, returning
+    # None on error means "not fulfilled", so a lookup failure would cause the
+    # double-run this function exists to prevent: a silent wrong answer where a
+    # refusal belongs.
+    support = _maintainer_for(session, args).capabilities().of(operation)
+    if support.fulfilled_by and support.fulfilled_by in done:
+        return support.fulfilled_by
+    return None
+
+
+def _load_table_config(args: argparse.Namespace) -> TableConfig:
+    """Load ``--table-config`` and check it describes the warehouse in play.
+
+    The file's ``warehouse`` does not *select* anything -- the flag, the profile
+    or the directory does that. It asserts, so the mistake the per-warehouse
+    layout invites (copy acme's config into globex's directory, forget to edit
+    the one line) is an error rather than a night of maintaining the wrong
+    tenant's tables.
+    """
+    config = TableConfig.load(args.table_config)
+    expected = getattr(args, "warehouse", None)
+    if expected and config.warehouse != expected:
+        raise TableConfigError(
+            f"{args.table_config} declares warehouse {config.warehouse!r}, but this "
+            f"run is maintaining {expected!r}. One of the two is wrong; the file is "
+            "the one that travels between directories."
+        )
+    return config
 
 
 def _tables_to_maintain(args: argparse.Namespace, profile) -> list[str]:
@@ -849,7 +1111,7 @@ def _tables_to_maintain(args: argparse.Namespace, profile) -> list[str]:
     if profile.tables:
         return list(profile.tables)
     if args.table_config:
-        return sorted(TableConfig.load(args.table_config).tables)
+        return sorted(_load_table_config(args).tables)
     return []
 
 
@@ -967,7 +1229,11 @@ def _from_catalog(args: argparse.Namespace) -> int:
         )
 
     config, report = config_from_catalog(
-        catalog, namespace=args.namespace, defaults=defaults, source=args.catalog
+        catalog,
+        warehouse=args.warehouse,
+        namespace=args.namespace,
+        defaults=defaults,
+        source=args.catalog,
     )
     config.dump(args.output)
     print(report.describe())
@@ -977,7 +1243,11 @@ def _from_catalog(args: argparse.Namespace) -> int:
 
 def _validate_config(args: argparse.Namespace) -> int:
     config = TableConfig.load(args.config)
-    print(f"{args.config}: valid (version {config.version}, {len(config.tables)} table(s))")
+    print(
+        f"{args.config}: valid (version {config.version}, warehouse "
+        f"{config.warehouse!r}, {len(config.namespaces)} namespace(s), "
+        f"{len(config.tables)} table(s))"
+    )
     for identifier in sorted(config.tables):
         settings = config.for_table(identifier)
         parts = (
@@ -992,6 +1262,228 @@ def _validate_config(args: argparse.Namespace) -> int:
             else "disabled"
         )
         print(f"  {identifier}: [{parts}] ordering={settings.ordering.mode} evolution={evolution}")
+    return 0
+
+
+def _table_config_generate(session: CatalogSession, args: argparse.Namespace) -> int:
+    """A starter config that describes the catalog **as it is today**.
+
+    Deliberately descriptive rather than aspirational. Every table gets the
+    default settings plus its *current* partition spec written out, so the first
+    run of `zamboni maintenance` against the generated file changes nothing but
+    file sizes -- an operator can diff their intent against reality instead of
+    discovering it during a run that deletes things.
+
+    `from-catalog` is the other direction: a Singer catalog describes tables
+    that may not exist yet. This one reads a live Iceberg catalog.
+    """
+    from pyiceberg.exceptions import NoSuchTableError
+
+    from .orphans import _all_table_identifiers
+    from .tableconfig import DEFAULT_SETTINGS, PartitionField, TableConfig
+
+    if not args.warehouse:
+        print(
+            "table-config generate needs --warehouse/--db: the file records which "
+            "warehouse it describes, and is checked against it on every run. Name it "
+            "even for a filesystem catalog -- `--db local` is a fine answer.",
+            file=sys.stderr,
+        )
+        return 2
+
+    output = Path(args.output)
+    if output.exists() and not args.force:
+        print(f"{output} exists; pass --force to overwrite", file=sys.stderr)
+        return 2
+
+    identifiers = _all_table_identifiers(session.catalog)
+    if args.namespace:
+        wanted = tuple(args.namespace.split("."))
+        identifiers = [i for i in identifiers if i[: len(wanted)] == wanted]
+
+    grouped: dict[str, dict[str, TableSettings]] = {}
+    skipped: list[tuple[str, str]] = []
+    for identifier in sorted(identifiers):
+        name = ".".join(identifier)
+        try:
+            tbl = session.catalog.load_table(identifier)
+        except NoSuchTableError:  # dropped between listing and loading
+            skipped.append((name, "no longer exists"))
+            continue
+        # V1 is refused by every operation, so writing it into a config would
+        # generate a file whose first run errors on a table nobody can maintain.
+        if tbl.metadata.format_version < 2:
+            skipped.append((name, "format version 1, which Zamboni refuses"))
+            continue
+        partition = tuple(
+            PartitionField(
+                column=tbl.schema().find_column_name(f.source_id) or "?", transform=str(f.transform)
+            )
+            for f in tbl.spec().fields
+        )
+        # The catalog hands the namespace back as a tuple, so the split is known
+        # rather than recovered from a string. That is the point of the shape.
+        grouped.setdefault(".".join(identifier[:-1]), {})[identifier[-1]] = replace(
+            DEFAULT_SETTINGS, partition=partition
+        )
+
+    namespaces = {ns: NamespaceSettings(tables=t) for ns, t in sorted(grouped.items())}
+    config = TableConfig(
+        warehouse=args.warehouse or "", namespaces=namespaces, defaults=DEFAULT_SETTINGS
+    )
+    config.validate()
+    config.dump(str(output))
+
+    print(
+        f"wrote {output}: {len(config.tables)} table(s) in "
+        f"{len(namespaces)} namespace(s), warehouse {config.warehouse!r}"
+    )
+    for name, reason in skipped:
+        print(f"  skipped {name}: {reason}")
+    print("\nThis describes the catalog as it is now. Edit it to say what you want,")
+    print("then: zamboni table-config summary " + str(output))
+    return 0
+
+
+def _lacking_nested() -> str:
+    """Nested namespaces work everywhere and mean different SQL on each engine.
+
+    Not a `LayoutFeature`: every engine supports them, so "unsupported" would be
+    a lie. What differs is spelling, verified live -- Trino wants one schema
+    identifier containing a dot, Spark wants one quoted part per level, and each
+    rejects the other's form outright. Nothing here is broken; it is simply a
+    thing you have to be sure you meant.
+    """
+    return (
+        " namespace; Trino and Spark address these with different SQL "
+        "(docs/table-config.md), so prefer one level where you can"
+    )
+
+
+def _lacking(feature: LayoutFeature) -> str:
+    """ " -- not available on: trino", or "" when every engine can do it.
+
+    Asked of the capability declarations rather than written out here. The first
+    version was the string "-- local and spark only; trino cannot do this",
+    which was true and would have gone stale silently: `zamboni engines` derives
+    its answer from the code, so a hardcoded duplicate is a second source of
+    truth that nothing keeps honest.
+    """
+    lacking = maintainers.engines_lacking(feature)
+    if not lacking:
+        return ""
+    return f"  -- not available on: {', '.join(lacking)}"
+
+
+#: What an unset expiry knob resolves to, named rather than printed as `None`.
+#: Kept beside the summary because it is documentation; the resolution itself
+#: lives in expire.py.
+_UNSET_AGE = "unset -> history.expire.max-snapshot-age-ms, else 5"
+_UNSET_KEEP = "unset -> history.expire.min-snapshots-to-keep, else 1"
+
+
+def _table_config_summary(args: argparse.Namespace) -> int:
+    """What the file *does*, including the defaults nobody wrote down.
+
+    `validate` answers "does this parse". This answers the question an operator
+    actually has before a run that deletes files: which operations are on, what
+    windows they use, and where a value came from when it is not in the file.
+    """
+    from .tableconfig import DEFAULT_SETTINGS, TableConfig
+
+    config = TableConfig.load(args.config)
+    names = sorted(config.tables)
+    if args.table:
+        if args.table not in config.tables:
+            print(
+                f"{args.table} is not in {args.config}; it would get the defaults "
+                f"({len(config.tables)} table(s) are named)",
+                file=sys.stderr,
+            )
+            return 2
+        names = [args.table]
+
+    print(
+        f"{args.config}: version {config.version}, warehouse {config.warehouse!r}, "
+        f"{len(config.namespaces)} namespace(s), {len(config.tables)} table(s)"
+    )
+    print("Values not written in the file are marked (default).\n")
+
+    def mark(value, fallback, *, unset: str = "") -> str:
+        """Render a setting, saying where it came from.
+
+        `None` is not "no value": it means the knob was left out, and expiry
+        then falls back to the Iceberg table property and only then to the spec
+        default. A bare `None` told an operator nothing and read like a bug --
+        naming the fallback is the whole point of a summary.
+        """
+        if value is None:
+            return unset or "unset"
+        return f"{value}" if value != fallback else f"{value} (default)"
+
+    for name in names:
+        s = config.for_table(name)
+        d = DEFAULT_SETTINGS
+        namespace = config.namespace_of(name)
+        nested = "  -- nested" + _lacking_nested() if len(namespace) > 1 else ""
+        print(f"{name}   [namespace {'.'.join(namespace)}, table {name.split('.')[-1]}]{nested}")
+        parts = (
+            "partition [" + ", ".join(f"{pf.column}:{pf.transform}" for pf in s.partition) + "]"
+            if s.partition
+            else "unpartitioned"
+        )
+        print(f"  layout     {parts}, ordering {mark(s.ordering.mode, d.ordering.mode)}")
+        if s.ordering.mode == "zorder" and s.ordering.zorder:
+            columns = ", ".join(s.ordering.zorder.columns)
+            print(f"             zorder columns {columns}{_lacking(LayoutFeature.ZORDER)}")
+
+        r = s.retention
+        expire = "on" if r.expire_snapshots.enabled else "OFF"
+        de = d.retention.expire_snapshots
+        print(
+            f"  expire     {expire}, "
+            "keep "
+            + mark(
+                r.expire_snapshots.max_snapshot_age_days,
+                de.max_snapshot_age_days,
+                unset=_UNSET_AGE,
+            )
+            + " day(s), minimum "
+            + mark(
+                r.expire_snapshots.min_snapshots_to_keep,
+                de.min_snapshots_to_keep,
+                unset=_UNSET_KEEP,
+            )
+            + " snapshot(s)"
+        )
+        orphans = "on" if r.remove_orphan_files.enabled else "OFF"
+        do = d.retention.remove_orphan_files
+        print(
+            f"  orphans    {orphans}, files older than "
+            f"{mark(r.remove_orphan_files.older_than_days, do.older_than_days)} day(s) "
+            "-- this deletes storage; the guard is what stands between it and a live write"
+        )
+        dangling = "on" if r.remove_dangling_deletes.enabled else "OFF"
+        print(f"  dangling   {dangling}")
+        manifests = "on" if r.rewrite_manifests.enabled else "OFF"
+        print(f"  manifests  {manifests}")
+        if r.metadata.previous_versions_max is None and r.metadata.delete_after_commit is None:
+            print("  metadata   unset; apply-properties has nothing to set and will refuse")
+        else:
+            print(
+                f"  metadata   keep {r.metadata.previous_versions_max} previous version(s), "
+                f"delete after commit {r.metadata.delete_after_commit}"
+            )
+        ev = s.partition_evolution
+        if ev.enabled and ev.rules:
+            rules = ", ".join(
+                f"{r_.from_transform}->{r_.to_transform} after {r_.older_than_days}d"
+                for r_ in ev.rules
+            )
+            print(f"  evolution  {rules}{_lacking(LayoutFeature.PARTITION_EVOLUTION)}")
+        else:
+            print("  evolution  disabled")
+        print()
     return 0
 
 

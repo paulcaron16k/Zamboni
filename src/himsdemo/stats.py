@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Iceberg metadata and statistics, for the `status` command.
 
 Metadata metrics lead, wall-clock follows. At this demo's scale -- roughly 630

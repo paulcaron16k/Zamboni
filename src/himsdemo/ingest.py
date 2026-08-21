@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Ingest one simulated day.
 
 Two things here are deliberate and worth reading before changing:

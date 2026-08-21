@@ -19,8 +19,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
@@ -52,13 +52,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.13 is the pinned development version; 3.11 is the floor that
-        # pyproject.toml claims to support. Testing only the pin would let a
-        # 3.12-only construct ship under a >=3.11 requirement.
-        python: ["3.11", "3.13"]
+        # Every version pyproject.toml claims a classifier for. 3.11 is the
+        # floor `requires-python` declares, 3.13 is the pinned development
+        # version, and 3.12 is here because the classifier promises it: testing
+        # only the endpoints catches a 3.12-only *construct* -- it fails on the
+        # 3.11 leg -- but not a 3.12-only runtime difference, which passes both
+        # and breaks for whoever is actually on 3.12. The legs run in parallel,
+        # so the third costs no wall-clock.
+        python: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
@@ -68,14 +72,14 @@ jobs:
       - run: uv run --python ${{ matrix.python }} pytest -q --ignore=tests/test_dev_stack.py
 
   executables:
-    # bin/zamboni and bin/demo are PEP 723 scripts that reference the project as
+    # bin/zamboni and bin/zamboni-demo are PEP 723 scripts that reference the project as
     # an editable path install. Two bugs have already come from that path: one
     # absolute (broke on directory rename) and one non-editable (ran stale code).
     # Both were only visible when running from outside the project directory.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
@@ -93,13 +97,77 @@ jobs:
           "$GITHUB_WORKSPACE/bin/zamboni" doctor
           "$GITHUB_WORKSPACE/bin/zamboni" --help > /dev/null
 
+  spark:
+    # Spark gets its own job rather than a step in dev-stack, because it is the
+    # only one that builds an image (1.57GB: Spark 4, the Iceberg runtime, and
+    # 558MB of AWS SDK that hadoop-aws pulls in) and because its failures are
+    # its own. Folding it into dev-stack would make one red tick mean either
+    # "reclamation is broken" or "Spark is broken", which is the kind of
+    # ambiguity that gets a job ignored.
+    #
+    # Spark Connect, so the runner needs no Java and the client is ~1.5MB. What
+    # this job proves that tests/test_maintainers.py cannot: that a real server
+    # accepts the procedure calls we build.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --frozen
+
+      - name: Check the pinned subnet is free
+        run: |
+          if docker network ls -q | xargs -r -I{} docker network inspect {} \
+               --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' | grep -q '^172\.31\.0\.0/24$'; then
+            echo "::error::172.31.0.0/24 is already in use; change it in dev-stack/docker-compose.yaml and S3_GATEWAY"
+            exit 1
+          fi
+
+      - name: Bring up the stack with Spark
+        working-directory: dev-stack
+        run: |
+          cp .env.sample .env
+          docker compose --profile spark up -d --wait
+          docker compose ps
+
+      - name: Bootstrap Lakekeeper and create the warehouse
+        working-directory: dev-stack
+        run: uv run bootstrap.py
+
+      # The Spark fixtures skip on a closed port by design, so "0 failures" is
+      # not the same as "Spark was tested" -- a server that never started would
+      # produce a green tick and no coverage. Selecting by marker guarantees the
+      # set is non-empty, and -W error::pytest.PytestUnraisableExceptionWarning
+      # does not help here, so the skip count is checked outright.
+      - name: Run the live Spark tests
+        env:
+          ZAMBONI_REQUIRE_DEV_STACK: "1"
+        run: |
+          uv run pytest tests/test_dev_stack.py -v -m spark | tee spark.log
+          if grep -qE "[0-9]+ skipped" spark.log; then
+            echo "::error::a live Spark test skipped; the Connect server was not reachable"
+            exit 1
+          fi
+
+      - name: Stack logs
+        if: failure()
+        working-directory: dev-stack
+        run: docker compose --profile spark logs --tail 200
+
+      - name: Tear down
+        if: always()
+        working-directory: dev-stack
+        run: docker compose --profile spark down -v
+
   dev-stack:
     # The job that exercises what unit tests cannot: a real REST catalog, real
     # object storage, and the S3 permissions the reclaim operations need.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
@@ -141,11 +209,11 @@ jobs:
           ZAMBONI_URI: http://localhost:8182/catalog
           ZAMBONI_WAREHOUSE: zamboni
         run: |
-          ./bin/demo --catalog lakekeeper clear
-          ./bin/demo --catalog lakekeeper next-day
-          ./bin/demo --catalog lakekeeper maintenance --reclaim-now
-          ./bin/demo --catalog lakekeeper query
-          ./bin/demo --catalog lakekeeper clear
+          ./bin/zamboni-demo --catalog lakekeeper clear
+          ./bin/zamboni-demo --catalog lakekeeper next-day
+          ./bin/zamboni-demo --catalog lakekeeper maintenance --reclaim-now
+          ./bin/zamboni-demo --catalog lakekeeper query
+          ./bin/zamboni-demo --catalog lakekeeper clear
 
       - name: Stack logs
         if: failure()

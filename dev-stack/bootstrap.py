@@ -169,7 +169,7 @@ def describe(env: dict[str, str]) -> None:
     print(f"    export ZAMBONI_URI=http://localhost:{lk}/catalog")
     print(f"    export ZAMBONI_WAREHOUSE={env['WAREHOUSE_NAME']}")
     print("    zamboni describe <namespace>.<table>")
-    print(f"\n    ./bin/demo --catalog lakekeeper next-day\n")
+    print(f"\n    ./bin/zamboni-demo --catalog lakekeeper next-day\n")
 
 
 def main() -> int:

@@ -89,6 +89,68 @@ def test_partitioned_compaction_is_partition_scoped(session, partitioned):
     assert {tuple(f.partition) for f in after.live_files} == {("a",), ("b",)}
 
 
+def test_the_rust_core_is_installed_however_it_gets_here():
+    """`pyiceberg-core` must be present; which side declares it moved in 0.12.
+
+    Non-negotiable half: `pyarrow_transform` -- called for every partition field
+    when writing a partitioned table -- delegates to the Rust core for **six**
+    transforms. Without it, `bucket`, `truncate`, `year`, `month`, `day` and
+    `hour` partitioned writes all raise `NotInstalledError` from inside
+    PyIceberg's own writer. So the import has to work, on any line.
+
+    The half that moved: on 0.11.1 `pyiceberg[pyarrow]` requires the core, and
+    this test used to assert exactly that, plus that no extra of ours re-declares
+    it (ZMBNI-1815 deleted a `bucket` extra that installed what the base install
+    already had). **0.12 moved the core out of `[pyarrow]` into an extra of its
+    own** while keeping `pyarrow_transform`'s dependency on it, so on 0.12 the
+    old assertion is false and `pyiceberg[pyarrow]` alone silently cannot write a
+    transformed partition.
+
+    That is this test doing its job rather than breaking: its previous docstring
+    said it "fails if upstream moves the dependency out of `[pyarrow]`, rather
+    than leaving a user to discover it by writing a table", and that is precisely
+    how the 0.12 requirement was found. What it asserts now is the invariant that
+    survives the move -- the core is installed, and *somebody* declares it -- with
+    the two acceptable providers named, so a build where neither declares it still
+    fails.
+    """
+    import importlib.util
+    import tomllib
+    from importlib.metadata import requires
+    from pathlib import Path
+
+    from packaging.requirements import Requirement
+
+    assert importlib.util.find_spec("pyiceberg_core") is not None, (
+        "pyiceberg-core is not installed, so bucket/day/month/year/hour/truncate "
+        "partitioned writes cannot work. On 0.11.1 it comes from pyiceberg's "
+        "[pyarrow] extra; on 0.12 it must be requested explicitly"
+    )
+
+    def is_core(requirement: str) -> bool:
+        return Requirement(requirement).name.lower().replace("_", "-") == "pyiceberg-core"
+
+    upstream = [r for r in (requires("pyiceberg") or []) if is_core(r)]
+    supplied_by_pyarrow_extra = any('extra == "pyarrow"' in r for r in upstream)
+
+    project = tomllib.loads((Path(__file__).parent.parent / "pyproject.toml").read_text())
+    ours = [d for d in project["project"]["dependencies"] if "pyiceberg-core" in d]
+
+    assert supplied_by_pyarrow_extra or ours, (
+        "nothing declares pyiceberg-core: pyiceberg[pyarrow] does not supply it on "
+        "this build and this project does not ask for it either, so the install that "
+        "works here is an accident of what else was resolved"
+    )
+
+    if supplied_by_pyarrow_extra:
+        # The 0.11.1 shape. Re-declaring what the base install already brings is
+        # what ZMBNI-1815 removed, so keep that closed.
+        for name, deps in project["project"]["optional-dependencies"].items():
+            assert not any("pyiceberg-core" in dep for dep in deps), (
+                f"extra {name!r} declares pyiceberg-core, which the base install already has"
+            )
+
+
 def test_bucket_partitioned_table_compacts(session, bucketed):
     """The transform that defeats PyIceberg's add_files-based partition inference.
 
@@ -326,6 +388,194 @@ def test_a_failed_atomic_run_leaves_no_referenced_file_missing(session, partitio
     assert referenced <= on_disk, (
         f"{len(referenced - on_disk)} referenced file(s) were deleted by the cleanup"
     )
+
+
+# -- bounded reads (ZMBNI-1906) -------------------------------------------
+
+
+def test_chunked_reads_one_data_file_at_a_time(session, partitioned, monkeypatch):
+    """The property that makes CHUNKED bound anything.
+
+    Handing PyIceberg the whole task list buffers most of the group:
+    `ArrowScan.to_record_batches` materialises each data file into a list and
+    drives that with `executor.map`, which submits every task at once and
+    returns results in order -- so tasks that finish early hold their whole file
+    until the consumer catches up. Measured, peak memory scaled with the group;
+    reading one task per call makes it scale with the largest *file*.
+
+    Asserted on the call shape rather than on memory, because a memory
+    assertion is a flaky assertion. If someone reverts to passing every task,
+    this fails; if they keep the property while restructuring, it passes.
+
+    Still one task per call after ZMBNI-1909 added a read-ahead window: the
+    window changes how many of these calls are in flight, not how much each one
+    is asked for. That distinction is the whole bound.
+    """
+    from pyiceberg.io.pyarrow import ArrowScan
+
+    task_counts = []
+    original = ArrowScan.to_record_batches
+
+    def counting(self, tasks):
+        tasks = list(tasks)
+        task_counts.append(len(tasks))
+        return original(self, tasks)
+
+    monkeypatch.setattr(ArrowScan, "to_record_batches", counting)
+
+    config = CompactionConfig(memory_mode=MemoryMode.CHUNKED, rewrite_all=True)
+    TableCompactor(session, "db.partitioned", config).execute()
+
+    assert task_counts, "the chunked path did not stream at all"
+    assert set(task_counts) == {1}, (
+        f"expected one task per read call, got {sorted(set(task_counts))} -- "
+        "passing the whole list back to PyIceberg reinstates the buffering"
+    )
+
+
+def test_chunked_still_sorts_across_the_whole_group(session, partitioned):
+    """Why this fix was preferred over capping group size.
+
+    Bounding the *read* leaves the sort seeing every row in the group, because
+    DuckDB consumes the stream and spills to disk. Capping the group would not:
+    N sub-groups sort independently and produce N overlapping ranges, which is
+    precisely what makes Z-order work less well. A per-file read that quietly
+    sorted per file would have the same defect, so the ordering is asserted
+    across the partition rather than within a file.
+    """
+    before_rows = rows(partitioned)
+    config = CompactionConfig(
+        memory_mode=MemoryMode.CHUNKED,
+        sort_expression="id DESC",
+        target_file_size_bytes=200,  # force several output files per partition
+        rewrite_all=True,
+    )
+    TableCompactor(session, "db.partitioned", config).execute()
+
+    tbl = session.table("db.partitioned")
+    assert rows(tbl) == before_rows
+    for category in ("a", "b"):
+        ids = tbl.scan(row_filter=f"category == '{category}'").to_arrow()["id"].to_pylist()
+        assert ids == sorted(ids, reverse=True), "the group was sorted in pieces, not as a whole"
+
+
+def _concurrency_probe(monkeypatch):
+    """Record the high-water mark of overlapping reads."""
+    import threading
+
+    from pyiceberg.io.pyarrow import ArrowScan
+
+    state = {"live": 0, "peak": 0, "calls": 0}
+    lock = threading.Lock()
+    original = ArrowScan.to_record_batches
+
+    def tracked(self, tasks):
+        with lock:
+            state["live"] += 1
+            state["calls"] += 1
+            state["peak"] = max(state["peak"], state["live"])
+        try:
+            # An iterator, not a list: `to_table` calls next() on the result,
+            # and this probe also sits under that path.
+            return iter(list(original(self, tasks)))
+        finally:
+            with lock:
+                state["live"] -= 1
+
+    monkeypatch.setattr(ArrowScan, "to_record_batches", tracked)
+    return state
+
+
+def test_read_ahead_zero_reads_strictly_one_file_at_a_time(session, partitioned, monkeypatch):
+    """The ZMBNI-1906 behaviour, still reachable.
+
+    It is the floor the window is measured against, and the setting to reach for
+    on a host where even one extra file in flight is too much.
+    """
+    state = _concurrency_probe(monkeypatch)
+
+    TableCompactor(
+        session,
+        "db.partitioned",
+        CompactionConfig(memory_mode=MemoryMode.CHUNKED, rewrite_all=True, read_ahead_bytes=0),
+    ).execute()
+
+    assert state["calls"] > 1, "nothing was read; the probe is not on the read path"
+    assert state["peak"] == 1, f"reads overlapped with the window disabled: {state['peak']}"
+
+
+def test_read_ahead_overlaps_reads_without_unbounding_them(session, partitioned, monkeypatch):
+    """The point of ZMBNI-1909: concurrency comes back, the bound does not go.
+
+    Measured on object storage, serialising the reads cost 1.12x-1.39x as RTT
+    rose 0 to 30ms, because it serialised the round trips too.
+    """
+    state = _concurrency_probe(monkeypatch)
+    before_rows = rows(partitioned)
+
+    TableCompactor(
+        session,
+        "db.partitioned",
+        CompactionConfig(
+            memory_mode=MemoryMode.CHUNKED,
+            rewrite_all=True,
+            read_ahead_bytes=64 * 1024 * 1024,  # far larger than these tiny files
+            max_read_ahead_files=4,
+        ),
+    ).execute()
+
+    assert state["peak"] > 1, "the window admitted nothing; reads stayed serial"
+    assert state["peak"] <= 4, f"more files in flight than the cap allows: {state['peak']}"
+    assert rows(session.table("db.partitioned")) == before_rows
+
+
+def test_a_file_larger_than_the_window_still_makes_progress(session, partitioned):
+    """A window smaller than one file must admit that file anyway.
+
+    The obvious loop -- refuse to submit while queued bytes exceed the window --
+    never submits anything when the first file is already over, and the run
+    hangs rather than failing. One byte is the smallest way to say that.
+    """
+    before_rows = rows(partitioned)
+
+    TableCompactor(
+        session,
+        "db.partitioned",
+        CompactionConfig(memory_mode=MemoryMode.CHUNKED, rewrite_all=True, read_ahead_bytes=1),
+    ).execute()
+
+    assert rows(session.table("db.partitioned")) == before_rows
+
+
+def test_read_ahead_preserves_row_order_across_files(session, partitioned):
+    """Concurrent reads, ordered results.
+
+    Futures are drained in submission order, so a fast third file cannot
+    overtake a slow first one. Asserted through a sort, which would expose any
+    reordering as a broken sequence.
+    """
+    config = CompactionConfig(
+        memory_mode=MemoryMode.CHUNKED,
+        sort_expression="id DESC",
+        target_file_size_bytes=200,
+        rewrite_all=True,
+        read_ahead_bytes=64 * 1024 * 1024,
+    )
+    TableCompactor(session, "db.partitioned", config).execute()
+
+    tbl = session.table("db.partitioned")
+    for category in ("a", "b"):
+        ids = tbl.scan(row_filter=f"category == '{category}'").to_arrow()["id"].to_pylist()
+        assert ids == sorted(ids, reverse=True)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("read_ahead_bytes", -1), ("max_read_ahead_files", 0)],
+)
+def test_the_read_ahead_settings_are_validated(field, value):
+    with pytest.raises(ValueError, match=field):
+        CompactionConfig(**{field: value})
 
 
 # -- ZMBNI-1104: the streaming write path ---------------------------------

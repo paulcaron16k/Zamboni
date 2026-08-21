@@ -1,10 +1,223 @@
 # Zamboni
 
-Iceberg table maintenance -- compaction, dangling-delete removal, manifest rewriting,
-snapshot expiry and orphan-file removal -- for a MinIO + Lakekeeper lakehouse, without Trino
-or Spark.
+[![CI](https://github.com/paulcaron16k/Zamboni/actions/workflows/ci.yml/badge.svg)](https://github.com/paulcaron16k/Zamboni/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Nothing in that stack compacts tables today:
+Iceberg table maintenance -- compaction, Z-order clustering, partition evolution,
+dangling-delete removal, manifest rewriting, snapshot expiry and orphan-file removal --
+**without needing Trino or Spark**. It can drive either Trino or Spark if you have one.
+
+```bash
+pipx install iceberg-zamboni       # the distribution name; you still `import zamboni`
+# Copy zamboni.yml.sample to $HOME/.zamboni.yml and edit
+cat ~/.zamboni.yml
+zamboni doctor                      # is this PyIceberg build usable?
+zamboni --db acme maintenance       # previews; --yes commits
+```
+
+**New here?** [docs/user_guide.md](docs/user_guide.md) is the place to start: four ways to
+run it, an engine-capability table to choose with, secrets handling, and the memory
+numbers. This README is the *why* -- the evidence behind the design decisions.
+
+
+## Installation Use-Cases
+
+There are various ways to create and use an Iceberg DB. While Zamboni is for maintenance
+only, depending on how you _CREATE_ and _USE_ your Iceberg DB the installation varies.
+
+**Everything about *using* the tables is reference only.** Reading them with DuckDB,
+pandas, polars, Trino or a BI tool is outside what Zamboni does -- it compacts, sorts,
+expires and reclaims, and then gets out of the way. The reading tools are named below so
+you can see where a maintenance install sits in a working stack, not because this package
+provides, configures or supports them.
+
+### Dev -- `iceberg-zamboni[sql]`
+
+A laptop, no services, nothing to start. A local SQLite catalog and a warehouse directory,
+which is enough to write tables programmatically through the PyIceberg catalog and read
+them back with pandas or DuckDB. `zamboni-demo` runs on exactly this.
+
+```bash
+pipx install "iceberg-zamboni[sql]"
+zamboni-demo next-day        # five days of simulated ingestion, then maintain it
+```
+
+### Home Lab -- `iceberg-zamboni[s3]`
+
+A real catalog and a real object store, still on one machine: **Lakekeeper** (which brings
+Postgres) and **MinIO**, both from the dev stack's docker services. This is the smallest
+setup that behaves like production -- REST catalog, S3 paths, vended credentials -- and the
+best base for programmatic data science against the tables: pandas or polars, embedded
+DuckDB, SQLAlchemy.
+
+```bash
+cd dev-stack && docker compose up -d --wait      # Lakekeeper + Postgres + MinIO
+pipx install "iceberg-zamboni[s3]"
+zamboni maintenance --warehouse demo --yes
+```
+
+### Home Lab Professional -- `iceberg-zamboni[s3]` + Trino for *query*
+
+Home Lab, plus the dev stack's Trino profile:
+
+```bash
+cd dev-stack && docker compose --profile trino up -d trino
+```
+
+Trino is what lets **Apache Superset** and other BI tools query the Iceberg tables -- they
+speak SQL to an engine, and DuckDB will not serve them. **You do _NOT_ use Trino for
+maintenance here.** Compaction stays with the local engine: Trino cannot Z-order, cannot
+remove dangling deletes, and enforces retention floors that reject Zamboni's defaults.
+Adding Trino for BI does not mean adding `--engine trino`.
+
+The `s3` extra is unchanged -- Superset talks to Trino, not to Zamboni, so nothing here
+needs the `trino` extra either. That extra is only for `--engine trino`.
+
+### Enterprise -- `iceberg-zamboni[s3,spark]`
+
+Your Spark cluster does the heavy lifting: large-scale compaction and sorting, on hardware
+sized for it rather than on one machine's disk and CPU. IT provides the object store (MinIO
+on real disk, AWS S3, GCS), the REST catalog (Lakekeeper or Polaris), and the Spark
+master -- you point Zamboni at those services when you run it.
+
+```bash
+pip install "iceberg-zamboni[s3,spark]"
+zamboni maintenance --warehouse acme --engine spark \
+        --spark-remote sc://spark.internal:15002 --yes
+```
+
+`spark` here is the Spark **Connect client**, ~13MB and no JVM on your side. For BI, IT
+provides a Trino cluster -- again for query, not for maintenance.
+
+## Install
+
+### Optional Package Extensions
+
+Depending on the installation use-case you are using, the installation requires different
+extensions or extras.
+
+| Extra | Purpose, and when you need it | Python dependencies |
+|---|---|---|
+| `s3` | Object-store access. Required whenever data files live in S3, MinIO or GCS rather than on a local path -- so for every use-case above except Dev. Provides the fsspec filesystem PyIceberg and orphan removal use to read, write, **list** and delete objects | `s3fs` |
+| `sql` | A local SQLite catalog, with no catalog server to run. Enough to create and open a warehouse on a laptop; used by the test suite, the demo, and dry runs. Not needed against a REST catalog such as Lakekeeper or Polaris | `pyiceberg[sql-sqlite]` (`sqlalchemy`) |
+| `trino` | The client for `--engine trino`, which runs five of the six operations as `ALTER TABLE … EXECUTE`. **Requires a local Trino stand-alone instance via `dev-stack --profile trino`, or an Enterprise Trino cluster** -- this extra is a client and starts nothing. Not needed to *query* through Trino from a BI tool | `trino` |
+| `spark` | The Spark **Connect** client for `--engine spark --spark-remote sc://…`, which runs all six operations through the Iceberg Spark procedures, Z-order included. **Requires a local Spark stand-alone instance via `dev-stack --profile spark`, or an Enterprise Spark master/cluster.** ~13MB on disk, pure Python, and **no JVM on your machine** -- the driver runs on the server. Needs Spark 4 | `pyspark-client` |
+| `spark-lib` | The **embedded** Spark library: a driver JVM inside this process, so no Spark server or cluster is required anywhere. The cost is why it is not the default -- **~472MB on disk** and **~470MB resident** for even a trivial session (measured: 440MB JVM + 34MB Python), rising toward `spark.driver.memory` (1GB by default) under real work, plus a JDK 17 or 21 you install yourself. Mutually exclusive with `spark`: both provide the `pyspark` module | `pyspark` |
+
+`spark` and `spark-lib` are the two halves of the same engine and the names say which side
+the JVM is on. Pick `spark` if a cluster exists, `spark-lib` only if none does and you
+would rather carry half a gigabyte than run a server.
+
+### What "Spark works" has actually been run against
+
+The extras admit more combinations than CI exercises, and the honest thing is to say which
+is which rather than let a version floor imply coverage it does not have:
+
+| Path | Status |
+|---|---|
+| `--spark-remote sc://…` (Connect) | **Verified.** Spark 4.0.4 with Iceberg 1.11, on every push — the `spark` CI job builds the server and runs the live tests against it |
+| `--spark-master local[*]` (embedded) | Best effort. Nothing in the maintainer is Spark-4 only, and it is not exercised by CI |
+| `--spark-master spark://…` (classic cluster) | Best effort. Driver and cluster versions must match, which is why the `spark-lib` floor is 3.5 rather than 4.0 |
+
+**Spark 3.5 is admitted deliberately.** Connect cannot reach a 3.5 cluster at all —
+`pyspark-client` did not exist before 4.0 — so `spark-lib` is the only route to one. And
+3.5 is not dead: Iceberg publishes `iceberg-spark-runtime-3.5` at its current 1.11.0, and
+Spark 3.5.x has an **extended LTS running to November 2027** (security fixes only). Usable
+and unverified is a real state; the run logs which Spark it reached, so a bug report
+carries the combination rather than requiring someone to reconstruct it.
+
+It will stay unverified, deliberately. A CI leg for 3.5 built today would be maintained
+for about a year and then retired with the LTS, for a combination nobody has reported
+using — so the gap is a choice rather than an omission, and it reopens the moment someone
+turns up on 3.5.
+
+Whichever you use, **the Iceberg runtime jar is yours to supply** and must match the Spark
+version — `iceberg-spark-runtime-3.5_2.13` or `-4.0_2.13`. Zamboni sets
+`spark.sql.extensions` and deliberately nothing else: a maintenance tool that invented
+`spark.sql.catalog.*` would be changing where your data is.
+
+### Installation Best-Practices
+
+**Never into your system Python.** Pick by what you want:
+
+**The distribution is `iceberg-zamboni`; the import is `zamboni`.** They differ because
+`zamboni` on PyPI is a dormant registration by an unrelated project. Only the distribution
+name has to be globally unique, and the mismatch is ordinary — `beautifulsoup4` imports as
+`bs4`.
+
+**The CLI, isolated — recommended.** `pipx` gives it its own virtual environment and puts
+`zamboni` on your PATH. We include `sql` to run zamboni-demo:
+
+```bash
+pipx install "iceberg-zamboni[s3,sql]"
+uv tool install "iceberg-zamboni[s3,sql]"     # the uv equivalent
+```
+
+**The library, in your project's environment.** Activate a virtual environment first:
+
+```bash
+python -m venv .venv && . .venv/bin/activate
+pip install "iceberg-zamboni[s3,sql]"
+
+uv add "iceberg-zamboni[s3,sql]"              # the uv equivalent; no activation needed
+```
+
+**From the repository**, for the unreleased tip:
+
+```bash
+pipx install "git+https://github.com/paulcaron16k/Zamboni"
+```
+
+## Status: what depending on this commits you to
+
+Read this before depending on it.
+
+- **`0.x`.** The public surface is believed reasonably firm, but a `0.x` release may still
+  break a CLI script or an API call; every effort will be made to avoid it. From `1.0.0`
+  onward the usual semver promise applies -- minor and patch releases will not break you.
+  **The unusual part, and the reason to read
+  [docs/releasing.md](docs/releasing.md):** for this tool a changed *default* is a breaking
+  change even when no signature moves. Lowering `older_than_days` deletes files on the next
+  nightly run with nothing in the API having moved at all, so the destructive defaults are
+  treated as public surface.
+- **Small team (of one).** Security response is best-effort rather than contractual
+  ([SECURITY.md](SECURITY.md)), and there is no backport branch: fixes land on the latest
+  `0.x`, or `1.x.x` once released, with a minor version, or possibly only patch
+  version, increment. Contributors welcome.
+- **CI runs green.** Five jobs on every push and pull request, with `test` running once per
+  supported Python -- including `dev-stack`, which brings up a real
+  Lakekeeper, Postgres and MinIO and runs the demo end to end, and `spark`, which builds a
+  Spark Connect server with the Iceberg runtime. The badge above reports the current state
+  rather than a claim about it.
+- **Verified against real infrastructure.** Every operation has been run against a
+  live Lakekeeper + MinIO, and against real Trino 483 and Spark 4.0.4 servers.
+- **PyIceberg 0.11.x is fully supported**, and `pyproject.toml` caps at `<0.12` while the
+  0.12 release candidates are being tested -- see [below](#why-pyiceberg-is-capped-at-012).
+- **On PyPI as `iceberg-zamboni`**, imported as `zamboni`. See
+  [Install](#install); the names differ because `zamboni` on PyPI is a dormant
+  registration by an unrelated project.
+
+## What it is, and what it is not
+
+**It is** a maintenance tool for Iceberg tables that runs as a single process: PyIceberg for
+metadata, DuckDB for sorting. One command a cron line can call, one declarative file
+describing what each table's layout should be and what maintenance may delete. It may optionally
+use Trino or Spark standalone or clusters.
+
+**It is not:**
+
+- **A query engine.** It rewrites files and commits snapshots; it does not serve queries.
+- **A catalog.** It talks to yours.
+- **A scheduler.** It exits with a code; cron, Airflow or systemd decides when.
+- **An ingestion tool.** Something else writes the data.
+- **A cluster.** Throughput is one machine's disk and CPU. For a partition larger than that
+  machine can chew through in the window you have, use `--engine spark`.
+- **A replacement for Trino or Spark** where you already run them. It is what you use when
+  you do not, and it drives them through the same config when you do.
+
+---
+
+Nothing in the MinIO + Lakekeeper stack compacts tables today:
 
 - **Lakekeeper OSS** ships queues for its own bookkeeping only. Verified against running
   servers: `v0.13.1` reports `["tabular_expiration", "tabular_purge", "task_log_cleanup"]`
@@ -21,18 +234,39 @@ Nothing in that stack compacts tables today:
   exists on `duckdb-iceberg` main but is not in the shipped extension; loading `iceberg`
   in DuckDB 1.5.4 exposes 16 `iceberg_*` functions and that is not one of them.
 
-## Try it: the HIMS discharge demo
+## Try it: the Health Information Management System (HIMS) In-Patient discharge demo
 
 Five days of simulated hospital discharge ingestion, so you can watch small files
-accumulate and see what maintenance does about them.
+accumulate and see what maintenance does about them. Copy-on-Write (CoW) and
+Merge-on-Read (MoR) are selectable, the default is `mode cow` - which is not optimal for
+ingestion via frequent updates or transactional data and why MoR mode was invented in Apache
+Iceberg V2 specification and improved in the V3 specification. The Iceberg warehouse created is
+in data/healthims/iceberg_warehouse/ in namespace (a.k.a. DB schema) healthims/ folder.s
+The `iceberg_warehouse` folder is created _after_ the first `next-day` action.
+
+**From an install**, with no clone — the five days of input CSV data ship in the wheel
+(212 KB), and the demo writes to `./zamboni-demo/` in whatever directory you run it from:
 
 ```bash
-./bin/demo clear
-./bin/demo next-day        # x5 -- each prints status; file counts climb
-./bin/demo query           # note "files scanned"
-./bin/demo maintenance     # compact + drop dangling deletes + expire + remove orphans
-./bin/demo query           # identical rows, far fewer files
-./bin/demo next-day        # "No More Data"
+pipx install "iceberg-zamboni[sql]"
+zamboni-demo next-day        # x5
+zamboni-demo query           # note "files scanned"
+zamboni-demo maintenance
+zamboni-demo query           # identical rows, far fewer files
+```
+
+**From a clone**, `./bin/zamboni-demo` is the same program and keeps its state in
+`data/healthims/`:
+
+```bash
+./bin/zamboni-demo clear
+./bin/zamboni-demo mode cow        # Copy-on-Write is the default. Clear and repeat with "mode mor"
+                                   # and time the next-day ingestion to see performance difference.
+./bin/zamboni-demo next-day        # Repeat 5 times -- each prints status; file counts climb
+./bin/zamboni-demo query           # note "files scanned"
+./bin/zamboni-demo maintenance     # compact + drop dangling deletes + expire + remove orphans
+./bin/zamboni-demo query           # identical rows, far fewer files
+./bin/zamboni-demo next-day        # "No More Data"
 ```
 
 The employees table is deliberately included as a control: a full daily replace leaves
@@ -91,7 +325,7 @@ The `on disk` line above counts parquet only, to stay comparable with `data file
 why it reports zero unreferenced. Superseded and unreferenced are different problems with
 different owners: expiry and orphan removal respectively.
 
-`./bin/demo maintenance --reclaim-now` lifts both. Storage then falls to exactly what is
+`./bin/zamboni-demo maintenance --reclaim-now` lifts both. Storage then falls to exactly what is
 live -- 120 parquet files to 1, with all 44 rows intact:
 
 ```
@@ -102,7 +336,7 @@ on disk       1      total    7.0KiB   0 superseded, 0 unreferenced
 That flag is a demo affordance, not a recommendation: the age guard is what stops orphan
 removal deleting a file another writer has written but not yet committed.
 
-`./bin/demo mode mor` replays the same five days as a merge-on-read table, where updates
+`./bin/zamboni-demo mode mor` replays the same five days as a merge-on-read table, where updates
 land as position deletes instead of rewrites. Those delete files are **written directly to
 simulate what Spark or Flink would emit** -- PyIceberg's `delete()` and `upsert()` are both
 copy-on-write, so it cannot produce them. The demo says so in its own output.
@@ -115,52 +349,294 @@ nothing would have failed -- but an engine that prunes on manifest content would
 deletes at all. `zamboni/testing.py` supplies the missing writer, and a test asserts every
 manifest's content agrees with the files inside it.
 
+### Query it from the DuckDB CLI
+
+The demo writes real Iceberg tables, so anything that reads Iceberg reads them -- including
+`duckdb` from a shell, with no Zamboni in the picture at all. That is worth seeing: it is
+what makes maintenance *worth* doing, and it is how you check that a compaction changed
+file counts and not answers.
+
+**Ask the catalog which metadata is current.** This is the step to do properly, because it
+is the entire reason a catalog exists: it holds the pointer to the table's current
+metadata, and every writer updates it atomically. The demo's catalog is SQLite, so a
+one-liner reads it:
+
+```console
+$ uv run python -c "
+from pyiceberg.catalog.sql import SqlCatalog
+c = SqlCatalog('healthims', uri='sqlite:///data/healthims/iceberg_catalog.db',
+               warehouse='file://data/healthims/iceberg_warehouse')
+print(c.load_table('healthims.hims_events').metadata_location)"
+file:///.../data/healthims/iceberg_warehouse/healthims/hims_events/metadata/00065-e4147334-....metadata.json
+```
+
+**Then hand that to DuckDB.** `iceberg_scan()` takes the `file://` URI as it comes:
+
+```console
+$ duckdb
+INSTALL iceberg; LOAD iceberg;
+
+CREATE VIEW hims_events AS SELECT * FROM iceberg_scan(
+  'file:///.../hims_events/metadata/00065-e4147334-....metadata.json');
+```
+
+Getting the DuckDB CLI: `curl https://install.duckdb.org | sh`, or `brew install duckdb`.
+Note that `pip install duckdb` and `pipx install duckdb` give you the Python *library* --
+the wheel ships no console script, so neither puts a `duckdb` command on your PATH.
+
+**Daily EVS turnaround** -- how long a room sits between the patient leaving and the bed
+being ready. Environmental Services cleans the room, and the metric is the gap between two
+events sharing a `process_id`, the second of which arrives *after* the discharge process
+has already reached its terminal state:
+
+```sql
+WITH out AS (
+    SELECT process_id, occurred_at AS left_at FROM hims_events
+    WHERE event_name = 'patient_displaced_discharged'
+), clean AS (
+    SELECT process_id, occurred_at AS ready_at FROM hims_events
+    WHERE event_name = 'bed_cleaned'
+)
+SELECT CAST(o.left_at AS DATE)                                    AS day,
+       COUNT(*)                                                   AS rooms,
+       ROUND(AVG(date_diff('minute', o.left_at, c.ready_at)), 1)  AS avg_turnaround_min,
+       MAX(date_diff('minute', o.left_at, c.ready_at))            AS worst_min
+FROM out o JOIN clean c USING (process_id)
+GROUP BY 1 ORDER BY 1;
+```
+
+```
+┌────────────┬───────┬────────────────────┬───────────┐
+│    day     │ rooms │ avg_turnaround_min │ worst_min │
+├────────────┼───────┼────────────────────┼───────────┤
+│ 2026-01-05 │     7 │               77.7 │       104 │
+│ 2026-01-06 │     9 │              104.3 │       140 │
+│ 2026-01-07 │     9 │               85.9 │       115 │
+│ 2026-01-08 │    10 │               92.6 │       113 │
+│ 2026-01-09 │     9 │               75.2 │       100 │
+└────────────┴───────┴────────────────────┴───────────┘
+```
+
+The SQL is the demo's own -- `src/himsdemo/queries.py` runs this exact statement -- so the
+README and the demo cannot drift into computing different things under one name.
+
+**Run it before and after `./bin/zamboni-demo maintenance`.** The metrics do not move, but the
+query latency does. Measured on the five-day demo: `hims_events` went from **60 live data files
+to 5**, and the output above was byte-identical either side, once through the pre-maintenance
+metadata pointer and once through the new one. That is the whole claim in one comparison --
+compaction, expiry and orphan removal change how the data is stored and never what it says.
+`./bin/zamboni-demo query` runs this and three others for exactly that reason, and reports
+"files scanned" alongside, which *does* move.
+
+**Skipping the pointer lookup.** If you would rather not ask the catalog, DuckDB can find
+the newest metadata itself, but it makes you say so:
+
+```sql
+SET unsafe_enable_version_guessing = true;
+CREATE VIEW hims_events AS SELECT * FROM
+  iceberg_scan('data/healthims/iceberg_warehouse/healthims/hims_events');
+```
+
+The refusal is a good one and the setting is named honestly: globbing the metadata
+directory can pick up a file a writer has not committed yet. It is fine against this demo
+warehouse, which nothing else is writing to, and it is not how you should read a live
+table.
+
+**Against a REST catalog** -- `./bin/zamboni-demo --catalog lakekeeper` -- none of this applies:
+DuckDB attaches the catalog with `ATTACH ... (TYPE ICEBERG)` and resolves tables by name,
+which is what a real deployment does.
+
 Requirements and domain model: [data/healthims/Demo_Requirements.md](data/healthims/Demo_Requirements.md).
 Event catalogue: [data/healthims/HIMS_Discharge_Process_Events.md](data/healthims/HIMS_Discharge_Process_Events.md).
 
 ## CI
 
-[.github/workflows/ci.yml](.github/workflows/ci.yml) runs four jobs on push and pull request:
+[.github/workflows/ci.yml](.github/workflows/ci.yml) defines five jobs on push and pull
+request:
 
 | Job | What it guards |
 |---|---|
-| `lint` | ruff check and format; mypy over `src` and `scripts`; `uv sync --frozen` fails on a stale lockfile; pre-commit and CI must pin the same ruff |
-| `test` | The suite on Python **3.11 and 3.13** — the floor `pyproject.toml` claims and the version pinned for development |
+| `lint` | ruff check and format; mypy over `src` and `scripts`; `uv sync --frozen` fails on a stale lockfile; pre-commit and CI must pin the same ruff; every source file carries its SPDX tag |
+| `test` | The suite on Python **3.11, 3.12 and 3.13** — every version `pyproject.toml` carries a classifier for. 3.11 is the floor `requires-python` declares, 3.13 is the pinned development version, and 3.12 is tested because it is claimed |
 | `executables` | `bin/` regenerates to a no-op, and both PEP 723 scripts run **from outside the project directory** |
-| `dev-stack` | The real thing: brings up Lakekeeper + Postgres + MinIO from `.env.sample`, bootstraps it, runs the 12 dev-stack tests, then the demo end to end |
+| `spark` | Builds a Spark Connect server with the Iceberg runtime and S3A, then runs the live Spark tests against it |
+| `dev-stack` | The real thing: brings up Lakekeeper + Postgres + MinIO from `.env.sample`, bootstraps it, runs the dev-stack tests, then the demo end to end |
 
-The `dev-stack` job sets `ZAMBONI_REQUIRE_DEV_STACK=1`, which turns "cannot reach the stack"
-from a skip into a failure. Without it, a stack that never started yields a suite of skips
-and a green tick that means nothing was tested.
+Two jobs guard against a green tick that means nothing. `dev-stack` sets
+`ZAMBONI_REQUIRE_DEV_STACK=1`, which turns "cannot reach the stack" from a skip into a
+failure; `spark` selects its tests by marker and fails if any of them *skipped*, because
+those fixtures skip on a closed port by design. Without both, a stack that never started
+yields a suite of skips and a tick that means nothing was tested.
+
+The `executables` job earned its place before it ever ran: `bin/` was found stale against
+three separate changes, each of which this job would have caught and nothing else did.
+
+The other two workflows do not gate anything.
+[version-watch.yml](.github/workflows/version-watch.yml) runs on the 1st of the month and
+asks PyPI whether anything has been released above a version cap `pyproject.toml` declares —
+`pyiceberg<0.12` and the dev group's `pyspark-client<4.1` are both waiting on a release that
+has to be tested before the bound moves. It keeps one issue current and starts no containers.
+There is deliberately **no nightly re-run of the suite**: every input to these tests is
+pinned — `uv.lock`, exact image tags in `dev-stack/.env.sample`, pinned Maven jars in the
+Spark image, SHA-pinned actions — so against an unchanged commit it would re-prove the tick
+that commit already has. [release.yml](.github/workflows/release.yml) publishes to PyPI on a
+`v*.*.*` tag, running the suite again first.
 
 Locally, [.pre-commit-config.yaml](.pre-commit-config.yaml) runs the fast checks on every
 commit:
 
 ```bash
-uv run pre-commit install
+uv run pre-commit install     # `make venv` is what installs pre-commit itself
 uv run pre-commit run --all-files
 ```
 
 The full suite stays out of the hook deliberately — a four-minute hook gets bypassed, and a
-bypassed hook is worse than none.
+bypassed hook is worse than none. Run it with `make test`, below.
+
+## Running Tests
+
+**`make` on its own prints every target.** Each one names the CI job it corresponds to, so
+"did I break CI" is answerable before pushing rather than after:
+
+```bash
+make                      # the target list, and which stack is currently up
+make doctor               # can this machine run everything? checks the toolchain, not the code
+make venv                 # .venv from uv.lock — the package, the dev dependencies, and pip
+make ci                   # every CI check that needs no containers
+```
+
+New here, or setting up a machine: **[ONBOARDING.md](ONBOARDING.md)** is the worked
+version of this section, with a checkpoint after each step.
+
+Every target that runs Python goes through `uv`, so it uses `.venv` built from `uv.lock` and
+never whatever is installed globally. Each calls a `require_venv` guard first: if `.venv` is
+missing it **warns and builds it** rather than telling you to, because `uv sync` is
+deterministic here and there is only one right answer. If a *different* virtualenv is
+activated it warns about that too — `uv` ignores it, which is confusing precisely once.
+
+**pip is installed inside `.venv` deliberately**, with `uv venv --seed`. `uv sync` does not
+put it there, and the failure that causes is silent and lands somewhere else: with `.venv`
+activated but no pip in it, `pip install x` runs whichever pip is next on `PATH` and installs
+into *that* interpreter — on one machine here, a Python 3.10 pip against a 3.13 project. Any
+target repairs it. Adding a real dependency is still `uv add`, because that updates `uv.lock`;
+the seeded pip is there so an accident stays inside the virtualenv.
+
+### The CI jobs, one at a time
+
+| CI job | Run it locally | Needs |
+|---|---|---|
+| `lint` | `make lint` | nothing |
+| `test` | `make test` | nothing |
+| `test`, all three Pythons | `make test-matrix` | nothing; restores `.venv` afterwards |
+| `executables` | `make test-executables` | nothing |
+| `dev-stack` | `make test-local`, then `make test-demo` | the local stack |
+| `dev-stack`, Trino leg | `make test-trino` | Trino in the stack |
+| `spark` | `make test-spark` | Spark in the stack |
+
+`make lint` is the whole job; its pieces are separate targets for a tighter loop while
+editing — `make format` writes the formatting fix, and there are `make ruff`,
+`make format-check`, `make typecheck`, `make precommit` and `make ruff-pin` (the check that
+`.pre-commit-config.yaml` and `uv.lock` name the same ruff, without which every commit
+churns). `make test-docs` runs the documentation invariants alone in under a second, which
+is the one to keep running while editing prose.
+
+### The dev stack, per engine
+
+The base stack is Lakekeeper, Postgres and MinIO. Each engine is a compose profile on top,
+and adding one does not disturb what is already running:
+
+```bash
+make local-stack-start      # Lakekeeper + Postgres + MinIO, no engine
+make trino-stack-start      # ... plus Trino          (--profile trino)
+make spark-stack-start      # ... plus Spark Connect  (--profile spark)
+
+make stack-status           # local, local+trino, local+spark, local+trino+spark, or none
+make stack-stop             # stop everything, keep the warehouse
+make stack-clean            # stop everything and delete the volumes
+```
+
+Which states exist, which target moves you along each edge, and what each state lets you
+run:
+
+```mermaid
+flowchart LR
+  N["<b>none</b><br/>no containers<br/><br/><i>every target above<br/>that needs nothing</i>"]
+  L["<b>local</b><br/>Lakekeeper · Postgres · MinIO<br/><br/>make test-local<br/>make test-demo"]
+  LT["<b>local+trino</b><br/><br/>make test-trino"]
+  LS["<b>local+spark</b><br/><br/>make test-spark"]
+  LTS["<b>local+trino+spark</b><br/><br/>make test-trino<br/>make test-spark"]
+
+  N -->|local-stack-start| L
+  N -->|trino-stack-start| LT
+  N -->|spark-stack-start| LS
+  L -->|trino-stack-start| LT
+  L -->|spark-stack-start| LS
+  LT -->|spark-stack-start| LTS
+  LS -->|trino-stack-start| LTS
+
+  L -.->|stack-stop| N
+  LT -.->|stack-stop| N
+  LS -.->|stack-stop| N
+  LTS -.->|stack-stop| N
+```
+
+The edge the table cannot express is the one that goes *backwards*: **starting an engine takes
+`test-local` and `test-demo` away.** Those two require no engine at all, so `local+trino` is
+not a superset of `local` — it is a different state, and `make stack-stop` is how you get the
+first two back. Every other transition only adds.
+
+`make stack-status` prints which of these you are in. The start targets write
+`dev-stack/.env` from the sample if it is missing, check the pinned
+subnet is free, and bootstrap the warehouse. `local-stack-stop`, `trino-stack-stop` and
+`spark-stack-stop` are the same teardown, which names both profiles — a plain
+`docker compose down` leaves the engine container standing.
+
+**A test target that needs a stack refuses the wrong one rather than skipping.** The
+fixtures in `tests/test_dev_stack.py` skip when a port is closed, by design, so a green run
+against a stack that never started would mean nothing was tested. `make test-spark` checks
+that Spark is in the running stack, sets `ZAMBONI_REQUIRE_DEV_STACK=1`, selects by marker,
+and **fails if anything skipped** — the same three guards CI uses. `make test-local` also
+requires that *no* engine is running, since one left over from an earlier session changes
+what the dev-stack tests exercise.
+
+## Contributing, security, licence
+
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — the five conventions that make this codebase's
+  claims trustworthy, each with the evidence that earned it. Read rule 1 before opening a
+  pull request: verify a claim before making it.
+- **[SECURITY.md](SECURITY.md)** — this tool deletes files, so the failure mode of a defect
+  is somebody's data. Report anything that could delete a still-referenced file privately,
+  and note that it does **not** need to be attacker-triggerable to count.
+- **Licence: Apache-2.0** — the same licence as Iceberg and PyIceberg, so contributions
+  flow both ways without friction. Every source file carries an SPDX tag; see
+  [LICENSE](LICENSE).
 
 ## Documentation
+
+**Start here: [docs/user_guide.md](docs/user_guide.md)** — the four ways to run
+Zamboni (Python API, cron + CLI, Trino, Spark), a capability table to choose an
+engine with, secrets handling, and the local engine's measured memory ceiling.
 
 - **[docs/design.md](docs/design.md)** — high-level design: how Iceberg stores a table, how
   that grows, why each maintenance operation exists, architecture, sequence diagrams,
   constraints, and who owns what.
 - **[docs/plan.md](docs/plan.md)** — delivery plan: scope, phasing, requirements
   traceability, verification approach, residual risk.
-- **[docs/runbook.md](docs/runbook.md)** — operator runbook: the order to run the six verbs
-  in, how to derive a cadence, how to size the orphan guard, and what each exit code means.
+- **[docs/runbook.md](docs/runbook.md)** — when a maintenance cycle fails: exit codes,
+  getting a stack trace out of cron, table status, a health check, and recovery.
+- **[docs/runbook-dev.md](docs/runbook-dev.md)** — running each step by hand: the order
+  and why each position matters, cadence arithmetic, sizing the orphan guard, the dev stack.
 - **[docs/devops.md](docs/devops.md)** — running it in production: the cron line, `zamboni.yml`
   and `.env`, why there is no shell wrapper, and the multi-tenant layout for one
   warehouse per customer.
-- **[docs/tasks.md](docs/tasks.md)** — the ZMBNI backlog: what is done, what is left, and
-  what is deliberately not being done.
-- **[docs/roadmap.md](docs/roadmap.md)** — the six features beyond `v0.1.0`, and why they are
-  sequenced as they are. The theme is to stop being one implementation: Trino and Spark can do
-  this work too, and Zamboni should be one option behind a common interface.
+- **[docs/tasks_historical.md](docs/tasks_historical.md)** — the ZMBNI backlog as it stood
+  when tracking moved to GitHub: 125 delivered stories with the reasoning behind each, and
+  a map from every migrated id to its issue. Frozen. Current work is on
+  [board #23](https://github.com/users/paulcaron16k/projects/23).
+- **[docs/roadmap.md](docs/roadmap.md)** — the six features planned beyond `v0.1.0`, five of
+  which shipped. Mostly a record now: what each was for, the evidence it was chosen on, and
+  the one place the sequencing was wrong. The remaining item is PyIceberg 0.12, blocked
+  upstream.
 - **[docs/engine-comparison.md](docs/engine-comparison.md)** — what Zamboni, Trino and Spark
   each can do, and the twelve places where the same-sounding operation differs.
 - **[docs/ice-keeper-comparison.md](docs/ice-keeper-comparison.md)** — against a deployed
@@ -204,18 +680,24 @@ target-sized files with PyIceberg's own writer, and commits the swap as a single
 `replace` snapshot per partition.
 
 ```python
+import os
+
 from zamboni import CatalogSession, CompactionConfig, S3Settings, TableCompactor
 
 session = CatalogSession.for_lakekeeper(
     uri="http://localhost:8181/catalog",
     warehouse="demo",
-    credential="spark:2OR3eRvYfSZzzZ16MlPd95jhLnOaLM52",
+    # From the environment, or your secret manager -- never a literal, and never
+    # a command-line flag. See docs/user_guide.md#secrets.
+    credential=os.environ["ZAMBONI_CREDENTIAL"],
     oauth2_server_uri="http://localhost:30080/realms/iceberg/protocol/openid-connect/token",
     scope="lakekeeper",
-    s3=S3Settings(  # omit when Lakekeeper vends credentials
+    # Omit entirely when the catalog vends credentials, which is the arrangement
+    # worth having: one revocable secret instead of long-lived object-store keys.
+    s3=S3Settings(
         endpoint="http://localhost:9000",
-        access_key_id="minio-root-user",
-        secret_access_key="minio-root-password",
+        access_key_id=os.environ["ZAMBONI_S3_ACCESS_KEY_ID"],
+        secret_access_key=os.environ["ZAMBONI_S3_SECRET_ACCESS_KEY"],
     ),
 )
 
@@ -234,12 +716,19 @@ A Lakekeeper + Postgres + MinIO stack, configured so reclamation works, lives in
 [dev-stack/](dev-stack/):
 
 ```bash
-cp dev-stack/.env.sample dev-stack/.env
-cd dev-stack && docker compose up -d && uv run bootstrap.py
+make local-stack-start                         # .env, compose up, bootstrap; see Running Tests
+make test-local                                # the stack tests, refusing to skip
 
 export ZAMBONI_URI=http://localhost:8182/catalog
 export ZAMBONI_WAREHOUSE=zamboni
-./bin/demo --catalog lakekeeper next-day        # the demo, on Lakekeeper and MinIO
+./bin/zamboni-demo --catalog lakekeeper next-day        # the demo, on Lakekeeper and MinIO
+```
+
+The equivalent by hand, if you would rather see what those targets do:
+
+```bash
+cp dev-stack/.env.sample dev-stack/.env
+cd dev-stack && docker compose up -d --wait && uv run bootstrap.py
 uv run pytest tests/test_dev_stack.py          # skipped when the stack is down
 ```
 
@@ -260,13 +749,14 @@ is the compose gateway rather than `minio` — are explained in
 
 ## Environment
 
-Everything runs from a locked virtualenv. Nothing resolves against global site-packages —
-that matters here because PyIceberg's SQL catalog needs SQLAlchemy 2.x while this machine's
-global environment pins 1.4.x for Airflow.
+Everything runs from a locked virtualenv, and nothing resolves against global site-packages.
+That is not fastidiousness: PyIceberg's SQL-catalog extra pins SQLAlchemy, and a shared
+site-packages is under no obligation to agree. A venv makes that a non-question rather than a
+resolution problem.
 
 ```bash
 uv sync            # builds .venv from uv.lock, Python pinned by .python-version
-uv run pytest -q   # 44 tests, no Docker/MinIO/Lakekeeper needed
+uv run pytest -q   # no Docker needed; the dev-stack tests skip when it is down
 uv run ruff check src tests scripts
 ```
 
@@ -323,14 +813,29 @@ With `./zamboni.yml` and `./.env` present that is the whole cron line — see
 **[docs/devops.md](docs/devops.md)**, which also covers why there is deliberately no shell
 wrapper and how a multi-tenant fleet is scheduled.
 
-Each mutating verb takes `--engine` (default `local`, the PyIceberg one). **Trino works**
-(`pip install zamboni[trino]`, then `--engine trino --trino-host …`) for five of the six
-operations; Spark is declared but not yet implemented. `zamboni engines` reports exactly what
-each one does and does not do, which is worth reading before planning a migration —
-particularly that Trino cannot Z-order, so only your leading `sorted_by` column gets file
-skipping. The `--yes` rule holds on every
-engine: where one cannot preview an operation, a run without `--yes` is *refused* rather than
-executed or dressed up as a dry run it did not perform.
+Each mutating verb takes `--engine` (default `local`, the PyIceberg one).
+
+**Spark works** — all six operations, over the Iceberg Spark procedures, verified against
+Spark 4.0.4:
+
+```bash
+pip install "iceberg-zamboni[spark]"             # the Connect client: ~13MB, no JVM
+zamboni compact default.events --engine spark --spark-remote sc://localhost:15002 --yes
+```
+
+**Trino works** for five of the six — it cannot remove dangling deletes:
+
+```bash
+pip install "iceberg-zamboni[trino]"
+zamboni compact default.events --engine trino --trino-host localhost --yes
+```
+
+Spark comes first because it is the more complete of the two: it Z-orders and Trino does
+not, so on Trino only your leading `sorted_by` column gets file skipping. `zamboni engines`
+reports exactly what each one does and refuses, which is worth reading before planning a
+migration. The `--yes` rule holds on every engine: where one cannot preview an operation, a
+run without `--yes` is *refused* rather than executed or dressed up as a dry run it did not
+perform.
 
 `expire` and `remove-orphans` are dry-run without `--yes`, like `compact`. Both take
 `--table-config` for the [`retention`](docs/table-config.md#retention) block, and both
@@ -352,7 +857,10 @@ When `sort_expression` is set the stream is routed through DuckDB, whose `ORDER 
 to `temp_directory` on disk rather than holding the group in memory.
 
 `MemoryMode.AUTO` (the default) picks `IN_MEMORY` for groups under `memory_budget_bytes`
-and `CHUNKED` above it.
+(256MiB) and `CHUNKED` above it. CHUNKED reads **one data file at a time**, which is what
+bounds it: peak memory is set by the largest file rather than by the group, so a partition
+larger than RAM still compacts. It costs about 1.5x on read, which is why small groups stay
+on the materialising path. See [docs/user_guide.md](docs/user_guide.md) for the numbers.
 
 ## Limitations
 
@@ -428,6 +936,41 @@ errs the other way and hardcodes `sort_order_id=None` on every file it writes.
 Iceberg has no clustering concept distinct from sort order, and neither PyIceberg nor
 duckdb-iceberg has z-order or Hilbert curves anywhere. Express a z-order as a
 bit-interleaving expression in `sort_expression`.
+
+## Why PyIceberg is capped at `<0.12`
+
+`pyproject.toml` pins `pyiceberg[pyarrow]>=0.11.1,<0.12`. **0.11.x is fully supported**;
+the cap is a held position while the 0.12 release candidates are tested, not a judgement
+about 0.12.
+
+Zamboni is tested against each 0.12 release candidate as it appears. Issues found are
+reported upstream and fixed; that is ordinary, and it is how a cap gets lifted rather than
+a reason to keep one. Currently open:
+
+| Issue | What it is | Fix |
+|---|---|---|
+| [iceberg-python#3758](https://github.com/apache/iceberg-python/issues/3758) | `upsert` on a *partitioned* table keeps the replaced row beside its replacement and duplicates an untouched one, silently. Overwrite's new manifest pruning keeps a non-matching manifest verbatim, including the entries being deleted | [#3780](https://github.com/apache/iceberg-python/pull/3780), open |
+
+The issue and its PR are the source of detail; there is no second copy here. Our own
+reproduction and the mechanism are in
+[docs/upstream-0.12-upsert-regression.md](docs/upstream-0.12-upsert-regression.md).
+
+Two things worth being clear about:
+
+- **This is an ingest hazard, not a maintenance one.** Zamboni's own operations pass on
+  0.12 -- what the defect reaches is any *write* path going through overwrite on a
+  partitioned table, which is most merge-style ingestion. The cap protects your ingest.
+- **The cap is deliberate, not staleness.** The original bound was open-ended, which meant
+  the day 0.12 published, any `uv lock --upgrade` would have pulled it in with nobody
+  touching this code.
+
+When 0.12 releases and the suite passes against it, the supported range will include it.
+
+Note the capability probes do not catch a defect like this by design: they answer "can this
+build do X", and such a build *can* upsert -- it simply does it wrongly. Proving
+correctness means writing data and reading it back, which is a test, not a probe. Where a
+probe genuinely must ask about behaviour rather than structure, it runs the operation --
+see [Capability detection](#capability-detection-not-version-checks).
 
 ## Capability detection, not version checks
 

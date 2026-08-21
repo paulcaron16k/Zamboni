@@ -12,15 +12,15 @@ it.
 ## 1. Narrative
 
 ```
-./bin/demo clear                 # empty catalog, DAYS_INGESTED=0
-./bin/demo next-day              # ingest day 1, then print status automatically
-./bin/demo next-day              # ingest day 2 ...
-./bin/demo status                # re-print status on demand
-./bin/demo query                 # list discharges and events, with timings
-./bin/demo maintenance           # run zamboni, then print status automatically
-./bin/demo query                 # same queries, compare
+./bin/zamboni-demo clear                 # empty catalog, DAYS_INGESTED=0
+./bin/zamboni-demo next-day              # ingest day 1, then print status automatically
+./bin/zamboni-demo next-day              # ingest day 2 ...
+./bin/zamboni-demo status                # re-print status on demand
+./bin/zamboni-demo query                 # list discharges and events, with timings
+./bin/zamboni-demo maintenance           # run zamboni, then print status automatically
+./bin/zamboni-demo query                 # same queries, compare
 ...
-./bin/demo next-day              # after day 5 -> "No More Data"
+./bin/zamboni-demo next-day              # after day 5 -> "No More Data"
 ```
 
 The intended arc: **ingest → status → query → maintain → status → query**, so the developer
@@ -135,7 +135,7 @@ CSVs are generated once and committed, so the demo is deterministic and reviewab
 
 ### 3.2 Write modes
 
-`./bin/demo mode [cow|mor]` selects how day-over-day updates are applied.
+`./bin/zamboni-demo mode [cow|mor]` selects how day-over-day updates are applied.
 
 | Mode | Behaviour | Implementation |
 |---|---|---|
@@ -264,7 +264,7 @@ The demo must **not** present a noisy millisecond delta as if it were a benchmar
 | A2 | `process_id` is a **UUIDv7 string** for both tables | Auto-increment integer; the brief allows either. UUIDv7 keeps one type across tables and sorts by time |
 | A3 | `table_schema.json` holds **column definitions**; `table-config.json` holds **layout** | Merge both into `table_schema.json` |
 | A4 | `hims_employees` uses **upsert** (stable row identity) | Full `overwrite` — the brief offers both; upsert is gentler on the table's history |
-| A5 | Demo lives at `Zamboni/bin/demo`, data under `Zamboni/data/healthims/` | A separate top-level project |
+| A5 | Demo lives at `Zamboni/bin/zamboni-demo`, data under `Zamboni/data/healthims/` | A separate top-level project |
 
 ---
 
@@ -272,18 +272,18 @@ The demo must **not** present a noisy millisecond delta as if it were a benchmar
 
 The demo is done when a developer can, from a clean checkout:
 
-1. `./bin/demo clear && ./bin/demo next-day` five times and see file counts grow.
+1. `./bin/zamboni-demo clear && ./bin/zamboni-demo next-day` five times and see file counts grow.
 2. See `status` report a small-file problem (many files, low average size).
 3. Run `query` and get correct discharge and event results, including the three cancelled
    discharges showing their restart, and EVS events attached to `discharged` rows.
 4. Run `maintenance` and see file count fall, average size rise, and the layout
    (z-order, partitioning) reflected in `status`.
 5. Re-run `query`, get **identical results**, with metadata metrics improved.
-6. Repeat all of the above with `./bin/demo mode mor` and see delete files appear in
+6. Repeat all of the above with `./bin/zamboni-demo mode mor` and see delete files appear in
    `status` before maintenance and be reported as dangling afterwards.
 7. Observe that `status` reports **more files on disk than live** after `maintenance`, and
    that the run says why nothing was deleted -- the demo's files are minutes old and both
    reclaim defaults are age-based. Compaction supersedes files; it does not free them.
 8. Run `maintenance --reclaim-now` and see files on disk fall to exactly the live count,
    with `query` still returning identical rows.
-9. `./bin/demo next-day` after day 5 prints **"No More Data"** and changes nothing.
+9. `./bin/zamboni-demo next-day` after day 5 prints **"No More Data"** and changes nothing.

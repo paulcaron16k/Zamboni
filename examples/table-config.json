@@ -1,5 +1,6 @@
 {
-  "version": 1,
+  "version": 2,
+  "warehouse": "acme",
   "defaults": {
     "partition_evolution": {
       "enabled": true,
@@ -12,73 +13,77 @@
       ]
     }
   },
-  "tables": {
-    "analytics.events": {
-      "description": "Clickstream fact table. Queried by customer and product, over a time range.",
-      "partition": [
-        {
-          "column": "occurred_at",
-          "transform": "day"
-        },
-        {
-          "column": "tenant_id",
-          "transform": "bucket",
-          "num_buckets": 16
-        }
-      ],
-      "partition_evolution": {
-        "enabled": true,
-        "rules": [
-          {
-            "from": "day",
-            "to": "month",
-            "older_than_days": 90
-          }
-        ]
-      },
-      "ordering": {
-        "mode": "zorder",
-        "zorder": {
-          "columns": [
-            "customer_id",
-            "product_id"
+  "namespaces": {
+    "analytics": {
+      "tables": {
+        "events": {
+          "description": "Clickstream fact table. Queried by customer and product, over a time range.",
+          "partition": [
+            {
+              "column": "occurred_at",
+              "transform": "day"
+            },
+            {
+              "column": "tenant_id",
+              "transform": "bucket",
+              "num_buckets": 16
+            }
           ],
-          "precision_bits": 16
-        }
-      },
-      "target_file_size_bytes": 268435456,
-      "min_input_files": 4
-    },
-    "analytics.audit_log": {
-      "description": "Append-only. Read by day, never condensed: auditors ask for single days years back.",
-      "partition": [
-        {
-          "column": "occurred_at",
-          "transform": "day"
-        }
-      ],
-      "partition_evolution": {
-        "enabled": false,
-        "rules": []
-      },
-      "ordering": {
-        "mode": "sort",
-        "sort": [
-          {
-            "column": "actor_id",
-            "direction": "asc",
-            "nulls": "last"
+          "partition_evolution": {
+            "enabled": true,
+            "rules": [
+              {
+                "from": "day",
+                "to": "month",
+                "older_than_days": 90
+              }
+            ]
+          },
+          "ordering": {
+            "mode": "zorder",
+            "zorder": {
+              "columns": [
+                "customer_id",
+                "product_id"
+              ],
+              "precision_bits": 16
+            }
+          },
+          "target_file_size_bytes": 268435456,
+          "min_input_files": 4
+        },
+        "audit_log": {
+          "description": "Append-only. Read by day, never condensed: auditors ask for single days years back.",
+          "partition": [
+            {
+              "column": "occurred_at",
+              "transform": "day"
+            }
+          ],
+          "partition_evolution": {
+            "enabled": false,
+            "rules": []
+          },
+          "ordering": {
+            "mode": "sort",
+            "sort": [
+              {
+                "column": "actor_id",
+                "direction": "asc",
+                "nulls": "last"
+              }
+            ]
           }
-        ]
+        },
+        "dim_customer": {
+          "description": "Small dimension. Unpartitioned; compaction just keeps the file count down.",
+          "partition_evolution": {
+            "enabled": false,
+            "rules": []
+          },
+          "target_file_size_bytes": 67108864
+        }
       }
-    },
-    "analytics.dim_customer": {
-      "description": "Small dimension. Unpartitioned; compaction just keeps the file count down.",
-      "partition_evolution": {
-        "enabled": false,
-        "rules": []
-      },
-      "target_file_size_bytes": 67108864
     }
   }
 }

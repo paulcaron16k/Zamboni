@@ -23,6 +23,182 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **A monthly version watch, in place of a nightly test run.** Every `<` bound in
+  `pyproject.toml` is a decision with an expiry date -- `pyiceberg<0.12` is a
+  data-corruption workaround, the dev group's `pyspark-client<4.1` is matched to
+  the dev stack's server -- and nothing announced when one went stale.
+  Dependabot cannot: its `uv` ecosystem updates `uv.lock` and not
+  `pyproject.toml`, so with `<4.1` written down the most it can offer is a 4.0.x
+  patch. `scripts/version_watch.py` asks PyPI about every cap the file declares,
+  ignores pre-releases and fully yanked versions, and keeps one issue current.
+  Seconds, no containers, no matrix. It found `pyspark-client` 4.2.0 on its first
+  run.
+
+  A nightly re-run of the suite was considered and rejected: every input to the
+  tests is pinned -- `uv.lock`, exact image tags, pinned Maven jars, SHA-pinned
+  actions -- so against an unchanged commit it re-proves the tick that commit
+  already has.
+
+### Changed
+
+- **Epics and stories are GitHub issues, not rows in a markdown file.** Ids came
+  from us before -- `ZMBNI-1xx` per epic, assigned by hand -- and now they come
+  from GitHub, tracked on project #23 with the `gh agile` extension.
+  `docs/tasks.md` is `docs/tasks_historical.md`: frozen, hash-pinned by a test,
+  and carrying a map from every migrated id to the issue it became, because 147
+  commit messages cite those ids and cannot be rewritten. Four of its five tests
+  are gone -- three are now covered by GitHub or by `gh agile validate`, and the
+  story-count check died with the hand-written totals it existed to police. The
+  fifth, FR traceability, was broadened to every document instead.
+
+- **The PyPI development status is Beta**, not Alpha. Alpha understated where
+  this is: the scope is delivered, every operation is verified against a live
+  Lakekeeper and MinIO plus real Trino and Spark servers, and CI runs green on
+  three Pythons. It is deliberately not Production/Stable -- that waits on the
+  same two things `1.0.0` does, a maintenance cycle against a warehouse we did
+  not build and a second user on the config schema. Takes effect on the next
+  release; PyPI metadata cannot be edited in place.
+
+- **CI tests every Python `pyproject.toml` claims**, not only the endpoints.
+  The matrix was 3.11 and 3.13 -- the floor and the development pin -- while the
+  classifiers promised 3.12 as well. Endpoints catch a 3.12-only *construct*,
+  which fails on the 3.11 leg, but not a 3.12-only runtime difference, which
+  passes both and breaks for whoever is on 3.12. The legs run in parallel, so
+  the third costs no wall-clock. 507 tests pass there, so the claim was true --
+  it simply had no evidence behind it.
+
+### Security
+
+- **Every GitHub Action is pinned to a commit SHA**, with the release in a
+  trailing comment. They were pinned to movable refs, so each job ran whatever
+  `v4` or `release/v1` pointed at that morning — including the `release.yml`
+  job holding an OIDC credential that can publish to PyPI. `.github/dependabot.yml`
+  proposes monthly bumps so the pins do not rot, and two tests keep both halves
+  honest. Raised by the 0.3.0 security review; ZMBNI-1817.
+
+### Changed
+
+- **What "Spark works" means is now stated per connection path.** The security
+  review flagged `spark-lib`'s `pyspark>=3.5` floor as looser than the Connect
+  client's `>=4.0`. Investigating inverted the conclusion: Spark 3.5 carries an
+  *extended* LTS to **November 2027**, Iceberg still publishes
+  `iceberg-spark-runtime-3.5` at 1.11.0, and `pyspark-client` did not exist
+  before 4.0 -- so `spark-lib` with `--spark-master` is the **only** way to
+  drive a Spark 3.5 cluster. Raising the floor would have removed that for no
+  gain in verification, since CI covers Connect against 4.0.4 and the classic
+  path is untested at every version.
+
+  So the floor stays and the claim got fixed instead. README and
+  [docs/user_guide.md](docs/user_guide.md) now carry a verified/best-effort
+  table per path, and every Spark run logs the version it reached and how it
+  connected -- once per run -- so a failure on an untested combination names
+  the combination. ZMBNI-1818.
+
+## [0.3.0] - 2026-08-13
+
+What the first publication exposed: two defects only a real install could show,
+and an extras list that had accumulated one entry doing nothing and two named the
+wrong way round. A minor rather than a patch because of the third of those --
+`spark` now means something different, and a version number is the only warning
+anyone gets.
+
+### Security
+
+- **Pre-release security review run against `v0.2.0..HEAD`** — the first under
+  [docs/releasing.md §3a](docs/releasing.md), now step 0 of the release
+  checklist. All eight checks clean: no secret reaches a log, `repr`, exception
+  or the process table; the credential-literal guard was mutation-verified; no
+  destructive default moved; the reclaim invariants still abort (70 tests); every
+  engine identifier is quoted; **zero** packages added, removed or version-changed
+  in `uv.lock`; the wheel and sdist carry no `.env`, catalog, warehouse or data
+  file; and the release workflow still publishes from OIDC with no stored secret.
+  Two observations recorded rather than fixed, neither a blocker: GitHub Actions
+  are pinned to movable tags rather than commit SHAs (ZMBNI-1817), and `spark-lib`
+  still floors at `pyspark>=3.5` where the Connect client requires `>=4.0`.
+
+### BREAKING
+
+- **`spark` is now the Spark Connect *client*; the embedded library is
+  `spark-lib`.** `spark` used to install `pyspark` -- 472MB and a JDK -- while
+  the client hid behind `spark-connect`, a name nobody guessed. That was
+  backwards: driving a Spark you already have is the common case, and it is what
+  `trino` means for Trino, so the two engines now read the same way.
+
+  **If you install `iceberg-zamboni[spark]`** and used a *local* session
+  (`--spark-master local[*]`), switch to `iceberg-zamboni[spark-lib]`. If you
+  used `--spark-remote`, you now get a 13MB install instead of a 472MB one and
+  need no JDK.
+  **If you install `iceberg-zamboni[spark-connect]`**, that extra is gone;
+  use `spark`. ZMBNI-1816.
+
+- **The `bucket` extra is removed.** It installed nothing: `pyiceberg[pyarrow]`
+  is a hard dependency and already requires `pyiceberg-core`, so `[bucket]` only
+  restated that with a looser floor. `pip install "iceberg-zamboni[bucket]"` now
+  warns that the extra is unknown and installs exactly what it installed before.
+  **Nothing to do** -- bucket-partitioned tables work with a plain install, and
+  did before. Removing it rather than keeping an inert alias, because an extra
+  that exists and does nothing reads as a warning about a problem that does not
+  exist. ZMBNI-1815.
+
+### Fixed
+
+- **The demo told new users to run a command that does not exist.** Every "run X
+  next" hint said `./bin/zamboni-demo` -- right in a checkout, a dead path for
+  anyone who ran `pipx install iceberg-zamboni`, where the command is bare
+  `zamboni-demo`. `invocation()` now keys off the same signal as
+  `default_inputs()` and `default_root()`, and an AST guard fails the build if
+  the literal comes back. ZMBNI-1811.
+
+- **The PyPI page had no links.** `[project.urls]` was missing entirely, so the
+  published page carried no Homepage, Repository, Changelog or Issues link. That
+  is worse here than usual: the docs are deliberately not shipped in the wheel
+  and are meant to be reached by link. PyPI metadata cannot be edited in place,
+  which is what makes this a release rather than a commit. ZMBNI-1812.
+
+### Changed
+
+- **The PyIceberg 0.12 position is stated without drama.** 0.11.x is fully
+  supported; each 0.12 release candidate is tested as it appears; issues found
+  are reported upstream and fixed, and the supported range widens when a release
+  passes. The README section is now a one-row table naming the open issue
+  ([#3758](https://github.com/apache/iceberg-python/issues/3758)) and its fix
+  ([#3780](https://github.com/apache/iceberg-python/pull/3780)) -- those are the
+  source of detail, so there is no second copy here to keep current.
+  ZMBNI-1814.
+
+- **The README said Spark was "declared but not yet implemented".** It has been
+  implemented and verified against Spark 4.0.4 since 0.2.0. Spark now leads the
+  engine section with its own install line, ahead of Trino, because it is the
+  more complete of the two -- it Z-orders and Trino does not.
+
+## [0.2.0] - 2026-08-12
+
+**Three engines, a public repository, and a name on PyPI.** 0.1.0 was one
+maintainer over PyIceberg; this release adds Trino and Spark behind the same six
+verbs and the same `table-config.json`, makes `maintenance` a single command an
+application or a cron line can call, and publishes the result as
+`iceberg-zamboni`.
+
+The BREAKING section is longer than a 0.x release would like. Most of it is the
+cost of those two facts: a distribution rename, a config file that had to grow a
+namespace level once one warehouse was not the only shape, and secrets that had
+to stop being command-line flags before anyone's process table was the place
+they lived. Each entry names what to change.
+
+### Published
+
+- **The repository is public: [github.com/paulcaron16k/Zamboni](https://github.com/paulcaron16k/Zamboni).**
+  Created private, pushed, CI verified green, then flipped — nothing was visible
+  until it was known to build.
+
+- **CI has now run, and the first run was green.** All six jobs, including
+  `dev-stack` (a real Lakekeeper, Postgres and MinIO plus the demo end to end)
+  and `spark` (a built Spark Connect server with the Iceberg runtime). The CI
+  badge is in the README for the first time, because now it reports a result
+  rather than making a claim.
+
+### Added
+
 - **`zamboni maintenance`** — one command that runs the six operations in the
   runbook order over every configured table, exiting with the worst code any of
   them produced. This is the DevOps entry point: with `./zamboni.yml` and
@@ -46,6 +222,28 @@ Two categories beyond the usual set, because this tool deletes files:
   is written.
 - **`zamboni engines`** — per-engine, per-operation support, previewability and
   limitations.
+- **`--engine spark`** — all six operations over the Iceberg Spark procedures,
+  including Z-order, which Trino cannot do. Needs the optional `zamboni[spark]`
+  extra (a JVM and ~300MB). Verified against a live Spark 3.5.9 driving
+  Lakekeeper and MinIO.
+
+  Three things behave differently from Trino and are declared rather than
+  smoothed over: `older_than` is a **typed literal timestamp computed on the
+  client**, because a `CALL` argument cannot be an expression — so a fast clock
+  expires more than intended; `remove_orphan_files` refuses any interval under
+  24 hours, and refuses exactly 1 day too, since the timestamp is evaluated
+  moments after it is computed; and it **lists with Hadoop FileSystem rather
+  than Iceberg FileIO**, so it needs its own `spark.hadoop.fs.s3a.*`
+  credentials even though every other operation runs on the catalog's vended
+  ones.
+
+  The timestamp carries an **explicit `+00:00` offset**. A bare wall-clock is
+  read in `spark.sql.session.timeZone`, not UTC — measured against a live
+  session in `America/New_York`, every expiry cut four hours deeper than asked,
+  and a 1-day orphan guard fell under Spark's 24-hour floor. Setting the
+  operator's session timezone would have been the wrong fix; the offset makes
+  the literal unambiguous without touching their session.
+
 - **`--engine trino`** — five of the six operations, over `ALTER TABLE … EXECUTE`.
   Needs the optional `zamboni[trino]` extra. Configure with `--trino-host`,
   `--trino-port`, `--trino-user`, `--trino-catalog` and `--trino-version`, or the
@@ -60,7 +258,370 @@ Two categories beyond the usual set, because this tool deletes files:
   so it is gated on `--trino-version` and its loss is reported rather than
   silent.
 
+- **`--spark-remote`, `--spark-master` and `--spark-catalog`** — Spark had no
+  CLI flags at all: the maintainer read `remote`, `master` and `catalog` from
+  options that nothing on the command line ever populated, so `--engine spark`
+  was reachable and unconfigurable, and `--trino-catalog` was silently
+  configuring Spark. Engine options are now built per engine.
+
+- **`zamboni[spark-connect]`** — the Spark engine over Spark Connect. This is
+  `pyspark-client`, ~1.5MB of pure Python against pyspark's 434MB, and it starts
+  no JVM, so the machine's Java version stops mattering. Mutually exclusive with
+  `zamboni[spark]`: both provide the `pyspark` package. Needs a Spark 4 server.
+
+  With Connect the Iceberg extensions and the S3 credentials `remove-orphans`
+  lists with belong to whoever operates the server — `spark.hadoop.*` is read
+  when that server builds its Hadoop configuration, so Zamboni cannot supply
+  them at call time and `zamboni doctor` cannot check them.
+
+- **A Spark Connect server in the dev stack**, in its own `spark` profile
+  alongside Trino's, plus a CI job that runs six live tests against it. The
+  Spark maintainer's automated coverage was previously the SQL strings it
+  generated and nothing else, which is how a timezone defect reached review.
+  Its session timezone is deliberately not UTC, because a UTC server cannot
+  distinguish a correct timestamp literal from one missing its offset.
+
+- **[docs/user_guide.md](docs/user_guide.md)** — four ways to run Zamboni, for
+  two audiences. A capability table that leads with Z-order, because that is the
+  row a small deployment should choose an engine on and the one where the
+  obvious choice (Trino) is the wrong one. Secrets posture, a multi-warehouse
+  SaaS loop, and transient-engine scripts for Trino and Spark.
+
+- **A public API.** `zamboni.__all__` was compaction-only, so an application
+  that wanted to expire snapshots had to import `zamboni.expire` — a private
+  path. It now exports the maintainer interface, the config types and the local
+  operation classes, and states the compatibility promise on the list itself.
+
+- **`zamboni table-config generate|validate|summary`** — `generate` writes a
+  config describing the catalog *as it is today*, so the first run against it
+  changes nothing but file sizes. `summary` answers what `validate` does not:
+  what the file would *do*, marking every value that came from a default,
+  naming what an unset knob resolves to instead of printing `None`, and
+  flagging the settings that silently do nothing on the wrong engine.
+  `validate-config` remains as an alias.
+
+- **[docs/runbook-dev.md](docs/runbook-dev.md)** — the developer half of the
+  runbook: running each step by hand, the six-verb order and why each position
+  matters, cadence arithmetic, sizing the orphan guard, the dev stack.
+  [docs/runbook.md](docs/runbook.md) is now what an operator opens when a cycle
+  has failed — exit codes first, getting a stack trace out of cron, table
+  status, a health check, and common failures.
+
+- **`LayoutFeature` and `MaintainerCapabilities.layout`** — Z-order, sort,
+  partition evolution and output-size control are layout *settings* rather than
+  verbs, so `OperationSupport` had nowhere to record them and they existed only
+  as prose inside `compact`'s limitations. Each engine now declares them, and
+  `zamboni engines` prints them. `zamboni table-config summary` derives its "not
+  available on: trino" warnings from those declarations instead of a hardcoded
+  string that would have gone stale the day Trino gained Z-order.
+
+### Changed
+
+- **`MemoryMode.CHUNKED` now bounds peak memory**, which it has always claimed
+  to and never did. Compaction reads **one data file at a time** instead of
+  handing PyIceberg the whole task list. That mattered because
+  `ArrowScan.to_record_batches` materialises each data file into a list before
+  yielding any of it, and drives that with `executor.map`, which submits every
+  task at once and returns results in order — so files that finished early sat
+  in memory waiting for the consumer, and peak grew with the group.
+
+  Measured end to end with file size held at ~28MB while the group grew 4×:
+
+  | Group | before | after |
+  |---|---|---|
+  | 224 MB | +822 MB | **+541 MB** |
+  | 447 MB | +1088 MB | **+527 MB** |
+  | 894 MB | +1111 MB | **+577 MB** |
+
+  Flat is the point: peak is now set by the largest data *file*, so a partition
+  larger than RAM compacts. It applies to the CHUNKED path only, because it
+  costs time.
+
+  That cost was then measured against object storage rather than local files,
+  since the parallelism being given up is what hides network latency — MinIO
+  through Lakekeeper with vended credentials, 228MB in 96 files, with a proxy
+  injecting per-request RTT: 1.12× at 0ms, 1.26× at 10ms, 1.39× at 30ms. All of
+  it was serialised round trips, which is what the read-ahead window below gives
+  back.
+
+- **`read_ahead_bytes` (64MiB) and `max_read_ahead_files` (8)** — a bounded
+  window of files in flight, so CHUNKED is no longer slower than reading
+  everything at once:
+
+  | RTT | one file at a time | windowed | unbounded |
+  |---|---|---|---|
+  | 10 ms | 20.8 s | **15.3 s** | 15.9 s |
+  | 30 ms | 36.2 s | **25.8 s** | 26.3 s |
+
+  The window is sized in **bytes rather than files**, so it adapts: many small
+  files get real concurrency — the case with the most round trips to hide —
+  while a few large ones fall back towards one at a time, the case where memory
+  binds. Peak stays bounded by the window rather than the group (692/840/784MB
+  as a 28MB-file group quadrupled, against 822/1088/1111MB unbounded), at about
+  70% of the unbounded peak rather than the 60% strictly-serial reads managed.
+  Set `read_ahead_bytes=0` to restore those.
+
+  A group cap would also have bounded memory and was **rejected**: clustering
+  quality is a function of how many rows the sort can see at once, so N
+  sub-groups would produce N overlapping ranges and silently degrade every
+  Z-ordered table. Bounding the read avoids that — DuckDB still receives the
+  whole group and spills its sort to disk.
+
+- **`memory_budget_bytes` default lowered from 1GiB to 256MiB.** This is the
+  size above which `AUTO` chooses CHUNKED. The old value predates CHUNKED
+  bounding anything: crossing it bought nothing, so it was set high to avoid a
+  slower path for no benefit. `IN_MEMORY` on a 1GiB group measures ~2.3GiB of
+  peak growth, which is more than a small host has. Raise it if you have memory
+  to spare and would rather have the speed.
+
+- **`--read-ahead-bytes` and `--max-read-ahead-files`** — the two settings
+  added above, now reachable from the command line. They shipped as dataclass
+  fields wired into the backend with no flag, so an operator could not use them.
+
+- **A complete controls reference** in [docs/user_guide.md](docs/user_guide.md):
+  all four places a setting can live and which owns what, plus two worked
+  configurations — general data, and day-partitioned event data with day→month
+  evolution. Both are loaded by the test suite, so they cannot rot against the
+  schema.
+
+- **[SECURITY.md](SECURITY.md) and [CONTRIBUTING.md](CONTRIBUTING.md).** The
+  security policy treats data loss as its first category and says plainly that a
+  report does not need to be attacker-triggerable to count — a logic error that
+  makes a live file look unreferenced fires without anyone trying. The
+  contributing guide writes down the conventions that were previously visible
+  only by reading commits.
+
+- **An SPDX tag on every source file.** `# SPDX-License-Identifier: Apache-2.0`,
+  one line, with a pre-commit hook that fails on a file without it. Chosen over
+  the full Apache header (520 lines, 4.5% of the codebase, 76% of the smallest
+  module) and over nothing at all: the tag gives the machine-readable provenance
+  that survives a file being copied out, at a fifteenth of the cost.
+
+- **A `Secrets` section covering all four deployment shapes** — cron, the Python
+  API, a subprocess, and Airflow — in
+  [docs/user_guide.md](docs/user_guide.md). They leak in different places, and
+  the guide previously covered only cron.
+
+- **The README is written for someone who has not decided yet.** It opens with an
+  install line, a **Status** block (0.x, one author, CI written and never
+  executed, the PyIceberg cap) and a what-it-is-and-is-not list, instead of
+  opening with the evidence that nothing else does this. No CI badge: a badge
+  that has never run is a claim.
+
+- **`trino:` and `spark:` blocks in `zamboni.yml`.** A host, a port, a user name
+  and a catalog name are not secrets, and that file is defined as everything
+  which is not one — but the profile refused those keys, so they could only come
+  from a flag or `.env`. Keys are allow-listed per engine and there is
+  deliberately none for a password.
+
+- **Spark settings in `env.sample`**, which documented five `ZAMBONI_TRINO_*`
+  variables and no Spark equivalent.
+
+- **`maintain()` — the CLI's `maintenance` run, callable from Python.**
+
+  ```python
+  from zamboni import CatalogSession, maintain
+
+  report = maintain(session, table_config="table-config.json", commit=True)
+  raise SystemExit(report.exit_code)
+  ```
+
+  The loop lived only in `cli.py`, and the user guide told integrators to write
+  their own — so the operation order, the `fulfilled_by` skip, which exceptions
+  are refusals rather than failures, and when to stop after a safety abort all
+  existed twice. Now one implementation, with the CLI as a printing adapter over
+  it. `report.exit_code` is the number `zamboni maintenance` would have exited
+  with, and a test pins that. `commit=False` is the default, matching the rule
+  that nothing commits without `--yes`.
+
+### Fixed
+
+- **`bin/zamboni` and `bin/demo` were broken by the distribution rename.** They
+  embed the project as a path dependency, and uv refused it: *"Package metadata
+  name `iceberg-zamboni` does not match given name `zamboni`"*. Testing the wheel
+  had not caught it, because the wheel is not what `bin/` builds.
+  `scripts/build-executable.py` duplicated `[project.scripts]` and hardcoded the
+  distribution name in `[tool.uv.sources]`; both now come from
+  `pyproject.toml`. `bin/demo` is consequently **`bin/zamboni-demo`**, matching
+  the console script a `pip install` puts on your PATH.
+
+- **`zamboni-demo` shipped as a command that could not run.** It resolved the
+  demo's input data relative to the source tree, so an installed copy died on an
+  unhandled `FileNotFoundError` pointing inside `site-packages`, and no data was
+  in the wheel to find. The 17 input files (212 KB) now ship, and reads are
+  separated from writes so nothing is ever written into `site-packages` — the
+  demo writes to `./zamboni-demo/` when run from an install, and keeps using
+  `data/healthims/` in a checkout. `pipx install "iceberg-zamboni[sql]" &&
+  zamboni-demo next-day` now works with no clone.
+
+- **Manifest-pruning safety is decided by behaviour, not by a private symbol
+  name.** The probe asked whether
+  `_SnapshotProducer._build_delete_files_partition_predicate` existed. That
+  method is present on PyIceberg `0.12.0rc1`, **which corrupts data**, and on
+  the builds that fix it — its behaviour changed while its name did not, so no
+  name-based check could tell them apart. Zamboni now runs the smallest
+  operation that would go wrong (two rows in a day-partitioned table, replace
+  one, count) and looks at the result. `0.11.1` does not prune and short-circuits
+  at 3ms; a build that does prune pays ~1.7s once per process. `zamboni doctor`
+  reports whether the answer was observed or assumed.
+
+  This also unblocks PyIceberg 0.12: the unmodified suite passes against it —
+  496 tests plus 31 against live Lakekeeper, MinIO, Trino and Spark — where
+  before, 83 failed for this one reason.
+
+- **`.env` is now looked for under `$ZAMBONI_ROOT`**, after `--env` and
+  `./.env` — the same order the profile already used. `docs/devops.md` puts the
+  fleet-wide `.env` there, so the documented multi-tenant layout worked only
+  when the cron line's `cd` made the working directory and `$ZAMBONI_ROOT` the
+  same place; from anywhere else the symptom was a run with no credentials
+  rather than an error. A foreign `.env` in the working directory no longer
+  masks the fleet's, and finding none remains legal.
+
+- **Spark addressed a nested namespace as one dotted identifier**, which it
+  rejects. Verified against live servers: Spark needs one quoted part per level
+  (`` `ice`.`a`.`b`.`events` ``) and refuses a dot inside a part; **Trino needs
+  exactly the opposite** (`"ice"."a.b"."events"`) and refuses the per-level form
+  with "Too many dots in table name". Trino's existing code was correct and is
+  unchanged. Two engines, mutually incompatible spellings of the same table.
+
+- **`docs/devops.md` documented an `--all-warehouses` flag that does not exist**,
+  including what its `--help` said. The claim is removed rather than the flag
+  added — every argument in that section is an argument against a loop inside
+  Zamboni.
+
+- **The README's first code sample carried a credential-shaped literal.** A
+  document telling operators to keep secrets out of files and command lines
+  cannot open with one pasted into a code block — anyone copying the sample
+  inherited the habit. Samples read from the environment now, and
+  `test_no_document_carries_a_credential_shaped_literal` fails on a regression.
+
+- **The CI section claimed four jobs when there are five**, and read as though
+  it were green. It now says plainly that it has never executed.
+
+- **`S3Settings` printed its secret access key in `repr()`.** A frozen dataclass
+  prints every field, so the key would appear in any traceback rendered with
+  locals, any `logger.debug("%s", settings)`, and any error aggregator. Nothing
+  in this package logs it, which is why it had gone unnoticed. Redacted; the key
+  *id* is kept, since that is what identifies a wrong credential.
+
+- **Secrets passed as flags are now warned about.** `--token`, `--credential`
+  and `--s3-secret-access-key` put a value on the command line, where any local
+  user can read it from `ps` or `/proc/<pid>/cmdline` — confirmed by reading one
+  back — and where shell history keeps it. A warning rather than a refusal,
+  because an interactive one-off is a legitimate use.
+
+- **A group- or world-readable `.env` is now warned about.** The guide has always
+  said `chmod 600`; nothing checked.
+
+- **`--memory-budget-bytes` ignored the default it was supposed to have.** The
+  flag hardcoded `1 << 30` while `CompactionConfig` said 256MiB, so the
+  threshold lowered in this release reached Python callers and **not the CLI** —
+  every command-line run kept the old 1GiB behaviour. CLI defaults now come from
+  the dataclass instead of being repeated as literals.
+
+- **Z-order was unreachable from the CLI on any engine but the local one.**
+  `table-config.json` ordering was translated into a compaction config only on
+  the local path, so `--engine spark --table-config …` silently compacted
+  without the ordering the file asked for. The translation now happens for every
+  engine.
+
+### BREAKING
+
+- **The distribution is now `iceberg-zamboni`.** The import is still `zamboni`
+  and the repository is still `Zamboni`; only the PyPI name changes, because
+  `zamboni` there is a dormant registration by an unrelated project. Install
+  with `pip install "iceberg-zamboni[s3,sql]"`.
+
+- **The `demo` console script is now `zamboni-demo`.** Installing the package
+  put a bare `demo` on the user's PATH, which no library should claim globally —
+  and the collision would have been silent, with whichever package installed
+  last winning. `./bin/demo` inside the repository is unchanged.
+
+- **`table-config.json` is version 2: warehouse -> namespace -> table.** The file
+  now has the shape every data engineer already has — an Iceberg warehouse is a
+  Postgres/Snowflake **database**, a namespace is a **schema** — instead of a
+  dotted key whose split had to be guessed:
+
+  ```json
+  {"version": 2, "warehouse": "acme",
+   "namespaces": {"analytics": {"tables": {"events": {}}}}}
+  ```
+
+  `warehouse` is required and **asserts** rather than selects: `--warehouse`/`--db`
+  or the per-customer directory chooses, and a file naming a different one stops
+  the run. Table names may not contain a dot. A dot in a *namespace* means
+  nesting, unambiguously. Version 1 files are refused with a message naming the
+  shape rather than a generic unknown-key error; there is no migration, because
+  nothing has shipped against it.
+
+- **`--catalog` is not a flag**, and will not be: it already means the engine's
+  catalog in `--trino-catalog`/`--spark-catalog`, and a Singer catalog file in
+  `from-catalog`. Use `--warehouse`, or its alias **`--db`**.
+
+- **`table-config generate` and `from-catalog` require `--warehouse`/`--db`.**
+  Without it they could emit a file that fails its own validation.
+
+- **`--token`, `--credential` and `--s3-secret-access-key` are removed.** A
+  value on a command line is readable by every local user from `ps` or
+  `/proc/<pid>/cmdline` — confirmed by reading one back — and shell history
+  keeps it. Set `ZAMBONI_TOKEN`, `ZAMBONI_CREDENTIAL` or
+  `ZAMBONI_S3_SECRET_ACCESS_KEY` instead. The flags still parse, only to exit 2
+  naming the variable, so a script that used them says what to change rather
+  than `unrecognized arguments`. `--s3-access-key-id` is kept: a key id is an
+  identifier, not a secret.
+
+- **A `.env` readable by group or other now stops the run.** It was a warning in
+  the same release; a warning on a nightly cron job is a line in a log nobody
+  opens. `chmod 600` — or `0400`, which also passes, since the check is for
+  group and other access rather than an exact mode.
+
+- **Only `ZAMBONI_*` entries are read from a `.env`.** Such a file is very often
+  shared with docker compose or a framework, and loading all of it meant Zamboni
+  silently altering the environment of everything downstream. A discovered file
+  with no `ZAMBONI_*` entries is now treated as not ours and ignored entirely;
+  the same file named with `--env` is an error, because there you meant it.
+
 ### SAFETY
+
+- **Spark identifiers containing a backtick could target a different table.**
+  The plain string a Spark procedure takes was derived by stripping every
+  backtick off the quoted form, but `quote()` doubles an embedded backtick to
+  escape it — so ``we`ird.ta-ble`` reached `remove_orphan_files` and
+  `expire_snapshots` as `weird.ta-ble`, a different table, with no error. Found
+  by an independent review before any release carried it. The plain form is now
+  built from the original name and never by unquoting.
+
+- **Spark compaction ignored the dangling-delete settings.** The
+  `remove-dangling-deletes` option was hard-coded `true`, so an operator who
+  disabled that removal in `table-config.json`, or set `dangling_delete_policy:
+  block` specifically so compaction would refuse rather than touch delete files,
+  got them deleted anyway and silently. It now follows the config, and the
+  coupling is declared in `zamboni engines` so the side effect is discoverable
+  from `compact` rather than only from the operation it rides on.
+
+- **PyIceberg is now capped at `<0.12`.** 0.12 corrupts data on a partitioned
+  `upsert`: it leaves the row it replaced *and* duplicates one it never touched,
+  with no error. Reproduced in 25 lines and filed upstream as
+  [apache/iceberg-python#3758](https://github.com/apache/iceberg-python/issues/3758)
+  — see [docs/upstream-0.12-upsert-regression.md](docs/upstream-0.12-upsert-regression.md).
+  The previous `>=0.11.1` had an open upper bound, so the day 0.12 published,
+  any `uv lock --upgrade` would have pulled it in without anyone touching this
+  code. The cap lifts when 0.12 is released *and* the regression is fixed.
+
+- **The equality-delete capability probe could report a false positive.** It
+  inspected `DataScan._plan_files_local` for PyIceberg's refusal string. That
+  method holds the guard inline in 0.11.1, but newer PyIceberg extracted the
+  planner and left it a five-line delegation — so the probe found nothing and
+  reported equality deletes as *readable* while the refusal was alive one call
+  deeper. On the probe whose job is stopping compaction from resurrecting
+  deleted rows. It now searches the whole `pyiceberg.table` module, and a test
+  fails if it is ever narrowed back.
+
+- **Partition evolution no longer relies on upstream manifest pruning.** Newer
+  PyIceberg appends a manifest its partition-predicate evaluator does not match
+  *verbatim*, entries being deleted included — which duplicated rows on a
+  multi-spec commit. `_surviving_manifests()` matches entries directly instead.
+  Correct on 0.11.1 and on 0.12; no behaviour change on the released line.
 
 - **Orphan removal now refuses when another table shares this table's location.**
   Previously it deleted that table's files. `0.1.0` scoped the sweep to the
