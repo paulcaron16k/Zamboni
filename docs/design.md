@@ -584,9 +584,15 @@ sequenceDiagram
 | No streaming write path (`_dataframe_to_data_files` takes a `pa.Table`) | Bin-packing done locally; native path used when a build has it |
 | Partitioned streaming writes unsupported (apache/iceberg-python#2152) | Partitioned tables always bin-pack locally |
 | `add_files` cannot infer non-order-preserving partition values | Writes go through `_dataframe_to_data_files`, which derives the key from data |
-| The `bucket`, `truncate`, `year`, `month`, `day` and `hour` transforms compute partition values in the Rust core | Nothing to declare: `pyiceberg[pyarrow]`, which is a hard dependency, already requires `pyiceberg-core` |
+| The `bucket`, `truncate`, `year`, `month`, `day` and `hour` transforms compute partition values in the Rust core | Declared explicitly. On 0.11.1 `pyiceberg[pyarrow]` requires `pyiceberg-core` and there was nothing to declare; **0.12 moved it to an extra of its own** while `pyarrow_transform` still needs it, so `[pyarrow]` alone raises `NotInstalledError` on any transformed partition. `test_the_rust_core_is_installed_however_it_gets_here` fails if neither side declares it |
 | `expire_snapshots()` is metadata-only and ignores most of the retention spec | Retention algorithm and file deletion implemented here (`expire.py`); PyIceberg is used only to commit the `RemoveSnapshotsUpdate` |
 | `FileIO` has no list operation | Orphan removal reaches `PyArrowFileIO._initialize_fs()` for a `pyarrow.fs` filesystem, which covers local paths and S3/MinIO alike |
+
+Every private symbol behind the handling column, why each is unavoidable, and
+what stops an upstream rename from becoming a corrupted table:
+[pyiceberg-private-api.md](pyiceberg-private-api.md). It also records what this
+surface actually did across 0.11.1 → 0.12.0, which was measured rather than
+guessed: nothing in the inventory changed, and two things broke anyway.
 
 ### 6.3 Upstream — Meltano / Singer
 
