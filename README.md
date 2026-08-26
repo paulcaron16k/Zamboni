@@ -417,7 +417,7 @@ GROUP BY 1 ORDER BY 1;
 └────────────┴───────┴────────────────────┴───────────┘
 ```
 
-The SQL is the demo's own -- `src/himsdemo/queries.py` runs this exact statement -- so the
+The SQL is the demo's own -- `src/zamboni/demo/queries.py` runs this exact statement -- so the
 README and the demo cannot drift into computing different things under one name.
 
 **Run it before and after `./bin/zamboni-demo maintenance`.** The metrics do not move, but the

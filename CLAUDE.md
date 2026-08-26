@@ -59,7 +59,7 @@ uv sync                                          # back to the pinned line
 
 ## Architecture
 
-Two packages under `src/`: `zamboni` (the tool) and `himsdemo` (the
+One package under `src/`: `zamboni`, with the demo as `zamboni.demo` (the
 `zamboni-demo` narrative, a separate console script). The distribution is
 `iceberg-zamboni`; the import is `zamboni`.
 

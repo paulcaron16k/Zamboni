@@ -2,7 +2,7 @@
 """Byte formatting, in one place.
 
 This existed four times -- in `orphans`, `profile`, `deletes` and
-`himsdemo.stats` -- and the copies had already diverged: three stopped at GiB
+`zamboni.demo.stats` -- and the copies had already diverged: three stopped at GiB
 while one went to TiB, so the same byte count formatted differently depending on
 which module happened to report it. Type checking flagged one copy, which is how
 the drift surfaced; fixing one of four is how it would have continued.

@@ -371,7 +371,7 @@ def demo_env(env, monkeypatch, tmp_path):
         )
     import shutil
 
-    from himsdemo.state import TOTAL_DAYS
+    from zamboni.demo.state import TOTAL_DAYS
 
     source = Path(__file__).resolve().parent.parent / "data" / "healthims"
     root = tmp_path / "healthims"
@@ -393,8 +393,8 @@ def test_the_demo_runs_on_the_dev_stack(demo_env, capsys):
     One day rather than five: this exercises the catalog switch and the full
     maintenance triad, and the five-day progression is already covered locally.
     """
-    from himsdemo.catalogs import NAMESPACE
-    from himsdemo.cli import main
+    from zamboni.demo.catalogs import NAMESPACE
+    from zamboni.demo.cli import main
 
     def run(*argv):
         return main(["--root", str(demo_env), "--catalog", "lakekeeper", *argv])
@@ -444,8 +444,8 @@ def test_the_demo_runs_on_the_dev_stack(demo_env, capsys):
 
 def test_the_demo_defaults_to_sqlite_with_no_stack(tmp_path, monkeypatch):
     """`./bin/zamboni-demo` must keep working with nothing running and nothing set."""
-    from himsdemo import catalogs
-    from himsdemo.state import DemoState
+    from zamboni.demo import catalogs
+    from zamboni.demo.state import DemoState
 
     monkeypatch.delenv("ZAMBONI_DEMO_CATALOG", raising=False)
     assert catalogs.resolve_backend(None) == "sqlite"
@@ -454,8 +454,8 @@ def test_the_demo_defaults_to_sqlite_with_no_stack(tmp_path, monkeypatch):
 
 
 def test_selecting_lakekeeper_without_config_explains_itself(tmp_path, monkeypatch):
-    from himsdemo import catalogs
-    from himsdemo.state import DemoState
+    from zamboni.demo import catalogs
+    from zamboni.demo.state import DemoState
 
     monkeypatch.delenv("ZAMBONI_URI", raising=False)
     monkeypatch.delenv("ZAMBONI_WAREHOUSE", raising=False)

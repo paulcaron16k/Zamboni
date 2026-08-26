@@ -68,7 +68,7 @@ def test_the_version_banner_names_all_three_versions():
     assert ".".join(str(part) for part in sys.version_info[:3]) in banner
 
 
-@pytest.mark.parametrize("entry_point", ["zamboni.cli", "himsdemo.cli"])
+@pytest.mark.parametrize("entry_point", ["zamboni.cli", "zamboni.demo.cli"])
 def test_both_entry_points_report_the_version_and_exit_zero(entry_point, capsys):
     """Both, because they are two parsers in two packages sharing one wheel.
 

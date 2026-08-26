@@ -15,9 +15,9 @@ from pathlib import Path
 
 import pytest
 
-from himsdemo.cli import main
-from himsdemo.state import TOTAL_DAYS, DemoState
 from zamboni import CatalogSession
+from zamboni.demo.cli import main
+from zamboni.demo.state import TOTAL_DAYS, DemoState
 from zamboni.profile import profile_table
 
 SOURCE = Path(__file__).resolve().parent.parent / "data" / "healthims"
@@ -430,7 +430,7 @@ def test_query_reports_fewer_files_after_maintenance(ingested_root, capsys):
     The command previously had no assertion beyond exit code 0, which is how
     three separate reporting defects survived earlier review rounds.
     """
-    from himsdemo import queries
+    from zamboni.demo import queries
 
     session, tables = open_tables(ingested_root)
     try:
@@ -459,7 +459,7 @@ def test_query_reports_fewer_files_after_maintenance(ingested_root, capsys):
 
 def test_mor_query_counts_include_delete_files(demo_root, capsys):
     """Counting only data files understates merge-on-read by roughly half."""
-    from himsdemo import queries
+    from zamboni.demo import queries
 
     run(demo_root, "clear")
     run(demo_root, "mode", "mor")
@@ -640,7 +640,7 @@ def test_the_prose_and_the_generated_state_are_not_packaged():
 
 
 def test_the_demo_finds_its_inputs_from_a_checkout():
-    from himsdemo.cli import default_inputs
+    from zamboni.demo.cli import default_inputs
 
     assert (default_inputs() / "table_schema.json").is_file()
 
@@ -648,7 +648,7 @@ def test_the_demo_finds_its_inputs_from_a_checkout():
 def test_reads_and_writes_are_separate_paths(tmp_path):
     """Installed, the inputs sit in a read-only package directory. A demo that
     writes its catalog beside them cannot be run twice, or by two users."""
-    from himsdemo.state import DemoState
+    from zamboni.demo.state import DemoState
 
     state = DemoState(root=tmp_path / "work", inputs=tmp_path / "in")
 
@@ -665,7 +665,7 @@ def test_the_demo_names_a_command_the_reader_can_actually_run(monkeypatch):
     path that is not there -- the same class of defect as shipping data the
     installed copy could not find (ZMBNI-1809), just cheaper. ZMBNI-1811.
     """
-    from himsdemo import cli
+    from zamboni.demo import cli
 
     monkeypatch.setattr(cli, "_CHECKOUT_INPUTS", Path("/nonexistent"))
     assert cli.invocation() == "zamboni-demo"
@@ -684,7 +684,7 @@ def test_no_user_facing_hint_hardcodes_the_checkout_path():
     import ast
 
     offenders = []
-    for path in (Path(__file__).parent.parent / "src" / "himsdemo").glob("*.py"):
+    for path in (Path(__file__).parent.parent / "src" / "zamboni" / "demo").glob("*.py"):
         tree = ast.parse(path.read_text())
         # `invocation()` is where the literal is *supposed* to live.
         allowed = {
@@ -715,3 +715,29 @@ def test_no_user_facing_hint_hardcodes_the_checkout_path():
         f"{offenders} hardcode './bin/' in a runtime string; use invocation() so the "
         "hint matches how the demo was actually started"
     )
+
+
+def test_the_checkout_inputs_path_resolves_to_the_repository_data():
+    """The `parents[3]` in `cli.py` must land on the repository root.
+
+    This is the assertion that would have caught ZMBNI-24's one silent hazard.
+    Moving the package from `src/himsdemo` to `src/zamboni/demo` put it one level
+    deeper, so a path built from three `.parent`s now stops at `src/`. Nothing
+    raises: `_CHECKOUT_INPUTS.is_dir()` simply returns False, `default_inputs()`
+    falls back to the packaged copy, and a developer edits CSVs in the working
+    tree that the demo never reads. In a checkout with nothing installed it is
+    the FileNotFoundError ZMBNI-1809 fixed, back again.
+
+    Asserted against the real repository layout rather than by counting
+    `.parent`s, so it keeps holding if the package moves again.
+    """
+    from zamboni.demo.cli import _CHECKOUT_INPUTS, default_inputs
+
+    repo = Path(__file__).resolve().parent.parent
+    assert repo / "data" / "healthims" == _CHECKOUT_INPUTS, (
+        f"_CHECKOUT_INPUTS points at {_CHECKOUT_INPUTS}, not the repository's data directory. "
+        "Count the path components from the module to the repository root."
+    )
+    assert _CHECKOUT_INPUTS.is_dir(), "the checkout inputs must exist in a working tree"
+    assert default_inputs() == _CHECKOUT_INPUTS, "a checkout must win over the packaged copy"
+    assert (_CHECKOUT_INPUTS / "day1" / "events.csv").is_file(), "day 1 inputs are missing"
