@@ -101,7 +101,7 @@ zamboni = "zamboni.cli:main"
 # Namespaced, not `demo`. Installing this put a bare `demo` on the user's PATH,
 # which is a name no library has any business claiming globally -- and the
 # collision would be silent, with whichever package installed last winning.
-# Inside the repository `./bin/demo` is unchanged.
+# Inside the repository the generated script is `./bin/zamboni-demo`.
 zamboni-demo = "zamboni.demo.cli:main"
 
 [dependency-groups]

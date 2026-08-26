@@ -33,7 +33,7 @@ from .state import MODES, TOTAL_DAYS, DemoState
 #: shipped. It is reference material rather than something the demo reads, and a
 #: URL serves it better than a copy in everyone's site-packages.
 _PACKAGED_INPUTS = Path(__file__).resolve().parent / "data"
-# Four `.parent`s: demo -> zamboni -> src -> repository root. It was three when
+# Four components up: cli.py -> demo -> zamboni -> src -> repository root. It was three when
 # this package was a top-level `himsdemo`, and getting it wrong here fails
 # *silently* -- `is_dir()` returns False, the packaged copy wins, and a developer
 # edits CSVs in the working tree that the demo never reads. Pinned by

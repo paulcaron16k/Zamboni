@@ -21,7 +21,7 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
-### BREAKING
+### Changed
 
 - **The demo is `zamboni.demo`, not a top-level `himsdemo`.** Installing
   `iceberg-zamboni` put an unnamespaced `himsdemo` package on the import path --
@@ -33,6 +33,16 @@ Two categories beyond the usual set, because this tool deletes files:
   **Migration:** `import himsdemo.x` becomes `import zamboni.demo.x`. The
   `zamboni-demo` command is unchanged, and so is everything under `zamboni`. The
   demo's CSV fixtures move with it, to `zamboni/demo/data/` inside the wheel.
+
+  **Deliberately not filed as `BREAKING`.** An import path moving is not one of
+  the five things this file defines that term for -- a verb, a flag, an exit
+  code, a config key, or a default that decides what gets deleted -- and
+  [docs/releasing.md](docs/releasing.md) says of `src/zamboni/demo` that "the
+  demo is a teaching aid that ships in the same wheel. It has no stability
+  contract at all." Filing it as breaking would also commit the next release to a
+  minor bump for a change the contract says carries no promise. It is called out
+  here in full anyway, because "no stability contract" is a reason not to bump a
+  version and not a reason to let someone's import break in silence.
 
   A separate `iceberg-zamboni-demo` distribution behind a `demo` extra was
   considered and rejected: a second distribution buys its own release cadence,

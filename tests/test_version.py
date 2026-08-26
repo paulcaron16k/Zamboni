@@ -70,7 +70,7 @@ def test_the_version_banner_names_all_three_versions():
 
 @pytest.mark.parametrize("entry_point", ["zamboni.cli", "zamboni.demo.cli"])
 def test_both_entry_points_report_the_version_and_exit_zero(entry_point, capsys):
-    """Both, because they are two parsers in two packages sharing one wheel.
+    """Both, because they are two parsers in one wheel, built independently of each other.
 
     `--version` was added to `zamboni` first; the demo's parser is built
     separately and would have silently lacked it.

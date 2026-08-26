@@ -731,9 +731,16 @@ def test_the_checkout_inputs_path_resolves_to_the_repository_data():
     Asserted against the real repository layout rather than by counting
     `.parent`s, so it keeps holding if the package moves again.
     """
+    from zamboni.demo import cli
     from zamboni.demo.cli import _CHECKOUT_INPUTS, default_inputs
 
     repo = Path(__file__).resolve().parent.parent
+    if not Path(cli.__file__).resolve().is_relative_to(repo / "src"):
+        # An installed copy, not this working tree -- which the sdist makes a real
+        # combination, because it ships `tests/` and `data/healthims/` alongside
+        # the code. There `_CHECKOUT_INPUTS` legitimately points elsewhere and
+        # this assertion would fail with nothing wrong.
+        pytest.skip("zamboni.demo is imported from an install, not from src/")
     assert repo / "data" / "healthims" == _CHECKOUT_INPUTS, (
         f"_CHECKOUT_INPUTS points at {_CHECKOUT_INPUTS}, not the repository's data directory. "
         "Count the path components from the module to the repository root."
@@ -741,3 +748,39 @@ def test_the_checkout_inputs_path_resolves_to_the_repository_data():
     assert _CHECKOUT_INPUTS.is_dir(), "the checkout inputs must exist in a working tree"
     assert default_inputs() == _CHECKOUT_INPUTS, "a checkout must win over the packaged copy"
     assert (_CHECKOUT_INPUTS / "day1" / "events.csv").is_file(), "day 1 inputs are missing"
+
+
+def test_every_packaged_input_lands_where_the_demo_looks_for_it():
+    """The force-include *destinations*, which nothing checked before.
+
+    `packaged_inputs()` above reads the same table and takes its **keys** -- the
+    repository-side paths -- so the wheel-side paths were unverified. Seven of
+    them were hand-edited when the package moved (ZMBNI-24), and getting one
+    wrong ships that day's CSVs outside the package: every test passes, because
+    the checkout path wins locally, and `pipx install iceberg-zamboni &&
+    zamboni-demo next-day` then dies partway through the run. That is the
+    ZMBNI-1809 failure with a green suite in front of it.
+
+    The expected prefix is *derived from the code that does the lookup* --
+    `_PACKAGED_INPUTS` relative to the source root -- rather than written out
+    here. A literal would have to be edited in step with the module, which is the
+    coupling this test exists to remove.
+    """
+    import tomllib
+
+    from zamboni.demo import cli
+
+    repo = Path(__file__).resolve().parent.parent
+    if not Path(cli.__file__).resolve().is_relative_to(repo / "src"):
+        pytest.skip("zamboni.demo is imported from an install, not from src/")
+
+    expected = cli._PACKAGED_INPUTS.resolve().relative_to(repo / "src")
+    include = tomllib.loads((repo / "pyproject.toml").read_text())
+    destinations = include["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"].values()
+
+    assert destinations, "no force-include entries; the demo would ship without its inputs"
+    wrong = [d for d in destinations if not Path(d).is_relative_to(expected)]
+    assert not wrong, (
+        f"these wheel destinations are not under {expected}, so the demo will not "
+        f"find them in an installed copy: {wrong}"
+    )
