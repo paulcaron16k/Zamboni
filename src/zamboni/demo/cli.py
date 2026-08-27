@@ -22,8 +22,8 @@ from .state import MODES, TOTAL_DAYS, DemoState
 
 #: The five days of CSV and the two config files, wherever they are.
 #:
-#: In a checkout they are `data/healthims/`, three levels up from this module.
-#: In an installed copy they are `himsdemo/data/`, shipped in the wheel -- 212KB
+#: In a checkout they are `data/healthims/`, four levels up from this module.
+#: In an installed copy they are `zamboni/demo/data/`, shipped in the wheel -- 212KB
 #: of inputs, which is what lets `pipx install iceberg-zamboni && zamboni-demo`
 #: work at all. Before that they were only ever found relative to the source
 #: tree, so the installed `zamboni-demo` crashed on a FileNotFoundError pointing
@@ -33,7 +33,12 @@ from .state import MODES, TOTAL_DAYS, DemoState
 #: shipped. It is reference material rather than something the demo reads, and a
 #: URL serves it better than a copy in everyone's site-packages.
 _PACKAGED_INPUTS = Path(__file__).resolve().parent / "data"
-_CHECKOUT_INPUTS = Path(__file__).resolve().parent.parent.parent / "data" / "healthims"
+# Four components up: cli.py -> demo -> zamboni -> src -> repository root. It was three when
+# this package was a top-level `himsdemo`, and getting it wrong here fails
+# *silently* -- `is_dir()` returns False, the packaged copy wins, and a developer
+# edits CSVs in the working tree that the demo never reads. Pinned by
+# `test_the_checkout_inputs_path_resolves_to_the_repository_data`.
+_CHECKOUT_INPUTS = Path(__file__).resolve().parents[3] / "data" / "healthims"
 
 DOCS_URL = "https://github.com/paulcaron16k/Zamboni/tree/main/data/healthims"
 
@@ -173,7 +178,7 @@ def _has_catalog(state: DemoState, catalog) -> bool:
 
     Checked before opening, not after: for SQLite, SQLAlchemy creates the file
     on connect, so opening one to look would itself be the mutation a read-only
-    command must not make. See :mod:`himsdemo.catalogs`.
+    command must not make. See :mod:`zamboni.demo.catalogs`.
     """
     return catalogs.exists(catalog, state)
 
