@@ -69,7 +69,7 @@ Pinned to uv.lock. Regenerate with `uv run scripts/build-executable.py`.
 
 import sys
 
-from himsdemo.cli import main
+from zamboni.demo.cli import main
 
 if __name__ == "__main__":
     sys.exit(main())

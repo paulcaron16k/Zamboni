@@ -60,7 +60,7 @@ survivors, because the same private symbol exists on both the corrupting build
 and the fixed one (ZMBNI-1109). A PyIceberg upgrade that changes those internals
 is a compatibility matter, not a versioning one.
 
-**`src/himsdemo`.** The demo is a teaching aid that ships in the same wheel. It
+**`src/zamboni/demo`.** The demo is a teaching aid that ships in the same wheel. It
 has no stability contract at all.
 
 ### The two version numbers

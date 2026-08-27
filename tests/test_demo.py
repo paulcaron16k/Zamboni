@@ -15,9 +15,9 @@ from pathlib import Path
 
 import pytest
 
-from himsdemo.cli import main
-from himsdemo.state import TOTAL_DAYS, DemoState
 from zamboni import CatalogSession
+from zamboni.demo.cli import main
+from zamboni.demo.state import TOTAL_DAYS, DemoState
 from zamboni.profile import profile_table
 
 SOURCE = Path(__file__).resolve().parent.parent / "data" / "healthims"
@@ -430,7 +430,7 @@ def test_query_reports_fewer_files_after_maintenance(ingested_root, capsys):
     The command previously had no assertion beyond exit code 0, which is how
     three separate reporting defects survived earlier review rounds.
     """
-    from himsdemo import queries
+    from zamboni.demo import queries
 
     session, tables = open_tables(ingested_root)
     try:
@@ -459,7 +459,7 @@ def test_query_reports_fewer_files_after_maintenance(ingested_root, capsys):
 
 def test_mor_query_counts_include_delete_files(demo_root, capsys):
     """Counting only data files understates merge-on-read by roughly half."""
-    from himsdemo import queries
+    from zamboni.demo import queries
 
     run(demo_root, "clear")
     run(demo_root, "mode", "mor")
@@ -640,7 +640,7 @@ def test_the_prose_and_the_generated_state_are_not_packaged():
 
 
 def test_the_demo_finds_its_inputs_from_a_checkout():
-    from himsdemo.cli import default_inputs
+    from zamboni.demo.cli import default_inputs
 
     assert (default_inputs() / "table_schema.json").is_file()
 
@@ -648,7 +648,7 @@ def test_the_demo_finds_its_inputs_from_a_checkout():
 def test_reads_and_writes_are_separate_paths(tmp_path):
     """Installed, the inputs sit in a read-only package directory. A demo that
     writes its catalog beside them cannot be run twice, or by two users."""
-    from himsdemo.state import DemoState
+    from zamboni.demo.state import DemoState
 
     state = DemoState(root=tmp_path / "work", inputs=tmp_path / "in")
 
@@ -665,7 +665,7 @@ def test_the_demo_names_a_command_the_reader_can_actually_run(monkeypatch):
     path that is not there -- the same class of defect as shipping data the
     installed copy could not find (ZMBNI-1809), just cheaper. ZMBNI-1811.
     """
-    from himsdemo import cli
+    from zamboni.demo import cli
 
     monkeypatch.setattr(cli, "_CHECKOUT_INPUTS", Path("/nonexistent"))
     assert cli.invocation() == "zamboni-demo"
@@ -684,7 +684,7 @@ def test_no_user_facing_hint_hardcodes_the_checkout_path():
     import ast
 
     offenders = []
-    for path in (Path(__file__).parent.parent / "src" / "himsdemo").glob("*.py"):
+    for path in (Path(__file__).parent.parent / "src" / "zamboni" / "demo").glob("*.py"):
         tree = ast.parse(path.read_text())
         # `invocation()` is where the literal is *supposed* to live.
         allowed = {
@@ -714,4 +714,99 @@ def test_no_user_facing_hint_hardcodes_the_checkout_path():
     assert not offenders, (
         f"{offenders} hardcode './bin/' in a runtime string; use invocation() so the "
         "hint matches how the demo was actually started"
+    )
+
+
+def test_the_checkout_inputs_path_resolves_to_the_repository_data():
+    """The `parents[3]` in `cli.py` must land on the repository root.
+
+    This is the assertion that would have caught ZMBNI-24's one silent hazard.
+    Moving the package from `src/himsdemo` to `src/zamboni/demo` put it one level
+    deeper, so a path built from three `.parent`s now stops at `src/`. Nothing
+    raises: `_CHECKOUT_INPUTS.is_dir()` simply returns False, `default_inputs()`
+    falls back to the packaged copy, and a developer edits CSVs in the working
+    tree that the demo never reads. In a checkout with nothing installed it is
+    the FileNotFoundError ZMBNI-1809 fixed, back again.
+
+    Asserted against the real repository layout rather than by counting
+    `.parent`s, so it keeps holding if the package moves again.
+    """
+    from zamboni.demo import cli
+    from zamboni.demo.cli import _CHECKOUT_INPUTS, default_inputs
+
+    repo = Path(__file__).resolve().parent.parent
+    if not Path(cli.__file__).resolve().is_relative_to(repo / "src"):
+        # An installed copy, not this working tree -- which the sdist makes a real
+        # combination, because it ships `tests/` and `data/healthims/` alongside
+        # the code. There `_CHECKOUT_INPUTS` legitimately points elsewhere and
+        # this assertion would fail with nothing wrong.
+        pytest.skip("zamboni.demo is imported from an install, not from src/")
+    assert repo / "data" / "healthims" == _CHECKOUT_INPUTS, (
+        f"_CHECKOUT_INPUTS points at {_CHECKOUT_INPUTS}, not the repository's data directory. "
+        "Count the path components from the module to the repository root."
+    )
+    assert _CHECKOUT_INPUTS.is_dir(), "the checkout inputs must exist in a working tree"
+    assert default_inputs() == _CHECKOUT_INPUTS, "a checkout must win over the packaged copy"
+    assert (_CHECKOUT_INPUTS / "day1" / "events.csv").is_file(), "day 1 inputs are missing"
+
+
+def test_every_packaged_input_lands_where_the_demo_looks_for_it():
+    """The force-include *destinations*, checked against what the demo reads.
+
+    `packaged_inputs()` above reads the same table and takes its **keys** -- the
+    repository-side paths -- so the wheel-side paths were unverified. Seven of
+    them were hand-edited when the package moved (ZMBNI-24), and getting one
+    wrong ships that day's CSVs where the installed demo will not look: every
+    other test passes, because the checkout path wins locally, and `pipx install
+    iceberg-zamboni && zamboni-demo next-day` then dies partway through the run.
+    That is the ZMBNI-1809 failure with a green suite in front of it.
+
+    Both halves are derived from the code rather than restated here, because a
+    literal would have to be edited in step with the module and that is the
+    coupling this test exists to remove:
+
+    * the directory, from `cli._PACKAGED_INPUTS` relative to the source root;
+    * the leaf names, by asking the accessors that actually open the files --
+      `DemoState.schema_path`, `.table_config_path` and `.day_dir()` -- against a
+      known root and taking the final component of each.
+
+    Checking only the directory is not enough, and a review caught that: a
+    destination of `zamboni/demo/data/day3_TYPO` is under the right directory and
+    is still a file the demo never opens.
+    """
+    import tomllib
+
+    from zamboni.demo import cli
+    from zamboni.demo.state import DemoState
+
+    repo = Path(__file__).resolve().parent.parent
+    if not Path(cli.__file__).resolve().is_relative_to((repo / "src").resolve()):
+        # An installed copy, not this working tree -- which the sdist makes a real
+        # combination, because it ships `tests/` and `data/healthims/` alongside
+        # the code. `.resolve()` after joining, so a symlinked `src` cannot cause
+        # a false skip and silently disable everything below.
+        pytest.skip("zamboni.demo is imported from an install, not from src/")
+
+    directory = cli._PACKAGED_INPUTS.resolve().relative_to((repo / "src").resolve())
+
+    probe = DemoState(root=Path("/probe"), inputs=Path("/probe"))
+    wanted = {probe.schema_path.name, probe.table_config_path.name}
+    wanted |= {probe.day_dir(day).name for day in range(1, TOTAL_DAYS + 1)}
+
+    include = tomllib.loads((repo / "pyproject.toml").read_text())
+    destinations = include["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"].values()
+    assert destinations, "no force-include entries; the demo would ship without its inputs"
+
+    shipped = {}
+    for destination in destinations:
+        path = Path(destination)
+        assert path.is_relative_to(directory), (
+            f"{destination!r} is not under {directory}, so an installed demo will not find it"
+        )
+        shipped[path.name] = destination
+
+    assert set(shipped) == wanted, (
+        f"the wheel ships {sorted(shipped)} under {directory}, but the demo opens "
+        f"{sorted(wanted)}. Missing: {sorted(wanted - set(shipped))}; "
+        f"unexpected: {sorted(set(shipped) - wanted)}"
     )

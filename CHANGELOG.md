@@ -21,6 +21,36 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### Changed
+
+- **The demo is `zamboni.demo`, not a top-level `himsdemo`.** Installing
+  `iceberg-zamboni` put an unnamespaced `himsdemo` package on the import path --
+  a name that says nothing about where it came from, and one any other
+  distribution could collide with silently. The same objection that renamed the
+  `demo` console script to `zamboni-demo`, and for the same reason; this was the
+  case that was missed. Raised by someone installing the package.
+
+  **Migration:** `import himsdemo.x` becomes `import zamboni.demo.x`. The
+  `zamboni-demo` command is unchanged, and so is everything under `zamboni`. The
+  demo's CSV fixtures move with it, to `zamboni/demo/data/` inside the wheel.
+
+  **Deliberately not filed as `BREAKING`.** An import path moving is not one of
+  the five things this file defines that term for -- a verb, a flag, an exit
+  code, a config key, or a default that decides what gets deleted -- and
+  [docs/releasing.md](docs/releasing.md) says of `src/zamboni/demo` that "the
+  demo is a teaching aid that ships in the same wheel. It has no stability
+  contract at all." Filing it as breaking would also commit the next release to a
+  minor bump for a change the contract says carries no promise. It is called out
+  here in full anyway, because "no stability contract" is a reason not to bump a
+  version and not a reason to let someone's import break in silence.
+
+  A separate `iceberg-zamboni-demo` distribution behind a `demo` extra was
+  considered and rejected: a second distribution buys its own release cadence,
+  version synchronisation and CI leg, which is disproportionate to a 212KB
+  payload and a naming problem. The one argument for it -- that those 212KB stop
+  shipping to people who never run the demo -- is recorded in #24 for if the
+  fixtures grow.
+
 ### Added
 
 - **A monthly version watch, in place of a nightly test run.** Every `<` bound in

@@ -118,7 +118,7 @@ class DemoState:
     def reset_counters(self) -> None:
         """Back to day 0, keeping the chosen write mode.
 
-        Removing the *tables* is :mod:`himsdemo.catalogs`' job, because how you
+        Removing the *tables* is :mod:`zamboni.demo.catalogs`' job, because how you
         do that depends on the catalog: locally it is a directory and a file,
         remotely it is a series of drop-table calls. This method owns only the
         part that is the same either way.
