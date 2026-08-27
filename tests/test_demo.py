@@ -751,36 +751,62 @@ def test_the_checkout_inputs_path_resolves_to_the_repository_data():
 
 
 def test_every_packaged_input_lands_where_the_demo_looks_for_it():
-    """The force-include *destinations*, which nothing checked before.
+    """The force-include *destinations*, checked against what the demo reads.
 
     `packaged_inputs()` above reads the same table and takes its **keys** -- the
     repository-side paths -- so the wheel-side paths were unverified. Seven of
     them were hand-edited when the package moved (ZMBNI-24), and getting one
-    wrong ships that day's CSVs outside the package: every test passes, because
-    the checkout path wins locally, and `pipx install iceberg-zamboni &&
-    zamboni-demo next-day` then dies partway through the run. That is the
-    ZMBNI-1809 failure with a green suite in front of it.
+    wrong ships that day's CSVs where the installed demo will not look: every
+    other test passes, because the checkout path wins locally, and `pipx install
+    iceberg-zamboni && zamboni-demo next-day` then dies partway through the run.
+    That is the ZMBNI-1809 failure with a green suite in front of it.
 
-    The expected prefix is *derived from the code that does the lookup* --
-    `_PACKAGED_INPUTS` relative to the source root -- rather than written out
-    here. A literal would have to be edited in step with the module, which is the
-    coupling this test exists to remove.
+    Both halves are derived from the code rather than restated here, because a
+    literal would have to be edited in step with the module and that is the
+    coupling this test exists to remove:
+
+    * the directory, from `cli._PACKAGED_INPUTS` relative to the source root;
+    * the leaf names, by asking the accessors that actually open the files --
+      `DemoState.schema_path`, `.table_config_path` and `.day_dir()` -- against a
+      known root and taking the final component of each.
+
+    Checking only the directory is not enough, and a review caught that: a
+    destination of `zamboni/demo/data/day3_TYPO` is under the right directory and
+    is still a file the demo never opens.
     """
     import tomllib
 
     from zamboni.demo import cli
+    from zamboni.demo.state import DemoState
 
     repo = Path(__file__).resolve().parent.parent
-    if not Path(cli.__file__).resolve().is_relative_to(repo / "src"):
+    if not Path(cli.__file__).resolve().is_relative_to((repo / "src").resolve()):
+        # An installed copy, not this working tree -- which the sdist makes a real
+        # combination, because it ships `tests/` and `data/healthims/` alongside
+        # the code. `.resolve()` after joining, so a symlinked `src` cannot cause
+        # a false skip and silently disable everything below.
         pytest.skip("zamboni.demo is imported from an install, not from src/")
 
-    expected = cli._PACKAGED_INPUTS.resolve().relative_to(repo / "src")
+    directory = cli._PACKAGED_INPUTS.resolve().relative_to((repo / "src").resolve())
+
+    probe = DemoState(root=Path("/probe"), inputs=Path("/probe"))
+    wanted = {probe.schema_path.name, probe.table_config_path.name}
+    wanted |= {probe.day_dir(day).name for day in range(1, TOTAL_DAYS + 1)}
+
     include = tomllib.loads((repo / "pyproject.toml").read_text())
     destinations = include["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"].values()
-
     assert destinations, "no force-include entries; the demo would ship without its inputs"
-    wrong = [d for d in destinations if not Path(d).is_relative_to(expected)]
-    assert not wrong, (
-        f"these wheel destinations are not under {expected}, so the demo will not "
-        f"find them in an installed copy: {wrong}"
+
+    shipped = {}
+    for destination in destinations:
+        path = Path(destination)
+        assert path.is_relative_to(directory), (
+            f"{destination!r} is not under {directory}, so an installed demo will not find it"
+        )
+        shipped[path.name] = destination
+
+    assert set(shipped) == wanted, (
+        f"the wheel ships {sorted(shipped)} under {directory}, but the demo opens "
+        f"{sorted(wanted)}. Missing: {sorted(wanted - set(shipped))}; "
+        f"unexpected: {sorted(set(shipped) - wanted)}"
     )

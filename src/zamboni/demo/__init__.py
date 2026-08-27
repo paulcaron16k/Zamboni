@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """HIMS discharge maintenance demo.
 
-Domain code for the demo, and the only place in the distribution that carries
+Domain code for the demo: the only *package* in the distribution that carries
 hospital vocabulary. It lives *inside* `zamboni` as a subpackage rather than
 beside it as a top-level `himsdemo`.
+
+(Package, not distribution. `README.md` is embedded verbatim as the wheel's
+`dist-info/METADATA`, and it describes the HIMS demo at length -- so the broader
+claim was measurably false, which a review pointed out by grepping the built
+metadata.)
 
 That reverses the original arrangement, whose stated reason was that a
 maintenance library should not carry hospital vocabulary. The instinct was
