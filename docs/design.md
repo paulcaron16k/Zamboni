@@ -588,6 +588,12 @@ sequenceDiagram
 | `expire_snapshots()` is metadata-only and ignores most of the retention spec | Retention algorithm and file deletion implemented here (`expire.py`); PyIceberg is used only to commit the `RemoveSnapshotsUpdate` |
 | `FileIO` has no list operation | Orphan removal reaches `PyArrowFileIO._initialize_fs()` for a `pyarrow.fs` filesystem, which covers local paths and S3/MinIO alike |
 
+Every private symbol behind the handling column, why each is unavoidable, and
+what stops an upstream rename from becoming a corrupted table:
+[pyiceberg-private-api.md](pyiceberg-private-api.md). It also records what that
+surface actually did across 0.11.1 → 0.12.0, which was measured rather than
+guessed: nothing in the inventory changed, and two things broke anyway.
+
 ### 6.3 Upstream — Meltano / Singer
 
 | Constraint | Consequence |

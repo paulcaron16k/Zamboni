@@ -53,7 +53,8 @@ uv run zamboni-demo next-day                     # five-day HIMS demo on a local
 Probe work against unreleased PyIceberg (see "Capability probes" below):
 
 ```bash
-uv pip install -e ../iceberg-python && uv run zamboni doctor && uv run pytest
+uv pip install -e ../iceberg-python              # then use .venv/bin, NOT uv run --
+.venv/bin/zamboni doctor && .venv/bin/python -m pytest   # uv run re-syncs and undoes it
 uv sync                                          # back to the pinned line
 ```
 
@@ -148,8 +149,10 @@ rejects password/token/secret keys by name.
   is chosen per probe for the safe direction and says so in a comment.
 - **Format versions:** V1 refused, V2 full, V3 metadata-only. Equality deletes
   block compaction.
-- Private PyIceberg APIs in use are guarded by
-  `committer.assert_supported_pyiceberg()`; `pyiceberg` is capped `<0.12` because
+- Private PyIceberg APIs in use are inventoried in
+  `docs/pyiceberg-private-api.md` — read it before editing `committer.py`,
+  `evolution.py`, `deletes.py`, `manifests.py` or `capabilities.py`. They are
+  guarded by `committer.assert_supported_pyiceberg()`; `pyiceberg` is capped `<0.12` because
   0.12 corrupts partitioned upserts (docs/upstream-0.12-upsert-regression.md).
 - Removed files are passed as the `DataFile` objects read from the manifests,
   never reconstructed — `_OverwriteFiles._existing_manifests` matches by
