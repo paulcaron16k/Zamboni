@@ -7,7 +7,7 @@ upstream rename from becoming a corrupted table.**
 |---|---|
 | Audience | Anyone changing `committer.py`, `evolution.py`, `deletes.py`, `manifests.py` or `capabilities.py` |
 | Companion | [design.md §6.2](design.md) — the upstream constraints · [../CONTRIBUTING.md](../CONTRIBUTING.md) rule 3 — testing across both PyIceberg lines |
-| Verified | Every row below was probed against **0.11.1** and against **0.12.0** (`../iceberg-python` at `0bf4d13d`) on 2026-08-21 |
+| Verified | Every row below re-probed against **0.11.1** and against the 0.12 line on 2026-08-29. The latter is `../iceberg-python` at `0bf4d13d` — `pyiceberg-0.12.0rc1-47-g0bf4d13d`, an unreleased post-rc1 tree that declares `version = "0.12.0"`. It is *not* a published release; PyPI's newest final is 0.11.1 |
 
 ---
 
@@ -16,7 +16,9 @@ upstream rename from becoming a corrupted table.**
 Zamboni's job is to rewrite data files and commit the result as an Iceberg
 `replace` snapshot. PyIceberg's public surface cannot express that:
 
-- `UpdateSnapshot.overwrite()` hardcodes `Operation.OVERWRITE`, and
+- `UpdateSnapshot.overwrite()` chooses between `Operation.OVERWRITE` and
+  `Operation.APPEND` by whether the branch already has a snapshot — `REPLACE` is
+  not among the options — and
   `update_snapshot_summaries` rejects anything outside
   `{APPEND, OVERWRITE, DELETE}` — on both lines. `replace` is the spec's own
   operation for "data and delete files were added and removed without changing
@@ -35,25 +37,43 @@ build the tool". What follows is the bill for that decision, itemised.
 
 ## 2. The inventory
 
-Five private imports, three private base classes subclassed, four private methods
-overridden, and eight private instance attributes read. That is the whole
-surface; it is small, and it is concentrated.
+**Four** private symbols imported, **three** upstream base classes subclassed,
+**four** private methods overridden, **nine** private instance attributes read,
+one inherited private method called without being overridden, and three reaches
+that are not attribute access at all (§2.6). Small and concentrated, and every
+count below was re-derived against this branch — an earlier revision of this
+document carried §2 over from another branch unchecked and got four of these
+wrong.
 
 ### 2.1 Imported symbols
 
+Four symbols, at five import sites (`git grep -nE "from pyiceberg.*import.*\b_"`).
+
 | Symbol | Imported by | What public API cannot do |
 |---|---|---|
-| `_OverwriteFiles` | `committer.py` | Base for `_ReplaceFiles`. Nothing public emits a `replace` snapshot |
-| `_SnapshotProducer` | `evolution.py`, `capabilities.py` | Needs the `operation` constructor argument and the `_manifests` hook |
-| `_FastAppendFiles` | `testing.py` | Register **position delete files**, which PyIceberg cannot write at all. Test-only; never on a user's path |
-| `_dataframe_to_data_files` | `backends/duckdb_arrow.py`, `capabilities.py` | Computes the partition key **from the data**, so `bucket` works. `add_files` infers it from statistics |
-| `PyArrowFileIO._initialize_fs` | `orphans.py` | Returns the fsspec filesystem needed to **list** storage. `FileIO` exposes open/delete and no listing |
+| `_OverwriteFiles` | `committer.py:31`, `capabilities.py:115` | Base for `_ReplaceFiles`. Nothing public emits a `replace` snapshot |
+| `_SnapshotProducer` | `capabilities.py:115` **only** | Probed for the `operation` constructor argument. `evolution.py` names it in prose and does not import it |
+| `_FastAppendFiles` | `testing.py:43` | Register **position delete files**, which PyIceberg cannot write at all |
+| `_dataframe_to_data_files` | `backends/duckdb_arrow.py:29`, `capabilities.py:318` | Computes the partition key **from the data**, so `bucket` works. `add_files` infers it from statistics |
+
+`PyArrowFileIO._initialize_fs` is **not** in this table: it is never imported, only
+reached as an attribute, and it is counted once in §2.6.
+
+`zamboni.testing` is **not** test-only.  `zamboni/demo/ingest.py:28` imports
+`locate_rows` and `write_position_deletes` from it, and `zamboni-demo` is a
+shipped console script — so `_FastAppendFiles` is on a user's path whenever the
+demo simulates merge-on-read. The module's own docstring says "tests *and the
+demo*"; an earlier revision here said "never on a user's path", which was wrong.
 
 ### 2.2 Subclassed base classes
 
 `_ReplaceFiles` (in `committer.py`) is the hub: it subclasses `_OverwriteFiles`
-and is itself the base for three more producers. One upstream rename of
-`_OverwriteFiles` therefore reaches six modules.
+and is itself the base for three more producers. So an upstream rename of
+`_OverwriteFiles` breaks **four modules at runtime** — `committer.py` where it is
+imported, and `evolution.py`, `manifests.py`, `deletes.py` through inheritance —
+plus `capabilities.py`, which imports it to probe. (A previous revision said six,
+counting `profile.py` and `deletes.py`'s docstring mentions; §2.5 says prose does
+not count, so it cannot count here either.)
 
 ```
 _OverwriteFiles                     (pyiceberg.table.update.snapshot)
@@ -61,22 +81,38 @@ _OverwriteFiles                     (pyiceberg.table.update.snapshot)
     ├── MultiSpecReplaceFiles       evolution.py     -- one commit spanning two partition specs
     ├── _RewriteManifests           manifests.py     -- regroup manifests, touch no data
     └── _RemoveDeleteFiles          deletes.py       -- drop whole delete manifests
-_FastAppendFiles
-└── _AppendDeleteFiles              testing.py       -- test fixtures only
+_FastAppendFiles                    (same module)
+└── _AppendDeleteFiles              testing.py       -- register position delete files
+ManifestWriterV2                    (pyiceberg.manifest -- public name, private contract)
+└── _DeleteManifestWriter           testing.py:206   -- label a manifest `content: deletes`
 ```
+
+The third base is easy to miss because its name carries no underscore.
+`ManifestWriterV2.content()` returns `ManifestContent.DATA` unconditionally, which
+is the fact `delete_manifests_writable` probes and the reason dangling-delete
+removal can only drop whole manifests — so subclassing it to override `_meta` is
+as much a private-contract dependency as anything above.
 
 ### 2.3 Overridden private methods
 
 Each override exists because the inherited behaviour is wrong for the operation,
 not because it is inconvenient.
 
+Four names, at the sites `git grep -nE "super\(\)\._"` reports.
+
 | Override | In | Why |
 |---|---|---|
-| `_summary()` | `committer.py`, `evolution.py` | Let PyIceberg compute the totals as an overwrite, then relabel the finished summary `replace` |
-| `_existing_manifests()` | `deletes.py`, `evolution.py` | Upstream's pruning double-counts rows; `_surviving_manifests` replaces it |
-| `_deleted_entries()` | `evolution.py`, `deletes.py`, `manifests.py` | Upstream filters entries to `DataFileContent.DATA`, so a delete file passed to `delete_data_file` is silently ignored |
-| `_manifests()` | `evolution.py`, `manifests.py`, `testing.py` | `_summary` hardcodes `table_metadata.spec()`, the table default, while grouping needs per-manifest specs |
-| `_meta` | `testing.py` | Label a manifest `content: deletes`, which `ManifestWriterV2` will not do |
+| `_summary()` | `committer.py:40`, `evolution.py:81` | Let PyIceberg compute the totals as an overwrite, then relabel the finished summary `replace` |
+| `_existing_manifests()` | `deletes.py:97` **only** | Refuse the one path that corrupts metadata: upstream rewrites a partially-emptied manifest through `write_manifest`, which stamps `content: data`. Delegates to `super()` otherwise |
+| `_manifests()` | `evolution.py:140`, `manifests.py` (via `_RewriteManifests`), `testing.py` | `_SnapshotProducer._manifests` passes `spec=table_metadata.spec()` — the table default — to `write_manifest`, while entries are grouped by each file's own spec |
+| `_meta` | `testing.py:219` | A **property**, not a method. Labels a manifest `content: deletes`, which `ManifestWriterV2` will not do |
+
+**`evolution.py` overrides neither `_existing_manifests` nor `_deleted_entries`,
+and that is deliberate.** It defines `_surviving_manifests` (`evolution.py:200`)
+whose docstring opens "Deliberately *not* `_existing_manifests()`", and it
+*calls* the inherited `self._deleted_entries()` at `evolution.py:177`. A previous
+revision of this table sent a reader to `evolution.py` looking for two overrides
+that are not there, with the real workaround under a third name.
 
 ### 2.4 Inherited private attributes
 
@@ -86,19 +122,50 @@ whereas an attribute that is renamed is an `AttributeError` in the middle of a
 commit.
 
 `_transaction` (19 uses) · `_snapshot_id` (7) · `_io` (6) ·
-`_parent_snapshot_id` (5) · `_deleted_data_files` (4) · `_added_data_files` (3) ·
-`_target_branch` (2) · `_operation` (set by us, read by upstream)
+`_parent_snapshot_id` (5) · `_compression` (5) · `_deleted_data_files` (4) ·
+`_added_data_files` (3) · `_target_branch` (2) · `_operation` (set by us, read by
+upstream)
 
-### 2.5 Other private reaches
+Counts are code references only, excluding prose. `_compression` was absent from
+an earlier revision of this list — read at `evolution.py:163`, `:190`, `:252`,
+`manifests.py:268` and `testing.py:238`, every one of them passing
+`avro_compression=` to `write_manifest`. Missing it is exactly the failure this
+subsection warns about: it appears in no import, so an audit that greps imports
+does not see it, and a rename surfaces as an `AttributeError` mid-commit.
+
+### 2.5 Inherited private methods called without being overridden
+
+`self._process_manifests(...)` at `evolution.py:196` — `_SnapshotProducer`'s, on
+both builds. Distinct from §2.3 because there is no `super()` call to grep for and
+no `def` in our source: it is invisible to both of the searches that find
+everything else here.
+
+### 2.6 Other private reaches
 
 | Call | In | Why |
 |---|---|---|
 | `Transaction._apply(...)` | `evolution.py:422` | Apply an `AddPartitionSpecUpdate` plus its `AssertTableUUID` in one commit |
-| `hasattr(io, "_initialize_fs")` | `orphans.py:216` | Guarded — a non-PyArrow `FileIO` falls back rather than crashing |
+| `hasattr(io, "_initialize_fs")` then `io._initialize_fs(...)` | `orphans.py:216-217` | The fsspec filesystem needed to **list** storage; `FileIO` exposes open/delete and no listing. Guarded — a non-PyArrow `FileIO` falls back rather than crashing |
+| `from pyiceberg.table.delete_file_index import DeleteFileIndex` | `deletes.py:180` | Answers "does this delete file still apply" with upstream's own index rather than a second implementation of the rule. No underscore, and no public-API promise either |
 
-`Table._do_commit` and `ExpireSnapshots._commit` appear in **prose only**
-(`properties.py`, `expire.py` docstrings) to explain upstream behaviour. They are
-not called, and are listed here so a future audit does not count them twice.
+**And the most fragile reach in the repository, which has no row above because it
+is not attribute access at all:** three probes depend on upstream's *source text*.
+
+| Reach | In | Breaks when |
+|---|---|---|
+| `"manifest_evaluator" in getsource(_OverwriteFiles._existing_manifests)` | `capabilities.py:118` | that method's body is refactored |
+| `"does not yet support equality deletes" in getsource(pyiceberg.table)` | `capabilities.py:274-278` | an **error message** is reworded |
+| `inspect.signature(_dataframe_to_data_files).parameters["df"].annotation` | `capabilities.py:320` | a type annotation changes — **which it did**, see §3 |
+
+Each fails *silently*, to its own safe direction, so the cost is a capability
+believed absent forever rather than a crash. That is the whole subject of
+[#36](https://github.com/paulcaron16k/Zamboni/issues/36).
+
+`Table._do_commit`, `ExpireSnapshots._commit`, `DataScan._plan_files_local` and
+`_SnapshotProducer._manifests`/`._summary` appear in **prose only** — docstrings
+in `properties.py`, `expire.py`, `profile.py`, `capabilities.py` and
+`evolution.py` explaining upstream behaviour. They are not called, and are listed
+so a future audit does not count them twice.
 
 ---
 
@@ -107,9 +174,32 @@ not called, and are listed here so a future audit does not count them twice.
 Measured, not assumed — this is the interesting result, and it cuts against the
 intuition that private APIs churn constantly.
 
-**Every symbol above survived 0.11.1 → 0.12.0 unchanged, signatures included.**
-Across 397 upstream commits, the inventory in §2 needed no edit. What did change
-was subtler and worse:
+**One signature changed; everything else in §2 survived 0.11.1 → 0.12.0
+unchanged.** The exception matters more than the rule:
+
+```
+0.11.1   _dataframe_to_data_files(df: pa.Table, ...)
+0.12.0   _dataframe_to_data_files(df: pa.Table | pa.RecordBatchReader, ...)
+```
+
+That is §2.1's fourth row, and `capabilities.py:316-326` exists *only* to read
+that annotation — so the one signature that moved is the one a probe watches, and
+§4.6 bills for its consequence (the two tests that skip by build). An earlier
+revision of this document claimed nothing changed, which was both false and
+self-contradictory with its own §4.6.
+
+Everything else held: 20 signatures, the owning class of all four overridden
+names, and all nine inherited attributes are identical across the two builds. One
+non-signature drift worth noting — on 0.12.0 `_deleted_data_files` is declared on
+`_OverwriteFiles` as well as on `_SnapshotProducer`.
+
+Between the two builds are **108 commits touching `pyiceberg/`** (463 counting
+the whole repository), by
+`git log --oneline pyiceberg-0.11.1..0bf4d13d -- pyiceberg/ | wc -l`. An earlier
+revision said 397 with no method given, which is reproducible by no counting I
+tried.
+
+What did change was subtler and worse:
 
 | Change | Detected by | Consequence |
 |---|---|---|
@@ -125,7 +215,7 @@ rather than by reading release notes:
 
 | Named change | 0.11.1 | 0.12.0 | Our exposure |
 |---|---|---|---|
-| `_scan_plan_helper` renamed to `_plan_manifest_entries` | both absent | both absent | **None.** Neither name has ever existed on a build we support, and no module references either. The rename happened on an unreleased tree between the two, and the symbol it concerned is not one we call — reads go through `ArrowScan` over a hand-filtered task list |
+| `_scan_plan_helper` renamed to `_plan_manifest_entries` | both absent | `_scan_plan_helper` absent; **`_plan_manifest_entries` present** as a `DataScan` method | **None**, but the evidence took two attempts. The first probe asked `hasattr(pyiceberg.table, name)`, which sees module-level attributes and not methods, so it reported both absent on both builds. It is `DataScan._plan_manifest_entries` (`pyiceberg/table/__init__.py:2412`, referenced at `inspect.py:407`). The conclusion holds — we call neither; reads go through `ArrowScan` over a hand-filtered task list — but a structural probe got the structure wrong, in the document about structural probes getting things wrong |
 | `BaseScan` / `ManifestGroupPlanner` extracted | absent | **present** | **Mitigated before the fact.** This extraction turned `DataScan._plan_files_local` into a five-line delegation, which is precisely why `_guard_anywhere_in_scan_planning` searches the whole `pyiceberg.table` module instead of one function. The first version of that probe inspected the function, found no guard, and reported equality deletes as *readable* while the refusal was alive one call deeper |
 | `ManifestEntry.snapshot_id`'s setter fixed for writing to the wrong index | — | — | **Verified behaviourally, and it holds.** `manifests.py` re-writes entries as `EXISTING` and passes `snapshot_id=entry.snapshot_id` to preserve the original, so a setter that wrote to the wrong index would corrupt exactly this. `test_rewrite_reduces_manifests_without_touching_data` compares every entry's `(snapshot_id, sequence_number, file_sequence_number, record_count)` before and after a rewrite, and passes on both lines |
 
@@ -136,7 +226,7 @@ assertion answers it. That test already existed for the sequence-number
 guarantee, and it covers this for free — which is an argument for asserting a
 tuple of fields rather than the one field a story happens to be about.
 
-Two lessons follow, and they are the whole basis of §4:
+Three lessons follow, and they are the whole basis of §4:
 
 1. **Rename risk is real but loud.** An `ImportError` or `AttributeError` stops
    the run. It is the failure mode you want.
@@ -174,8 +264,19 @@ assumed *not* to be able to write delete manifests (so we do not try).
 ### 4.3 Behavioural probing where names cannot answer
 
 The pruning probe **performs an overwrite on a transformed partition and counts
-what survived**. It costs ~150ms warm, once per process, and only on builds that
-prune at all — which is no current release. This is the single most important
+what survived**. It runs once per process (`detect()` is
+`lru_cache`d) and only on builds that prune at all — which is no current release.
+
+**What it costs is not settled, and the numbers in circulation disagree.**
+`capabilities.py:170` says "~150ms warm, ~600ms cold"; `docs/tasks_historical.md`
+records "~1.7s once per process". Measured here against the 0.12 tree: **591, 675
+and 1517 ms** for the first call in a fresh process, then 1045 / 289 / 242 /
+400 ms for successive calls inside one. The figure therefore depends entirely on
+whether import and filesystem caches are counted, and neither existing number
+says which it measured. Treat ~0.3s as the floor and ~1.5s as a realistic cold
+CLI invocation — a spread that is itself an argument for
+[#39](https://github.com/paulcaron16k/Zamboni/issues/39), which would confine
+this cost to untested builds. This is the single most important
 mitigation on the list, because it is the only one that catches a behaviour
 change that kept its name.
 

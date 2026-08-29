@@ -102,11 +102,26 @@ If your change touches a probe, or depends on one, exercise it against both the
 pinned release and a checkout of PyIceberg `main`:
 
 ```bash
-uv pip install -e ../iceberg-python     # a checkout of apache/iceberg-python
-uv run zamboni doctor                   # what does this build support?
-pytest
+uv pip install -e ../iceberg-python      # a checkout of apache/iceberg-python
+.venv/bin/zamboni doctor                # what does this build support?
+.venv/bin/python -m pytest
 uv sync                                 # back to the pinned line
 ```
+
+**Through `.venv/bin/python`, not `uv run`.** `uv run` re-syncs the environment
+from `uv.lock` before running, and it does not merely ignore the install you just
+made -- it **reverts** it, so every later command is wrong too. Measured:
+
+```
+uv pip install -e ../iceberg-python
+.venv/bin/python -c "...version..."   -> 0.12.0    # the install worked
+uv run python -c "...version..."      -> 0.11.1    # re-synced to the lock
+.venv/bin/python -c "...version..."   -> 0.11.1    # and the checkout is gone
+```
+
+So a single `uv run` anywhere in the loop silently returns you to the pinned
+release, and the suite then passes against the wrong build while you believe you
+are testing the checkout.
 
 The probes have safe-direction defaults for the case where source is not
 inspectable, and each says which direction is safe *for that probe* — they are

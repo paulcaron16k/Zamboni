@@ -53,7 +53,8 @@ uv run zamboni-demo next-day                     # five-day HIMS demo on a local
 Probe work against unreleased PyIceberg (see "Capability probes" below):
 
 ```bash
-uv pip install -e ../iceberg-python && uv run zamboni doctor && uv run pytest
+uv pip install -e ../iceberg-python              # then use .venv/bin, NOT uv run --
+.venv/bin/zamboni doctor && .venv/bin/python -m pytest   # uv run re-syncs and undoes it
 uv sync                                          # back to the pinned line
 ```
 
