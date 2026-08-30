@@ -134,3 +134,59 @@ def test_overwrite_operation_fallback(session, unpartitioned):
 
 def _any_live_data_file(tbl):
     return profile_table(tbl).live_files[0].data_file
+
+
+def test_every_replace_producer_consults_the_guard(monkeypatch):
+    """The property, not today's five call sites (ZMBNI-37).
+
+    `assert_supported_pyiceberg()` refuses a PyIceberg whose
+    `_OverwriteFiles._existing_manifests` prunes by predicate without deriving
+    that predicate correctly -- on such a build the manifest holding a replaced
+    file is kept verbatim and its rows are counted twice.
+
+    It used to have one caller, `TableCompactor.execute`. Five of the six
+    mutating operations never reached it, and two of them -- `rewrite-manifests`
+    and `remove-dangling-deletes` -- commit through subclasses of
+    `_ReplaceFiles`, which is the machinery the guard exists to protect.
+    Compaction refused on such a build and those two proceeded.
+
+    Enumerating `__subclasses__()` rather than listing the operations is what
+    makes this survive a seventh one: a new producer is covered by existing, and
+    a subclass that overrides `__init__` without calling `super()` fails here
+    rather than silently opting out.
+    """
+    import inspect
+
+    from zamboni import committer
+    from zamboni.committer import UnsupportedPyIceberg, _ReplaceFiles
+
+    def refuse() -> None:
+        raise UnsupportedPyIceberg("simulated unusable build")
+
+    monkeypatch.setattr(committer, "assert_supported_pyiceberg", refuse)
+
+    producers = [_ReplaceFiles, *_ReplaceFiles.__subclasses__()]
+    assert len(producers) >= 4, (
+        f"expected the base plus at least three subclasses, found {producers}. "
+        "If a producer moved, this test is looking in the wrong place"
+    )
+
+    for producer in producers:
+        # Required arguments are read off each producer rather than listed:
+        # `_RewriteManifests` takes `bins` and `kept` and binds them before
+        # delegating upwards, so a hardcoded call would raise TypeError and
+        # never reach the guard -- passing the test for the wrong reason.
+        kwargs = {
+            name: None
+            for name, param in inspect.signature(producer.__init__).parameters.items()
+            if param.default is inspect.Parameter.empty
+            and param.kind is inspect.Parameter.KEYWORD_ONLY
+        }
+        kwargs.setdefault("operation", None)
+        kwargs.setdefault("transaction", None)
+        kwargs.setdefault("io", None)
+
+        with pytest.raises(UnsupportedPyIceberg):
+            # The values never matter: the guard runs before `super().__init__`,
+            # so construction cannot get far enough to need a real transaction.
+            producer(**kwargs)

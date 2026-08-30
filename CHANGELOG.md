@@ -21,6 +21,26 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### SAFETY
+
+- **Every operation that commits through the private snapshot producers now
+  refuses an unsupported PyIceberg build.** `assert_supported_pyiceberg()` had
+  one caller, so five of the six mutating operations never consulted it — and
+  two of those, `rewrite-manifests` and `remove-dangling-deletes`, commit through
+  `_ReplaceFiles` subclasses, which is the machinery the guard exists to protect.
+  On a build that prunes manifests by predicate without deriving the predicate
+  correctly, the manifest holding a replaced file is kept verbatim and its rows
+  are counted twice; compaction refused such a build and those two proceeded.
+
+  The guard now runs in `_ReplaceFiles.__init__`, so coverage is a property of
+  the producer rather than a list of call sites. `expire`, `apply-properties`
+  and `remove-orphans` deliberately do not consult it, for reasons recorded on
+  the function.
+
+  **Latent rather than exploited**: on 0.11.1, the only version the `<0.12` cap
+  admits, `prunes_manifests_by_predicate` is false and the guard never fires. The
+  exposure would have arrived with the cap being lifted.
+
 ### Changed
 
 - **The demo is `zamboni.demo`, not a top-level `himsdemo`.** Installing

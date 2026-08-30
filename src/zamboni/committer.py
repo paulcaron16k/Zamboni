@@ -37,6 +37,35 @@ logger = logging.getLogger(__name__)
 class _ReplaceFiles(_OverwriteFiles):
     """An overwrite producer that labels its snapshot ``replace``."""
 
+    def __init__(self, *args, **kwargs) -> None:
+        """Refuse a build whose internals would corrupt this commit.
+
+        **The guard lives here, at the producer, rather than at each verb.** It
+        used to be called in exactly one place -- ``TableCompactor.execute`` --
+        while five of the six mutating operations reached
+        ``_OverwriteFiles._existing_manifests`` without ever consulting it. Two
+        of those five, ``rewrite-manifests`` and ``remove-dangling-deletes``,
+        commit through subclasses of *this class*: on a build that prunes
+        manifests by predicate without deriving the predicate correctly, the
+        manifest holding a replaced file is kept verbatim and its rows are
+        counted twice. Compaction refused and they proceeded (ZMBNI-37).
+
+        Guarding the constructor makes the coverage a property rather than a
+        list. A seventh operation that commits this way is protected by
+        existing, without anyone remembering; and
+        ``test_every_replace_producer_consults_the_guard`` enumerates
+        ``__subclasses__`` so a subclass that circumvents ``super().__init__``
+        fails rather than slipping through.
+
+        It cannot refuse a *preview*, and should not: every caller builds the
+        producer only after its own ``if dry_run: return``, so nothing that
+        merely reports reaches this line. ``TableCompactor.execute`` keeps its
+        own earlier call deliberately -- refusing before an expensive rewrite
+        beats refusing after it.
+        """
+        assert_supported_pyiceberg()
+        super().__init__(*args, **kwargs)
+
     def _summary(self, snapshot_properties: dict[str, str] = EMPTY_DICT) -> Summary:
         self._operation = Operation.OVERWRITE
         try:
@@ -176,6 +205,29 @@ def assert_supported_pyiceberg() -> None:
 
     The checks themselves live in :mod:`zamboni.capabilities`, which probes the
     installed build structurally rather than comparing version numbers.
+
+    **Who calls this, and who deliberately does not.** It is invoked from
+    :meth:`_ReplaceFiles.__init__`, so every operation that commits through the
+    private snapshot producers is covered by construction, plus once at the top
+    of :meth:`~zamboni.compactor.TableCompactor.execute` to refuse before an
+    expensive rewrite rather than after it.
+
+    The three mutating operations that do **not** consult it, each for a stated
+    reason rather than by omission (ZMBNI-37):
+
+    * ``expire`` commits through PyIceberg's own ``ExpireSnapshots``, which
+      removes snapshot entries from metadata. It never rewrites a manifest, so
+      the pruning defect this guard exists for cannot reach it.
+    * ``apply-properties`` commits a plain ``Table.transaction()`` that sets
+      table properties. No manifests, no data files.
+    * ``remove-orphans`` produces no snapshot at all -- it calls
+      ``FileIO.delete`` on files the reachable set does not contain. Its own
+      safety fence is the five invariants in design.md §6.6, which are about
+      what may be deleted rather than about which PyIceberg is installed.
+
+    If any of those three gains a manifest rewrite, it needs the guard, and
+    ``test_every_replace_producer_consults_the_guard`` will not notice -- it
+    watches producers, not verbs.
     """
     from .capabilities import detect
 
