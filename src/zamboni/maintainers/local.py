@@ -99,13 +99,17 @@ class LocalMaintainer(Maintainer):
                     invariants=RECLAIM_INVARIANTS,
                 ),
                 Operation.REMOVE_DANGLING_DELETES: cls._dangling_support(probes),
-                Operation.REWRITE_MANIFESTS: OperationSupport(
+                Operation.REWRITE_MANIFESTS: cls._producer_gated(
                     Operation.REWRITE_MANIFESTS,
-                    Support.FULL,
-                    can_preview=True,
-                    invariants=(
-                        *PREVIEWS_EVERYTHING,
-                        "preserves sequence numbers and snapshot ids exactly",
+                    probes,
+                    OperationSupport(
+                        Operation.REWRITE_MANIFESTS,
+                        Support.FULL,
+                        can_preview=True,
+                        invariants=(
+                            *PREVIEWS_EVERYTHING,
+                            "preserves sequence numbers and snapshot ids exactly",
+                        ),
                     ),
                 ),
                 Operation.APPLY_PROPERTIES: OperationSupport(
@@ -119,6 +123,33 @@ class LocalMaintainer(Maintainer):
                 ),
             },
         )
+
+    @staticmethod
+    def _producer_gated(operation: Operation, probes, usable: OperationSupport) -> OperationSupport:
+        """Declare what an unusable PyIceberg does to an operation that commits.
+
+        `rewrite-manifests` and `remove-dangling-deletes` commit through
+        `_ReplaceFiles` subclasses, so `assert_supported_pyiceberg()` refuses them
+        on a build whose manifest pruning would double-count rows. Before
+        ZMBNI-37 they did not consult the guard at all; adding it without
+        declaring it would have been worse than either -- `zamboni engines` would
+        advertise FULL support, the preview would print "re-run with --yes", and
+        `--yes` would then raise.
+
+        That is the second-source-of-truth failure this package keeps
+        re-learning: the capability is now enforced in `committer.py` and must be
+        *declared* here, or the declaration and the behaviour disagree. See
+        `MaintainerCapabilities` -- ask the declarations, do not write a second
+        copy of the fact.
+        """
+        if reason := probes.unsupported_reason():
+            return OperationSupport(
+                operation,
+                Support.UNSUPPORTED,
+                can_preview=False,
+                limitations=(f"this PyIceberg build cannot be used: {reason}",),
+            )
+        return usable
 
     @staticmethod
     def _compact_support(probes) -> OperationSupport:
@@ -174,6 +205,15 @@ class LocalMaintainer(Maintainer):
         a delete manifest, the limitation is gone and this must stop claiming it
         (ZMBNI-604).
         """
+        if reason := probes.unsupported_reason():
+            # Commits through `_RemoveDeleteFiles`, a `_ReplaceFiles` subclass,
+            # so the same gate as compaction applies. See `_producer_gated`.
+            return OperationSupport(
+                Operation.REMOVE_DANGLING_DELETES,
+                Support.UNSUPPORTED,
+                can_preview=False,
+                limitations=(f"this PyIceberg build cannot be used: {reason}",),
+            )
         if probes.delete_manifests_writable:
             return OperationSupport(
                 Operation.REMOVE_DANGLING_DELETES,

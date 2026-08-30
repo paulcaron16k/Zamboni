@@ -243,12 +243,47 @@ Three lessons follow, and they are the whole basis of §4:
 
 Six mechanisms, in the order they engage.
 
-### 4.1 A single choke point, not a scatter
+### 4.1 One choke point, at the producer rather than at each verb
 
-`assert_supported_pyiceberg()` runs before any commit path and raises
-`UnsupportedPyIceberg` if the installed build fails the checks in
-`capabilities.py`. Every mutating operation passes through it, so "is this build
-safe" is asked once, in one place, and answered the same way for every verb.
+`assert_supported_pyiceberg()` raises `UnsupportedPyIceberg` if the installed
+build fails the checks in `capabilities.py`. It is called from three places, and
+it takes all three to make the coverage a property rather than a list:
+
+| Call site | Covers |
+|---|---|
+| `_ReplaceFiles.__init__` | every operation committing through a private producer subclass, including one added tomorrow |
+| `ReplaceCommitter.commit` | the paths where the producer is the **stock** `_OverwriteFiles` — `snapshot_operation="overwrite"`, and any build with native REPLACE summaries — plus library callers, since `ReplaceCommitter` is public API |
+| `TableCompactor.execute` | refusing *before* an expensive rewrite rather than after it |
+
+The second was missed on the first attempt at this fix, and the reason is worth
+keeping: the producer class is chosen at **runtime**, so guarding the class made
+coverage a property of something that is itself a decision. Two of the three
+choices are not `_ReplaceFiles`, and one of them — a future PyIceberg whose
+`replace_summary_supported` is true — is exactly the build class the guard exists
+for.
+
+It was not always so, and the history is the point.
+[#37](https://github.com/paulcaron16k/Zamboni/issues/37): until it was fixed the
+guard had exactly **one** caller, and five of the six mutating operations never
+consulted it — two of them, `rewrite-manifests` and `remove-dangling-deletes`,
+committing through `_ReplaceFiles` subclasses on builds the guard would have
+refused. An earlier revision of this section asserted the opposite, and that
+assertion is *how the gap survived*: the claim was read off the guard's docstring
+rather than off its callers, and the document was then treated as evidence the
+guard was sound.
+
+`test_every_replace_producer_consults_the_guard` enumerates
+`_ReplaceFiles.__subclasses__()` rather than listing today's operations, so a
+subclass that overrides `__init__` without calling `super()` fails the suite
+instead of quietly opting out. Verified by breaking it both ways: deleting the
+guard fails the test, and a subclass calling `_OverwriteFiles.__init__` directly
+fails it.
+
+Three mutating operations deliberately do **not** consult it, with the reasons
+recorded on the function itself: `expire` commits through PyIceberg's own
+`ExpireSnapshots` and rewrites no manifest; `apply-properties` sets table
+properties in a plain transaction; `remove-orphans` produces no snapshot at all
+and is fenced instead by the deletion invariants in design.md §6.6.
 
 ### 4.2 Capability probes, never version comparisons
 

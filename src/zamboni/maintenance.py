@@ -25,6 +25,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from .committer import UnsupportedPyIceberg
 from .compactor import CompactionBlocked
 from .config import CompactionConfig, config_from_table_settings
 from .expire import ExpiryAborted
@@ -249,7 +250,13 @@ def _run(
         # Declared, not a failure: Trino cannot remove dangling deletes, and a
         # nightly fleet run should skip it rather than fail every night.
         return Outcome(table, operation, 0, f"skipped -- {exc}")
-    except CompactionBlocked as exc:
+    except (CompactionBlocked, UnsupportedPyIceberg) as exc:
+        # Both are refusals rather than failures: the table, or the build under
+        # it, is blocked. `UnsupportedPyIceberg` escaping instead would abort the
+        # whole fleet run with a traceback and exit 1 -- contradicting both the
+        # exit-code contract and this function's promise that each table is
+        # attempted. Added with ZMBNI-37, which gave five more operations a way
+        # to raise it.
         return Outcome(table, operation, 3, str(exc))
     except (ExpiryAborted, OrphanCleanupAborted) as exc:
         # A safety check refused. Nothing was deleted, and the operator response
