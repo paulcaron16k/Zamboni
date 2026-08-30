@@ -152,9 +152,14 @@ rejects password/token/secret keys by name.
 - Private PyIceberg APIs in use are inventoried in
   `docs/pyiceberg-private-api.md` — read it before editing `committer.py`,
   `evolution.py`, `deletes.py`, `manifests.py` or `capabilities.py`. They are
-  guarded by `committer.assert_supported_pyiceberg()`, called from
-  `_ReplaceFiles.__init__` so every producer that commits is covered by
-  construction — do not move it to the call sites, that is what ZMBNI-37 fixed.
+  guarded by `committer.assert_supported_pyiceberg()`, called from three places:
+  `_ReplaceFiles.__init__`, `ReplaceCommitter.commit` (which picks the *stock*
+  producer for `snapshot_operation="overwrite"` and on a build with native
+  REPLACE summaries) and `TableCompactor.execute`. All three are needed —
+  guarding only the producer class leaves the paths that do not use it, which is
+  the bug ZMBNI-37 fixed and then briefly reintroduced. Any operation that can
+  raise it must also **declare** it in `maintainers/local.py`, or `engines`
+  advertises support the run then refuses.
   `pyiceberg` is capped `<0.12` because 0.12 corrupts partitioned upserts
   (docs/upstream-0.12-upsert-regression.md).
 - Removed files are passed as the `DataFile` objects read from the manifests,

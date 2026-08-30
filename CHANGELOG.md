@@ -32,10 +32,18 @@ Two categories beyond the usual set, because this tool deletes files:
   correctly, the manifest holding a replaced file is kept verbatim and its rows
   are counted twice; compaction refused such a build and those two proceeded.
 
-  The guard now runs in `_ReplaceFiles.__init__`, so coverage is a property of
-  the producer rather than a list of call sites. `expire`, `apply-properties`
-  and `remove-orphans` deliberately do not consult it, for reasons recorded on
-  the function.
+  The guard now runs in `_ReplaceFiles.__init__` **and** in
+  `ReplaceCommitter.commit`, which is where the producer class is chosen at
+  runtime — `snapshot_operation="overwrite"` and any build with native REPLACE
+  summaries both select the stock `_OverwriteFiles`, so guarding the subclass
+  alone would have left those paths open. `expire`, `apply-properties` and
+  `remove-orphans` deliberately do not consult it, for reasons recorded on the
+  function.
+
+  `rewrite-manifests` and `remove-dangling-deletes` now **declare** the same gate
+  compaction does, so `zamboni engines` stops advertising support that the run
+  refuses, and the refusal is exit 3 with a reason rather than an uncaught
+  exception — which previously would have aborted an entire fleet run.
 
   **Latent rather than exploited**: on 0.11.1, the only version the `<0.12` cap
   admits, `prunes_manifests_by_predicate` is false and the guard never fires. The

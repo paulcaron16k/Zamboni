@@ -50,18 +50,23 @@ class _ReplaceFiles(_OverwriteFiles):
         manifest holding a replaced file is kept verbatim and its rows are
         counted twice. Compaction refused and they proceeded (ZMBNI-37).
 
-        Guarding the constructor makes the coverage a property rather than a
-        list. A seventh operation that commits this way is protected by
-        existing, without anyone remembering; and
-        ``test_every_replace_producer_consults_the_guard`` enumerates
-        ``__subclasses__`` so a subclass that circumvents ``super().__init__``
-        fails rather than slipping through.
+        Guarding the constructor covers every operation that commits through a
+        producer *subclass*, and ``test_every_replace_producer_consults_the_guard``
+        walks the subclass tree recursively so a grandchild circumventing
+        ``super().__init__`` fails rather than slipping through.
 
-        It cannot refuse a *preview*, and should not: every caller builds the
-        producer only after its own ``if dry_run: return``, so nothing that
-        merely reports reaches this line. ``TableCompactor.execute`` keeps its
-        own earlier call deliberately -- refusing before an expensive rewrite
-        beats refusing after it.
+        **It is not sufficient on its own**, which the first version of this fix
+        got wrong: :meth:`ReplaceCommitter.commit` chooses its producer at
+        runtime and two of the three choices are the stock ``_OverwriteFiles``.
+        That method carries its own call; see it for which paths.
+
+        This line cannot refuse a *preview*: every caller builds its producer
+        after its own ``if dry_run: return``, so nothing that merely reports
+        reaches here. ``TableCompactor.execute`` keeps a separate, earlier call
+        which *does* precede its dry-run check -- so ``execute(dry_run=True)``
+        refuses on an unusable build, deliberately: there is no point previewing
+        a rewrite that cannot be committed, and refusing before the work beats
+        refusing after it.
         """
         assert_supported_pyiceberg()
         super().__init__(*args, **kwargs)
@@ -123,6 +128,24 @@ class ReplaceCommitter:
     ) -> CommitOutcome:
         """Swap ``removed`` for ``added`` in a single replace snapshot.
 
+        Guarded here as well as in :meth:`_ReplaceFiles.__init__`, because the
+        producer class is chosen at **runtime** and two of the three choices are
+        not ``_ReplaceFiles``: ``snapshot_operation="overwrite"``, a documented
+        option, selects the stock ``_OverwriteFiles``, and so does a build whose
+        ``replace_summary_supported`` is true -- a *future* PyIceberg, which is
+        exactly the kind most likely to carry the pruning defect the guard exists
+        for. ``ReplaceCommitter`` is exported from :mod:`zamboni`, so a library
+        caller reaches this without passing through
+        :meth:`~zamboni.compactor.TableCompactor.execute` either.
+
+        Guarding the producer alone made coverage a property of a class that is
+        itself a runtime choice; the property has to be "every commit path".
+
+        The guard runs **after** the empty-commit early return, deliberately: a
+        call with nothing to add or remove produces no snapshot, so there is
+        nothing for an unusable build to corrupt, and refusing it would fail a
+        fleet run that simply had no work for a table.
+
         Args:
             expected_snapshot_id: The snapshot the plan was built against. The
                 table is re-read and checked against this immediately before
@@ -131,6 +154,8 @@ class ReplaceCommitter:
         """
         if not added and not removed:
             return CommitOutcome(tbl.metadata.current_snapshot_id, 0, 0, 0, 0)
+
+        assert_supported_pyiceberg()
 
         tbl.refresh()
         current = tbl.current_snapshot()

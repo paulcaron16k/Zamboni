@@ -165,10 +165,29 @@ def test_every_replace_producer_consults_the_guard(monkeypatch):
 
     monkeypatch.setattr(committer, "assert_supported_pyiceberg", refuse)
 
-    producers = [_ReplaceFiles, *_ReplaceFiles.__subclasses__()]
-    assert len(producers) >= 4, (
-        f"expected the base plus at least three subclasses, found {producers}. "
-        "If a producer moved, this test is looking in the wrong place"
+    def descendants(cls) -> list[type]:
+        """Every subclass, not just the direct ones.
+
+        `type.__subclasses__()` returns direct children only, so a *grandchild*
+        overriding `__init__` without calling `super()` bypassed the guard while
+        this test passed. Found in review, reproduced with a subclass of
+        `_RewriteManifests`.
+        """
+        found = []
+        for sub in cls.__subclasses__():
+            found.append(sub)
+            found.extend(descendants(sub))
+        return found
+
+    # Import every module that defines one, so the walk cannot report complete
+    # coverage of a set that is short because something was never imported.
+    from zamboni import deletes, evolution, manifests  # noqa: F401
+
+    producers = [_ReplaceFiles, *descendants(_ReplaceFiles)]
+    expected = {"_ReplaceFiles", "MultiSpecReplaceFiles", "_RewriteManifests", "_RemoveDeleteFiles"}
+    assert {p.__name__ for p in producers} >= expected, (
+        f"expected {sorted(expected)}, found {sorted(p.__name__ for p in producers)}. "
+        "A producer moved, or its module is no longer imported"
     )
 
     for producer in producers:
@@ -180,7 +199,9 @@ def test_every_replace_producer_consults_the_guard(monkeypatch):
             name: None
             for name, param in inspect.signature(producer.__init__).parameters.items()
             if param.default is inspect.Parameter.empty
-            and param.kind is inspect.Parameter.KEYWORD_ONLY
+            and param.kind
+            in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            and name != "self"
         }
         kwargs.setdefault("operation", None)
         kwargs.setdefault("transaction", None)
@@ -190,3 +211,36 @@ def test_every_replace_producer_consults_the_guard(monkeypatch):
             # The values never matter: the guard runs before `super().__init__`,
             # so construction cannot get far enough to need a real transaction.
             producer(**kwargs)
+
+
+def test_the_committer_refuses_even_when_it_picks_the_stock_producer(monkeypatch):
+    """The hole that guarding `_ReplaceFiles` alone left open (ZMBNI-37).
+
+    `ReplaceCommitter.commit` chooses its producer at runtime, and two of the
+    three choices are *not* `_ReplaceFiles`:
+
+    * `snapshot_operation="overwrite"`, a documented `CompactionConfig` option,
+      selects the stock `_OverwriteFiles`;
+    * so does any build whose `replace_summary_supported` is true -- a future
+      PyIceberg, which is exactly the kind most likely to carry the pruning
+      defect the guard exists for.
+
+    So the first version of this fix made coverage a property of a class that is
+    itself a runtime choice. `ReplaceCommitter` is public API too, so a library
+    caller reaches `commit()` without going through `TableCompactor.execute`.
+    """
+    from zamboni import committer
+    from zamboni.committer import ReplaceCommitter, UnsupportedPyIceberg
+
+    def refuse() -> None:
+        raise UnsupportedPyIceberg("simulated unusable build")
+
+    monkeypatch.setattr(committer, "assert_supported_pyiceberg", refuse)
+
+    for snapshot_operation in ("replace", "overwrite"):
+        with pytest.raises(UnsupportedPyIceberg):
+            # `added`/`removed` are non-empty so the early return for a no-op
+            # commit cannot be what raises -- and the guard runs before it anyway.
+            ReplaceCommitter(snapshot_operation=snapshot_operation).commit(
+                None, expected_snapshot_id=None, removed=[object()], added=[object()]
+            )

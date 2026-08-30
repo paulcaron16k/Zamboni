@@ -246,11 +246,21 @@ Six mechanisms, in the order they engage.
 ### 4.1 One choke point, at the producer rather than at each verb
 
 `assert_supported_pyiceberg()` raises `UnsupportedPyIceberg` if the installed
-build fails the checks in `capabilities.py`. It is called from
-**`_ReplaceFiles.__init__`**, so every operation that commits through the private
-snapshot producers is covered *by construction*, including one added tomorrow.
-`TableCompactor.execute` keeps an additional call at its top, deliberately:
-refusing before an expensive rewrite beats refusing after it.
+build fails the checks in `capabilities.py`. It is called from three places, and
+it takes all three to make the coverage a property rather than a list:
+
+| Call site | Covers |
+|---|---|
+| `_ReplaceFiles.__init__` | every operation committing through a private producer subclass, including one added tomorrow |
+| `ReplaceCommitter.commit` | the paths where the producer is the **stock** `_OverwriteFiles` — `snapshot_operation="overwrite"`, and any build with native REPLACE summaries — plus library callers, since `ReplaceCommitter` is public API |
+| `TableCompactor.execute` | refusing *before* an expensive rewrite rather than after it |
+
+The second was missed on the first attempt at this fix, and the reason is worth
+keeping: the producer class is chosen at **runtime**, so guarding the class made
+coverage a property of something that is itself a decision. Two of the three
+choices are not `_ReplaceFiles`, and one of them — a future PyIceberg whose
+`replace_summary_supported` is true — is exactly the build class the guard exists
+for.
 
 It was not always so, and the history is the point.
 [#37](https://github.com/paulcaron16k/Zamboni/issues/37): until it was fixed the
