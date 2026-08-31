@@ -21,6 +21,24 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### Removed
+
+- **`docs/upstream-0.12-upsert-regression.md`**, which both this file and the
+  README linked. Its reproduction is now
+  `test_upsert_on_a_transformed_partition_replaces_rather_than_duplicates`, which
+  fails on a build exhibiting the bug and passes on one that does not — the
+  question the document was answering in prose. The upstream issue
+  ([#3758](https://github.com/apache/iceberg-python/issues/3758)) and its fix
+  ([#3780](https://github.com/apache/iceberg-python/pull/3780), merged) remain the
+  source of detail, and every reference now points at one of those or at the test.
+
+  Two things the document carried that prose was the wrong home for are now
+  assertions instead: the partition spec being *required* to reproduce is
+  `test_the_upsert_defect_needs_a_partition_spec`, and which transforms are
+  affected is measured per transform in the test's own docstring rather than
+  characterised — an earlier draft said "any non-identity transform", and
+  `truncate` is non-identity and correct.
+
 ### SAFETY
 
 - **Every operation that commits through the private snapshot producers now
@@ -660,9 +678,7 @@ they lived. Each entry names what to change.
 - **PyIceberg is now capped at `<0.12`.** 0.12 corrupts data on a partitioned
   `upsert`: it leaves the row it replaced *and* duplicates one it never touched,
   with no error. Reproduced in 25 lines and filed upstream as
-  [apache/iceberg-python#3758](https://github.com/apache/iceberg-python/issues/3758),
-  and now pinned by
-  `test_upsert_on_a_transformed_partition_replaces_rather_than_duplicates`.
+  [apache/iceberg-python#3758](https://github.com/apache/iceberg-python/issues/3758).
   The previous `>=0.11.1` had an open upper bound, so the day 0.12 published,
   any `uv lock --upgrade` would have pulled it in without anyone touching this
   code. The cap lifts when 0.12 is released *and* the regression is fixed.

@@ -42,6 +42,16 @@ assumptions plans the wrong work. Each row says how it was established, and rows
 that have since been overtaken say so rather than being quietly corrected --
 what a plan believed at the time is part of why it chose what it chose.
 
+**Two rows were collapsed on 2026-08-31** rather than gaining a third
+strike-through: both concerned `0.12.0rc1`, which is now two candidates behind
+and whose defect is fixed, so the superseded text had stopped explaining a choice
+and become a version number nobody needs. The convention above is for a belief
+that shaped a decision; it is not a reason to accumulate corrections about a
+release candidate that no longer exists anywhere but in this file. Where the *why*
+still matters -- that a name-based probe could not tell a corrupting candidate
+from a fixed one -- it is kept in
+[pyiceberg-private-api.md](pyiceberg-private-api.md) §3, without the version.
+
 | Fact | How | Consequence |
 |---|---|---|
 | PyIceberg 0.12 is **still not released**: PyPI's newest final is 0.11.1, and `0.12.0rc2` is in release voting | PyPI JSON API, 2026-08-31 | The `<0.12` cap holds until a final publishes, not until the fix merges — and the fix has merged |
@@ -70,7 +80,7 @@ routes every version-dependent decision through structural probes
 | REPLACE summary native | False | **False** | `update_snapshot_summaries` still rejects `REPLACE`; `_ReplaceFiles` stays |
 | streaming writes | False | **True** | `_dataframe_to_data_files` now accepts `pa.RecordBatchReader` |
 | manifest predicate pruning | False | **True** | `_OverwriteFiles._existing_manifests` prunes via `manifest_evaluator` |
-| derives delete predicate | False | **True** | `_build_delete_files_partition_predicate` exists and is called |
+| derives delete predicate | False | **True** | established **behaviourally**: an overwrite on a transformed partition kept the right rows. The method name is identical on a candidate that corrupts data and on one that does not, so no name-based check can separate them (ZMBNI-1109) |
 | equality deletes readable | False | **False** | the `NotImplementedError` guard is still there |
 | delete manifests writable | False | **False** | `ManifestWriterV2.content()` still returns `DATA`; there is no `ManifestWriterV3` |
 
@@ -87,7 +97,7 @@ dangling delete manifest) remains blocked; and equality deletes stay unreadable.
 Anyone expecting 0.12 to close those should read this row first.
 
 **So the value is:** don't rot, gain streaming writes and cheaper commits, and —
-mainly — **find out what 397 commits did to the private APIs this package
+mainly — **find out what the commits since 0.11.1 did to the private APIs this package
 drives**. Known movers already visible in the log: `_scan_plan_helper` renamed to
 `_plan_manifest_entries`, `BaseScan`/`ManifestGroupPlanner` extracted, and
 `ManifestEntry.snapshot_id`'s setter fixed for writing to the wrong index —
