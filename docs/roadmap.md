@@ -42,11 +42,21 @@ assumptions plans the wrong work. Each row says how it was established, and rows
 that have since been overtaken say so rather than being quietly corrected --
 what a plan believed at the time is part of why it chose what it chose.
 
+**Two rows were collapsed on 2026-08-31** rather than gaining a third
+strike-through: both concerned `0.12.0rc1`, which is now two candidates behind
+and whose defect is fixed, so the superseded text had stopped explaining a choice
+and become a version number nobody needs. The convention above is for a belief
+that shaped a decision; it is not a reason to accumulate corrections about a
+release candidate that no longer exists anywhere but in this file. Where the *why*
+still matters -- that a name-based probe could not tell a corrupting candidate
+from a fixed one -- it is kept in
+[pyiceberg-private-api.md](pyiceberg-private-api.md) §3, without the version.
+
 | Fact | How | Consequence |
 |---|---|---|
-| ~~PyIceberg 0.12 is **not released** — PyPI's latest is 0.11.1, with no rc~~ **Superseded 2026-08-11: `0.12.0rc1` is on PyPI; the latest *stable* is still 0.11.1** | PyPI JSON API | RM-1 develops against the checkout until a release candidate carries the fix for [#3758](https://github.com/apache/iceberg-python/issues/3758) |
-| ~~That checkout is on `main` at `154288fb` (2026-07-27), **397 commits** past `pyiceberg-0.11.1`~~ **Now `32f036c5`, 19 commits past `pyiceberg-0.12.0rc1`** | `git log` | Large surface for private-API drift — and it drifted: two probes now key on symbols that moved (ZMBNI-1109) |
-| `0.12.0rc1` reproduces [#3758](https://github.com/apache/iceberg-python/issues/3758); main after rc1 does not | the 25-line reproduction in [upstream-0.12-upsert-regression.md](upstream-0.12-upsert-regression.md), run against both on 2026-08-11 | The supported range includes 0.12 once a release carries the fix ([#3780](https://github.com/apache/iceberg-python/pull/3780)) |
+| PyIceberg 0.12 is **still not released**: PyPI's newest final is 0.11.1, and `0.12.0rc2` is in release voting | PyPI JSON API, 2026-08-31 | The `<0.12` cap holds until a final publishes, not until the fix merges — and the fix has merged |
+| The branch builds against a checkout **108 commits** past `pyiceberg-0.11.1` in `pyiceberg/` (463 across the whole repository) | `git log --oneline pyiceberg-0.11.1..0bf4d13d -- pyiceberg/` | Large surface for private-API drift — and it drifted, though not where expected: no symbol in the inventory moved, and two probes broke anyway. [pyiceberg-private-api.md](pyiceberg-private-api.md) §3 |
+| **`0.12.0rc2` returns the correct answer**; the release candidate under vote carries the fix ([#3780](https://github.com/apache/iceberg-python/pull/3780), merged 2026-08-19, closing [#3758](https://github.com/apache/iceberg-python/issues/3758)) | `test_upsert_on_a_transformed_partition_replaces_rather_than_duplicates`, run against 0.11.1, rc2 and a build that regressed, on 2026-08-31 | The `<0.12` cap's justification is spent the day 0.12.0 publishes. The test stays as the tripwire |
 | Trino has **no Z-order and no sort during `optimize`** | Trino Iceberg connector docs | A common interface cannot treat ordering as universally available |
 | Trino enforces **retention floors** (`iceberg.expire-snapshots.min-retention`, `remove-orphan-files.min-retention`, both default `7d`) | same | Zamboni's 5-day/3-day defaults are *rejected*, not honoured. Must fail at plan time |
 | Spark removes dangling deletes via the `remove-dangling-deletes` option on `rewrite_data_files`; `rewrite_position_delete_files` is a separate procedure that *compacts* delete files; Trino has neither | Iceberg Spark procedures docs, corrected by RM-3 | Dangling-delete removal is Spark-only, and Spark can do what *we* cannot. An earlier draft of this row attributed it to the wrong procedure |
@@ -70,7 +80,7 @@ routes every version-dependent decision through structural probes
 | REPLACE summary native | False | **False** | `update_snapshot_summaries` still rejects `REPLACE`; `_ReplaceFiles` stays |
 | streaming writes | False | **True** | `_dataframe_to_data_files` now accepts `pa.RecordBatchReader` |
 | manifest predicate pruning | False | **True** | `_OverwriteFiles._existing_manifests` prunes via `manifest_evaluator` |
-| derives delete predicate | False | **True** | `_build_delete_files_partition_predicate` exists and is called |
+| derives delete predicate | False | **True** | established **behaviourally**: an overwrite on a transformed partition kept the right rows. The method name is identical on a candidate that corrupts data and on one that does not, so no name-based check can separate them (ZMBNI-1109) |
 | equality deletes readable | False | **False** | the `NotImplementedError` guard is still there |
 | delete manifests writable | False | **False** | `ManifestWriterV2.content()` still returns `DATA`; there is no `ManifestWriterV3` |
 
@@ -87,7 +97,7 @@ dangling delete manifest) remains blocked; and equality deletes stay unreadable.
 Anyone expecting 0.12 to close those should read this row first.
 
 **So the value is:** don't rot, gain streaming writes and cheaper commits, and —
-mainly — **find out what 397 commits did to the private APIs this package
+mainly — **find out what the commits since 0.11.1 did to the private APIs this package
 drives**. Known movers already visible in the log: `_scan_plan_helper` renamed to
 `_plan_manifest_entries`, `BaseScan`/`ManifestGroupPlanner` extracted, and
 `ManifestEntry.snapshot_id`'s setter fixed for writing to the wrong index —

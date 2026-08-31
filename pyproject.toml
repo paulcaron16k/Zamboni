@@ -34,10 +34,16 @@ classifiers = [
     "Topic :: System :: Systems Administration",
 ]
 dependencies = [
-    # Upper bound deliberate, not caution. PyIceberg 0.12 corrupts data on a
-    # partitioned `upsert` -- it leaves the row it replaced *and* duplicates one
-    # it never touched, silently. Reproduced in 25 lines and recorded in
-    # docs/upstream-0.12-upsert-regression.md.
+    # Upper bound deliberate, not caution. PyIceberg 0.12's early release
+    # candidates corrupt data on a partitioned `upsert` -- the row it replaced
+    # survives *beside* its replacement and one it never touched is duplicated,
+    # silently. Filed upstream as https://github.com/apache/iceberg-python/issues/3758,
+    # fixed by https://github.com/apache/iceberg-python/pull/3780.
+    #
+    # `test_upsert_on_a_transformed_partition_replaces_rather_than_duplicates`
+    # is the reproduction, and it is a tripwire rather than a passing formality:
+    # verified to fail on a build that regressed and pass on 0.11.1 and on
+    # 0.12.0rc2, which carries the fix.
     #
     # Without a cap, the day 0.12 publishes any `uv lock --upgrade` pulls it in
     # and nobody had to touch our code for that to happen. Lift it when 0.12 is

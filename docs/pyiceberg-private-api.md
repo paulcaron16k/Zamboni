@@ -231,7 +231,7 @@ Three lessons follow, and they are the whole basis of §4:
 1. **Rename risk is real but loud.** An `ImportError` or `AttributeError` stops
    the run. It is the failure mode you want.
 2. **Behaviour risk is quiet, and names cannot detect it.**
-   `_build_delete_files_partition_predicate` exists on 0.12.0rc1, *which corrupts
+   `_build_delete_files_partition_predicate` exists on an early 0.12 candidate *which corrupts
    data*, and on both attempted fixes for it. Any probe that asks "does this
    symbol exist" declares the corrupting build safe.
 3. **The packaging around the private API moves independently of it.** Nothing in

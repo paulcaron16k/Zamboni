@@ -117,11 +117,11 @@ def test_exceeds_at_the_boundary(operator, bound, version, expected):
 
 
 def test_prereleases_are_not_findings():
-    """`pyiceberg<0.12` is waiting for a *release*, and 0.12.0rc1 is on PyPI
+    """`pyiceberg<0.12` is waiting for a *release*, and 0.12 candidates are on PyPI
     today. Counting it would open an issue about a version that cannot lift the
     cap it names."""
     cap = vw.Cap("pyiceberg", "<", "0.12", "project.dependencies", "pyiceberg<0.12")
-    for version in ("0.12.0rc1", "0.12.0b1", "0.12.0.dev1", "1.0.0a1"):
+    for version in ("0.12.0rc1", "0.12.0rc2", "0.12.0b1", "0.12.0.dev1", "1.0.0a1"):
         assert vw.release_ordinal(version) is None
         assert not vw.exceeds(cap, version)
 

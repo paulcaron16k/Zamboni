@@ -160,8 +160,9 @@ rejects password/token/secret keys by name.
   the bug ZMBNI-37 fixed and then briefly reintroduced. Any operation that can
   raise it must also **declare** it in `maintainers/local.py`, or `engines`
   advertises support the run then refuses.
-  `pyiceberg` is capped `<0.12` because 0.12 corrupts partitioned upserts
-  (docs/upstream-0.12-upsert-regression.md).
+  `pyiceberg` is capped `<0.12` for an upstream partitioned-`upsert`
+  corruption, pinned by
+  `test_upsert_on_a_transformed_partition_replaces_rather_than_duplicates`.
 - Removed files are passed as the `DataFile` objects read from the manifests,
   never reconstructed — `_OverwriteFiles._existing_manifests` matches by
   identity.

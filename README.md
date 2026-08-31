@@ -945,21 +945,27 @@ about 0.12.
 
 Zamboni is tested against each 0.12 release candidate as it appears. Issues found are
 reported upstream and fixed; that is ordinary, and it is how a cap gets lifted rather than
-a reason to keep one. Currently open:
+a reason to keep one. What was found, and where it stands:
 
 | Issue | What it is | Fix |
 |---|---|---|
-| [iceberg-python#3758](https://github.com/apache/iceberg-python/issues/3758) | `upsert` on a *partitioned* table keeps the replaced row beside its replacement and duplicates an untouched one, silently. Overwrite's new manifest pruning keeps a non-matching manifest verbatim, including the entries being deleted | [#3780](https://github.com/apache/iceberg-python/pull/3780), open |
+| [iceberg-python#3758](https://github.com/apache/iceberg-python/issues/3758) | `upsert` on a table partitioned by a **type-changing** transform (`day`, `month`, `year`, `hour`, `bucket`) keeps the replaced row beside its replacement and duplicates an untouched one, silently — or raises, for `bucket`. Overwrite's new manifest pruning keeps a non-matching manifest verbatim, including the entries being deleted | [#3780](https://github.com/apache/iceberg-python/pull/3780), **merged 2026-08-19**; the issue closed with it. **`0.12.0rc2` carries the fix** — measured, all six transforms correct |
 
 The issue and its PR are the source of detail; there is no second copy here. Our own
-reproduction and the mechanism are in
-[docs/upstream-0.12-upsert-regression.md](docs/upstream-0.12-upsert-regression.md).
+reproduction is a test --
+`test_upsert_on_a_transformed_partition_replaces_rather_than_duplicates` -- which
+fails on a build that regressed and passes on one that does not. That is the
+question a document would have been answering in prose, so the document is gone
+(ZMBNI-19).
 
 Two things worth being clear about:
 
-- **This is an ingest hazard, not a maintenance one.** Zamboni's own operations pass on
-  0.12 -- what the defect reaches is any *write* path going through overwrite on a
-  partitioned table, which is most merge-style ingestion. The cap protects your ingest.
+- **This is an ingest hazard, not a maintenance one.** What the defect reaches is any
+  *write* path going through overwrite on a partitioned table, which is most merge-style
+  ingestion — Zamboni does not call `upsert` at all. That its own operations pass on 0.12
+  is established by running them: the suite on the `feature/pyiceberg-0.12` branch, 527
+  passed, plus the live dev-stack run recorded on
+  [#17](https://github.com/paulcaron16k/Zamboni/issues/17). The cap protects your ingest.
 - **The cap is deliberate, not staleness.** The original bound was open-ended, which meant
   the day 0.12 published, any `uv lock --upgrade` would have pulled it in with nobody
   touching this code.

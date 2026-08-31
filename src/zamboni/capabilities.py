@@ -88,7 +88,7 @@ class PyIcebergCapabilities:
                 "this build prunes manifests by predicate and does so "
                 f"incorrectly: {self.pruning_evidence}. A manifest holding "
                 "replaced files is kept verbatim, so their rows would be "
-                "counted twice. PyIceberg 0.12.0rc1 is such a build."
+                "counted twice. An early 0.12 release candidate was such a build."
             )
         return None
 
@@ -155,7 +155,8 @@ def _derivation_is_correct(prunes: bool) -> tuple[bool, str]:
 
     Then the symbols were actually enumerated across three builds, and the
     repair collapsed: ``_build_delete_files_partition_predicate`` is present on
-    **0.12.0rc1, which corrupts data**, and on both attempted fixes for it. The
+    **an early 0.12 release candidate that corrupts data**, and on both attempted
+    fixes for it. The
     method's *existence* was never the property. Its *behaviour* changed while
     its name did not, so any name-based probe declares the corrupting build
     safe. A second name in the list would not have helped; it would have made

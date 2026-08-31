@@ -28,7 +28,7 @@ def collected_test_names() -> set[str]:
 def test_every_cited_test_exists():
     known = collected_test_names()
     cited_anywhere = set()
-    for doc in all_docs():
+    for doc in [*all_docs(), *(ROOT / name for name in CITING_NON_DOCS)]:
         cited = set(re.findall(r"`(test_[a-z0-9_]+)`", doc.read_text()))
         cited_anywhere |= cited
         missing = sorted(cited - known)
@@ -49,6 +49,12 @@ def test_the_requirements_table_still_carries_its_evidence():
 #: which no longer exists, or points at a moved runbook, is worse than none --
 #: it is the first thing an outside contributor reads.
 ROOT_DOCS = ("README.md", "CHANGELOG.md", "SECURITY.md", "CONTRIBUTING.md", "ONBOARDING.md")
+
+#: Files that are not documents but cite tests by name, so a rename must not rot
+#: them silently. `pyproject.toml` justifies the `pyiceberg` bound by naming the
+#: test that pins it, and `CLAUDE.md` does the same for the guard; both used to
+#: point at a document instead, which `test_doc_links_resolve` covered. ZMBNI-19.
+CITING_NON_DOCS = ("pyproject.toml", "CLAUDE.md")
 
 
 def all_docs() -> list[Path]:

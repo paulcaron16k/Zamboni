@@ -89,20 +89,26 @@ Zamboni counterparts: `target-file-size-bytes` (512 MB), `min-input-files` (5),
 
 ## 1a. What PyIceberg 0.12 provides
 
-Zamboni's local engine *is* PyIceberg, so the comparison has a fourth column
-that moves on its own. Measured on 2026-08-11 by installing each line and
-running Zamboni's own capability probes -- `zamboni doctor` -- rather than
-reading release notes:
+Zamboni's local engine *is* PyIceberg, so this column moves on its own.
+Measured on 2026-08-31 by installing each line and running Zamboni's own
+capability probes against it, rather than reading release notes.
 
-| Probe | 0.11.1 (current release) | 0.12.0rc1 | main @ `32f036c5` |
-|---|---|---|---|
-| `operation_is_injectable` | yes | yes | yes |
-| `replace_summary_supported` | no | no | no |
-| `streaming_write_supported` | **no** | **yes** | **yes** |
-| `prunes_manifests_by_predicate` | **no** | **yes** | **yes** |
-| `derives_delete_predicate` | no | no | no *(see below)* |
-| `equality_deletes_readable` | no | no | no |
-| `delete_manifests_writable` | no | no | no |
+| Probe | 0.11.1 (newest release) | 0.12.0rc2 (under vote) |
+|---|---|---|
+| `operation_is_injectable` | yes | yes |
+| `replace_summary_supported` | no | no |
+| `streaming_write_supported` | **no** | **yes** |
+| `prunes_manifests_by_predicate` | **no** | **yes** |
+| `derives_delete_predicate` | yes *(vacuously — does not prune)* | **yes, observed** |
+| `equality_deletes_readable` | no | no |
+| `delete_manifests_writable` | no | no |
+
+The third and fourth flip together, which is what keeps `manifest_pruning_is_safe`
+true across the boundary — the pair whose *split* would make Zamboni refuse to
+run. On rc2 the derivation answer is `observed -- an overwrite on a transformed
+partition kept the right rows`, and `unsupported_reason()` is None: **rc2 is
+usable.** An earlier candidate was not, which is what the behavioural probe exists
+to tell apart, since the symbol names are identical on both.
 
 **What 0.12 gives Zamboni.** One thing, and it is real: `_dataframe_to_data_files`
 accepts a `RecordBatchReader`, so the writer bin-packs a stream itself and the
@@ -119,11 +125,33 @@ rather than assumed.
 **What it took away, and got back.** 0.12 added manifest pruning to the overwrite
 path, which is a performance win and a correctness hazard: a manifest the
 predicate does not match is kept *verbatim*, including entries the operation is
-deleting. Derived wrongly, that double-counts rows. `0.12.0rc1` derives it
-wrongly for any non-identity transform -- verified, the 25-line reproduction in
-[upstream-0.12-upsert-regression.md](upstream-0.12-upsert-regression.md) returns
-`[('a',1), ('a',2), ('b',1), ('b',1)]` on rc1 where the correct answer is
-`[('a',2), ('b',1)]`. Filed as
+deleting. Derived wrongly, that double-counts rows. An early 0.12 candidate
+derived it wrongly, and *which* transforms it broke was measured per transform
+rather than characterised -- an earlier revision of this paragraph said "any
+non-identity transform", which is false:
+
+| partition transform | on the regressed build |
+|---|---|
+| `identity(k)` | correct |
+| `truncate(k, 2)` | correct |
+| `bucket(k, 4)` | **raises** `TypeError: Cannot convert LongLiteral into string` |
+| `day` / `month` / `year` (ts) | **silently wrong** |
+
+The class is transforms whose partition value has a **different type from its
+source column**, because the faulty predicate compares one against the other:
+`truncate` preserves the type so the comparison holds, the temporal transforms
+put a day ordinal beside a timestamp and compare wrongly, and `bucket` puts an
+int beside a string, which is not comparable at all -- so it crashes instead of
+corrupting. The silent case returns `[('a',1), ('a',2), ('b',1), ('b',1)]` where
+the answer is `[('a',2), ('b',1)]`: the replaced row surviving beside its
+replacement, and one nothing touched duplicated. A later `upsert` then fails with
+`Target table has duplicate rows, aborting upsert`, a guard which is itself
+correct and is detecting corruption 0.12 created.
+
+All six are correct on 0.11.1 and on **0.12.0rc2**, so the fix is in the
+candidate under vote.
+`test_upsert_on_a_transformed_partition_replaces_rather_than_duplicates` pins the
+temporal case. Filed as
 [#3758](https://github.com/apache/iceberg-python/issues/3758); the fix is on main
 after rc1 and lands via
 [#3780](https://github.com/apache/iceberg-python/pull/3780), and the same

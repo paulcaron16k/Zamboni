@@ -3,7 +3,7 @@
 
 Every ``<`` bound in ``pyproject.toml`` is a decision with an expiry date. The
 two that matter today are ``pyiceberg<0.12``, which is a data-corruption
-workaround (docs/upstream-0.12-upsert-regression.md), and the dev group's
+workaround (apache/iceberg-python#3758), and the dev group's
 ``pyspark-client>=4.0.4,<4.1``, which is matched to the dev stack's server. Both
 are meant to be lifted deliberately once the new release has been tested -- and
 neither announces itself.
@@ -130,7 +130,7 @@ def release_ordinal(version: str) -> tuple[int, ...] | None:
     """``"4.1.0" -> (4, 1, 0)``, and ``None`` for anything not purely numeric.
 
     Returning ``None`` for a non-numeric part is the pre-release filter, not a
-    parsing shortcut. ``0.12.0rc1`` exists on PyPI *now* and is exactly what the
+    parsing shortcut. ``0.12.0rc1`` and ``rc2`` are on PyPI *now* and are exactly what the
     ``pyiceberg<0.12`` cap is waiting out, so a watcher that counted it would
     open an issue about a release nobody can lift the cap for. Same for
     ``4.1.0b1``.

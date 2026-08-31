@@ -244,3 +244,182 @@ def test_the_committer_refuses_even_when_it_picks_the_stock_producer(monkeypatch
             ReplaceCommitter(snapshot_operation=snapshot_operation).commit(
                 None, expected_snapshot_id=None, removed=[object()], added=[object()]
             )
+
+
+def test_upsert_on_a_transformed_partition_replaces_rather_than_duplicates(session):
+    """The upstream regression the `<0.12` cap exists for, as a test (ZMBNI-19).
+
+    Early PyIceberg 0.12 release candidates corrupt a partitioned `upsert`: the
+    row that should have been replaced survives *beside* its replacement,
+    silently, and a later `upsert` then fails with `Target table has duplicate
+    rows, aborting upsert` -- a guard that is itself correct, detecting corruption
+    0.12 created. Filed as apache/iceberg-python#3758, fixed by #3780.
+
+    **Which transforms are affected, measured per transform** rather than
+    characterised. On a regressed build:
+
+    ==========================  =========================================
+    `identity(k)`               correct
+    `truncate(k, 2)`            correct
+    `bucket(k, 4)`              **raises** `TypeError: Cannot convert
+                                LongLiteral into string`
+    `day` / `month` / `year`    **silently wrong**
+    ==========================  =========================================
+
+    So it is neither "partitioned" in general nor "any non-identity transform" --
+    `truncate` is non-identity and correct. The class is transforms whose
+    partition value has a **different type from its source column**, because the
+    faulty predicate compares the source column against the transformed value:
+    `EqualTo(Reference('ts'), LongLiteral(20455))` puts a timestamp beside a day
+    ordinal. `truncate` preserves the type, so the comparison happens to hold;
+    the temporal transforms produce an int from a timestamp and compare wrongly;
+    `bucket` produces an int from a string, which is not comparable at all, so it
+    crashes instead of corrupting. All six are correct on 0.11.1 and on 0.12.0rc2.
+
+    This replaces a document that described the same thing in prose. It is a
+    *tripwire*, not a trivial pass: 0.11.1 is the correct build, so it passes
+    today and exists to fail the moment the cap is lifted onto a build that
+    regressed. Upstream carries its own regression test as of `d0ee9d86` (#3780),
+    `test_upsert_on_table_partitioned_by_transform`, which is what makes deleting
+    the prose safe rather than merely tidy.
+
+    Zamboni does not call `upsert`; ingestion does. The reproduction uses no
+    Zamboni code, and lives here because this is where the reason for a
+    dependency bound belongs.
+    """
+    import datetime as dt
+
+    import pyarrow as pa
+    from pyiceberg.partitioning import PartitionField, PartitionSpec
+    from pyiceberg.schema import Schema
+    from pyiceberg.transforms import DayTransform
+    from pyiceberg.types import IntegerType, NestedField, StringType, TimestampType
+
+    table = session.catalog.create_table(
+        "db.upsert_regression",
+        schema=Schema(
+            NestedField(1, "k", StringType(), required=False),
+            NestedField(2, "v", IntegerType(), required=False),
+            NestedField(3, "ts", TimestampType(), required=False),
+        ),
+        partition_spec=PartitionSpec(
+            PartitionField(source_id=3, field_id=1000, transform=DayTransform(), name="ts_day")
+        ),
+        properties={"format-version": "2"},
+    )
+
+    arrow = pa.schema(
+        [
+            pa.field("k", pa.string()),
+            pa.field("v", pa.int32()),
+            pa.field("ts", pa.timestamp("us")),
+        ]
+    )
+    when = dt.datetime(2026, 1, 6, 12)
+
+    def rows(pairs: list[tuple[str, int]]) -> pa.Table:
+        return pa.table(
+            {
+                "k": [k for k, _ in pairs],
+                "v": pa.array([v for _, v in pairs], type=pa.int32()),
+                "ts": [when] * len(pairs),
+            },
+            schema=arrow,
+        )
+
+    table.append(rows([("a", 1), ("b", 1)]))
+    table.refresh()
+
+    # Asserted, not assumed. The defect needs one manifest holding both a
+    # replaced row *and* a survivor -- the survivor is what forces the rewrite
+    # that reaches the faulty predicate. Split these across two files and the
+    # whole manifest is dropped, the faulty path is never entered, and this test
+    # passes on a build that corrupts data. Verified: a variant appending the two
+    # rows separately passes on a regressed build.
+    assert len(table.inspect.files()) == 1, (
+        "both rows must share one data file, or the upsert drops the manifest "
+        "whole and never reaches the path this test exists to check"
+    )
+
+    result = table.upsert(rows([("a", 2)]), join_cols=["k"])
+    table.refresh()
+
+    assert (result.rows_updated, result.rows_inserted) == (1, 0), (
+        f"expected one row updated and none inserted, got {result}"
+    )
+
+    # One scan, read once: comparing columns from two independent scans would
+    # compare two different reads.
+    arrived = table.scan().to_arrow()
+    got = sorted(
+        zip(arrived["k"].to_pylist(), arrived["v"].to_pylist(), strict=True),
+    )
+    assert got == [("a", 2), ("b", 1)], (
+        f"upsert on a day-partitioned table returned {got}. Expected the replaced "
+        "row to be gone: this is apache/iceberg-python#3758, and a build "
+        "exhibiting it must not be inside the pyiceberg bound in pyproject.toml"
+    )
+
+
+def test_the_upsert_defect_needs_a_partition_spec(session):
+    """The negative control the deleted document carried as prose (ZMBNI-19).
+
+    "The partition spec is required to reproduce; the same script on an
+    unpartitioned table is correct on both versions." That sentence justified the
+    whole framing -- the defect is about comparing a source column against a
+    *transformed* partition value, so with no partition there is nothing to
+    compare wrongly. Confirmed on a regressed build: unpartitioned is correct
+    there too.
+
+    Kept as an assertion rather than a sentence because it is the control that
+    makes the sibling test meaningful. If both passed on a regressed build, the
+    sibling would be proving nothing about partitioning; if this one ever starts
+    failing, the defect is not what either test says it is.
+    """
+    import datetime as dt
+
+    import pyarrow as pa
+    from pyiceberg.schema import Schema
+    from pyiceberg.types import IntegerType, NestedField, StringType, TimestampType
+
+    table = session.catalog.create_table(
+        "db.upsert_unpartitioned",
+        schema=Schema(
+            NestedField(1, "k", StringType(), required=False),
+            NestedField(2, "v", IntegerType(), required=False),
+            NestedField(3, "ts", TimestampType(), required=False),
+        ),
+        properties={"format-version": "2"},
+    )
+    arrow = pa.schema(
+        [
+            pa.field("k", pa.string()),
+            pa.field("v", pa.int32()),
+            pa.field("ts", pa.timestamp("us")),
+        ]
+    )
+    when = dt.datetime(2026, 1, 6, 12)
+
+    def rows(pairs: list[tuple[str, int]]) -> pa.Table:
+        return pa.table(
+            {
+                "k": [k for k, _ in pairs],
+                "v": pa.array([v for _, v in pairs], type=pa.int32()),
+                "ts": [when] * len(pairs),
+            },
+            schema=arrow,
+        )
+
+    table.append(rows([("a", 1), ("b", 1)]))
+    table.refresh()
+    assert len(table.inspect.files()) == 1, "the control needs the same one-file shape"
+
+    table.upsert(rows([("a", 2)]), join_cols=["k"])
+    table.refresh()
+
+    arrived = table.scan().to_arrow()
+    got = sorted(zip(arrived["k"].to_pylist(), arrived["v"].to_pylist(), strict=True))
+    assert got == [("a", 2), ("b", 1)], (
+        f"unpartitioned upsert returned {got}; the defect in #3758 is specific to a "
+        "partition spec, so this must hold on every build"
+    )
