@@ -244,3 +244,94 @@ def test_the_committer_refuses_even_when_it_picks_the_stock_producer(monkeypatch
             ReplaceCommitter(snapshot_operation=snapshot_operation).commit(
                 None, expected_snapshot_id=None, removed=[object()], added=[object()]
             )
+
+
+def test_upsert_on_a_transformed_partition_replaces_rather_than_duplicates(session):
+    """The upstream regression the `<0.12` cap exists for, as a test (ZMBNI-19).
+
+    PyIceberg 0.12 release candidates corrupt a partitioned `upsert`: the row
+    that should have been replaced survives *beside* its replacement, silently,
+    and a later `upsert` then fails on the duplicates the earlier one created.
+    Filed as apache/iceberg-python#3758, fixed by #3780.
+
+    **The transform has to be non-identity**, which is the whole shape of the
+    bug: a data file records its partition values already transformed, so a
+    predicate comparing a source column against a partition value only holds for
+    identity. `EqualTo(Reference('ts'), LongLiteral(20455))` compares a timestamp
+    against a day ordinal. Verified upstream that `identity`, `truncate` and
+    `bucket` are all correct and `year`/`month`/`day`/`hour` all duplicate.
+
+    This replaces `docs/upstream-0.12-upsert-regression.md`, whose 165 lines
+    existed to say in prose what these assertions say by failing. It is a
+    *tripwire*, not a trivial pass: 0.11.1 is the correct build, so this passes
+    today and exists to fail the moment the cap is lifted onto a build that
+    regressed. Upstream carries its own regression test too, as of
+    `0bf4d13d` -- which is what makes deleting the prose safe rather than merely
+    tidy.
+
+    Zamboni does not call `upsert`; ingestion does. The reproduction uses no
+    Zamboni code, and lives here because this is where the reason for a
+    dependency bound belongs.
+    """
+    import datetime as dt
+
+    import pyarrow as pa
+    from pyiceberg.partitioning import PartitionField, PartitionSpec
+    from pyiceberg.schema import Schema
+    from pyiceberg.transforms import DayTransform
+    from pyiceberg.types import IntegerType, NestedField, StringType, TimestampType
+
+    table = session.catalog.create_table(
+        "db.upsert_regression",
+        schema=Schema(
+            NestedField(1, "k", StringType(), required=False),
+            NestedField(2, "v", IntegerType(), required=False),
+            NestedField(3, "ts", TimestampType(), required=False),
+        ),
+        partition_spec=PartitionSpec(
+            PartitionField(source_id=3, field_id=1000, transform=DayTransform(), name="ts_day")
+        ),
+        properties={"format-version": "2"},
+    )
+
+    arrow = pa.schema(
+        [
+            pa.field("k", pa.string()),
+            pa.field("v", pa.int32()),
+            pa.field("ts", pa.timestamp("us")),
+        ]
+    )
+    when = dt.datetime(2026, 1, 6, 12)
+
+    def rows(pairs: list[tuple[str, int]]) -> pa.Table:
+        return pa.table(
+            {
+                "k": [k for k, _ in pairs],
+                "v": pa.array([v for _, v in pairs], type=pa.int32()),
+                "ts": [when] * len(pairs),
+            },
+            schema=arrow,
+        )
+
+    # Two rows in one partition, then replace one. Both parts matter: the
+    # minimum condition for the defect is a manifest holding a replaced row *and*
+    # a survivor, because the survivor is what forces the rewrite that reaches
+    # the faulty predicate. Append one row and upsert it and every entry is
+    # deleted, the manifest is dropped whole, and the bug never fires.
+    table.append(rows([("a", 1), ("b", 1)]))
+    table.refresh()
+    table.upsert(rows([("a", 2)]), join_cols=["k"])
+    table.refresh()
+
+    got = sorted(
+        zip(
+            table.scan().to_arrow()["k"].to_pylist(),
+            table.scan().to_arrow()["v"].to_pylist(),
+            strict=True,
+        )
+    )
+    assert got == [("a", 2), ("b", 1)], (
+        f"upsert on a day-partitioned table returned {got}. Expected the replaced "
+        "row to be gone: this is apache/iceberg-python#3758, and a build "
+        "exhibiting it must not be inside the pyiceberg bound in pyproject.toml"
+    )

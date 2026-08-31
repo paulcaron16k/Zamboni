@@ -94,15 +94,25 @@ that moves on its own. Measured on 2026-08-11 by installing each line and
 running Zamboni's own capability probes -- `zamboni doctor` -- rather than
 reading release notes:
 
-| Probe | 0.11.1 (current release) | 0.12.0rc1 | main @ `32f036c5` |
-|---|---|---|---|
-| `operation_is_injectable` | yes | yes | yes |
-| `replace_summary_supported` | no | no | no |
-| `streaming_write_supported` | **no** | **yes** | **yes** |
-| `prunes_manifests_by_predicate` | **no** | **yes** | **yes** |
-| `derives_delete_predicate` | no | no | no *(see below)* |
-| `equality_deletes_readable` | no | no | no |
-| `delete_manifests_writable` | no | no | no |
+Measured on 2026-08-31 by running `detect()` against each installed build, not
+read off release notes.
+
+| Probe | 0.11.1 (newest release) | 0.12.0rc2 (under vote) |
+|---|---|---|
+| `operation_is_injectable` | yes | yes |
+| `replace_summary_supported` | no | no |
+| `streaming_write_supported` | **no** | **yes** |
+| `prunes_manifests_by_predicate` | **no** | **yes** |
+| `derives_delete_predicate` | yes *(vacuously — does not prune)* | **yes, observed** |
+| `equality_deletes_readable` | no | no |
+| `delete_manifests_writable` | no | no |
+
+The third and fourth flip together, which is what keeps `manifest_pruning_is_safe`
+true across the boundary — the pair whose *split* would make Zamboni refuse to
+run. On rc2 the derivation answer is `observed -- an overwrite on a transformed
+partition kept the right rows`, and `unsupported_reason()` is None: **rc2 is
+usable.** An earlier candidate was not, which is what the behavioural probe exists
+to tell apart, since the symbol names are identical on both.
 
 **What 0.12 gives Zamboni.** One thing, and it is real: `_dataframe_to_data_files`
 accepts a `RecordBatchReader`, so the writer bin-packs a stream itself and the
@@ -120,10 +130,13 @@ rather than assumed.
 path, which is a performance win and a correctness hazard: a manifest the
 predicate does not match is kept *verbatim*, including entries the operation is
 deleting. Derived wrongly, that double-counts rows. `0.12.0rc1` derives it
-wrongly for any non-identity transform -- verified, the 25-line reproduction in
-[upstream-0.12-upsert-regression.md](upstream-0.12-upsert-regression.md) returns
-`[('a',1), ('a',2), ('b',1), ('b',1)]` on rc1 where the correct answer is
-`[('a',2), ('b',1)]`. Filed as
+wrongly for any non-identity transform, and that is measured rather than
+inferred: the reproduction, now
+`test_upsert_on_a_transformed_partition_replaces_rather_than_duplicates`, returns
+`[('a',1), ('a',2), ('b',1), ('b',1)]` on the build that regressed where the
+correct answer is `[('a',2), ('b',1)]` -- the replaced row surviving beside its
+replacement, and one it never touched duplicated. **0.12.0rc2 returns the correct
+answer**, so the fix is in the candidate under vote. Filed as
 [#3758](https://github.com/apache/iceberg-python/issues/3758); the fix is on main
 after rc1 and lands via
 [#3780](https://github.com/apache/iceberg-python/pull/3780), and the same

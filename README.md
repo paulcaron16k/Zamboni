@@ -952,8 +952,11 @@ a reason to keep one. Currently open:
 | [iceberg-python#3758](https://github.com/apache/iceberg-python/issues/3758) | `upsert` on a *partitioned* table keeps the replaced row beside its replacement and duplicates an untouched one, silently. Overwrite's new manifest pruning keeps a non-matching manifest verbatim, including the entries being deleted | [#3780](https://github.com/apache/iceberg-python/pull/3780), open |
 
 The issue and its PR are the source of detail; there is no second copy here. Our own
-reproduction and the mechanism are in
-[docs/upstream-0.12-upsert-regression.md](docs/upstream-0.12-upsert-regression.md).
+reproduction is a test --
+`test_upsert_on_a_transformed_partition_replaces_rather_than_duplicates` -- which
+fails on a build that regressed and passes on one that does not. That is the
+question a document would have been answering in prose, so the document is gone
+(ZMBNI-19).
 
 Two things worth being clear about:
 

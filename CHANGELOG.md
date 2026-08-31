@@ -660,8 +660,9 @@ they lived. Each entry names what to change.
 - **PyIceberg is now capped at `<0.12`.** 0.12 corrupts data on a partitioned
   `upsert`: it leaves the row it replaced *and* duplicates one it never touched,
   with no error. Reproduced in 25 lines and filed upstream as
-  [apache/iceberg-python#3758](https://github.com/apache/iceberg-python/issues/3758)
-  — see [docs/upstream-0.12-upsert-regression.md](docs/upstream-0.12-upsert-regression.md).
+  [apache/iceberg-python#3758](https://github.com/apache/iceberg-python/issues/3758),
+  and now pinned by
+  `test_upsert_on_a_transformed_partition_replaces_rather_than_duplicates`.
   The previous `>=0.11.1` had an open upper bound, so the day 0.12 published,
   any `uv lock --upgrade` would have pulled it in without anyone touching this
   code. The cap lifts when 0.12 is released *and* the regression is fixed.

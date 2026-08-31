@@ -228,7 +228,7 @@ def test_the_behavioural_probe_agrees_with_the_installed_build():
 def test_no_symbol_can_override_what_was_observed(monkeypatch):
     """The point of ZMBNI-1109, pinned behaviourally.
 
-    `_build_delete_files_partition_predicate` is present on 0.12.0rc1, which
+    `_build_delete_files_partition_predicate` is present on a 0.12 candidate which
     corrupts data, *and* on the builds that fix it. Its existence was never the
     property. So removing it must not change the verdict, and adding one back
     must not either -- if either did, a name would be deciding safety again and
