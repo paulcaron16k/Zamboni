@@ -36,7 +36,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, ClassVar, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -103,9 +103,37 @@ class Support(StrEnum):
 
 
 class Reportable(Protocol):
-    """What every operation returns: something that can describe itself."""
+    """What every operation returns: something that can describe itself.
+
+    Two renderings of the same values, for two different readers.
+
+    ``describe()`` is prose, and it is what makes the CLI readable. It is
+    deliberately *not* a stable surface -- docs/releasing.md does not cover
+    wording, so a message improves without a version bump.
+
+    ``as_dict()`` is the machine-readable form, and it **is** covered: the keys
+    are identifiers a dashboard may key on for years. Added because the only
+    machine-readable thing a run produced was an exit code, so an integrator
+    exporting per-operation counters had to regex sentences that are free to
+    change (ZMBNI-32, raised by the first production integrator).
+
+    Three rules for an implementation, each learned from what the results
+    actually hold:
+
+    * **Counters and identifiers only.** Never a PyIceberg object.
+      ``DanglingReport.removable`` is a ``list[DataFile]`` and
+      ``RewritePlan.replaced`` is a ``list[ManifestFile]``; serialising either
+      would leak upstream's internal representation into a contract this package
+      then owns. Report their *counts*.
+    * **JSON-serialisable throughout**, because that is what the caller does with
+      it. ``test_every_result_serialises_to_json`` proves it rather than assuming.
+    * **An ``operation`` key**, so a consumer can branch on what it is holding
+      without walking the type.
+    """
 
     def describe(self) -> str: ...
+
+    def as_dict(self) -> dict[str, Any]: ...
 
 
 class UnsupportedOperation(RuntimeError):
@@ -256,15 +284,51 @@ class Maintainer(ABC):
         dry_run: bool,
     ) -> Reportable: ...
 
-    def validate(self, operation: Operation, request: MaintenanceRequest) -> tuple[str, ...]:
-        """Problems that make this request invalid *for this engine*.
+    @classmethod
+    def validate_request(
+        cls,
+        operation: Operation,
+        request: MaintenanceRequest,
+        *,
+        options: Mapping[str, str] | None = None,
+    ) -> tuple[str, ...]:
+        """Problems that make this request invalid *for this engine*, with no
+        engine and no catalog.
 
         Plan time, not commit time. A ``table-config.json`` that is perfectly
-        valid can be unusable against a given engine -- Trino refuses a
-        retention below its configured floor -- and finding that out from a
-        server error part-way through a fleet run is the outcome this prevents.
+        valid can be unusable against a given engine -- Trino refuses a retention
+        below its configured floor, Spark refuses an orphan interval under 24
+        hours -- and finding that out from a server error part-way through a fleet
+        run is the outcome this prevents.
+
+        **A classmethod, so answering costs nothing** (ZMBNI-33). The question
+        "will this engine accept this policy?" is asked while validating
+        configuration, often on a host that has no business reaching Trino at
+        all, and it should not require a connection to anything.
+
+        Worth recording, because the original report had it the other way round
+        and the difference decides the design: **maintainer construction never
+        did I/O.** `TrinoMaintainer.__init__` reads `version` from an *option*,
+        not from the server, and `validate()` touches only that option and a
+        class constant -- measured, by blocking `socket.connect` and constructing
+        one. What *does* connect is the **catalog** session an integrator builds
+        to pass in: `CatalogSession.for_lakekeeper()` resolves configuration
+        eagerly, so on an unreachable catalog it hangs. So a form taking a session
+        would not have fixed anything; this one takes no session.
+
+        Everything version-dependent must say what it assumes when the version is
+        unknown, rather than silently choosing. Today that is Trino's
+        ``retain_last``, whose message ends "of unknown version".
         """
         return ()
+
+    def validate(self, operation: Operation, request: MaintenanceRequest) -> tuple[str, ...]:
+        """The instance form. Delegates, so there is one implementation.
+
+        Kept because the run loop holds a constructed maintainer already and
+        should not have to remember to pass its own options back in.
+        """
+        return type(self).validate_request(operation, request, options=self._options)
 
     def check_supported(self, operation: Operation) -> OperationSupport:
         support = self.capabilities().of(operation)

@@ -26,6 +26,7 @@ them is breaking:
 | **`table-config.json` keys** | removing a key, narrowing what a value accepts, changing what a key *means* | adding an optional key |
 | **Defaults that decide what gets deleted** | lowering `older_than_days`, raising `max_snapshot_age_days`, enabling a reclaim step that was off | changing a default that only affects performance, e.g. `target_file_size_bytes` |
 | **What is refused** | allowing an operation previously blocked as unsafe | blocking something newly discovered to be unsafe (see below) |
+| **`as_dict()` keys** | removing a key, renaming one, or changing what a key *counts* | adding a key, changing `describe()`'s wording, adding an operation with its own keys |
 
 **The fourth row is the one worth the effort of writing this down.** A release
 that lowers the orphan-removal age guard from three days to one deletes files on
@@ -34,6 +35,42 @@ signature changed, no flag renamed, and nothing in a conventional changelog to
 warn anyone. For a tool whose job includes deleting files, the destructive
 defaults *are* public API. They get a MAJOR bump (a MINOR, pre-1.0) and a
 `BREAKING` line in the changelog.
+
+**The sixth row exists because the same values have two renderings and only one
+is a promise.** Every operation result carries both `describe() -> str` and
+`as_dict() -> dict`. The prose is what makes the CLI readable and is free to
+improve: rewording a message is *not* breaking, and this section deliberately
+does not cover it. The dictionary is the opposite — an integrator exports those
+counters to a dashboard and trends them per warehouse for years, so a renamed key
+silently breaks a graph that nobody will connect to a Zamboni upgrade.
+
+Before `as_dict()` existed the only machine-readable thing a run produced was an
+exit code, so the alternative was a regex over sentences this document explicitly
+does not cover — a wording improvement would have been a breaking change by
+accident, in the one direction the contract could not describe. Raised by the
+first production integrator (ZMBNI-32).
+
+What the keys promise, precisely:
+
+- **A key means the same thing for as long as it exists.** `bytes_deleted` will
+  not quietly start counting bytes a dry run *would* have deleted.
+- **Counters and identifiers only, and JSON-serialisable.** No PyIceberg object
+  ever appears: `DanglingReport.removable` is a `list[DataFile]` and
+  `RewritePlan.replaced` is a `list[ManifestFile]`, and both are reported as
+  counts rather than serialised, so upstream's internal representation never
+  becomes something this package owns. `test_every_result_serialises_to_json`
+  proves the JSON half rather than trusting it.
+- **An `operation` key on every result**, so a consumer branches on the value
+  instead of the Python type.
+- **Absent, not zero, where an engine does not report it.** Trino's
+  `ALTER TABLE … EXECUTE` returns no counts, so `TrinoResult` has none —
+  inventing `files_rewritten: 0` would be a false measurement dressed as a
+  uniform schema. Spark's procedures do return rows; they are carried verbatim
+  under `rows` rather than mapped onto the local engine's key names, because the
+  columns differ per procedure and a wrong mapping would be trended for years.
+- **The promised set is enumerated in `tests/test_structured_results.py`**, not
+  derived from the implementation. Deriving it would make the test tautological,
+  which is the trap when the thing under test is itself a mapping.
 
 **The fifth row is deliberately asymmetric.** Newly refusing an operation can
 break a working pipeline, so by the letter of semver it is breaking. It still
@@ -59,6 +96,10 @@ decided by performing an overwrite on a transformed partition and counting the
 survivors, because the same private symbol exists on both the corrupting build
 and the fixed one (ZMBNI-1109). A PyIceberg upgrade that changes those internals
 is a compatibility matter, not a versioning one.
+
+**`describe()`'s wording.** The prose every operation renders is meant to improve,
+and does. A caller that parses it is depending on something this document declines
+to promise — `as_dict()` is the covered form, and it exists so that nobody has to.
 
 **`src/zamboni/demo`.** The demo is a teaching aid that ships in the same wheel. It
 has no stability contract at all.

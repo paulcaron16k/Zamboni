@@ -318,6 +318,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     vc = sub.add_parser("validate-config", help="check a table-config.json")
     vc.add_argument("config", help="path to table-config.json")
+    _add_engine_check(vc)
 
     # `table-config` groups the three things an operator does to that file.
     # `validate-config` stays as it is: it shipped in 0.1.0 and removing a verb
@@ -340,6 +341,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "validate", help="check that a table-config.json parses and means something"
     )
     tcv.add_argument("config", help="path to table-config.json")
+    _add_engine_check(tcv)
 
     tcs = tc_sub.add_parser(
         "summary",
@@ -1241,6 +1243,35 @@ def _from_catalog(args: argparse.Namespace) -> int:
     return 0
 
 
+def _add_engine_check(parser: argparse.ArgumentParser) -> None:
+    """`--engine` on a verb that opens no catalog.
+
+    Checking the file and checking that a named engine will *accept* it are two
+    different questions, and until ZMBNI-33 the second could only be asked by
+    constructing a maintainer -- which meant building a `CatalogSession` first,
+    which for a REST catalog connects. So the check an operator most wants before
+    a run window required reaching the very infrastructure they were checking
+    ahead of. `validate_policy()` needs no session, so neither does this.
+    """
+    parser.add_argument(
+        "--engine",
+        choices=maintainers.available(),
+        help=(
+            "also check whether this engine would accept the policy -- its "
+            "retention floors and refusals. Opens no connection"
+        ),
+    )
+    parser.add_argument(
+        "--trino-version",
+        type=int,
+        help=(
+            "Trino server version, for the one check that depends on it "
+            "(`retain_last`, added in 479). Without it that check reports what it "
+            "assumed rather than guessing"
+        ),
+    )
+
+
 def _validate_config(args: argparse.Namespace) -> int:
     config = TableConfig.load(args.config)
     print(
@@ -1262,6 +1293,23 @@ def _validate_config(args: argparse.Namespace) -> int:
             else "disabled"
         )
         print(f"  {identifier}: [{parts}] ordering={settings.ordering.mode} evolution={evolution}")
+
+    if engine := getattr(args, "engine", None):
+        from .maintenance import validate_policy
+
+        options = {}
+        if version := getattr(args, "trino_version", None):
+            options["version"] = str(version)
+        problems = validate_policy(config, engine=engine, engine_options=options)
+        if not problems:
+            print(f"\n{engine}: would accept this policy")
+            return 0
+        # Exit 2, the configuration code: the file parses and the engine refuses
+        # it, which is a configuration problem rather than a blocked table.
+        print(f"\n{engine}: would refuse {len(problems)} thing(s)")
+        for problem in problems:
+            print(f"  {problem}")
+        return 2
     return 0
 
 

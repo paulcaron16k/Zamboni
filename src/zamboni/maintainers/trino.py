@@ -135,6 +135,23 @@ class TrinoResult:
             ]
         )
 
+    def as_dict(self) -> dict[str, Any]:
+        """Thin, and honestly so. See :class:`~zamboni.maintainers.Reportable`.
+
+        No counters, because Trino's ``ALTER TABLE … EXECUTE`` returns none --
+        claiming ``files_rewritten`` here would be an invention. A consumer
+        comparing engines gets the same keys from the local engine and has to
+        handle their absence here; that asymmetry is the engine's, and hiding it
+        behind zeroes would be worse than reporting it.
+        """
+        return {
+            "operation": self.operation.value,
+            "table": self.table,
+            "engine": "trino",
+            "statement": self.statement,
+            "rows": [str(row) for row in self.rows],
+        }
+
 
 @register
 class TrinoMaintainer(Maintainer):
@@ -276,14 +293,30 @@ class TrinoMaintainer(Maintainer):
             },
         )
 
-    def validate(self, operation: Operation, request: MaintenanceRequest) -> tuple[str, ...]:
-        """Catch the floor collision at plan time.
+    @classmethod
+    def validate_request(
+        cls,
+        operation: Operation,
+        request: MaintenanceRequest,
+        *,
+        options: Mapping[str, str] | None = None,
+    ) -> tuple[str, ...]:
+        """Catch the floor collision at plan time, without a connection.
 
         A ``table-config.json`` that is entirely valid is unusable here: our
         defaults are 5 days for expiry and 3 for orphan removal, and Trino's
         documented floors are 7 for both. Finding that out from a server error
         part-way through a fleet run is what this exists to prevent.
+
+        A classmethod since ZMBNI-33: the version comes from ``options``, exactly
+        as ``__init__`` reads it, so nothing here needs an instance and nothing
+        needs a server.
         """
+        settings = dict(options or {})
+        raw_version = settings.get("version")
+        version = int(raw_version) if raw_version else None
+        supports_retain_last = version is not None and version >= cls.RETAIN_LAST_MIN_VERSION
+
         problems: list[str] = []
         if operation is Operation.EXPIRE:
             days = (
@@ -300,7 +333,7 @@ class TrinoMaintainer(Maintainer):
                     "floor with the `iceberg.expire_snapshots_min_retention` session "
                     "property or the catalog property of the same name."
                 )
-        if operation is Operation.EXPIRE and not self.supports_retain_last:
+        if operation is Operation.EXPIRE and not supports_retain_last:
             keep = (
                 request.min_snapshots_to_keep
                 if request.min_snapshots_to_keep is not None
@@ -309,8 +342,8 @@ class TrinoMaintainer(Maintainer):
             if keep is not None:
                 problems.append(
                     f"min_snapshots_to_keep is {keep}, but `retain_last` was added in "
-                    f"Trino {self.RETAIN_LAST_MIN_VERSION} and this connection is "
-                    + (f"{self.version}" if self.version else "of unknown version")
+                    f"Trino {cls.RETAIN_LAST_MIN_VERSION} and this connection is "
+                    + (f"{version}" if version else "of unknown version")
                     + ". Expiry would silently keep a different number of snapshots. "
                     "Pass --trino-version if the server is newer, or drop the setting."
                 )

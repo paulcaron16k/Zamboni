@@ -241,6 +241,30 @@ class DeleteCleanupResult:
             )
         return "\n".join(lines)
 
+    def as_dict(self) -> dict[str, object]:
+        """Counters only. See :class:`~zamboni.maintainers.Reportable`.
+
+        `report.removable` and `report.stuck` are `list[DataFile]` -- PyIceberg
+        objects, deliberately reported as counts. `stuck` is the one worth a
+        consumer alerting on: dangling, but sharing a manifest with a delete file
+        that still applies, so it cannot be dropped without a delete-manifest
+        writer PyIceberg does not have.
+        """
+        return {
+            "operation": "remove-dangling-deletes",
+            "table": self.report.identifier,
+            "delete_files": self.report.delete_files,
+            "dangling_files": self.report.dangling_files,
+            "removable": len(self.report.removable),
+            "removable_bytes": self.report.removable_bytes,
+            "stuck": len(self.report.stuck),
+            "manifests_dropped": len(self.report.manifests_dropped),
+            "files_removed": self.removed,
+            "bytes_removed": self.removed_bytes,
+            "snapshot_id": self.snapshot_id,
+            "dry_run": self.dry_run,
+        }
+
 
 class DanglingDeleteCleaner:
     """Drops delete files that apply to nothing.

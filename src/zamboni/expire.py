@@ -261,6 +261,19 @@ class ExpireResult:
             )
         return "\n".join(lines)
 
+    def as_dict(self) -> dict[str, object]:
+        """Counters an integrator can trend. See :class:`~zamboni.maintainers.Reportable`."""
+        return {
+            "operation": "expire",
+            "table": self.identifier,
+            "snapshots_expired": self.expired_snapshots,
+            "snapshots_retained": self.retained_snapshots,
+            "files_deleted": self.deleted_files,
+            "deletes_failed": self.failed_deletes,
+            "stale_refs": list(self.stale_refs),
+            "dry_run": self.dry_run,
+        }
+
 
 class SnapshotExpirer:
     """Applies a retention policy and deletes what it orphans."""
