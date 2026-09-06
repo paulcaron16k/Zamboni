@@ -72,6 +72,22 @@ What the keys promise, precisely:
   derived from the implementation. Deriving it would make the test tautological,
   which is the trap when the thing under test is itself a mapping.
 
+**One semantic every consumer has to know, because the names do not carry it: on
+a dry run the counters are what *would* happen, not what did.** Measured on the
+test fixtures: `expire` on `db.aged` reports `files_deleted: 4` from a preview
+that left storage byte-identical, and `rewrite-manifests` on `db.partitioned`
+reports `manifests_after: 1` from both a preview and the real run that followed
+it. That is what a preview is *for* — `expire.py:301-311` computes the deletion
+set before the commit precisely so a dry run can report it — but `files_deleted`
+reads as an actual, so **`dry_run` is the only thing separating "reclaimed 4
+files" from "would reclaim 4 files"**, and every result carries it. A consumer
+summing a counter across runs without filtering on `dry_run` will report work
+that never happened.
+
+`CompactionResult` was the one result with no such field, which nothing noticed
+while the counters were prose — found by checking rather than by reading, and now
+pinned by `test_every_result_says_whether_it_was_a_preview`.
+
 **The fifth row is deliberately asymmetric.** Newly refusing an operation can
 break a working pipeline, so by the letter of semver it is breaking. It still
 ships in a patch release, because the alternative is leaving a known-corrupting

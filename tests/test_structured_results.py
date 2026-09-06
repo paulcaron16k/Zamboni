@@ -41,6 +41,7 @@ PROMISED = {
         "dangling_delete_files",
         "warnings",
         "snapshot_ids",
+        "dry_run",
     },
     "expire": {
         "operation",
@@ -209,3 +210,29 @@ def test_a_whole_run_serialises_in_one_call():
     assert first["result"]["data_files_rewritten"] == 6
     assert skipped["result"] is None, "a skip produces no result"
     assert skipped["detail"], "and its reason survives only in detail, so it must be there"
+
+
+@pytest.mark.parametrize("result", results(), ids=lambda r: type(r).__name__)
+def test_every_result_says_whether_it_was_a_preview(result):
+    """Because the counters are what *would* happen, not what did.
+
+    Measured: `expire` on the `db.aged` fixture reports `files_deleted=4` from a
+    dry run that left storage byte-identical, and `rewrite-manifests` on
+    `db.partitioned` reports `manifests_after=1` from both a preview and the real
+    run after it. That is a coherent design -- a projection is what a preview is
+    for, and `expire.py:301-311` computes the set before the commit so a dry run
+    can report it -- but it makes `dry_run` the only thing separating "reclaimed
+    4 files" from "would reclaim 4 files".
+
+    `CompactionResult` was the one result carrying no such field, which nothing
+    noticed while the counters were prose. A consumer summing `bytes_rewritten`
+    across runs without filtering on this key would report bytes that were never
+    rewritten.
+    """
+    payload = result.as_dict()
+    assert "dry_run" in payload, (
+        f"{type(result).__name__}.as_dict() cannot say whether it was a preview, "
+        "and its counters are projections -- so a consumer would read a preview "
+        "as work that happened"
+    )
+    assert isinstance(payload["dry_run"], bool)

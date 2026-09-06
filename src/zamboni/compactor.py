@@ -58,6 +58,12 @@ class CompactionResult:
     skipped: list[tuple[str, str]] = field(default_factory=list)
     dangling_delete_files: int = 0
     warnings: list[str] = field(default_factory=list)
+    #: Whether this was a preview. Every other operation's result carried this
+    #: and compaction's did not, which mattered once `as_dict()` made the
+    #: counters machine-readable: they are what *would* happen, so without this
+    #: a consumer cannot tell a preview's `bytes_rewritten` from a real one's
+    #: (ZMBNI-32).
+    dry_run: bool = False
 
     def describe(self) -> str:
         # Count both kinds of work: reporting only compaction groups reads as
@@ -100,6 +106,7 @@ class CompactionResult:
             "groups_skipped": len(self.skipped),
             "dangling_delete_files": self.dangling_delete_files,
             "warnings": list(self.warnings),
+            "dry_run": self.dry_run,
             "snapshot_ids": [g.snapshot_id for g in (*self.groups, *self.evolved) if g.snapshot_id],
         }
 
@@ -167,7 +174,7 @@ class TableCompactor:
 
         tbl = self._session.table(self._identifier)
         profile = profile_table(tbl)
-        result = CompactionResult(identifier=profile.identifier)
+        result = CompactionResult(identifier=profile.identifier, dry_run=dry_run)
         result.warnings = [str(f) for f in profile.warnings]
         result.dangling_delete_files = profile.position_delete_files
 
