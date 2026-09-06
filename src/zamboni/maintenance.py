@@ -24,6 +24,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .committer import UnsupportedPyIceberg
 from .compactor import CompactionBlocked
@@ -100,6 +101,28 @@ class Outcome:
     def describe(self) -> str:
         return f"{self.table} {self.operation.value}: {self.detail}"
 
+    def as_dict(self) -> dict[str, Any]:
+        """The whole outcome, structurally, so a caller need not walk the type.
+
+        `detail` is kept because it is the only place a *skip* says why -- a
+        disabled operation, an unsupported one, or one fulfilled by another
+        produces no result at all, and the reason exists only as prose. So the
+        contract is: `result` for what changed, `detail` for why nothing did.
+
+        `exit_code` carries the CLI's meaning, which is the point: an integrator
+        streaming these through `observer=` can alert on the same numbers a cron
+        line does, without a second vocabulary.
+        """
+        return {
+            "table": self.table,
+            "operation": self.operation.value,
+            "exit_code": self.exit_code,
+            "ok": self.ok,
+            "skipped": self.skipped,
+            "detail": self.detail,
+            "result": self.result.as_dict() if self.result is not None else None,
+        }
+
 
 @dataclass(frozen=True)
 class MaintenanceReport:
@@ -125,6 +148,15 @@ class MaintenanceReport:
         for outcome in self.outcomes:
             seen.setdefault(outcome.table, None)
         return tuple(seen)
+
+    def as_dict(self) -> dict[str, Any]:
+        """A whole run, serialisable in one call. ZMBNI-32."""
+        return {
+            "exit_code": self.exit_code,
+            "tables": list(self.tables),
+            "failures": len(self.failures),
+            "outcomes": [o.as_dict() for o in self.outcomes],
+        }
 
     def describe(self) -> str:
         lines = [o.describe() for o in self.outcomes]
@@ -289,4 +321,64 @@ def _resolve_config(
     return config
 
 
-__all__ = ["RUNBOOK_ORDER", "MaintenanceReport", "Outcome", "maintain"]
+__all__ = ["RUNBOOK_ORDER", "MaintenanceReport", "Outcome", "maintain", "validate_policy"]
+
+
+def validate_policy(
+    table_config: str | Path | TableConfig,
+    *,
+    engine: str,
+    operations: Iterable[Operation | str] = RUNBOOK_ORDER,
+    engine_options: dict[str, str] | None = None,
+    tables: Sequence[str] | None = None,
+) -> tuple[str, ...]:
+    """Will this engine accept this policy? Answered without connecting to anything.
+
+    The one-shot form of :meth:`~zamboni.maintainers.Maintainer.validate_request`,
+    over every table a config names. It exists for the same reason
+    :func:`maintain` does: the first production integrator assembled it by hand,
+    and every integrator after would have re-derived the same loop -- which
+    operations to ask about, how to resolve a table's retention, and how to
+    attribute a problem to a table (ZMBNI-33).
+
+    **Takes no `CatalogSession`, deliberately.** That is the whole point, and it
+    is the opposite of what the original report proposed. Maintainer construction
+    was already pure -- `TrinoMaintainer.__init__` reads `version` from an option
+    rather than from the server, measured by blocking `socket.connect` and
+    constructing one. What connects is the *catalog* session a caller builds to
+    pass in: `CatalogSession.for_lakekeeper()` resolves configuration eagerly, so
+    against an unreachable catalog it hangs rather than failing fast. A signature
+    taking a session would therefore have kept the exact failure the report was
+    trying to remove, which is why this one does not have one.
+
+    So a caller can distinguish the two answers it could not before: a non-empty
+    return means *the engine rejects this policy*, and there is no third
+    possibility, because nothing here can fail to connect.
+
+    Returns:
+        One string per problem, each naming the table and the operation. Empty
+        means every named engine check passed -- not that the run will succeed,
+        which no amount of validation can promise.
+    """
+    config = _resolve_config(table_config, None)
+    maintainer = get_maintainer(engine)
+    wanted = list(tables) if tables is not None else sorted(config.tables)
+
+    problems: list[str] = []
+    for table in wanted:
+        settings = config.for_table(table)
+        request = MaintenanceRequest(retention=settings.retention, table_config=config)
+        for operation in (Operation(o) for o in operations):
+            support = maintainer.capabilities().of(operation)
+            if not support.usable:
+                # Not a problem with the policy. `maintain` skips these at exit 0
+                # and reporting them here would make an unsupported operation
+                # look like a misconfiguration.
+                continue
+            problems.extend(
+                f"{table} {operation.value}: {problem}"
+                for problem in maintainer.validate_request(
+                    operation, request, options=engine_options or {}
+                )
+            )
+    return tuple(problems)

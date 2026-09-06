@@ -21,6 +21,27 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### Added
+
+- **`as_dict()` on every operation result**, alongside `describe()`. Until now the
+  only machine-readable thing a run produced was an exit code: everything about
+  *what changed* was English prose, so an integrator exporting per-operation
+  counters had to regex sentences that [docs/releasing.md](docs/releasing.md)
+  explicitly does not cover — meaning a wording improvement was a breaking change
+  by accident, in the one direction the contract could not describe.
+
+  `Outcome` and `MaintenanceReport` carry it too, so a whole run serialises in one
+  call. Keys are stable identifiers, JSON-serialisable, and never contain a
+  PyIceberg object — `DanglingReport.removable` and `RewritePlan.replaced` hold
+  `DataFile`/`ManifestFile` and are reported as counts, so upstream's internal
+  representation does not become something this package owns.
+
+  **The keys are now a covered surface**: removing or renaming one is breaking,
+  adding one is not, and `describe()`'s wording remains explicitly uncovered.
+  Trino reports no counters and so has none — absent rather than zero, because
+  inventing `files_rewritten: 0` would be a false measurement dressed as a uniform
+  schema. Raised by the first production integrator.
+
 ### Removed
 
 - **`docs/upstream-0.12-upsert-regression.md`**, which both this file and the

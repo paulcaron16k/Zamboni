@@ -179,6 +179,27 @@ class SparkResult:
             lines.append("  committed; the procedure returned no rows.")
         return "\n".join(lines)
 
+    def as_dict(self) -> dict[str, Any]:
+        """See :class:`~zamboni.maintainers.Reportable`.
+
+        Spark's procedures *do* return a result row -- ``rewrite_data_files``
+        yields rewritten and added file counts -- but the columns differ per
+        procedure, so they are carried verbatim under ``rows`` rather than mapped
+        onto the local engine's key names. Mapping them would mean guessing at
+        several, and a wrong guess here is worse than an unmapped value: a
+        dashboard would trend it for years.
+
+        Stringified because the Connect client hands back its own row type, which
+        must not reach a key this package promises to keep.
+        """
+        return {
+            "operation": self.operation.value,
+            "table": self.table,
+            "engine": "spark",
+            "statement": self.statement,
+            "rows": [str(row) for row in self.rows],
+        }
+
 
 @register
 class SparkMaintainer(Maintainer):
@@ -314,12 +335,21 @@ class SparkMaintainer(Maintainer):
     #: "Cannot remove orphan files with an interval less than 24 hours."
     MINIMUM_ORPHAN_INTERVAL_DAYS = 2
 
-    def validate(self, operation: Operation, request: MaintenanceRequest) -> tuple[str, ...]:
+    @classmethod
+    def validate_request(
+        cls,
+        operation: Operation,
+        request: MaintenanceRequest,
+        *,
+        options: Mapping[str, str] | None = None,
+    ) -> tuple[str, ...]:
         """Catch Spark's orphan floor before a session is even started.
 
         Worth doing here rather than letting the procedure raise: starting a
-        SparkSession costs a JVM and a jar download, and failing after that for
-        a reason knowable up front is a poor trade.
+        SparkSession costs a JVM and a jar download, and failing after that for a
+        reason knowable up front is a poor trade. A classmethod since ZMBNI-33 --
+        the floor is hard-coded in the procedure, so nothing here depends on the
+        instance or on which server is configured.
         """
         if operation is not Operation.REMOVE_ORPHANS:
             return ()
@@ -328,7 +358,7 @@ class SparkMaintainer(Maintainer):
             if request.older_than_days is not None
             else request.retention.remove_orphan_files.older_than_days
         )
-        if days is not None and days < self.MINIMUM_ORPHAN_INTERVAL_DAYS:
+        if days is not None and days < cls.MINIMUM_ORPHAN_INTERVAL_DAYS:
             return (
                 (
                     f"older_than_days is {days}, but Spark's remove_orphan_files "

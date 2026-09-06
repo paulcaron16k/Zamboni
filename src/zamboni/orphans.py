@@ -91,6 +91,24 @@ class OrphanResult:
             lines.append(f"  {self.failed} file(s) could not be deleted")
         return "\n".join(lines)
 
+    def as_dict(self) -> dict[str, object]:
+        """Counters an integrator can trend. See :class:`~zamboni.maintainers.Reportable`."""
+        return {
+            "operation": "remove-orphans",
+            "table": self.identifier,
+            "files_scanned": self.scanned,
+            "files_referenced": self.referenced,
+            "orphans_found": self.orphans,
+            "orphan_bytes": self.orphan_bytes,
+            "files_deleted": self.deleted,
+            "bytes_deleted": self.deleted_bytes,
+            "deletes_failed": self.failed,
+            "too_young": self.too_young,
+            "too_young_bytes": self.too_young_bytes,
+            "dry_run": self.dry_run,
+            "roots": list(self.roots),
+        }
+
 
 def storage_roots(tbl: Table) -> list[str]:
     """Locations this table may own files in.

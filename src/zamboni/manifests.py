@@ -300,6 +300,29 @@ class RewriteResult:
             )
         return "\n".join(lines)
 
+    def as_dict(self) -> dict[str, object]:
+        """Counters only. See :class:`~zamboni.maintainers.Reportable`.
+
+        `plan.replaced` and `plan.kept` are `list[ManifestFile]`, reported as
+        counts. `partition_spread_before`/`after` is the number this operation
+        exists to reduce -- a manifest spanning many partitions prunes nothing,
+        so the manifest count alone understates what changed.
+        """
+        return {
+            "operation": "rewrite-manifests",
+            "table": self.plan.identifier,
+            "manifests_before": self.manifests_before,
+            "manifests_after": self.manifests_after,
+            "manifests_replaced": len(self.plan.replaced),
+            "manifests_kept": len(self.plan.kept),
+            "manifests_written": len(self.plan.bins),
+            "entries": self.plan.entries,
+            "partition_spread_before": self.plan.spread_before,
+            "partition_spread_after": self.plan.spread_after,
+            "snapshot_id": self.snapshot_id,
+            "dry_run": self.dry_run,
+        }
+
 
 class ManifestRewriter:
     """Regroups manifests by partition. Metadata only; no data file moves."""

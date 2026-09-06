@@ -36,7 +36,7 @@ from .maintainers import (
 )
 from .maintainers import available as available_engines
 from .maintainers import get as get_maintainer
-from .maintenance import RUNBOOK_ORDER, MaintenanceReport, Outcome, maintain
+from .maintenance import RUNBOOK_ORDER, MaintenanceReport, Outcome, maintain, validate_policy
 from .manifests import ManifestRewriter
 from .orphans import OrphanCleaner
 from .planner import CompactionPlan, CompactionPlanner, FileGroup
@@ -153,5 +153,6 @@ __all__ = [
     "profile_table",
     "reachable_files",
     "resolve_settings",
+    "validate_policy",
     "version_banner",
 ]

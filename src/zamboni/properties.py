@@ -79,6 +79,22 @@ class ApplyResult:
         lines += [f"  {c.key}: {c.was or '(unset)'} -> {c.now}" for c in self.changes]
         return "\n".join(lines)
 
+    def as_dict(self) -> dict[str, object]:
+        """Counters and the properties themselves. See
+        :class:`~zamboni.maintainers.Reportable`.
+
+        `changes` is this package's own `PropertyChange`, not a PyIceberg type, and
+        a caller wants to know *which* property moved -- so it is flattened rather
+        than counted.
+        """
+        return {
+            "operation": "apply-properties",
+            "table": self.identifier,
+            "changes": [{"key": c.key, "was": c.was, "now": c.now} for c in self.changes],
+            "changed": len(self.changes),
+            "dry_run": self.dry_run,
+        }
+
 
 def desired_properties(settings) -> dict[str, str]:
     """The properties a :class:`MetadataSettings` block asks for.
