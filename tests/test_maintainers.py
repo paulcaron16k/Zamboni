@@ -825,3 +825,133 @@ def test_engines_reports_the_layout_features():
 
     assert "layout:" in text
     assert "zorder" not in text.split("layout:")[1]
+
+
+# -- one config, three engines (ZMBNI-48) ---------------------------------
+
+
+def no_properties_declared() -> MaintenanceRequest:
+    """A config declaring neither metadata property.
+
+    Not a contrived edge: `MetadataSettings` defaults both fields to None and its
+    docstring defines that as "leave the table property alone", so an empty block
+    is a supported choice rather than an omission. The first production
+    integrator's policy has no metadata settings at all, so **every** run it makes
+    looks like this.
+    """
+    from zamboni.config import CompactionConfig
+    from zamboni.tableconfig import MetadataSettings
+
+    return MaintenanceRequest(
+        retention=replace(full_retention().retention, metadata=MetadataSettings()),
+        compaction=CompactionConfig(),
+    )
+
+
+def _forbid_connecting(monkeypatch):
+    """Prove no engine reaches for a server on a run with nothing to do."""
+
+    def connected(self, *args, **kwargs):
+        raise AssertionError(f"{self.name} opened a connection with nothing to set")
+
+    monkeypatch.setattr(TrinoMaintainer, "connect", connected)
+    monkeypatch.setattr(SparkMaintainer, "connect", connected)
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_no_properties_to_set_is_the_same_no_op_on_every_engine(
+    session, unpartitioned, monkeypatch, dry_run
+):
+    """The asymmetry ZMBNI-48 was opened for: one config, opposite outcomes.
+
+    `local` reported a clean no-op while Trino and Spark raised
+    `EngineConfigProblem`, and the difference was declared nowhere -- Trino's
+    `capabilities()` says APPLY_PROPERTIES is supported, so `check_engine_supports`
+    had nothing to refuse and the operation ran anyway.
+
+    Asserted as **payload equality across the three engines** rather than against
+    an expected dict, so the test states the property (they agree) instead of
+    re-encoding one engine's answer as the definition of right.
+    """
+    _forbid_connecting(monkeypatch)
+    request = no_properties_declared()
+
+    payloads = {
+        name: engine.execute(
+            Operation.APPLY_PROPERTIES, "db.unpartitioned", request=request, dry_run=dry_run
+        ).as_dict()
+        for name, engine in (
+            ("local", LocalMaintainer(session)),
+            ("trino", trino()),
+            ("spark", spark()),
+        )
+    }
+
+    assert len(set(map(repr, payloads.values()))) == 1, (
+        f"three engines, one config, three answers: {payloads}"
+    )
+    one = payloads["local"]
+    assert one["changed"] == 0 and one["changes"] == []
+    assert one["dry_run"] is dry_run
+    assert one["operation"] == Operation.APPLY_PROPERTIES.value
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_nothing_to_set_is_exit_0_not_a_config_error(session, unpartitioned, monkeypatch, dry_run):
+    """The bug as an operator saw it, at the layer that produced the exit code.
+
+    `apply-properties` is second in `RUNBOOK_ORDER`, straight after compaction, and
+    `MaintenanceReport.exit_code` is the *worst* outcome -- so this exiting 2 meant
+    a committing fleet run compacted the table and then reported the table failed.
+    Exit 2 also says "usage/config", which sends an operator to fix a config that
+    was never wrong.
+    """
+    from zamboni.maintenance import _run
+    from zamboni.tableconfig import TableConfig
+
+    _forbid_connecting(monkeypatch)
+    request = no_properties_declared()
+    # `_run` takes the table's settings block alongside the request. Built from a
+    # real config rather than passed as None, so the test does not quietly depend
+    # on the parameter currently going unread.
+    settings = TableConfig(warehouse="w", namespaces={}).for_table("db.unpartitioned")
+
+    for name, engine in (
+        ("local", LocalMaintainer(session)),
+        ("trino", trino()),
+        ("spark", spark()),
+    ):
+        outcome = _run(
+            engine,
+            "db.unpartitioned",
+            Operation.APPLY_PROPERTIES,
+            request,
+            settings,
+            set(),
+            commit=not dry_run,
+        )
+        assert outcome.exit_code == 0, f"{name}: {outcome.detail}"
+        assert outcome.result is not None, (
+            f"{name}: a no-op still reports, so a consumer trending `changed` "
+            "keeps its row rather than losing it to a skip"
+        )
+
+
+def test_a_declared_property_still_produces_a_statement():
+    """The negative case, so the no-op path cannot pass by swallowing everything.
+
+    Without this, returning None unconditionally from both builders would leave
+    the test above green.
+    """
+    declared = full_retention()
+
+    assert trino().statement_for(Operation.APPLY_PROPERTIES, "db.events", declared) is not None
+    assert spark().statement_for(Operation.APPLY_PROPERTIES, "db.events", declared) is not None
+    assert (
+        trino().statement_for(Operation.APPLY_PROPERTIES, "db.events", no_properties_declared())
+        is None
+    )
+    assert (
+        spark().statement_for(Operation.APPLY_PROPERTIES, "db.events", no_properties_declared())
+        is None
+    )
