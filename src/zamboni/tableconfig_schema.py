@@ -32,23 +32,31 @@ exactly the drift this module exists to prevent. A schema that passes and a
 config that then fails to load is the documented, expected relationship; the
 reverse is not, and is what the tests pin.
 
-Nulls are rejected for every nested block, which is what the loader does
-========================================================================
+Where ``null`` is legal, and where it is not
+===========================================
 
-``"ordering": null`` and its twelve siblings do not merely fail -- they raise a
-bare ``TypeError: 'NoneType' object is not iterable`` out of ``_reject_unknown``,
-because it calls ``set(raw)`` on whatever it is handed. Measured across every
-nested block: only ``namespaces.<ns>.tables`` fails cleanly, and only because a
-missing ``tables`` is checked separately.
+``null`` is a value the schema has to be exact about, because JSON has no way to
+distinguish "absent" from "explicitly nothing" and the two mean different things
+here. Three groups, and each is checked against the loader by
+`test_the_schema_and_the_loader_agree_about_null_everywhere`, a sweep over every
+field position:
 
-So the schema types those blocks as ``object`` with no ``null`` alternative. That
-matches observed behaviour today and stays correct however the crash is fixed,
-since fixing it means rejecting ``null`` cleanly rather than accepting it -- and
-a caller who validates first gets a located message instead of a traceback.
+* **Nested blocks reject it.** ``"ordering": null`` is refused, naming the path.
+  Omitting the key is how you take the default.
+* **Scalars documented as "unset" accept it.** ``target_file_size_bytes``,
+  ``description``, the ``expire_snapshots`` windows and the ``metadata``
+  properties all use ``None`` to mean "leave whatever is there", so ``null`` is a
+  legal spelling and they are typed as a union with ``"null"``.
+* **Scalars with a real default reject it**, because a ``null`` there does not
+  take the default -- it silently becomes ``None``. See ``NULL_MEANS_EMPTY``
+  below for the four container fields that are the exception.
 
-Scalar ``X | None`` fields are different and do accept ``null``: ``raw.get(key)``
-yields ``None`` either way, so ``"target_file_size_bytes": null`` loads fine and
-means "unset". Those are typed as a union with ``"null"``.
+This was the messy part of the format and it is now the tidy part, but only
+because ZMBNI-53 fixed the loader rather than the schema being taught to describe
+a mess: thirteen of the fourteen nested blocks used to raise a bare ``TypeError``
+out of ``_reject_unknown`` (it called ``set(raw)`` on whatever it was handed), and
+``"remove_orphan_files": {"enabled": null}`` used to load and *silently disable
+reclamation*. The sweep that pins the three groups above is what found both.
 """
 
 from __future__ import annotations
@@ -100,6 +108,29 @@ JSON_NAME: dict[tuple[type, str], str] = {
 #: own ``_reject_unknown`` set is the proof: ``{"version", "warehouse",
 #: "defaults", "namespaces"}``.
 NOT_AUTHORED: frozenset[tuple[type, str]] = frozenset({(tc.TableConfig, "source")})
+
+#: Container fields the loader reads as ``raw.get(key) or <empty>``, so an
+#: explicit ``null`` is accepted and means "empty".
+#:
+#: A property of the *parser*, not of the annotation, which is why it has to be
+#: declared: nothing in ``tuple[PartitionField, ...]`` says the loader coalesces.
+#: Every entry is verified against the loader by
+#: `test_the_schema_and_the_loader_agree_about_null_everywhere`, which sweeps
+#: every field position rather than trusting this list -- so an entry that stops
+#: being true, or a coalescing field missing from it, fails.
+#:
+#: Not here, and deliberately: ``ZOrder.columns`` and ``NamespaceSettings.tables``
+#: also coalesce, but ``validate()`` then refuses the empty result ("needs at
+#: least 2 columns", "declares no tables"). The loader rejects those documents, so
+#: the schema rejecting them agrees.
+NULL_MEANS_EMPTY: frozenset[tuple[type, str]] = frozenset(
+    {
+        (tc.TableConfig, "namespaces"),
+        (tc.TableSettings, "partition"),
+        (tc.PartitionEvolution, "rules"),
+        (tc.Ordering, "sort"),
+    }
+)
 
 #: Fields whose permitted values live in a module constant rather than in a
 #: ``Literal``. Referenced, not copied, so adding a transform upstream widens the
@@ -198,9 +229,10 @@ def _for_annotation(annotation: Any) -> dict[str, Any]:
     # Only scalars and enums gain a null alternative, and the test is what `inner`
     # *is* rather than what the node looks like: a dataclass node carries
     # `"type": "object"`, which is a perfectly good string, so keying off the node
-    # silently gave `Ordering.zorder` a null alternative the loader crashes on.
-    # `Ordering.zorder` is the only nested block typed `X | None`, so that one
-    # field was the whole difference. See the module docstring.
+    # silently declared `Ordering.zorder` nullable -- the one nested block typed
+    # `X | None`, and so the one field where the difference showed. The loader
+    # refuses a null block, so declaring it nullable would have been the schema
+    # promising something the loader rejects. See the module docstring.
     if optional and not _is_dataclass_type(inner):
         if "enum" in node:
             node["enum"] = [*node["enum"], None]
@@ -221,6 +253,8 @@ def for_dataclass(cls: type) -> dict[str, Any]:
             prop: dict[str, Any] = {"enum": list(allowed)}
         else:
             prop = _for_annotation(hints[f.name])
+        if (cls, f.name) in NULL_MEANS_EMPTY:
+            prop["type"] = [prop["type"], "null"]
         if description := DESCRIPTIONS.get((cls, f.name)):
             prop["description"] = description
         properties[key] = prop
