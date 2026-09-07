@@ -46,6 +46,7 @@ from .session import CatalogSession, S3Settings
 from .settings import Profile
 from .settings import resolve as resolve_settings
 from .tableconfig import Retention, TableConfig, TableConfigError, TableSettings
+from .tableconfig_schema import load_schema as get_table_config_spec
 
 # Read from the installed distribution rather than repeated as a literal here.
 # pyproject.toml is the single source of truth, so `zamboni --version` cannot
@@ -149,6 +150,7 @@ __all__ = [
     "detect",
     "engines_lacking",
     "get_maintainer",
+    "get_table_config_spec",
     "maintain",
     "profile_table",
     "reachable_files",
