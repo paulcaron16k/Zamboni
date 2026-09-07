@@ -11,6 +11,18 @@ Two ways to author it:
    with `zamboni from-catalog`. See [Authoring in Meltano](#authoring-in-meltano) — and
    the warning there about why it is *generated* rather than read at runtime.
 
+There is a **machine-readable schema** for this format, generated from the
+dataclasses that implement it and shipped in the wheel:
+`zamboni.get_table_config_spec()` returns it as a dict, so a tool that writes
+these files can validate one without fetching anything. It is a shape check —
+keys, types, enumerations, and no unknown keys anywhere — and
+`TableConfig.load()` remains the authority for everything cross-field. See
+[the user guide](user_guide.md#validating-a-generated-table-configjson).
+
+Because it is generated, it cannot describe a format this package does not
+implement; if a key below is missing from the schema, the schema is right and
+this document is stale.
+
 ---
 
 ## The model: warehouse → namespace → table

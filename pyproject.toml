@@ -117,6 +117,11 @@ dev = [
     "pytest>=8",
     "python-dotenv>=1.2.2",
     "ruff>=0.6",
+    # Validates the samples against the shipped table-config schema. A test-only
+    # dependency on purpose: `get_table_config_spec()` hands the caller a dict and
+    # lets them pick a validator, rather than making every install carry one to
+    # check a file most runs never validate.
+    "jsonschema>=4.20",
     "iceberg-zamboni[sql,s3,trino]",
     # Matched to the dev stack's server, not to the extra's range. Iceberg 1.11
     # ships a Spark runtime for 4.0 and no later minor, so the server is 4.0.x;

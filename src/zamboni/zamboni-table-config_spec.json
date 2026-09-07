@@ -1,0 +1,537 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/paulcaron16k/Zamboni/blob/main/src/zamboni/zamboni-table-config_spec.json",
+  "title": "Zamboni table-config.json",
+  "description": "Declarative layout and retention per table, authored as warehouse -> namespace -> table. Generated from zamboni.tableconfig; do not edit by hand. A shape check only: keys, types and enumerations. Cross-field and numeric rules are enforced by TableConfig.load(), which stays the authority -- so a file may satisfy this schema and still be refused, with a located message saying why.",
+  "type": "object",
+  "properties": {
+    "warehouse": {
+      "type": "string",
+      "description": "Which warehouse this file describes. Required, and asserted rather than selected: --warehouse/--db or the profile chooses the warehouse, so a config copied into the wrong directory is an error instead of a silent maintenance run against the wrong tenant.",
+      "minLength": 1
+    },
+    "version": {
+      "const": 2,
+      "description": "Revision of this format. Version 2 states the namespace; version 1 keyed tables by a dotted string and left the split to be guessed."
+    },
+    "defaults": {
+      "type": "object",
+      "properties": {
+        "partition": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "column": {
+                "type": "string"
+              },
+              "transform": {
+                "enum": [
+                  "bucket",
+                  "day",
+                  "hour",
+                  "identity",
+                  "month",
+                  "truncate",
+                  "void",
+                  "year"
+                ]
+              },
+              "num_buckets": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "width": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "column"
+            ]
+          }
+        },
+        "partition_evolution": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "rules": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "from": {
+                    "enum": [
+                      "hour",
+                      "day",
+                      "month",
+                      "year"
+                    ]
+                  },
+                  "to": {
+                    "enum": [
+                      "hour",
+                      "day",
+                      "month",
+                      "year"
+                    ]
+                  },
+                  "older_than_days": {
+                    "type": "integer",
+                    "description": "Measured from the end of the partition window, so a partition is left alone until every row it could contain is at least this old."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "from",
+                  "to",
+                  "older_than_days"
+                ]
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "ordering": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "none",
+                "sort",
+                "zorder"
+              ]
+            },
+            "sort": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "column": {
+                    "type": "string"
+                  },
+                  "direction": {
+                    "enum": [
+                      "asc",
+                      "desc"
+                    ]
+                  },
+                  "nulls": {
+                    "enum": [
+                      "first",
+                      "last"
+                    ]
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "column"
+                ]
+              }
+            },
+            "zorder": {
+              "type": "object",
+              "properties": {
+                "columns": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "precision_bits": {
+                  "type": "integer",
+                  "description": "Bits of resolution kept per column before interleaving. More bits means finer locality per column but fewer columns fit the 62-bit ordering key."
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "retention": {
+          "type": "object",
+          "properties": {
+            "expire_snapshots": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "max_snapshot_age_days": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "min_snapshots_to_keep": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "max_ref_age_days": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            },
+            "remove_orphan_files": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "older_than_days": {
+                  "type": "integer",
+                  "description": "Must exceed the longest write the warehouse performs: a file written but not yet committed is indistinguishable from an orphan."
+                }
+              },
+              "additionalProperties": false
+            },
+            "remove_dangling_deletes": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            },
+            "rewrite_manifests": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "min_input_manifests": {
+                  "type": "integer"
+                }
+              },
+              "additionalProperties": false
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "previous_versions_max": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "description": "Omit to leave the table property alone. Setting this without delete_after_commit trims the metadata log but deletes nothing, turning each dropped entry into an unreferenced file for orphan removal to sweep."
+                },
+                "delete_after_commit": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "target_file_size_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "min_input_files": {
+          "type": "integer"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "description": "Applied to every table unless the table overrides the section."
+    },
+    "namespaces": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "tables": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "partition": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "column": {
+                        "type": "string"
+                      },
+                      "transform": {
+                        "enum": [
+                          "bucket",
+                          "day",
+                          "hour",
+                          "identity",
+                          "month",
+                          "truncate",
+                          "void",
+                          "year"
+                        ]
+                      },
+                      "num_buckets": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "width": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "name": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "additionalProperties": false,
+                    "required": [
+                      "column"
+                    ]
+                  }
+                },
+                "partition_evolution": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "rules": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "from": {
+                            "enum": [
+                              "hour",
+                              "day",
+                              "month",
+                              "year"
+                            ]
+                          },
+                          "to": {
+                            "enum": [
+                              "hour",
+                              "day",
+                              "month",
+                              "year"
+                            ]
+                          },
+                          "older_than_days": {
+                            "type": "integer",
+                            "description": "Measured from the end of the partition window, so a partition is left alone until every row it could contain is at least this old."
+                          }
+                        },
+                        "additionalProperties": false,
+                        "required": [
+                          "from",
+                          "to",
+                          "older_than_days"
+                        ]
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "ordering": {
+                  "type": "object",
+                  "properties": {
+                    "mode": {
+                      "enum": [
+                        "none",
+                        "sort",
+                        "zorder"
+                      ]
+                    },
+                    "sort": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "column": {
+                            "type": "string"
+                          },
+                          "direction": {
+                            "enum": [
+                              "asc",
+                              "desc"
+                            ]
+                          },
+                          "nulls": {
+                            "enum": [
+                              "first",
+                              "last"
+                            ]
+                          }
+                        },
+                        "additionalProperties": false,
+                        "required": [
+                          "column"
+                        ]
+                      }
+                    },
+                    "zorder": {
+                      "type": "object",
+                      "properties": {
+                        "columns": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "precision_bits": {
+                          "type": "integer",
+                          "description": "Bits of resolution kept per column before interleaving. More bits means finer locality per column but fewer columns fit the 62-bit ordering key."
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "retention": {
+                  "type": "object",
+                  "properties": {
+                    "expire_snapshots": {
+                      "type": "object",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "max_snapshot_age_days": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        },
+                        "min_snapshots_to_keep": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        },
+                        "max_ref_age_days": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "remove_orphan_files": {
+                      "type": "object",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "older_than_days": {
+                          "type": "integer",
+                          "description": "Must exceed the longest write the warehouse performs: a file written but not yet committed is indistinguishable from an orphan."
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "remove_dangling_deletes": {
+                      "type": "object",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "rewrite_manifests": {
+                      "type": "object",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "min_input_manifests": {
+                          "type": "integer"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "metadata": {
+                      "type": "object",
+                      "properties": {
+                        "previous_versions_max": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "description": "Omit to leave the table property alone. Setting this without delete_after_commit trims the metadata log but deletes nothing, turning each dropped entry into an unreferenced file for orphan removal to sweep."
+                        },
+                        "delete_after_commit": {
+                          "type": [
+                            "boolean",
+                            "null"
+                          ]
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "target_file_size_bytes": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "min_input_files": {
+                  "type": "integer"
+                },
+                "description": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "warehouse"
+  ]
+}

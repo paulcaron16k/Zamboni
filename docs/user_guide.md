@@ -462,6 +462,7 @@ internal and may move in a patch release. The entry points you need:
 | `Operation` | the six operations, as an enum |
 | `MaintenanceRequest` | engine-neutral inputs — retention plus overrides |
 | `TableConfig` | loading and reading `table-config.json` |
+| `get_table_config_spec()` | the JSON Schema for `table-config.json`, as a dict — for validating a file you generated, or driving editor completion. See [below](#validating-a-generated-table-configjson) |
 | `available_engines()` | what this install can drive |
 | `config_from_table_settings` | turning table-config layout into the compaction config `COMPACT` needs |
 | `TableCompactor`, `SnapshotExpirer`, `OrphanCleaner`, … | the local engine's own classes, when you want its richer results |
@@ -494,6 +495,49 @@ print(result.describe())
 `MaintenanceRequest` is engine-neutral by design: it carries *intent* — the
 retention windows and the layout you want — and each maintainer translates it
 into its own vocabulary. The same request object drives all three engines.
+
+### Validating a generated `table-config.json`
+
+If your service *writes* `table-config.json` — from a Meltano catalog, a UI, or
+its own model of the warehouse — validate it before it reaches a run.
+`get_table_config_spec()` returns the JSON Schema, so you do not have to fetch it
+from GitHub or guess a path inside the wheel:
+
+```python
+from jsonschema import Draft202012Validator  # any draft 2020-12 validator will do
+
+from zamboni import TableConfig, get_table_config_spec
+
+Draft202012Validator(get_table_config_spec()).validate(document)  # shape
+TableConfig.from_dict(document).validate()                        # everything else
+```
+
+**Both, in that order, and the order is the point.** The schema is a *shape*
+check: keys, types, enumerations, and `additionalProperties: false` everywhere,
+matching the loader's own refusal of unknown keys so a typo cannot silently
+change a table's layout. It reports every shape problem at once, with a JSON
+path, which is what you want to hand back to whoever authored the document.
+
+What it deliberately does not check is anything cross-field, because JSON Schema
+cannot express it: that `ordering.mode: "sort"` needs a non-empty `sort` list,
+that partition evolution must move to a *coarser* granularity, that
+`remove_orphan_files` may not be enabled while `expire_snapshots` is not. Those
+are `TableConfig.validate()`'s job, and it names the offending path. So a
+document can satisfy the schema and still be refused — that is the designed
+relationship, not a gap. The reverse never happens, and a test pins it.
+
+The schema is generated from the dataclasses in `zamboni.tableconfig` rather than
+maintained alongside them, so it cannot describe a format the loader does not
+implement. It declares its dialect with `$schema` and pins the format's own
+`version` to the revision your install understands — a schema from an older wheel
+therefore rejects a newer file loudly instead of half-accepting it.
+
+For a file already on disk, `zamboni validate-config` runs the authoritative
+half — `TableConfig.load()` — and prints what the config means per table. It does
+**not** run the schema, and does not need to: the loader is stricter. Reach for
+the schema when you want the other two things it gives you, which the loader
+cannot: every shape error at once with a JSON path, and editor completion against
+the file your wheel shipped.
 
 ### Engine configuration
 

@@ -42,6 +42,33 @@ Two categories beyond the usual set, because this tool deletes files:
   inventing `files_rewritten: 0` would be a false measurement dressed as a uniform
   schema. Raised by the first production integrator.
 
+- **A JSON Schema for `table-config.json`, shipped in the wheel and served by
+  `zamboni.get_table_config_spec()`.** Anything that *writes* these files — a
+  Meltano catalog conversion, a UI, a service modelling its own warehouses — had
+  nothing machine-readable to check its output against, and had to pull a copy
+  from GitHub or guess a path inside the installed package.
+
+  **Generated from the dataclasses in `zamboni.tableconfig`, not hand-written.**
+  A hand-written schema would make three descriptions of one format —
+  `docs/table-config.md`, `tableconfig.py`, and the schema — and two of them
+  would drift. `scripts/build-table-config-schema.py` regenerates it and a test
+  fails when the committed file falls behind, the same arrangement as `bin/`.
+
+  It is a **shape** check: keys, types, enumerations, and
+  `additionalProperties: false` everywhere, matching the loader's own refusal of
+  unknown keys. Cross-field rules cannot be expressed in JSON Schema —
+  `ordering.mode: "sort"` requiring a non-empty `sort` list, evolution having to
+  move to a coarser granularity — so `TableConfig.load()` stays the authority and
+  a document can satisfy the schema and still be refused. The reverse never
+  happens, and a test pins it by comparing the schema's keys against the key set
+  the loader's own error message declares.
+
+  The schema declares its dialect with `$schema` (draft 2020-12) and pins the
+  format's `version` to `SPEC_VERSION`, so a schema from an older wheel rejects a
+  newer file loudly rather than half-accepting it. `jsonschema` is a test-only
+  dependency: the API hands back a dict and lets the caller pick a validator
+  rather than making every install carry one.
+
 ### Removed
 
 - **`docs/upstream-0.12-upsert-regression.md`**, which both this file and the
