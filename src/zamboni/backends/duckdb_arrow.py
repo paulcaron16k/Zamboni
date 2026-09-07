@@ -66,9 +66,20 @@ class DuckDBArrowBackend(RewriteBackend):
 
         with self._stream(tasks, ctx) as stream:
             # PyIceberg gained a streaming write path after 0.11.1 that bin-packs
-            # a RecordBatchReader itself -- but only for unpartitioned tables
-            # (partitioned streaming is apache/iceberg-python#2152). Use it when
-            # the installed build has it; otherwise bin-pack here.
+            # a RecordBatchReader itself -- but only for unpartitioned tables.
+            # `_dataframe_to_data_files` raises NotImplementedError for a reader
+            # on a partitioned spec, so the guard is not caution, it is the
+            # difference between working and raising. Verified against upstream
+            # `main` at pyiceberg-0.12.0rc2-27-g4e6033d3, pyiceberg/io/pyarrow.py.
+            #
+            # Cited as the refusal rather than as apache/iceberg-python#2152,
+            # which this comment used to name: that issue is *closed*, because it
+            # delivered the unpartitioned half -- it is why the probe flips True
+            # at all. Upstream's own docstring still points at it for the
+            # partitioned remainder, so the number reads as "already fixed" to
+            # anyone who checks it, which is the opposite of what it means here.
+            # Use the streaming path when the installed build has it; otherwise
+            # bin-pack here.
             if detect().streaming_write_supported and _is_unpartitioned(ctx):
                 return RewriteOutput(self._write(stream, group, ctx), source_live_rows)
 
