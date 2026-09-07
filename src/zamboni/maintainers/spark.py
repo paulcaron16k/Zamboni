@@ -33,6 +33,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ..properties import ApplyResult
 from . import (
     EngineConfigProblem,
     LayoutFeature,
@@ -381,8 +382,11 @@ class SparkMaintainer(Maintainer):
         request: MaintenanceRequest,
         *,
         dry_run: bool = False,
-    ) -> str:
+    ) -> str | None:
         """The exact SQL this maintainer would run. No session needed.
+
+        ``None`` where this configuration asks for no work -- currently only
+        `apply-properties` with neither metadata setting declared.
 
         `dry_run` is a parameter rather than something `execute` splices in
         afterwards. The first version did the splice -- a `str.replace` of
@@ -525,7 +529,9 @@ class SparkMaintainer(Maintainer):
     def _rewrite_manifests_sql(self, target: str, plain: str, request: MaintenanceRequest) -> str:
         return _call("rewrite_manifests", [("table", _literal(plain))])
 
-    def _apply_properties_sql(self, target: str, plain: str, request: MaintenanceRequest) -> str:
+    def _apply_properties_sql(
+        self, target: str, plain: str, request: MaintenanceRequest
+    ) -> str | None:
         """Spark takes the Iceberg property names directly.
 
         Worth stating because Trino does not: there the same two settings need
@@ -543,10 +549,11 @@ class SparkMaintainer(Maintainer):
             value = "true" if settings.delete_after_commit else "false"
             pairs.append(f"'write.metadata.delete-after-commit.enabled' = {_literal(value)}")
         if not pairs:
-            raise EngineConfigProblem(
-                "apply-properties has nothing to set: the config declares neither "
-                "previous_versions_max nor delete_after_commit."
-            )
+            # No statement, rather than a refusal -- see the same branch in
+            # `trino._apply_properties_sql` for why. Both settings are optional
+            # and None means "leave whatever is there", so an empty block is a
+            # no-op, not a misconfiguration (ZMBNI-48).
+            return None
         return f"ALTER TABLE {target} SET TBLPROPERTIES ({', '.join(pairs)})"
 
     def _plain(self, table: str) -> str:
@@ -665,12 +672,21 @@ class SparkMaintainer(Maintainer):
         request: MaintenanceRequest,
         dry_run: bool,
     ) -> Reportable:
-        if dry_run and not self.capabilities().can_preview(operation):
-            raise PreviewUnavailable(
-                f"spark cannot preview {operation.value}. The statement would be: "
-                f"{self.statement_for(operation, table, request)}"
-            )
         statement = self.statement_for(operation, table, request, dry_run=dry_run)
+        if statement is None:
+            # Nothing to run, so nothing to commit and no session to open. See
+            # `trino.execute` for why this is an `ApplyResult` and why it comes
+            # ahead of the preview refusal.
+            return ApplyResult(identifier=table, dry_run=dry_run)
+        if dry_run and not self.capabilities().can_preview(operation):
+            # Built once, above, rather than rebuilt for the message. The two
+            # differed by `dry_run`, which only `_remove_orphans_sql` reads --
+            # and remove-orphans is the one operation that *can* preview, so the
+            # message never saw the difference. One call removes the chance that
+            # it starts to.
+            raise PreviewUnavailable(
+                f"spark cannot preview {operation.value}. The statement would be: {statement}"
+            )
 
         logger.info("spark: %s", statement)
         session = self.connect()

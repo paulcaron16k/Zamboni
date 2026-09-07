@@ -88,6 +88,40 @@ Two categories beyond the usual set, because this tool deletes files:
   admits, `prunes_manifests_by_predicate` is false and the guard never fires. The
   exposure would have arrived with the cap being lifted.
 
+### Fixed
+
+- **`apply-properties` no longer fails a run when the config declares no metadata
+  properties.** `MetadataSettings` defaults both `previous_versions_max` and
+  `delete_after_commit` to `None`, and its own documentation defines that as
+  "leave the table property alone" — so declaring neither is a supported choice.
+  The local engine read it that way and reported a clean no-op; **Trino and Spark
+  raised `EngineConfigProblem`** for the identical config, and the difference was
+  declared nowhere a caller could see it: Trino's `capabilities()` reports
+  `apply-properties` as supported, so `check_engine_supports` had nothing to
+  refuse and the operation was requested anyway.
+
+  The consequence was worse than a wrong exit code. `apply-properties` is second
+  in `RUNBOOK_ORDER`, immediately after compaction, and `MaintenanceReport.exit_code`
+  is the *worst* outcome — so a committing fleet run compacted the table, then
+  reported the table failed. Exit 2 means "usage/config", sending an operator to
+  fix a configuration that was never wrong. Reported by the first production
+  integrator, whose maintenance policy has no metadata settings at all, so this
+  was every run of every table.
+
+  All three engines now return the same result for that input — literally the same
+  `ApplyResult`, so `as_dict()` is byte-identical across engines and a dashboard
+  keyed on `changed` keeps its row. Neither engine opens a connection when there
+  is nothing to run.
+
+  **Why this is not BREAKING, though an exit code changed.** The definition above
+  names exit codes deliberately, so the exemption is stated rather than assumed:
+  the affected exit code is only ever produced by a run that did no work and had
+  nothing to do, and it reported failure for a correct configuration. Nothing that
+  worked stops working, and no pipeline can be relying on a spurious failure.
+  Newly *refusing* an operation is the direction that breaks a pipeline, which is
+  what the asymmetric fifth row of the covered surface in
+  [docs/releasing.md](docs/releasing.md) is about.
+
 ### Changed
 
 - **The demo is `zamboni.demo`, not a top-level `himsdemo`.** Installing

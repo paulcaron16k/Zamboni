@@ -33,6 +33,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ..properties import ApplyResult
 from . import (
     EngineConfigProblem,
     LayoutFeature,
@@ -367,8 +368,17 @@ class TrinoMaintainer(Maintainer):
 
     # -- statement building: pure, so every emitted statement is testable ----
 
-    def statement_for(self, operation: Operation, table: str, request: MaintenanceRequest) -> str:
-        """The exact SQL this maintainer would run. No connection needed."""
+    def statement_for(
+        self, operation: Operation, table: str, request: MaintenanceRequest
+    ) -> str | None:
+        """The exact SQL this maintainer would run. No connection needed.
+
+        ``None`` where this configuration asks for no work -- currently only
+        `apply-properties` with neither metadata setting declared. Answering the
+        question honestly is the point: "what SQL would you run?" has no string
+        answer when the answer is "none", and returning one anyway is what made
+        an empty config an error rather than a no-op.
+        """
         self.check_supported(operation)
         target = qualified(table, catalog=self.catalog)
         builder = {
@@ -434,7 +444,7 @@ class TrinoMaintainer(Maintainer):
         # counterpart and is not silently dropped -- it is declared missing.
         return _procedure(target, "optimize_manifests", [])
 
-    def _apply_properties_sql(self, target: str, request: MaintenanceRequest) -> str:
+    def _apply_properties_sql(self, target: str, request: MaintenanceRequest) -> str | None:
         # Trino does *not* accept the Iceberg property names. Its table
         # properties are an allowlist, and `write.metadata.*` is rejected even
         # through `extra_properties` ("Illegal keys in extra_properties") because
@@ -449,10 +459,18 @@ class TrinoMaintainer(Maintainer):
             value = "true" if settings.delete_after_commit else "false"
             pairs.append(f"delete_after_commit_enabled = {value}")
         if not pairs:
-            raise EngineConfigProblem(
-                "apply-properties has nothing to set: the config declares neither "
-                "previous_versions_max nor delete_after_commit."
-            )
+            # No statement, rather than a refusal. A config that declares neither
+            # setting is not malformed -- both are optional, and `MetadataSettings`
+            # uses None to mean "leave whatever is there" (properties.py
+            # `desired_properties`). The local engine reads it that way and reports
+            # a clean no-op; raising here made the same config an error on Trino,
+            # so one policy produced opposite outcomes on two engines and the
+            # difference was declared nowhere a caller could see it (ZMBNI-48).
+            #
+            # It was worse than a wrong exit code. `apply-properties` is second in
+            # RUNBOOK_ORDER, right after compaction, so a committing fleet run
+            # compacted the table, then reported the whole table failed.
+            return None
         return f"ALTER TABLE {target} SET PROPERTIES {', '.join(pairs)}"
 
     # -- execution ------------------------------------------------------------
@@ -483,6 +501,21 @@ class TrinoMaintainer(Maintainer):
         dry_run: bool,
     ) -> Reportable:
         statement = self.statement_for(operation, table, request)
+        if statement is None:
+            # Nothing to run, so nothing to commit and nothing to connect for.
+            # `ApplyResult` rather than a `TrinoResult`: no procedure ran, and the
+            # count is derived from the config rather than from the server, so
+            # reporting zero changes is a measurement we actually have -- unlike
+            # the row counts `TrinoResult` deliberately omits. It also means all
+            # three engines emit the same `as_dict()` payload for the same input,
+            # which is what ZMBNI-48 asked for and what a dashboard keyed on
+            # `changed` needs.
+            #
+            # Ahead of the dry-run refusal on purpose. That refusal exists so a
+            # preview is never printed over an engine about to commit; with no
+            # statement there is nothing to commit, so it has nothing to protect
+            # and would only reintroduce the divergence in preview mode.
+            return ApplyResult(identifier=table, dry_run=dry_run)
         if dry_run:
             # Reachable only by calling execute() directly; the CLI refuses
             # first. Belt and braces, because returning a "preview" from an
