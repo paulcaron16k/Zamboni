@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -46,6 +47,16 @@ def load_env() -> dict[str, str]:
             f"  cp {HERE.name}/.env.sample {HERE.name}/.env   # then re-run"
         )
     values = {k: v for k, v in dotenv_values(env_file).items() if v is not None}
+    # The process environment wins, so a second warehouse can be created without
+    # editing a developer's `.env`:
+    #
+    #     WAREHOUSE_NAME=zamboni-signed S3_STS_ENABLED=false uv run bootstrap.py
+    #
+    # That is not a convenience. `remove-orphans` against a remote-signing
+    # warehouse is the case ZMBNI-30 exists for, and until this passthrough
+    # existed the only way to reach it was to hand-edit `.env` -- so the test
+    # that proves it could not run unattended.
+    values.update({k: v for k, v in os.environ.items() if k in values})
     missing = [
         k
         for k in (

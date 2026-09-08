@@ -1195,6 +1195,66 @@ Worth stating plainly, because "no cluster" invites suspicion:
 
 ---
 
+## Storage credentials: who talks to the object store
+
+Skip this if your catalog vends credentials (Lakekeeper with `sts-enabled: true`, the
+default). It matters when it remote-signs instead.
+
+**The two paths are not equivalent.** A credential-vending catalog hands over temporary
+keys and a session token, and your client signs locally — every S3 verb works. A
+*remote-signing* catalog hands over nothing: the client sends each request's details to
+the catalog and gets an `Authorization` header back, and the catalog decides per request.
+That is an excellent control for a BI tool, which never sees a key and can be cut off
+instantly. It is the wrong control for maintenance, because the verbs a signing catalog
+declines are the ones reclaiming storage is made of:
+
+| | STS vending | Remote signing |
+|---|---|---|
+| `GET` / `PUT` — reading and writing files | works | works |
+| `ListObjectsV2`, `HeadObject`, multi-object `DELETE` | works | **refused** |
+
+So on a signing warehouse everything looks healthy until you try to free a byte: `expire`
+commits and reclaims nothing, and `remove-orphans` cannot run at all.
+
+**Zamboni's answer is to use the object store's own credentials.** The warehouse system
+owns that storage; the catalog is a service in front of it. Give Zamboni read/write/list/
+delete credentials for the bucket and it reclaims regardless of the catalog's signing
+policy — the same thing Spark has always done, which needs `spark.hadoop.fs.s3a.*` on the
+Spark server.
+
+```bash
+# .env, mode 600 -- never zamboni.yml
+ZAMBONI_S3_ACCESS_KEY_ID=...
+ZAMBONI_S3_SECRET_ACCESS_KEY=...
+```
+
+**This is not a way around a boundary someone set on purpose.** It needs credentials that
+can list and delete in the bucket, which somebody has to grant deliberately. It is the
+answer to *"my catalog is configured for readers and I also need to reclaim storage"*, not
+to *"the catalog said no"*.
+
+`ZAMBONI_CREDENTIAL_USE` decides when they are used:
+
+| Value | Behaviour |
+|---|---|
+| `always` *(default)* | Every operation uses Zamboni's credentials when they are configured. One credential path per run — one place to look when access fails |
+| `reclaim-only` | Only `expire` and `remove-orphans` — the two the signer refuses. Reads and compaction keep going through the catalog, so its audit trail still sees them |
+| `never` | The catalog governs Zamboni like any other client. Reclaim on a signing warehouse then refuses rather than half-working |
+
+`reclaim-only` is safe rather than merely narrower: the reachable set is compared on
+`bucket/key` keys, which do not depend on which endpoint or credential produced them, so
+mixing the two paths within a run cannot make the comparison disagree. Choose it when you
+want the catalog's audit trail to cover reads.
+
+**Under `always` and `reclaim-only`, a signing catalog with no credentials configured is
+refused before anything runs**, naming the table and what to set. The alternative — a
+reclaim pass that lists what it can and deletes what it managed to sign — is the one
+outcome this tool will not produce.
+
+The safety invariants are unchanged whichever you pick. Owning the storage changes who
+authenticates, not what may be deleted: the age guard, the reachable-set subtraction and
+the abort-on-doubt behaviour all still apply.
+
 ## Every control, and where it lives
 
 Settings live in three places, and which place is not arbitrary — it is the
@@ -1235,7 +1295,7 @@ not write.
 
 ### `zamboni.yml` — the profile
 
-Six keys, and unknown ones are refused rather than ignored. Template:
+Seven keys, and unknown ones are refused rather than ignored. Template:
 `zamboni.yml.sample`.
 
 | Key | Default | What it does |
@@ -1246,6 +1306,7 @@ Six keys, and unknown ones are refused rather than ignored. Template:
 | `root` | `~/.zamboni` | Where per-warehouse configs live: `{root}/configs/{warehouse}/table-config.json` |
 | `operations` | all six | Which operations `maintenance` runs, and in this order |
 | `tables` | every table in the config | Restrict a run |
+| `credential_use` | `always` | Whose object-store credentials reclaim uses — see [Storage credentials](#storage-credentials-who-talks-to-the-object-store). A policy, not a key, so it belongs here; the credentials themselves stay in `.env` |
 | `trino:` / `spark:` | — | Engine connection settings: `host`, `port`, `user`, `catalog`, `version` for Trino; `remote`, `master`, `catalog` for Spark. Not secrets, so they belong here rather than in `.env`, and there is deliberately no key for a password |
 
 ### Run controls — flags, or `CompactionConfig` from Python

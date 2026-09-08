@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any, Self
 
 import duckdb
@@ -23,6 +24,55 @@ from pyiceberg.catalog import Catalog, load_catalog
 from pyiceberg.table import Table
 
 logger = logging.getLogger(__name__)
+
+
+class CredentialUse(StrEnum):
+    """Whether Zamboni talks to the object store on its **own** credentials.
+
+    The warehouse system owns the storage. An Iceberg REST catalog is a service
+    in front of it, not its owner -- and remote signing exists to constrain
+    *external* readers such as BI tools, which is a different trust question
+    from the one a maintenance job asks.
+
+    That distinction is load-bearing because the two credential paths a catalog
+    can offer are not equivalent (docs/user_guide.md, "Storage credentials"):
+
+    * **STS vending** hands over temporary credentials with a session token, and
+      the client signs locally. Every S3 verb works.
+    * **Remote signing** hands over nothing; the client POSTs each request to the
+      catalog and gets an ``Authorization`` header back. The catalog decides per
+      request, and Lakekeeper declines exactly the verbs maintenance is made of.
+      Measured against Lakekeeper 0.13.1: a ``ListObjectsV2`` is refused with
+      ``SignError ... 400`` **even when its prefix is inside the table's own
+      location**, and so is a multi-object ``DELETE``.
+
+    So on a signing warehouse a reader works perfectly while ``expire`` commits
+    and frees nothing and ``remove-orphans`` cannot run at all.
+    """
+
+    #: Use Zamboni's own storage credentials for every operation, whenever they
+    #: are configured. The default: one credential path per run is one place to
+    #: look when access fails.
+    ALWAYS = "always"
+    #: Override only where the catalog's signer refuses -- ``expire``'s deletion
+    #: half and ``remove-orphans``. Reads and compaction keep going through
+    #: catalog-vended credentials, so the catalog's audit trail still sees them.
+    #: Safe rather than merely narrower: the reachable set is compared on
+    #: ``bucket/key`` keys (:func:`zamboni.reachable.canonical`), which do not
+    #: depend on which endpoint or credential produced them.
+    RECLAIM_ONLY = "reclaim-only"
+    #: Never override. The catalog governs Zamboni as it governs any client, and
+    #: reclaim on a signing warehouse refuses rather than half-working.
+    NEVER = "never"
+
+
+class StorageCredentialsRequired(RuntimeError):
+    """A run needs Zamboni's own storage credentials and none are configured.
+
+    Raised before anything is attempted, never part-way through: the alternative
+    is a reclaim pass that lists what it can and deletes what it managed to sign,
+    which is the one outcome this package will not produce.
+    """
 
 
 @dataclass
@@ -34,10 +84,45 @@ class CatalogSession:
     #: Threads DuckDB may use. Kept low by default because a maintenance job
     #: usually runs beside something more important.
     threads: int = 4
+    #: Zamboni's own object-store credentials, when it has been given any.
+    storage: S3Settings | None = None
+    #: When to prefer them over whatever the catalog vends. See
+    #: :class:`CredentialUse`.
+    credential_use: CredentialUse = CredentialUse.ALWAYS
 
-    def table(self, identifier: str) -> Table:
-        """Load a table by ``namespace.name`` identifier."""
-        return self.catalog.load_table(identifier)
+    def table(self, identifier: str, *, reclaiming: bool = False) -> Table:
+        """Load a table by ``namespace.name`` identifier.
+
+        ``reclaiming`` says this table is about to be listed or have files
+        deleted -- the operations a signing catalog refuses. It only changes
+        anything under :attr:`CredentialUse.RECLAIM_ONLY`; under ``always`` the
+        override is unconditional and under ``never`` it never happens.
+        """
+        table = self.catalog.load_table(identifier)
+        if not self._should_own(reclaiming):
+            return table
+        if self.storage is None:
+            if _catalog_refuses_storage_access(table):
+                raise StorageCredentialsRequired(
+                    f"{identifier}: this catalog vends no usable storage credentials -- it "
+                    "remote-signs, and its signer refuses the LIST and DELETE that reclaiming "
+                    "storage is made of. Zamboni needs the object store's own read/write "
+                    "credentials. Set ZAMBONI_S3_ACCESS_KEY_ID and "
+                    "ZAMBONI_S3_SECRET_ACCESS_KEY (in .env, never in zamboni.yml), or set "
+                    "ZAMBONI_CREDENTIAL_USE=never to leave the catalog in charge and accept "
+                    "that reclaim will not run."
+                )
+            # The catalog vends credentials that work, so there is nothing to
+            # override and nothing to complain about.
+            return table
+        return _with_storage_owner_io(table, self.storage)
+
+    def _should_own(self, reclaiming: bool) -> bool:
+        if self.credential_use is CredentialUse.NEVER:
+            return False
+        if self.credential_use is CredentialUse.ALWAYS:
+            return True
+        return reclaiming
 
     def warehouses(self) -> list[str]:
         """Warehouse names this catalog knows about, sorted.
@@ -95,6 +180,7 @@ class CatalogSession:
         scope: str | None = None,
         s3: S3Settings | None = None,
         threads: int = 4,
+        credential_use: CredentialUse = CredentialUse.ALWAYS,
         extra: dict[str, Any] | None = None,
     ) -> CatalogSession:
         """Build a session against a Lakekeeper REST catalog backed by MinIO.
@@ -106,7 +192,10 @@ class CatalogSession:
             token: A bearer token, as an alternative to ``credential``.
             oauth2_server_uri: Token endpoint, when not discoverable from ``uri``.
             scope: OAuth2 scope, e.g. ``lakekeeper``.
-            s3: Direct MinIO credentials. Omit when Lakekeeper vends credentials.
+            s3: Zamboni's own object-store credentials. Required to reclaim storage
+                from a warehouse whose catalog remote-signs; see :class:`CredentialUse`.
+            credential_use: When to prefer them over the catalog's. Defaults to
+                ``always``.
         """
         props: dict[str, Any] = {"type": "rest", "uri": uri, "warehouse": warehouse}
         if credential:
@@ -123,7 +212,16 @@ class CatalogSession:
             props.update(extra)
 
         catalog = load_catalog("lakekeeper", **props)
-        return cls(catalog=catalog, con=_new_duckdb(threads), threads=threads)
+        # `s3` is passed to PyIceberg *and* kept here. Passing it is what a
+        # non-signing catalog honours; keeping it is what lets us override a
+        # signing one, which PyIceberg offers no way to ask for.
+        return cls(
+            catalog=catalog,
+            con=_new_duckdb(threads),
+            threads=threads,
+            storage=s3,
+            credential_use=credential_use,
+        )
 
     @classmethod
     def for_local(
@@ -203,6 +301,60 @@ class S3Settings:
             props["s3.secret-access-key"] = self.secret_access_key
         props.update(self.extra)
         return props
+
+
+#: Properties a catalog returns when it will remote-sign rather than vend keys.
+#: Presence of either means the client holds no credential of its own.
+_SIGNING_PROPERTIES = ("s3.signer", "s3.remote-signing-enabled")
+
+
+def _catalog_refuses_storage_access(table: Table) -> bool:
+    """Whether this table's FileIO is driven by a signer rather than a credential.
+
+    Read off the properties the load-table response actually returned, not off
+    the warehouse's configuration, because the table is what the run will use.
+    ``s3.remote-signing-enabled`` can be present and false, so the value is
+    checked rather than the key.
+    """
+    properties = getattr(table.io, "properties", {}) or {}
+    if str(properties.get("s3.remote-signing-enabled", "")).lower() == "true":
+        return True
+    return bool(properties.get("s3.signer"))
+
+
+def _with_storage_owner_io(table: Table, storage: S3Settings) -> Table:
+    """The same table, reading and writing on Zamboni's own credentials.
+
+    **Why this is a local override rather than configuration.** PyIceberg builds
+    ``table.io`` from the load-table response, and those properties beat anything
+    the client configured -- with no supported way to say "I own this storage,
+    use my credentials". Measured against Lakekeeper 0.13.1: passing
+    ``s3.access-key-id``/``s3.secret-access-key``/``s3.endpoint`` to
+    ``for_lakekeeper`` changes nothing at all on a signing warehouse; the signer
+    is still selected, the endpoint is still the catalog's, and a LIST still
+    fails with ``SignError ... 400``. The keys are discarded silently, which is
+    the objectionable part.
+
+    So the FileIO is built from *only* our properties -- no catalog config, no
+    signer -- and swapped in. **Delete this function when PyIceberg gains a
+    supported precedence for client-supplied storage credentials**, which is
+    tracked as ZMBNI-56 with the measurements; the same change should re-examine
+    whether `CredentialUse` still needs three values.
+
+    Kept deliberately narrow: it replaces the IO and nothing else. Metadata still
+    comes from the catalog, commits still go through it, and the table object is
+    otherwise untouched -- so this changes who talks to the object store, not who
+    owns the table.
+    """
+    from pyiceberg.io.pyarrow import PyArrowFileIO
+
+    owned = PyArrowFileIO(properties=dict(storage.as_properties()))
+    # `Table` is a pydantic-era object whose fields are not all assignable, so
+    # the attribute is set through `object.__setattr__` rather than by
+    # reconstructing a table -- reconstruction would need every field the
+    # catalog set and would silently drop any this package does not know about.
+    object.__setattr__(table, "io", owned)
+    return table
 
 
 def _new_duckdb(threads: int) -> duckdb.DuckDBPyConnection:

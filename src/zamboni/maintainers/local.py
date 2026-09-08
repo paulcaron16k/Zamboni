@@ -87,13 +87,23 @@ class LocalMaintainer(Maintainer):
                     Operation.REMOVE_ORPHANS,
                     Support.PARTIAL,
                     can_preview=True,
-                    # Not probe-derived: this is a property of the *warehouse*,
-                    # not the library. A remote-signing Lakekeeper refuses the
-                    # listing however new PyIceberg is.
+                    # Not probe-derived: this is a property of the *warehouse*
+                    # and of how it is configured, not of the library.
+                    #
+                    # It used to say a remote-signing warehouse refused the
+                    # listing outright, which is no longer the whole truth:
+                    # Zamboni lists on its own object-store credentials when it
+                    # has them (ZMBNI-30, `CredentialUse`), and a signing
+                    # catalog cannot stop that because it is not the storage
+                    # owner. What remains is that it needs *a* listing, so a
+                    # signing warehouse with no credentials configured refuses,
+                    # and there is still no inventory-report path (ZMBNI-1602).
                     limitations=(
                         (
-                            "needs a bucket listing, which a remote-signing warehouse "
-                            "refuses outright -- no inventory-report path yet (ZMBNI-1602)"
+                            "needs a bucket listing, so a remote-signing warehouse refuses "
+                            "unless Zamboni has the object store's own credentials "
+                            "(ZAMBONI_S3_ACCESS_KEY_ID; see ZAMBONI_CREDENTIAL_USE). No "
+                            "inventory-report path yet (ZMBNI-1602)"
                         ),
                     ),
                     invariants=RECLAIM_INVARIANTS,
@@ -284,7 +294,10 @@ class LocalMaintainer(Maintainer):
         from ..expire import RetentionPolicy, SnapshotExpirer
 
         settings = request.retention.expire_snapshots
-        tbl = self._session.table(table)
+        # Reclaiming: expiry commits through the catalog but *deletes* through
+        # storage, which is the half a signing catalog refuses -- "commits but
+        # frees nothing" is exactly this operation on a signing warehouse.
+        tbl = self._session.table(table, reclaiming=True)
         policy = RetentionPolicy.resolve(
             dict(tbl.properties),
             max_snapshot_age_days=(
@@ -311,7 +324,9 @@ class LocalMaintainer(Maintainer):
             else settings.older_than_days
         )
         cleaner = OrphanCleaner(older_than_days=older_than, dry_run=dry_run)
-        return cleaner.run(self._session.table(table))
+        # Reclaiming: this one both LISTs and DELETEs, so it is the operation a
+        # signing catalog refuses outright rather than merely leaving ineffective.
+        return cleaner.run(self._session.table(table, reclaiming=True))
 
     def _remove_dangling_deletes(
         self, table: str, request: MaintenanceRequest, dry_run: bool
