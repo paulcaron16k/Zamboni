@@ -78,6 +78,10 @@ class Profile:
     #: characters of crontab per run or non-secret configuration sitting in the
     #: credentials file. Only the password-shaped things belong there.
     engines: dict[str, dict[str, str]] = field(default_factory=dict)
+    #: Whether Zamboni reclaims storage on its own credentials rather than the
+    #: catalog's. Non-secret -- it is a policy, not a key -- so it belongs here
+    #: and the credentials themselves stay in `.env`.
+    credential_use: str = "always"
     #: Where this came from, for `--help` and error messages. `None` means
     #: nothing was found and the defaults are in force.
     source: Path | None = None
@@ -239,7 +243,17 @@ def load_profile(path: Path | None) -> Profile:
     if not isinstance(raw, dict):
         raise ProfileError(f"{path}: expected a mapping at the top level")
 
-    known = {"uri", "warehouse", "engine", "root", "operations", "tables", "trino", "spark"}
+    known = {
+        "uri",
+        "warehouse",
+        "engine",
+        "root",
+        "operations",
+        "tables",
+        "credential_use",
+        "trino",
+        "spark",
+    }
     if unknown := sorted(set(raw) - known):
         raise ProfileError(
             f"{path}: unknown key(s) {', '.join(unknown)}. Known keys: {', '.join(sorted(known))}"
@@ -273,6 +287,11 @@ def load_profile(path: Path | None) -> Profile:
         uri=raw.get("uri") or base.uri,
         warehouse=raw.get("warehouse") or base.warehouse,
         engine=raw.get("engine") or base.engine,
+        credential_use=(
+            _credential_use(raw["credential_use"])
+            if raw.get("credential_use")
+            else base.credential_use
+        ),
         root=Path(root).expanduser() if root else base.root,
         operations=operations,
         engines=engines,
@@ -281,12 +300,31 @@ def load_profile(path: Path | None) -> Profile:
     )
 
 
+def _credential_use(value: str) -> str:
+    """Validated at load, like everything else here, never mid-run.
+
+    A typo such as ``reclaim_only`` would otherwise fall through to "not always
+    and not reclaim-only", i.e. silently behave as ``never`` -- turning a
+    misspelling into "reclaim quietly stopped working".
+    """
+    from .session import CredentialUse
+
+    allowed = [c.value for c in CredentialUse]
+    if value not in allowed:
+        raise ProfileError(
+            f"credential_use: {value!r} is not one of {allowed}. It decides whether "
+            "Zamboni reclaims storage on its own credentials or the catalog's."
+        )
+    return value
+
+
 def _from_environment(*, source: Path | None) -> Profile:
     root = os.environ.get("ZAMBONI_ROOT")
     return Profile(
         uri=os.environ.get("ZAMBONI_URI"),
         warehouse=os.environ.get("ZAMBONI_WAREHOUSE"),
         engine=os.environ.get("ZAMBONI_ENGINE", "local"),
+        credential_use=_credential_use(os.environ.get("ZAMBONI_CREDENTIAL_USE", "always")),
         root=Path(root).expanduser() if root else DEFAULT_ROOT,
         source=source,
     )

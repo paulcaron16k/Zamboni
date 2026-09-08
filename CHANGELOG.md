@@ -42,6 +42,40 @@ Two categories beyond the usual set, because this tool deletes files:
   inventing `files_rewritten: 0` would be a false measurement dressed as a uniform
   schema. Raised by the first production integrator.
 
+- **`remove-orphans` and `expire` now reclaim storage on Zamboni's own object-store
+  credentials, governed by `ZAMBONI_CREDENTIAL_USE`.** A warehouse whose catalog
+  remote-signs instead of vending credentials could not reclaim anything: Lakekeeper's
+  signer refuses `ListObjectsV2`, `HeadObject` and multi-object `DELETE`, so `expire`
+  committed and freed nothing while `remove-orphans` failed outright. Reads and writes
+  worked throughout, which is why the warehouse looked healthy until you tried to free a
+  byte.
+
+  The warehouse system owns its object store; the catalog is a service in front of it, and
+  remote signing exists to constrain external readers rather than the maintenance job. So
+  given bucket credentials, Zamboni now uses them and the signing policy no longer applies
+  to it — which is what Spark has always done via `spark.hadoop.fs.s3a.*` on the Spark
+  server.
+
+  | `ZAMBONI_CREDENTIAL_USE` | Behaviour |
+  |---|---|
+  | `always` *(default)* | Zamboni's credentials for every operation, when configured |
+  | `reclaim-only` | `expire` and `remove-orphans` only; reads stay on the catalog's |
+  | `never` | The catalog governs Zamboni as it governs any client |
+
+  Under the first two, **a signing catalog with no credentials configured is refused before
+  anything runs**, naming the table and what to set — rather than a reclaim pass that lists
+  what it can and deletes what it managed to sign.
+
+  Not a change for a credential-vending (`sts-enabled: true`) warehouse: there is nothing to
+  override, and nothing is refused. Not a way around a deliberate boundary either — it needs
+  credentials someone has to grant. The safety invariants are untouched: owning the storage
+  changes who authenticates, not what may be deleted.
+
+  Implemented by replacing the table's `FileIO`, because PyIceberg has no supported
+  precedence for client-supplied storage credentials — passing `s3.access-key-id` and
+  `s3.endpoint` to a signing catalog is measurably a no-op, and silently so. Tracked as
+  ZMBNI-56 with the measurements, and the override is deleted when upstream gains one.
+
 - **A JSON Schema for `table-config.json`, shipped in the wheel and served by
   `zamboni.get_table_config_spec()`.** Anything that *writes* these files — a
   Meltano catalog conversion, a UI, a service modelling its own warehouses — had

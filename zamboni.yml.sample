@@ -86,3 +86,9 @@ operations:
 #tables:
 #  - acme.events
 #  - acme.discharges
+
+# Whose object-store credentials reclaim uses when the catalog remote-signs
+# rather than vending keys: always (default), reclaim-only, or never.
+# See docs/user_guide.md, "Storage credentials". The credentials themselves
+# live in .env -- this is a policy, not a key.
+# credential_use: always

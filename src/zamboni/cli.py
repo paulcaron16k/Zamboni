@@ -61,7 +61,7 @@ from .maintainers import (
     PreviewUnavailable,
     UnsupportedOperation,
 )
-from .session import CatalogSession, S3Settings
+from .session import CatalogSession, CredentialUse, S3Settings
 from .tableconfig import (
     DEFAULT_SETTINGS,
     NamespaceSettings,
@@ -115,7 +115,7 @@ def _apply_profile(args: argparse.Namespace, profile) -> None:
     """
     # uri and warehouse: fill only when unset. Their flag defaults already carry
     # ZAMBONI_URI / ZAMBONI_WAREHOUSE, so None here means nobody said.
-    for attribute in ("uri", "warehouse"):
+    for attribute in ("uri", "warehouse", "credential_use"):
         if not getattr(args, attribute, None) and (value := getattr(profile, attribute)):
             setattr(args, attribute, value)
 
@@ -573,6 +573,15 @@ def _add_catalog_args(p: argparse.ArgumentParser) -> None:
     s = p.add_argument_group("s3 / minio")
     s.add_argument("--s3-endpoint", default=os.environ.get("ZAMBONI_S3_ENDPOINT"))
     s.add_argument("--s3-access-key-id", default=os.environ.get("ZAMBONI_S3_ACCESS_KEY_ID"))
+    s.add_argument(
+        "--credential-use",
+        choices=[c.value for c in CredentialUse],
+        default=os.environ.get("ZAMBONI_CREDENTIAL_USE"),
+        help=(
+            "whose object-store credentials reclaim uses: always (default) Zamboni's own, "
+            "reclaim-only for expire and remove-orphans alone, never the catalog's"
+        ),
+    )
     _add_removed_secret_flag(s, "--s3-secret-access-key", "ZAMBONI_S3_SECRET_ACCESS_KEY")
     s.add_argument("--s3-region", default=os.environ.get("ZAMBONI_S3_REGION", "us-east-1"))
 
@@ -703,6 +712,9 @@ def _session_from(args: argparse.Namespace) -> CatalogSession:
         oauth2_server_uri=args.oauth2_server_uri,
         scope=args.scope,
         s3=s3,
+        # Resolved like every other non-secret setting: flag > ZAMBONI_* >
+        # zamboni.yml > default. The credentials it governs stay in `.env`.
+        credential_use=CredentialUse(getattr(args, "credential_use", None) or "always"),
     )
 
 

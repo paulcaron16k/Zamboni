@@ -853,3 +853,150 @@ def test_the_expiry_timestamp_is_read_as_the_instant_we_meant(spark_env, session
     assert ours != without_offset, (
         "the offset made no difference, so this test cannot detect its loss"
     )
+
+
+# -- reclaiming storage the catalog will not sign for (ZMBNI-30) ----------
+
+SIGNING_WAREHOUSE = "zamboni-signed"
+
+
+@pytest.fixture(scope="module")
+def signing_warehouse(env) -> str:
+    """A warehouse with `sts-enabled: false`, so Lakekeeper remote-signs.
+
+    Skipped rather than created here: making a warehouse is `bootstrap.py`'s job
+    and doing it from a test would leave one behind on a developer's stack.
+
+        cd dev-stack && WAREHOUSE_NAME=zamboni-signed S3_STS_ENABLED=false \
+            uv run bootstrap.py
+    """
+    r = requests.get(
+        f"http://localhost:{env['LAKEKEEPER_PORT']}/management/v1/warehouse", timeout=10
+    )
+    r.raise_for_status()
+    for w in r.json().get("warehouses", []):
+        if w["name"] == SIGNING_WAREHOUSE:
+            if w["storage-profile"].get("sts-enabled"):
+                unavailable(f"{SIGNING_WAREHOUSE} has sts-enabled; it cannot test signing")
+            return SIGNING_WAREHOUSE
+    unavailable(
+        f"no {SIGNING_WAREHOUSE} warehouse -- create it with "
+        f"WAREHOUSE_NAME={SIGNING_WAREHOUSE} S3_STS_ENABLED=false uv run bootstrap.py"
+    )
+
+
+def signing_session(env, warehouse_name, *, credentials, mode):
+    from zamboni.session import CredentialUse, S3Settings
+
+    s3 = None
+    if credentials:
+        s3 = S3Settings(
+            endpoint=f"http://localhost:{env['MINIO_PORT']}",
+            access_key_id=env["MINIO_ROOT_USER"],
+            secret_access_key=env["MINIO_ROOT_PASSWORD"],
+        )
+    return CatalogSession.for_lakekeeper(
+        uri=f"http://localhost:{env['LAKEKEEPER_PORT']}/catalog",
+        warehouse=warehouse_name,
+        s3=s3,
+        credential_use=CredentialUse(mode),
+    )
+
+
+@pytest.fixture
+def signed_table(env, signing_warehouse):
+    """A small table on the signing warehouse. Writes work there; reclaim does not."""
+    import pyarrow as pa
+    from pyiceberg.schema import Schema
+    from pyiceberg.types import LongType, NestedField
+
+    s = signing_session(env, signing_warehouse, credentials=True, mode="always")
+    s.catalog.create_namespace_if_not_exists("db")
+    name = "db.reclaim_probe"
+    with contextlib.suppress(Exception):
+        s.catalog.drop_table(name)
+    tbl = s.catalog.create_table(
+        name,
+        schema=Schema(NestedField(1, "id", LongType(), required=False)),
+        properties={"format-version": "2"},
+    )
+    tbl.append(pa.table({"id": pa.array([1, 2, 3], type=pa.int64())}))
+    yield name
+    with contextlib.suppress(Exception):
+        s.catalog.drop_table(name)
+    s.close()
+
+
+def test_the_catalogs_signer_refuses_the_listing_orphan_removal_needs(env, signed_table):
+    """The defect this setting exists for, proven against the real signer.
+
+    Writes succeed on a signing warehouse -- only LIST, HEAD and multi-object
+    DELETE are refused -- which is why the symptom is `expire` committing and
+    freeing nothing rather than anything failing loudly.
+    """
+    from zamboni.orphans import list_storage, storage_roots
+
+    s = signing_session(env, SIGNING_WAREHOUSE, credentials=True, mode="never")
+    try:
+        with pytest.raises(Exception) as caught:
+            tbl = s.table(signed_table, reclaiming=True)
+            list_storage(tbl, storage_roots(tbl))
+        assert "sign" in str(caught.value).lower(), (
+            f"expected the signer to refuse, got {caught.value!r}"
+        )
+    finally:
+        s.close()
+
+
+@pytest.mark.parametrize("mode", ["always", "reclaim-only"])
+def test_zamboni_lists_that_storage_on_its_own_credentials(env, signed_table, mode):
+    """The same call, on the same warehouse, with the storage owner's keys."""
+    from zamboni.orphans import list_storage, storage_roots
+
+    s = signing_session(env, SIGNING_WAREHOUSE, credentials=True, mode=mode)
+    try:
+        tbl = s.table(signed_table, reclaiming=True)
+        keys = list_storage(tbl, storage_roots(tbl))
+        assert keys, "the storage owner's credentials listed nothing"
+        assert type(tbl.io).__name__ == "PyArrowFileIO"
+    finally:
+        s.close()
+
+
+def test_reclaim_without_credentials_refuses_rather_than_half_running(env, signed_table):
+    from zamboni.session import StorageCredentialsRequired
+
+    s = signing_session(env, SIGNING_WAREHOUSE, credentials=False, mode="always")
+    try:
+        with pytest.raises(StorageCredentialsRequired, match="ZAMBONI_S3_ACCESS_KEY_ID"):
+            s.table(signed_table, reclaiming=True)
+    finally:
+        s.close()
+
+
+def test_the_safety_checks_are_still_in_force_on_our_own_credentials(env, signed_table):
+    """Owning the storage changes who authenticates, not what is allowed to be
+    deleted. A dry run must still delete nothing and still report."""
+    from zamboni.orphans import OrphanCleaner
+
+    s = signing_session(env, SIGNING_WAREHOUSE, credentials=True, mode="always")
+    try:
+        tbl = s.table(signed_table, reclaiming=True)
+        before = set(_storage_keys(tbl))
+        result = OrphanCleaner(older_than_days=3, dry_run=True).run(tbl)
+
+        assert result.dry_run, "the result must say it was a preview"
+        assert set(_storage_keys(s.table(signed_table, reclaiming=True))) == before, (
+            "a dry run deleted something"
+        )
+        # The age guard is the check that matters here: everything was written
+        # seconds ago, so nothing is old enough to be an orphan yet.
+        assert result.deleted == 0, f"the age guard let {result.deleted} fresh file(s) through"
+    finally:
+        s.close()
+
+
+def _storage_keys(tbl):
+    from zamboni.orphans import list_storage, storage_roots
+
+    return list_storage(tbl, storage_roots(tbl))

@@ -608,8 +608,39 @@ guessed: nothing in the inventory changed, and two things broke anyway.
 | PyIceberg's SQL-catalog extra pins SQLAlchemy, which a shared site-packages need not satisfy | Everything runs from a locked `uv` venv; nothing resolves against global packages, so no global pin can conflict. Only the `sql` extra pulls SQLAlchemy in — a REST-catalog install never meets the constraint |
 | The `bin/zamboni` executable pins its Python from `.python-version` | The shipped executable runs the interpreter the tests ran on |
 | Lakekeeper OSS has no maintenance queues | Expiry and orphan removal run from this tool, scheduled by the operator |
-| A remote-signing Lakekeeper warehouse (`sts-enabled: false`, `push-s3-delete-disabled: true`) signs object GET/PUT only | `ListObjectsV2`, `HeadObject` and multi-object `DELETE` are refused, so compaction fails and no storage can be reclaimed. Needs STS-vended or direct credentials — measured in [live-verification.md](live-verification.md) |
-| Lakekeeper returns storage settings per table in the load-table response | Those properties win over client config, so `py-io-impl`, `s3.endpoint` and `s3.remote-signing-enabled` cannot be overridden from the client |
+| A remote-signing Lakekeeper warehouse (`sts-enabled: false`, `push-s3-delete-disabled: true`) signs object GET/PUT only | `ListObjectsV2`, `HeadObject` and multi-object `DELETE` are refused. Zamboni therefore reclaims on **its own** object-store credentials rather than the catalog's — see §6.4a — and refuses up front when it has none. Measured in [live-verification.md](live-verification.md) |
+| Lakekeeper returns storage settings per table in the load-table response | Those properties win over client config: `py-io-impl`, `s3.endpoint` and `s3.remote-signing-enabled` cannot be overridden *through PyIceberg*. Zamboni replaces the `FileIO` instead, because PyIceberg offers no supported precedence for client-supplied credentials (ZMBNI-56) |
+
+### 6.4a Who owns the storage
+
+The warehouse system owns its object store. An Iceberg REST catalog is a service in
+front of that store, not its owner — so its storage policy is a statement about the
+clients it fronts, and Zamboni is not one of them in the sense the policy means.
+
+Remote signing exists to constrain **external readers**: hand a BI tool a catalog token
+and it never sees a storage credential, and access is revoked by declining to sign rather
+than by rotating keys. For that job it is strictly better than credential vending. The two
+paths are not equivalent, and the difference is exactly the verbs maintenance needs:
+
+| | STS vending | Remote signing |
+|---|---|---|
+| Client receives | temporary credentials + session token | nothing; each request is signed by the catalog |
+| FileIO selected | `PyArrowFileIO` | `FsspecFileIO` + `S3V4RestSigner` |
+| `GET` / `PUT` | works | works |
+| `ListObjectsV2`, `HeadObject`, multi-object `DELETE` | works | **refused** |
+| Governed by | the STS policy, for the credential's lifetime | the catalog, per request |
+
+So a signing warehouse permits precisely what a reader needs and denies precisely what an
+owner needs. Measured against Lakekeeper 0.13.1, the refusal covers a `ListObjectsV2`
+**whose prefix is inside the table's own location** — the scoping is not the objection.
+
+`ZAMBONI_CREDENTIAL_USE` decides whose credentials a run uses: `always` (the default),
+`reclaim-only` for `expire` and `remove-orphans` alone, or `never` to let the catalog
+govern Zamboni as it governs any client. Under the first two, a signing catalog with no
+credentials configured is refused **before** anything runs, because a reclaim pass that
+lists what it can and deletes what it managed to sign is the one outcome this package will
+not produce. The safety invariants of §6.6 are unchanged either way: owning the storage
+changes who authenticates, not what may be deleted.
 
 ### 6.5 Functional limits
 
@@ -632,9 +663,10 @@ guessed: nothing in the inventory changed, and two things broke anyway.
   a failure anywhere leaves the table exactly as it was. `--partial-progress` commits each
   group instead, which is preferable on a table too large to redo. Iceberg is explicit that
   this is not a correctness question: "file groups can be compacted independently".
-- **A remote-signing Lakekeeper warehouse permits no reclamation.** Its signer refuses
-  `ListObjectsV2`, `HeadObject` and multi-object `DELETE`, so compaction fails and nothing
-  can be freed. See [live-verification.md](live-verification.md).
+- **A remote-signing Lakekeeper warehouse permits no reclamation *through the catalog*.**
+  Its signer refuses `ListObjectsV2`, `HeadObject` and multi-object `DELETE`. Zamboni
+  reclaims on the object store's own credentials instead (§6.4a); without them it refuses
+  rather than half-running. See [live-verification.md](live-verification.md).
 - **Compaction holds roughly one data file in memory, not one partition.** The streaming
   path reads one file per call and bin-packs the result, so peak scales with the largest
   *file* and a partition larger than RAM still compacts. It was not always so: reading the
@@ -649,10 +681,13 @@ guessed: nothing in the inventory changed, and two things broke anyway.
   inside a part. Zamboni emits the right form for each, so this is handled rather than left
   to the operator, but a layout needing two incompatible spellings does not map onto
   `database.schema.table` and is worth avoiding.
-- **Spark's `remove-orphans` needs credentials Zamboni cannot supply.** It lists through
-  Hadoop S3A rather than Iceberg FileIO, so it needs `spark.hadoop.fs.s3a.*` on the Spark
-  server. Every other operation runs on the catalog's vended credentials. Get it wrong and
-  exactly one of the six fails while the rest pass.
+- **Spark's `remove-orphans` needs credentials on the Spark server.** It lists through
+  Hadoop S3A rather than Iceberg FileIO, so it needs `spark.hadoop.fs.s3a.*` where the
+  server can read it — a Connect client cannot supply them. Every other Spark operation
+  runs on the catalog's vended credentials, so get this wrong and exactly one of the six
+  fails while the rest pass. Worth noting that Spark has always reclaimed as the storage
+  owner; §6.4a is Zamboni doing the same thing deliberately, per run rather than per
+  server.
 
 
 ### 6.6 Safety invariants for deletion
