@@ -369,3 +369,69 @@ def test_a_table_overrides_the_default_retention():
     config = TableConfig.from_dict(raw)
     assert config.for_table("a.b").retention.remove_orphan_files.older_than_days == 1
     assert config.for_table("a.c").retention.remove_orphan_files.older_than_days == 30
+
+
+# -- a value of the wrong type is refused, not crashed on (ZMBNI-53) ------
+
+
+@pytest.mark.parametrize(
+    ("settings", "message"),
+    [
+        # The silent one, and the reason this is a safety fix rather than a
+        # message improvement. `get("enabled", True)` returns None for an
+        # explicit null -- the default is only used when the key is *absent* --
+        # and None is falsy, so this loaded and turned reclamation off. A run
+        # then reported "disabled in the config" for a config that never said so.
+        ({"retention": {"remove_orphan_files": {"enabled": None}}}, "null is not a value"),
+        ({"retention": {"rewrite_manifests": {"enabled": None}}}, "null is not a value"),
+        ({"retention": {"remove_dangling_deletes": {"enabled": None}}}, "null is not a value"),
+        # Reached arithmetic in `validate()` and raised TypeError, which no
+        # caller catches: the CLI maps TableConfigError to exit 2 and lets
+        # anything else escape as a traceback.
+        ({"min_input_files": None}, "null is not a value"),
+        ({"retention": {"remove_orphan_files": {"older_than_days": None}}}, "null is not a value"),
+        ({"retention": {"rewrite_manifests": {"min_input_manifests": None}}}, "null is not a"),
+        ({"min_input_files": "day"}, "expected a number, found a string"),
+        # `bool` is a subclass of `int`, so an unguarded isinstance would read
+        # this as the integer 1 -- a config that means nothing accepted as one
+        # that means something.
+        ({"min_input_files": True}, "expected a number, found a boolean"),
+        # Slipped past `"column" not in key` and produced a sort key on None.
+        ({"ordering": {"mode": "sort", "sort": [{"column": None}]}}, "needs a string"),
+        # Thirteen of fourteen nested blocks raised TypeError from `set(raw)`.
+        ({"ordering": None}, "expected a block of settings, found null"),
+        ({"retention": None}, "expected a block of settings, found null"),
+        ({"partition": [None]}, "expected a block of settings, found null"),
+        ({"ordering": "day"}, "expected a block of settings, found a string"),
+    ],
+)
+def test_a_wrong_typed_value_is_refused_with_its_path(settings, message):
+    with pytest.raises(TableConfigError, match=message) as caught:
+        TableConfig.from_dict(v2({"a.b": settings})).validate()
+    assert "namespaces.a.tables.b" in str(caught.value), (
+        "the refusal must locate itself: a fleet config has hundreds of tables, "
+        "and a message that does not say which one is barely better than a crash"
+    )
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        # Documented as "leave whatever is there", so null is a legal spelling of
+        # unset and must stay one -- narrowing these would break every config
+        # using it, and the shipped schema declares them nullable.
+        {"target_file_size_bytes": None},
+        {"description": None},
+        {"retention": {"expire_snapshots": {"max_snapshot_age_days": None}}},
+        {"retention": {"expire_snapshots": {"min_snapshots_to_keep": None}}},
+        {"retention": {"expire_snapshots": {"max_ref_age_days": None}}},
+        {"retention": {"metadata": {"previous_versions_max": None}}},
+        {"retention": {"metadata": {"delete_after_commit": None}}},
+        # Containers the loader coalesces to empty. Kept, for the same reason.
+        {"partition": None},
+        {"ordering": {"sort": None}},
+        {"partition_evolution": {"rules": None}},
+    ],
+)
+def test_null_still_means_unset_where_it_always_did(settings):
+    TableConfig.from_dict(v2({"a.b": settings})).validate()

@@ -89,6 +89,47 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### SAFETY
 
+- **`table-config.json` now type-checks every value, and a `null` is refused
+  where it used to be swallowed.** The case this is filed under SAFETY for:
+  `{"remove_orphan_files": {"enabled": null}}` **loaded, and silently disabled
+  reclamation.** `dict.get("enabled", True)` returns `None` when the key is
+  present with a null — the default only applies when the key is *absent* — and
+  `None` is falsy, so a run reported "disabled in the config" for a config that
+  never said so. That is precisely the "silently reclaiming far less than
+  expected" outcome `Retention.validate` warns about, reached by a typo, in a
+  tool whose job includes deleting files.
+
+  Two more shapes of the same root cause — values were never checked as they were
+  read. A `null` where a *block* belongs escaped as a bare `TypeError: 'NoneType'
+  object is not iterable` from `_reject_unknown`, which called `set(raw)` on
+  whatever it was handed; measured across all fourteen nested blocks, **thirteen
+  crashed.** And a wrong-typed scalar reached arithmetic inside `validate()`:
+  `min_input_files: "day"` raised `TypeError: '<' not supported`. Neither is a
+  `TableConfigError`, which is the type the CLI maps to exit 2 and the user guide
+  documents as *the* config failure — so both were broken promises, surfacing as
+  a traceback with no path.
+
+  Every value now goes through one checked accessor that names the key, the path
+  and what it found: `namespaces.a.tables.b.min_input_files: expected a number,
+  found a string`. `bool` is rejected where a number is wanted, since it is an
+  `int` subclass and `min_input_files: true` would otherwise read as `1`.
+
+  **What still accepts `null`, unchanged:** the settings documented as "leave
+  whatever is there" — the `expire_snapshots` windows, the `metadata` properties,
+  `target_file_size_bytes`, `description` — and the four list-valued keys the
+  loader coalesces to empty (`namespaces`, `partition`,
+  `partition_evolution.rules`, `ordering.sort`). Narrowing those would break
+  configs that work, and the shipped JSON Schema declares exactly those keys
+  nullable; a sweep over every field position asserts the schema and the loader
+  agree about `null` everywhere, which is what found all of this.
+
+  **This narrows accepted config values, which the BREAKING definition above
+  names.** Filed under SAFETY because it ships in a patch release for the reason
+  SAFETY exists: a configuration that silently disabled an operation is worse
+  than one that is refused. If you have a `null` in a `table-config.json`, the
+  run now tells you where — and if it was on an `enabled` flag, that operation
+  was not running.
+
 - **Every operation that commits through the private snapshot producers now
   refuses an unsupported PyIceberg build.** `assert_supported_pyiceberg()` had
   one caller, so five of the six mutating operations never consulted it — and

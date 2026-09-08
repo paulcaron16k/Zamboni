@@ -552,18 +552,22 @@ class TableConfig:
             else DEFAULT_SETTINGS
         )
         namespaces = {}
-        for namespace, block in (raw.get("namespaces") or {}).items():
+        for namespace, block in (
+            _value(raw, "namespaces", "<root>", expect=dict, nullable=True) or {}
+        ).items():
             where = f"namespaces.{namespace}"
             _reject_unknown(block, {"tables"}, where)
             namespaces[namespace] = NamespaceSettings(
                 tables={
                     name: _settings_from_dict(settings, f"{where}.tables.{name}")
-                    for name, settings in (block.get("tables") or {}).items()
+                    for name, settings in (
+                        _value(block, "tables", where, expect=dict, nullable=True) or {}
+                    ).items()
                 }
             )
         return cls(
-            version=raw.get("version", SPEC_VERSION),
-            warehouse=raw.get("warehouse", ""),
+            version=_value(raw, "version", "<root>", expect=int, default=SPEC_VERSION),
+            warehouse=_value(raw, "warehouse", "<root>", expect=str, default=""),
             defaults=defaults,
             namespaces=namespaces,
             source=source,
@@ -592,7 +596,45 @@ class TableConfig:
 # -- dict <-> dataclass ---------------------------------------------------
 
 
-def _reject_unknown(raw: dict[str, Any], allowed: set[str], where: str) -> None:
+#: How to name what a malformed block actually held, in the file's own vocabulary
+#: rather than Python's -- an author reading ``found a JSON object`` can look at
+#: their file, where ``found a dict`` sends them to a language they may not use.
+_JSON_TYPE_NAME = {
+    type(None): "null",
+    bool: "a boolean",
+    int: "a number",
+    float: "a number",
+    str: "a string",
+    list: "a list",
+    dict: "a JSON object",
+}
+
+
+def _reject_unknown(raw: Any, allowed: set[str], where: str) -> None:
+    """Refuse unknown keys, and refuse anything that is not a block at all.
+
+    The second half is the one that had to be added. ``set(raw)`` is happy to
+    iterate whatever it is handed, so ``"ordering": null`` escaped as a bare
+    ``TypeError: 'NoneType' object is not iterable`` -- an unhandled crash with a
+    traceback and no path, for an authoring mistake a templated file makes easily
+    when it renders an absent block as ``null`` instead of omitting it. Measured
+    across every nested block: thirteen of fourteen crashed (ZMBNI-53).
+
+    ``TableConfigError`` is what a caller is told to catch -- the CLI maps it to
+    exit 2 and the user guide documents it as *the* config failure -- so a
+    ``TypeError`` here was a promise broken, not merely an ugly message.
+
+    Checked for any non-mapping rather than for ``None`` alone: a list or a string
+    did not crash, which is worse. ``set("abc")`` is a perfectly good set, so
+    ``"ordering": "day"`` reported its own characters as unknown keys.
+    """
+    if not isinstance(raw, dict):
+        found = _JSON_TYPE_NAME.get(type(raw), repr(raw))
+        raise TableConfigError(
+            f"{where}: expected a block of settings, found {found}. "
+            f"Omit the key entirely to take the default; allowed keys here are "
+            f"{sorted(allowed)}."
+        )
     unknown = sorted(set(raw) - allowed)
     if unknown:
         raise TableConfigError(
@@ -600,6 +642,77 @@ def _reject_unknown(raw: dict[str, Any], allowed: set[str], where: str) -> None:
             "Keys are rejected rather than ignored so a typo cannot silently "
             "change a table's layout."
         )
+
+
+def _value(
+    raw: dict[str, Any],
+    key: str,
+    where: str,
+    *,
+    expect: type,
+    default: Any = None,
+    nullable: bool = False,
+) -> Any:
+    """Read ``key``, checking the JSON type of what is there.
+
+    Every value in this file is read through here, because ``dict.get(key,
+    default)`` was quietly doing three different wrong things (ZMBNI-53):
+
+    * **A present ``null`` does not take the default.** ``get("enabled", True)``
+      returns ``None`` for ``"enabled": null``, and ``None`` is falsy -- so
+      ``"remove_orphan_files": {"enabled": null}`` loaded happily and *silently
+      disabled reclamation*. `maintain()` then reports "disabled in the config",
+      which is exactly the "silently reclaiming far less than expected" outcome
+      :meth:`Retention.validate` warns about, reached by a typo.
+    * **A wrong type reached arithmetic.** ``min_input_files: "day"`` and
+      ``older_than_days: null`` escaped as ``TypeError: '<' not supported`` from
+      inside ``validate()`` -- an unhandled crash, not the ``TableConfigError``
+      the CLI maps to exit 2.
+    * **A null slipped past a presence check.** ``sort[].column: null`` satisfied
+      ``"column" not in key`` and produced a sort key on column ``None``.
+
+    ``nullable`` says whether an explicit ``null`` is a legal spelling of "unset".
+    It is true only where a ``None`` *means* something -- the settings documented
+    as "leave the table property alone" -- and where the loader already coalesced
+    a null to empty. `zamboni.tableconfig_schema` declares exactly those keys
+    nullable, and a sweep over every field position asserts the two agree.
+    """
+    if key not in raw:
+        return default
+    value = raw[key]
+    if value is None:
+        if nullable:
+            return None
+        if default is None:
+            # No default to fall back on, so "omit it" is the wrong advice --
+            # `sort[].column` is required and omitting it is a different error.
+            raise TableConfigError(
+                f"{where}.{key}: null is not a value here; this key needs {_EXPECTED_NAME[expect]}."
+            )
+        raise TableConfigError(
+            f"{where}.{key}: null is not a value here. Omit the key to take the "
+            f"default ({default!r}); a null would otherwise read as "
+            f"{'off' if expect is bool else 'unset'} without saying so."
+        )
+    # `bool` is a subclass of `int`, so an unguarded isinstance would accept
+    # `min_input_files: true` as the integer 1 -- a config that means nothing
+    # being read as one that means something.
+    if isinstance(value, expect) and not (expect is not bool and isinstance(value, bool)):
+        return value
+    raise TableConfigError(
+        f"{where}.{key}: expected {_EXPECTED_NAME[expect]}, found "
+        f"{_JSON_TYPE_NAME.get(type(value), repr(value))}."
+    )
+
+
+#: What each expected Python type is called in the file's own vocabulary.
+_EXPECTED_NAME = {
+    bool: "true or false",
+    int: "a number",
+    str: "a string",
+    list: "a list",
+    dict: "a JSON object",
+}
 
 
 def _settings_from_dict(raw: dict[str, Any], where: str) -> TableSettings:
@@ -618,7 +731,7 @@ def _settings_from_dict(raw: dict[str, Any], where: str) -> TableSettings:
     )
     partition = tuple(
         _partition_field_from_dict(pf, f"{where}.partition[{i}]")
-        for i, pf in enumerate(raw.get("partition") or ())
+        for i, pf in enumerate(_value(raw, "partition", where, expect=list, nullable=True) or ())
     )
     evolution = (
         _evolution_from_dict(raw["partition_evolution"], f"{where}.partition_evolution")
@@ -640,9 +753,11 @@ def _settings_from_dict(raw: dict[str, Any], where: str) -> TableSettings:
         partition_evolution=evolution,
         ordering=ordering,
         retention=retention,
-        target_file_size_bytes=raw.get("target_file_size_bytes"),
-        min_input_files=raw.get("min_input_files", 2),
-        description=raw.get("description"),
+        target_file_size_bytes=_value(
+            raw, "target_file_size_bytes", where, expect=int, nullable=True
+        ),
+        min_input_files=_value(raw, "min_input_files", where, expect=int, default=2),
+        description=_value(raw, "description", where, expect=str, nullable=True),
     )
 
 
@@ -651,54 +766,65 @@ def _partition_field_from_dict(raw: dict[str, Any], where: str) -> PartitionFiel
     if "column" not in raw:
         raise TableConfigError(f"{where}: 'column' is required")
     return PartitionField(
-        column=raw["column"],
-        transform=raw.get("transform", "identity"),
-        num_buckets=raw.get("num_buckets"),
-        width=raw.get("width"),
-        name=raw.get("name"),
+        column=_value(raw, "column", where, expect=str),
+        transform=_value(raw, "transform", where, expect=str, default="identity"),
+        num_buckets=_value(raw, "num_buckets", where, expect=int, nullable=True),
+        width=_value(raw, "width", where, expect=int, nullable=True),
+        name=_value(raw, "name", where, expect=str, nullable=True),
     )
 
 
 def _evolution_from_dict(raw: dict[str, Any], where: str) -> PartitionEvolution:
     _reject_unknown(raw, {"enabled", "rules"}, where)
     rules = []
-    for i, rule in enumerate(raw.get("rules") or ()):
+    for i, rule in enumerate(_value(raw, "rules", where, expect=list, nullable=True) or ()):
         _reject_unknown(rule, {"from", "to", "older_than_days"}, f"{where}.rules[{i}]")
         missing = {"from", "to", "older_than_days"} - set(rule)
         if missing:
             raise TableConfigError(f"{where}.rules[{i}]: missing {sorted(missing)}")
         rules.append(
             EvolutionRule(
-                from_transform=rule["from"],
-                to_transform=rule["to"],
-                older_than_days=rule["older_than_days"],
+                from_transform=_value(rule, "from", f"{where}.rules[{i}]", expect=str),
+                to_transform=_value(rule, "to", f"{where}.rules[{i}]", expect=str),
+                older_than_days=_value(rule, "older_than_days", f"{where}.rules[{i}]", expect=int),
             )
         )
-    return PartitionEvolution(enabled=raw.get("enabled", True), rules=tuple(rules))
+    return PartitionEvolution(
+        enabled=_value(raw, "enabled", where, expect=bool, default=True), rules=tuple(rules)
+    )
 
 
 def _ordering_from_dict(raw: dict[str, Any], where: str) -> Ordering:
     _reject_unknown(raw, {"mode", "sort", "zorder"}, where)
     sort = []
-    for i, key in enumerate(raw.get("sort") or ()):
+    for i, key in enumerate(_value(raw, "sort", where, expect=list, nullable=True) or ()):
         _reject_unknown(key, {"column", "direction", "nulls"}, f"{where}.sort[{i}]")
         if "column" not in key:
             raise TableConfigError(f"{where}.sort[{i}]: 'column' is required")
         sort.append(
             SortKey(
-                column=key["column"],
-                direction=key.get("direction", "asc"),
-                nulls=key.get("nulls", "last"),
+                column=_value(key, "column", f"{where}.sort[{i}]", expect=str),
+                direction=_value(key, "direction", f"{where}.sort[{i}]", expect=str, default="asc"),
+                nulls=_value(key, "nulls", f"{where}.sort[{i}]", expect=str, default="last"),
             )
         )
     zorder = None
     if "zorder" in raw:
         _reject_unknown(raw["zorder"], {"columns", "precision_bits"}, f"{where}.zorder")
         zorder = ZOrder(
-            columns=tuple(raw["zorder"].get("columns") or ()),
-            precision_bits=raw["zorder"].get("precision_bits", 16),
+            columns=tuple(
+                _value(raw["zorder"], "columns", f"{where}.zorder", expect=list, nullable=True)
+                or ()
+            ),
+            precision_bits=_value(
+                raw["zorder"], "precision_bits", f"{where}.zorder", expect=int, default=16
+            ),
         )
-    return Ordering(mode=raw.get("mode", "none"), sort=tuple(sort), zorder=zorder)
+    return Ordering(
+        mode=_value(raw, "mode", where, expect=str, default="none"),
+        sort=tuple(sort),
+        zorder=zorder,
+    )
 
 
 def _retention_from_dict(raw: dict[str, Any], where: str) -> Retention:
@@ -722,35 +848,46 @@ def _retention_from_dict(raw: dict[str, Any], where: str) -> Retention:
             {"enabled", "max_snapshot_age_days", "min_snapshots_to_keep", "max_ref_age_days"},
             f"{where}.expire_snapshots",
         )
+        at = f"{where}.expire_snapshots"
         expire = ExpireSnapshotsSettings(
-            enabled=block.get("enabled", True),
-            max_snapshot_age_days=block.get("max_snapshot_age_days"),
-            min_snapshots_to_keep=block.get("min_snapshots_to_keep"),
-            max_ref_age_days=block.get("max_ref_age_days"),
+            enabled=_value(block, "enabled", at, expect=bool, default=True),
+            max_snapshot_age_days=_value(
+                block, "max_snapshot_age_days", at, expect=int, nullable=True
+            ),
+            min_snapshots_to_keep=_value(
+                block, "min_snapshots_to_keep", at, expect=int, nullable=True
+            ),
+            max_ref_age_days=_value(block, "max_ref_age_days", at, expect=int, nullable=True),
         )
 
     orphans = RemoveOrphanFilesSettings()
     if "remove_orphan_files" in raw:
         block = raw["remove_orphan_files"]
         _reject_unknown(block, {"enabled", "older_than_days"}, f"{where}.remove_orphan_files")
+        at = f"{where}.remove_orphan_files"
         orphans = RemoveOrphanFilesSettings(
-            enabled=block.get("enabled", True),
-            older_than_days=block.get("older_than_days", 3),
+            enabled=_value(block, "enabled", at, expect=bool, default=True),
+            older_than_days=_value(block, "older_than_days", at, expect=int, default=3),
         )
 
     dangling = RemoveDanglingDeletesSettings()
     if "remove_dangling_deletes" in raw:
         block = raw["remove_dangling_deletes"]
         _reject_unknown(block, {"enabled"}, f"{where}.remove_dangling_deletes")
-        dangling = RemoveDanglingDeletesSettings(enabled=block.get("enabled", True))
+        dangling = RemoveDanglingDeletesSettings(
+            enabled=_value(
+                block, "enabled", f"{where}.remove_dangling_deletes", expect=bool, default=True
+            )
+        )
 
     rewrite = RewriteManifestsSettings()
     if "rewrite_manifests" in raw:
         block = raw["rewrite_manifests"]
         _reject_unknown(block, {"enabled", "min_input_manifests"}, f"{where}.rewrite_manifests")
+        at = f"{where}.rewrite_manifests"
         rewrite = RewriteManifestsSettings(
-            enabled=block.get("enabled", True),
-            min_input_manifests=block.get("min_input_manifests", 2),
+            enabled=_value(block, "enabled", at, expect=bool, default=True),
+            min_input_manifests=_value(block, "min_input_manifests", at, expect=int, default=2),
         )
 
     metadata = MetadataSettings()
@@ -759,9 +896,14 @@ def _retention_from_dict(raw: dict[str, Any], where: str) -> Retention:
         _reject_unknown(
             block, {"previous_versions_max", "delete_after_commit"}, f"{where}.metadata"
         )
+        at = f"{where}.metadata"
         metadata = MetadataSettings(
-            previous_versions_max=block.get("previous_versions_max"),
-            delete_after_commit=block.get("delete_after_commit"),
+            previous_versions_max=_value(
+                block, "previous_versions_max", at, expect=int, nullable=True
+            ),
+            delete_after_commit=_value(
+                block, "delete_after_commit", at, expect=bool, nullable=True
+            ),
         )
 
     return Retention(

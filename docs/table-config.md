@@ -23,6 +23,15 @@ Because it is generated, it cannot describe a format this package does not
 implement; if a key below is missing from the schema, the schema is right and
 this document is stale.
 
+**Every value is type-checked as it is read, and `null` is not a spelling of
+"use the default".** Omit a key to take its default; a `null` is refused, naming
+the path — except on the settings documented below as *"leave whatever is
+there"* (the `expire_snapshots` windows, the `metadata` properties,
+`target_file_size_bytes`, `description`) and on the list-valued keys, where it
+means "empty". The distinction matters because a `null` does **not** fall back to
+the default: `{"remove_orphan_files": {"enabled": null}}` used to load and
+silently turn reclamation off.
+
 ---
 
 ## The model: warehouse → namespace → table

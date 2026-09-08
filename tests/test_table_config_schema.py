@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -333,3 +334,143 @@ def test_the_schema_never_rejects_what_the_loader_accepts(validator):
     assert not errors, (
         f"the schema rejects a config the loader accepts: {[e.message for e in errors]}"
     )
+
+
+# -- null, everywhere (ZMBNI-53) ------------------------------------------
+
+
+def field_paths(node, path="$"):
+    """Every field position in the schema, as a path a document can be built at.
+
+    `*` stands for a mapping key an author chooses, `[]` for a list element.
+    """
+    if not isinstance(node, dict):
+        return
+    for key, child in (node.get("properties") or {}).items():
+        yield f"{path}.{key}"
+        yield from field_paths(child, f"{path}.{key}")
+    if isinstance(node.get("additionalProperties"), dict):
+        yield from field_paths(node["additionalProperties"], f"{path}.*")
+    if "items" in node:
+        yield from field_paths(node["items"], f"{path}[]")
+
+
+def document_with(path: str, value):
+    """A document carrying ``value`` at ``path``, built from the path alone.
+
+    Everything above the target is materialised as it goes, so this needs no
+    per-location fixture and cannot fall behind a schema that grows a block.
+    """
+    segments = [s for s in path.removeprefix("$").split(".") if s]
+    root: dict = {}
+    cursor: Any = root
+    for i, segment in enumerate(segments):
+        last = i == len(segments) - 1
+        listed = segment.endswith("[]")
+        name = segment.removesuffix("[]")
+        key = "chosen" if name == "*" else name
+        placed = value if last else ({} if not listed else [{}])
+        if listed and not last:
+            cursor[key] = [{}]
+            cursor = cursor[key][0]
+        elif listed and last:
+            cursor[key] = [value]
+        else:
+            cursor[key] = placed
+            cursor = cursor[key]
+    # `warehouse` is required, so supply it unless it is the thing under test.
+    root.setdefault("warehouse", "w")
+    return root
+
+
+def loader_accepts(document) -> bool:
+    try:
+        TableConfig.from_dict(document).validate()
+    except TableConfigError:
+        return False
+    return True
+
+
+@pytest.mark.parametrize("path", sorted(set(field_paths(build_schema()))))
+def test_the_schema_and_the_loader_agree_about_null_everywhere(validator, path):
+    """A `null` is either accepted by both or refused by both, at every position.
+
+    This is the test that would have caught both halves of ZMBNI-53, and it exists
+    because the first version of `test_the_schema_never_rejects_what_the_loader_accepts`
+    only spelled `null` on *scalar* fields. Two opposite disagreements were hiding
+    in the gap:
+
+    * thirteen nested blocks made the loader raise a bare `TypeError` rather than
+      a `TableConfigError`, so it did not "reject" a document so much as crash on
+      it;
+    * four container fields -- `namespaces`, `partition`,
+      `partition_evolution.rules`, `ordering.sort` -- are read as
+      `raw.get(key) or <empty>`, so the loader accepted a null the shipped schema
+      refused. That is the direction that makes a schema harmful: working files
+      reported as errors.
+
+    Swept over every field position derived from the schema, so neither a new
+    block nor a new coalescing field can reintroduce either shape. A `TypeError`
+    escaping `from_dict` fails here rather than being counted as a rejection,
+    which is the whole point of the loader half.
+    """
+    document = document_with(path, None)
+
+    try:
+        loader = loader_accepts(document)
+    except TableConfigError:  # pragma: no cover - loader_accepts handles it
+        loader = False
+
+    assert validator.is_valid(document) is loader, (
+        f"null at {path}: the loader {'accepts' if loader else 'refuses'} it and "
+        f"the schema {'accepts' if not loader else 'refuses'} it. Either add the "
+        f"field to NULL_MEANS_EMPTY or make the loader refuse it."
+    )
+
+
+@pytest.mark.parametrize("path", sorted(set(field_paths(build_schema()))))
+def test_no_document_makes_the_loader_crash_instead_of_refusing(path):
+    """`TableConfigError` is the type a caller is told to catch.
+
+    The CLI maps it to exit 2 and the user guide documents it as *the* config
+    failure, so a `TypeError` out of `from_dict` is a broken promise rather than
+    an ugly message. Asserted for a null and for a string, the two shapes a
+    templated or hand-edited file produces: a string did not crash before the fix
+    either, which was worse -- `set("day")` is a perfectly good set, so
+    `"ordering": "day"` reported its own characters as unknown keys.
+    """
+    for value in (None, "day"):
+        document = document_with(path, value)
+        try:
+            TableConfig.from_dict(document).validate()
+        except TableConfigError:
+            pass
+        except Exception as exc:
+            raise AssertionError(
+                f"{value!r} at {path} raised {type(exc).__name__}: {exc}. "
+                "A malformed config must raise TableConfigError, naming the path."
+            ) from exc
+
+
+def test_the_sweep_reaches_the_fields_it_claims_to():
+    """Guard on the guard: a `field_paths` that stopped early, or a
+    `document_with` that built the wrong shape, would make both sweeps above
+    vacuously green."""
+    paths = set(field_paths(build_schema()))
+    for expected in (
+        "$.warehouse",
+        "$.defaults.ordering.zorder.precision_bits",
+        "$.namespaces.*.tables.*.retention.expire_snapshots.enabled",
+        "$.namespaces.*.tables.*.partition[].column",
+        "$.namespaces.*.tables.*.partition_evolution.rules[].from",
+    ):
+        assert expected in paths, f"the sweep never reached {expected}"
+
+    assert document_with("$.namespaces.*.tables.*.ordering", None) == {
+        "namespaces": {"chosen": {"tables": {"chosen": {"ordering": None}}}},
+        "warehouse": "w",
+    }
+    assert document_with("$.namespaces.*.tables.*.partition[].column", None) == {
+        "namespaces": {"chosen": {"tables": {"chosen": {"partition": [{"column": None}]}}}},
+        "warehouse": "w",
+    }
