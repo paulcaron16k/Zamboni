@@ -196,6 +196,20 @@ jobs:
         working-directory: dev-stack
         run: uv run bootstrap.py
 
+      # A second warehouse that remote-signs instead of vending credentials.
+      # Without it the reclaim-on-our-own-credentials tests skip, and a skip here
+      # is indistinguishable from a pass -- which is the whole reason
+      # ZAMBONI_REQUIRE_DEV_STACK exists below.
+      #
+      # The environment overrides `.env` rather than the file being edited, so
+      # the committed template stays the thing the previous step proved.
+      - name: Create the remote-signing warehouse
+        working-directory: dev-stack
+        env:
+          WAREHOUSE_NAME: zamboni-signed
+          S3_STS_ENABLED: "false"
+        run: uv run bootstrap.py
+
       # ZAMBONI_REQUIRE_DEV_STACK turns "cannot reach the stack" from a skip into
       # a failure. Without it a stack that never started produces a suite of
       # skips, and a green tick that means nothing was tested.
