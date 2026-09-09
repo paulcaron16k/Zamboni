@@ -192,6 +192,24 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **`MultiSpecReplaceFiles` now builds the delete predicate its base class
+  requires.** Overriding `_OverwriteFiles._manifests` takes on that method's
+  ordering, and ours called `_deleted_entries()` without the
+  `_build_delete_files_partition_predicate()` that precedes it upstream.
+
+  **No effect on the shipped 0.11.1 line**, where `_deleted_entries` walks every
+  manifest and filters by identity, consulting no predicate — which is why this
+  survived unnoticed. From PyIceberg 0.12 it gates each manifest on an evaluator
+  built from `partition_filters`, defaulting to a projection of `self._predicate`,
+  itself defaulting to `AlwaysFalse()`: with no predicate built, every manifest is
+  skipped and nothing is found to delete. Silently, before
+  apache/iceberg-python#3818 — the replaced files stayed live and rows duplicated
+  — and as a `ValidationException` since.
+
+  Measured: 19 test failures on PyIceberg 0.12.0 and on upstream `main`
+  (`9299bdb8`) become 1, the remainder being an unrelated packaging assertion.
+  This is what stood between us and adopting 0.12.
+
 - **`apply-properties` no longer fails a run when the config declares no metadata
   properties.** `MetadataSettings` defaults both `previous_versions_max` and
   `delete_after_commit` to `None`, and its own documentation defines that as

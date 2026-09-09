@@ -14,6 +14,7 @@ import datetime as dt
 
 import pyarrow as pa
 import pytest
+from pyiceberg.manifest import ManifestEntryStatus
 from pyiceberg.partitioning import PartitionField, PartitionSpec
 from pyiceberg.schema import Schema
 from pyiceberg.transforms import DayTransform, IdentityTransform
@@ -486,3 +487,93 @@ def test_two_fields_of_the_same_granularity_are_still_refused(session):
     reasons = [r for _, r in plan.skipped]
     assert any("ambiguous" in r for r in reasons), reasons
     assert any("created_day, updated_day" in r for r in reasons), reasons
+
+
+# -- the base class's planning step (ZMBNI-58) ----------------------------
+
+
+def test_the_delete_predicate_is_built_before_entries_are_planned(session, daily):
+    """Overriding `_manifests` takes on the ordering of the method it replaces.
+
+    `_OverwriteFiles._manifests` calls `_build_delete_files_partition_predicate()`
+    immediately before `_deleted_entries()` (snapshot.py:265 on 0.12.0). Ours did
+    not, and from 0.12 that means every manifest is skipped and **nothing is found
+    to delete**: `_deleted_entries` gates on `manifest_evaluators[spec_id]`, built
+    from `partition_filters`, which defaults to a projection of `self._predicate`
+    -- and that defaults to `AlwaysFalse()`.
+
+    **This asserts the call, not the effect, and that is deliberate.** On 0.11.1
+    the effect is unobservable: `_deleted_entries` there walks every manifest and
+    filters on `entry.data_file in self._deleted_data_files`, consulting no
+    predicate at all -- verified by reading it, and by running an evolution with
+    the defect present and finding all 8 files correctly marked DELETED. So a
+    behavioural test passes on the pinned line whether the bug is there or not,
+    and would have caught nothing. `test_evolution_condenses_days_into_a_month`
+    is that behavioural cover, and it does fail on 0.12 without the fix.
+
+    Skipped rather than faked where the base class has no such step: 0.11.1 has
+    neither the method nor `partition_filters`, so there is no contract to honour
+    and nothing to assert.
+    """
+    from zamboni.evolution import MultiSpecReplaceFiles
+
+    if not hasattr(MultiSpecReplaceFiles, "_build_delete_files_partition_predicate"):
+        pytest.skip("this PyIceberg has no delete-predicate planning step to honour")
+
+    planned: list[str] = []
+    original = MultiSpecReplaceFiles._build_delete_files_partition_predicate
+
+    def record(self):
+        planned.append("predicate")
+        return original(self)
+
+    def record_entries(self):
+        assert planned, (
+            "_deleted_entries() ran before the delete predicate was built; from "
+            "PyIceberg 0.12 it will find nothing and the replaced files stay live"
+        )
+        return MultiSpecReplaceFiles.__mro__[1]._deleted_entries(self)
+
+    config = TableConfig(warehouse="w", defaults=settings())
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(MultiSpecReplaceFiles, "_build_delete_files_partition_predicate", record)
+        mp.setattr(MultiSpecReplaceFiles, "_deleted_entries", record_entries)
+        TableCompactor.from_table_config(
+            session, "db.daily", config, base=CompactionConfig()
+        ).execute()
+
+    assert planned, "the delete predicate was never built"
+
+
+def test_every_file_we_replace_is_marked_deleted(session, daily):
+    """The property the missing call broke, stated directly.
+
+    A replace that does not mark its inputs deleted leaves them live beside their
+    replacements, which is row duplication. Passes on 0.11.1 with or without the
+    fix -- see above for why -- and fails on 0.12 without it, where the same
+    omission raises `ValidationException: Missing required files to delete`.
+    """
+    doomed = {f.data_file.file_path for f in profile_table(daily).live_files}
+    config = TableConfig(warehouse="w", defaults=settings())
+
+    result = TableCompactor.from_table_config(
+        session, "db.daily", config, base=CompactionConfig()
+    ).execute()
+    assert result.evolved, "no evolution group ran, so nothing was replaced"
+
+    tbl = session.table("db.daily")
+    snapshot = tbl.current_snapshot()
+    deleted = {
+        entry.data_file.file_path
+        for manifest in snapshot.manifests(io=tbl.io)
+        for entry in manifest.fetch_manifest_entry(io=tbl.io, discard_deleted=False)
+        if entry.status == ManifestEntryStatus.DELETED
+    }
+    live = {f.data_file.file_path for f in profile_table(tbl).live_files}
+
+    replaced = doomed - live
+    assert replaced, "the fixture evolved nothing, so this proves nothing"
+    assert replaced <= deleted, (
+        f"{len(replaced - deleted)} replaced file(s) were never marked deleted, so "
+        "they stay live beside their replacements"
+    )

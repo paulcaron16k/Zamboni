@@ -376,7 +376,88 @@ See [roadmap.md](roadmap.md) open question 1.
 
 ---
 
-## 6. If you are about to change any of this
+## 6. Which of these should stop being ours
+
+Reviewed 2026-09-09 against upstream `main` at `9299bdb8` (40 commits past the
+0.12.0 tag). Each reach was asked two questions in turn: **is it still required**,
+and **is it a gap upstream would want closed** — the second answered
+adversarially, as a maintainer who has to tell user error from a defect and who
+starts from the position that an outsider's patch is probably missing context.
+
+That posture is not theoretical politeness. On 2026-09-09 a failure was traced
+almost to an upstream bug report before the cause turned out to be ours:
+`MultiSpecReplaceFiles._manifests()` never called
+`_build_delete_files_partition_predicate()`, which the method it overrides calls
+(ZMBNI-58). A pure-PyIceberg reproduction is what caught it — the same scenario
+driven through `overwrite()` with no Zamboni subclass in the path **commits
+fine**. Nothing below should be raised upstream without that step.
+
+### 6.1 Still required, all of them
+
+| Reach | Still required because | Measured |
+|---|---|---|
+| `_dataframe_to_data_files` | No public API writes data files without committing. `add_files`/`parquet_file_to_data_file` register files that already exist; compaction has to create them, with partition keys computed from the data so `bucket` works | source, `main` |
+| `_OverwriteFiles` → `_ReplaceFiles`, `_summary` relabel | `update_snapshot_summaries` still rejects `REPLACE` (`snapshots.py:354`) | probe: `replace_summary_supported = False` |
+| `_manifests` for added-file specs | Upstream still writes every added file under `table_metadata.spec()` | source, `main` |
+| `_deleted_entries` no-ops | Metadata-only operations delete nothing; this is the extension point used as intended | — |
+| `_existing_manifests` refusal | `ManifestWriterV2.content()` still returns `DATA` | probe: `delete_manifests_writable = False` |
+| `_SnapshotProducer` | Probe only; dies with ZMBNI-38 | — |
+| `_FastAppendFiles`, `_meta` | PyIceberg cannot write position deletes at all | probe, as above |
+
+### 6.2 Upstream is already building table maintenance
+
+The single most important finding of this review, and it changes the strategy:
+**several of these workarounds have in-flight upstream work.** Checked
+2026-09-09:
+
+| Upstream | State | Overlaps |
+|---|---|---|
+| [PR #3131](https://github.com/apache/iceberg-python/pull/3131) metadata-only replace API | open since 2026-03-09, +1130/-82 | `_ReplaceFiles` and the `_summary` relabel — **the whole reason that subclass exists** |
+| [PR #3624](https://github.com/apache/iceberg-python/pull/3624) write V3 manifests and manifest lists | open since 2026-07-08, +761/-15 | `ManifestWriterV3`, hence `_meta`, `_FastAppendFiles`, `_existing_manifests`, and ZMBNI-9 |
+| [PR #3631](https://github.com/apache/iceberg-python/pull/3631) `rewrite_manifests` maintenance | open | `manifests.py`'s `_RewriteManifests` |
+| [issue #3925](https://github.com/apache/iceberg-python/issues/3925) remove dangling delete files | open | `deletes.py` |
+| [PR #3858](https://github.com/apache/iceberg-python/pull/3858) preserve explicit `delete_data_file()` | open | the delete-entry path ZMBNI-58 sits in |
+| [issue #1818](https://github.com/apache/iceberg-python/issues/1818) V3 tracking | open | ZMBNI-10, ZMBNI-12 |
+
+So the correct contribution for most of this surface is **not a new pull
+request**. It is testing an in-flight one against a real workload and saying what
+happened — which is a thing this project can do that the author usually cannot,
+and which is worth more than a duplicate.
+
+### 6.3 The determinations
+
+**Contribute as a defect — one candidate.**
+
+*Added files ignore their own partition spec* (ZMBNI-59). Inside a single method,
+`_write_added_manifest` uses `spec=self._transaction.table_metadata.spec()` for
+every added file while `_write_delete_manifest`, fifteen lines below, groups by
+`deleted_entry.data_file.spec_id`. Upstream already does the right thing on one
+side. The adversarial objection — *"adding files under a non-default spec is
+unusual; is your caller wrong?"* — does not hold: partition evolution requires
+rewriting aged data under the old spec, the Iceberg spec supports per-file specs,
+and their own delete side honours it. No upstream PR was found for it. **It needs
+a pure-PyIceberg reproduction before it is raised.**
+
+**Contribute as an enhancement — one candidate.**
+
+*A public way to write data files without committing* (ZMBNI-60). Every
+compaction tool needs it and every one currently reaches for
+`_dataframe_to_data_files`. The maintainer's objection is real — it is private
+because its signature moves — and that is precisely the argument for stabilising
+it.
+
+**Support work already in flight — do not duplicate.**
+
+*The `replace` snapshot operation* (ZMBNI-61) is PR #3131, open six months.
+*Delete-manifest writing* is PR #3624. Filing either would be a duplicate; the
+useful act is review and evidence.
+
+**Not upstream material.** `_deleted_entries` no-ops and `_SnapshotProducer` —
+the first is the extension point working, the second is ours to delete.
+
+---
+
+## 7. If you are about to change any of this
 
 1. Read the comment above the probe or override before editing it. Several
    explain a specific bug that a "cleanup" reintroduces —
