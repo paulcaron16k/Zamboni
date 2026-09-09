@@ -174,6 +174,36 @@ class MultiSpecReplaceFiles(_ReplaceFiles):
                     )
             added_manifests.append(writer.to_manifest_file())
 
+        # The base class calls this immediately before `_deleted_entries()`
+        # (`_OverwriteFiles._manifests`, snapshot.py:265 on 0.12.0). Overriding
+        # `_manifests` takes on that ordering, and this override did not have it
+        # (ZMBNI-58).
+        #
+        # On 0.11.1 the omission is invisible: `_deleted_entries` there walks
+        # every manifest and filters by `entry.data_file in self._deleted_data_files`,
+        # consulting no predicate at all. From 0.12 it gates each manifest on
+        # `manifest_evaluators[manifest.partition_spec_id]`, built from
+        # `partition_filters`, which defaults to a projection of `self._predicate`
+        # -- and that defaults to `AlwaysFalse()`. So with no predicate built,
+        # every manifest is skipped and **nothing is found to delete**.
+        #
+        # Silent before apache/iceberg-python#3818: no delete entries meant no
+        # delete manifests, the replaced files stayed live, and rows duplicated.
+        # That is the `[3,3,4,4]` -> `[3,3,3,3,4,4,4,4]` symptom
+        # `_surviving_manifests` was written for. Since #3818 it is a
+        # `ValidationException: Missing required files to delete` instead, which
+        # is the better failure and how this was finally found.
+        #
+        # Guarded because 0.11.1 has neither the method nor `partition_filters`
+        # -- both arrived with the pruning. **Not a version check and not a
+        # capability probe:** it asks whether the base class defines the step
+        # this override must not skip, which is a fact about the method being
+        # called rather than a claim about what the build can do. The existing
+        # `prunes_manifests_by_predicate` probe was considered and rejected here:
+        # it inspects `_existing_manifests`, a different method, so it would be a
+        # proxy that happens to correlate today.
+        if plan_deletes := getattr(self, "_build_delete_files_partition_predicate", None):
+            plan_deletes()
         deleted = self._deleted_entries()
         delete_manifests: list[ManifestFile] = []
         if deleted:
@@ -215,6 +245,15 @@ class MultiSpecReplaceFiles(_ReplaceFiles):
 
         Calling ``_build_delete_files_partition_predicate()`` first is not
         enough -- verified, the predicate populates and the duplication remains.
+
+        **That conclusion was drawn too widely, and it cost us (ZMBNI-58).** The
+        call is required for a different reason: without it ``_deleted_entries``
+        finds nothing to delete from 0.12 onwards. It is now made above, and with
+        it in place this method is **measurably no longer needed** -- swapping it
+        for ``super()._existing_manifests()`` passes the whole suite on 0.11.1
+        (814) and on 0.12/main. Left in place here only because removing it
+        touches CLAUDE.md and two sections of docs/pyiceberg-private-api.md, so
+        it is its own change with its own review: ZMBNI-62.
         So this does what 0.11.1 did and what is correct by construction:
         examine every manifest, since a run that evolves partitions cannot know
         in advance which spec holds the files it is replacing, and we already
