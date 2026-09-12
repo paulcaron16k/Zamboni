@@ -160,9 +160,14 @@ rejects password/token/secret keys by name.
   the bug ZMBNI-37 fixed and then briefly reintroduced. Any operation that can
   raise it must also **declare** it in `maintainers/local.py`, or `engines`
   advertises support the run then refuses.
-  `pyiceberg` is capped `<0.12` for an upstream partitioned-`upsert`
-  corruption, pinned by
-  `test_upsert_on_a_transformed_partition_replaces_rather_than_duplicates`.
+  `pyiceberg` is `>=0.12,<0.13` and resolved from the **maintenance fork** via
+  `[tool.uv.sources]` — see `MAINTENANCE-FORK.md` on that branch. The wheel
+  publishes only the range, so an install that does not redirect the source gets
+  stock PyIceberg; `capabilities.added_files_honour_spec` probes for the
+  difference and withdraws partition evolution rather than letting it corrupt
+  metadata. The old `<0.12` cap is gone: 0.12.0 shipped and
+  `test_upsert_on_a_transformed_partition_replaces_rather_than_duplicates`
+  passes on it.
 - Removed files are passed as the `DataFile` objects read from the manifests,
   never reconstructed — `_OverwriteFiles._existing_manifests` matches by
   identity.
@@ -185,9 +190,8 @@ rejects password/token/secret keys by name.
    Action is pinned to a SHA that dependabot watches. It also validates the
    `FR-` references in every doc against `plan.md`, and the hash of the frozen
    `docs/tasks_historical.md`. If you add a checkable claim, add the check.
-4. **Workarounds explain themselves in place** — `_surviving_manifests` in
-   `evolution.py`, `_guard_anywhere_in_scan_planning` in `capabilities.py`, the
-   `fs.s3.impl` mapping in the compose file. Several things here look like
+4. **Workarounds explain themselves in place** — `_guard_anywhere_in_scan_planning`
+   in `capabilities.py`, the `fs.s3.impl` mapping in the compose file. Several things here look like
    removable dead code and are not. If you remove something as dead, the commit
    message says how you established that.
 5. Every file under `src/` and `scripts/` carries `# SPDX-License-Identifier:

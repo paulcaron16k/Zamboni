@@ -38,14 +38,11 @@ import datetime as dt
 from collections import defaultdict
 from dataclasses import dataclass
 
-from pyiceberg.manifest import DataFile, ManifestEntry, ManifestEntryStatus, ManifestFile
 from pyiceberg.partitioning import PARTITION_FIELD_ID_START, PartitionSpec
 from pyiceberg.partitioning import PartitionField as IcebergPartitionField
 from pyiceberg.table import Table
-from pyiceberg.table.snapshots import Operation, Summary
 from pyiceberg.table.update import AddPartitionSpecUpdate, AssertTableUUID
 from pyiceberg.transforms import DayTransform, HourTransform, MonthTransform, YearTransform
-from pyiceberg.typedef import EMPTY_DICT
 
 from .committer import _ReplaceFiles
 from .profile import LiveFile
@@ -69,254 +66,16 @@ TRANSFORM_FOR = {
 class MultiSpecReplaceFiles(_ReplaceFiles):
     """A producer that writes one added manifest per partition spec.
 
-    Upstream writes every added file into a single manifest declared under the
-    table's default spec. That is fine while all added files share that spec and
-    wrong the moment they do not -- which is exactly what partition evolution
-    produces.
+    Now a name only: the behaviour it existed for lives in the library. The
+    fork's `feature/maintenance` writes added files under their own `spec_id`
+    in both `_write_added_manifest` and `_summary`, mirroring what the delete
+    side already did, so there is nothing left to override.
 
-    Named for its usual operation but it honours whichever the committer sets, so
-    it is equally usable for an ``overwrite`` snapshot.
+    Kept as a distinct class rather than collapsed into `_ReplaceFiles` so the
+    committer's choice of producer still reads as a decision, and so the
+    grouping behaviour has somewhere to come back to if the dependency ever
+    moves to a library without it.
     """
-
-    def _summary(self, snapshot_properties: dict[str, str] = EMPTY_DICT) -> Summary:
-        """Summarise added files under *their own* spec.
-
-        ``_SnapshotProducer._summary`` passes ``table_metadata.spec()`` -- the
-        default -- for every added file, while using each file's own spec for
-        removed ones: the same asymmetry ``_manifests`` has. Left alone, a
-        month-partitioned file gets its partition value rendered through the
-        day spec, so a table with ``write.summary.partition-limit`` set records
-        a garbage label like ``ts_day=1971-11-04`` in permanent snapshot
-        metadata.
-        """
-        from pyiceberg.table import TableProperties
-        from pyiceberg.table.snapshots import (
-            SnapshotSummaryCollector,
-            Summary,
-            update_snapshot_summaries,
-        )
-
-        table_metadata = self._transaction.table_metadata
-        specs = table_metadata.specs()
-        default_spec_id = table_metadata.default_spec_id
-
-        ssc = SnapshotSummaryCollector(
-            partition_summary_limit=int(
-                table_metadata.properties.get(
-                    TableProperties.WRITE_PARTITION_SUMMARY_LIMIT,
-                    TableProperties.WRITE_PARTITION_SUMMARY_LIMIT_DEFAULT,
-                )
-            )
-        )
-        for data_file in self._added_data_files:
-            ssc.add_file(
-                data_file=data_file,
-                partition_spec=specs[_spec_id_of(data_file, default_spec_id)],
-                schema=table_metadata.schema(),
-            )
-        for data_file in self._deleted_data_files:
-            ssc.remove_file(
-                data_file=data_file,
-                partition_spec=specs[data_file.spec_id],
-                schema=table_metadata.schema(),
-            )
-
-        previous_snapshot = (
-            table_metadata.snapshot_by_id(self._parent_snapshot_id)
-            if self._parent_snapshot_id is not None
-            else None
-        )
-        summary = update_snapshot_summaries(
-            summary=Summary(operation=Operation.OVERWRITE, **ssc.build(), **snapshot_properties),
-            previous_summary=previous_snapshot.summary if previous_snapshot else None,
-        )
-        # Built as OVERWRITE because update_snapshot_summaries rejects REPLACE,
-        # then labelled with whatever the committer actually asked for. Hardcoding
-        # REPLACE here made `snapshot_operation="overwrite"` -- the escape hatch
-        # for anyone unwilling to subclass PyIceberg internals -- silently produce
-        # a replace snapshot on any evolved table.
-        return Summary(operation=self._operation, **summary.additional_properties)
-
-    def _manifests(self) -> list[ManifestFile]:
-        from pyiceberg.manifest import write_manifest
-
-        default_spec_id = self._transaction.table_metadata.default_spec_id
-        by_spec: dict[int, list[DataFile]] = defaultdict(list)
-        for data_file in self._added_data_files:
-            by_spec[_spec_id_of(data_file, default_spec_id)].append(data_file)
-
-        if len(by_spec) <= 1:
-            spec_id = next(iter(by_spec), self._transaction.table_metadata.default_spec_id)
-            if spec_id == self._transaction.table_metadata.default_spec_id:
-                # Nothing unusual: let upstream handle it, so we inherit any
-                # behaviour it gains.
-                return super()._manifests()
-
-        added_manifests: list[ManifestFile] = []
-        for spec_id, data_files in by_spec.items():
-            with write_manifest(
-                format_version=self._transaction.table_metadata.format_version,
-                spec=self._transaction.table_metadata.specs()[spec_id],
-                schema=self._transaction.table_metadata.schema(),
-                output_file=self.new_manifest_output(),
-                snapshot_id=self._snapshot_id,
-                avro_compression=self._compression,
-            ) as writer:
-                for data_file in data_files:
-                    writer.add(
-                        ManifestEntry.from_args(
-                            status=ManifestEntryStatus.ADDED,
-                            snapshot_id=self._snapshot_id,
-                            sequence_number=None,
-                            file_sequence_number=None,
-                            data_file=data_file,
-                        )
-                    )
-            added_manifests.append(writer.to_manifest_file())
-
-        # The base class calls this immediately before `_deleted_entries()`
-        # (`_OverwriteFiles._manifests`, snapshot.py:265 on 0.12.0). Overriding
-        # `_manifests` takes on that ordering, and this override did not have it
-        # (ZMBNI-58).
-        #
-        # On 0.11.1 the omission is invisible: `_deleted_entries` there walks
-        # every manifest and filters by `entry.data_file in self._deleted_data_files`,
-        # consulting no predicate at all. From 0.12 it gates each manifest on
-        # `manifest_evaluators[manifest.partition_spec_id]`, built from
-        # `partition_filters`, which defaults to a projection of `self._predicate`
-        # -- and that defaults to `AlwaysFalse()`. So with no predicate built,
-        # every manifest is skipped and **nothing is found to delete**.
-        #
-        # Silent before apache/iceberg-python#3818: no delete entries meant no
-        # delete manifests, the replaced files stayed live, and rows duplicated.
-        # That is the `[3,3,4,4]` -> `[3,3,3,3,4,4,4,4]` symptom
-        # `_surviving_manifests` was written for. Since #3818 it is a
-        # `ValidationException: Missing required files to delete` instead, which
-        # is the better failure and how this was finally found.
-        #
-        # Guarded because 0.11.1 has neither the method nor `partition_filters`
-        # -- both arrived with the pruning. **Not a version check and not a
-        # capability probe:** it asks whether the base class defines the step
-        # this override must not skip, which is a fact about the method being
-        # called rather than a claim about what the build can do. The existing
-        # `prunes_manifests_by_predicate` probe was considered and rejected here:
-        # it inspects `_existing_manifests`, a different method, so it would be a
-        # proxy that happens to correlate today.
-        if plan_deletes := getattr(self, "_build_delete_files_partition_predicate", None):
-            plan_deletes()
-        deleted = self._deleted_entries()
-        delete_manifests: list[ManifestFile] = []
-        if deleted:
-            groups: dict[int, list[ManifestEntry]] = defaultdict(list)
-            for entry in deleted:
-                groups[entry.data_file.spec_id].append(entry)
-            for spec_id, entries in groups.items():
-                with write_manifest(
-                    format_version=self._transaction.table_metadata.format_version,
-                    spec=self._transaction.table_metadata.specs()[spec_id],
-                    schema=self._transaction.table_metadata.schema(),
-                    output_file=self.new_manifest_output(),
-                    snapshot_id=self._snapshot_id,
-                    avro_compression=self._compression,
-                ) as writer:
-                    for entry in entries:
-                        writer.add_entry(entry)
-                delete_manifests.append(writer.to_manifest_file())
-
-        return self._process_manifests(
-            added_manifests + delete_manifests + self._surviving_manifests()
-        )
-
-    def _surviving_manifests(self) -> list[ManifestFile]:
-        """Existing manifests, minus the entries this run is replacing.
-
-        Deliberately *not* ``_existing_manifests()``. From PyIceberg 0.12 that
-        prunes with a partition predicate and appends a non-matching manifest
-        **verbatim** -- entries we are deleting included. The predicate is built
-        from the removed files' partition values as ``EqualTo(Reference('ts'),
-        20455)``: the *source column* compared against a *partition ordinal*.
-        Projected onto one spec that resolves; across the two specs an evolution
-        run has by definition, it does not, so manifests survive untouched and
-        the rows we just rewrote are counted twice.
-
-        Found by ZMBNI-1101: three evolution tests turned ``[3,3,4,4]`` into
-        ``[3,3,3,3,4,4,4,4]`` on 0.12, while single-spec compaction stayed
-        correct because it delegates to ``super()._manifests()``.
-
-        Calling ``_build_delete_files_partition_predicate()`` first is not
-        enough -- verified, the predicate populates and the duplication remains.
-
-        **That conclusion was drawn too widely, and it cost us (ZMBNI-58).** The
-        call is required for a different reason: without it ``_deleted_entries``
-        finds nothing to delete from 0.12 onwards. It is now made above, and with
-        it in place this method is **measurably no longer needed** -- swapping it
-        for ``super()._existing_manifests()`` passes the whole suite on 0.11.1
-        (814) and on 0.12/main. Left in place here only because removing it
-        touches CLAUDE.md and two sections of docs/pyiceberg-private-api.md, so
-        it is its own change with its own review: ZMBNI-62.
-        So this does what 0.11.1 did and what is correct by construction:
-        examine every manifest, since a run that evolves partitions cannot know
-        in advance which spec holds the files it is replacing, and we already
-        know exactly which entries are going.
-        """
-        from pyiceberg.manifest import write_manifest
-
-        surviving: list[ManifestFile] = []
-        snapshot = self._transaction.table_metadata.snapshot_by_name(name=self._target_branch)
-        if snapshot is None:
-            return surviving
-
-        for manifest_file in snapshot.manifests(io=self._io):
-            keep: list[ManifestEntry] = []
-            dropped = 0
-            for entry in manifest_file.fetch_manifest_entry(io=self._io, discard_deleted=True):
-                if entry.data_file in self._deleted_data_files:
-                    dropped += 1
-                else:
-                    keep.append(entry)
-
-            if dropped == 0:
-                surviving.append(manifest_file)
-                continue
-            if not keep:
-                # Every entry replaced; the manifest itself goes.
-                continue
-
-            with write_manifest(
-                format_version=self._transaction.table_metadata.format_version,
-                spec=self._transaction.table_metadata.specs()[manifest_file.partition_spec_id],
-                schema=self._transaction.table_metadata.schema(),
-                output_file=self.new_manifest_output(),
-                snapshot_id=self._snapshot_id,
-                avro_compression=self._compression,
-            ) as writer:
-                for entry in keep:
-                    writer.add_entry(
-                        ManifestEntry.from_args(
-                            status=ManifestEntryStatus.EXISTING,
-                            snapshot_id=entry.snapshot_id,
-                            sequence_number=entry.sequence_number,
-                            file_sequence_number=entry.file_sequence_number,
-                            data_file=entry.data_file,
-                        )
-                    )
-            surviving.append(writer.to_manifest_file())
-
-        return surviving
-
-
-def _spec_id_of(data_file: DataFile, default: int) -> int:
-    """A data file's partition spec, tolerating one that has never had it set.
-
-    ``spec_id`` is not part of the data-file struct -- PyIceberg populates it
-    from the manifest when reading, and ``DataFile.from_args`` leaves the
-    backing attribute unset -- so a freshly written file raises rather than
-    returning a default.
-    """
-    try:
-        return data_file.spec_id
-    except AttributeError:
-        return default
 
 
 @dataclass(frozen=True)

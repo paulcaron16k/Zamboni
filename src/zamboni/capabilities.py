@@ -51,6 +51,13 @@ class PyIcebergCapabilities:
     #: holding removed files are kept verbatim and their rows count twice.
     derives_delete_predicate: bool
 
+    #: Added data files are written under the partition spec they were written
+    #: for, rather than under the table default. Partition evolution is the only
+    #: thing that needs this -- it is definitionally the case where added files
+    #: span two specs -- so a false answer withdraws that one layout feature and
+    #: leaves the six operations alone.
+    added_files_honour_spec: bool
+
     #: Scan planning can materialise equality deletes.
     equality_deletes_readable: bool
 
@@ -101,6 +108,7 @@ class PyIcebergCapabilities:
             ("manifest predicate pruning", self.prunes_manifests_by_predicate),
             ("derives delete predicate", self.derives_delete_predicate),
             ("  established by", self.pruning_evidence),
+            ("added files honour their spec", self.added_files_honour_spec),
             ("equality deletes readable", self.equality_deletes_readable),
             ("delete manifests writable", self.delete_manifests_writable),
         ]
@@ -133,6 +141,9 @@ def detect() -> PyIcebergCapabilities:
         # Unknown -> assume the "unsupported" guard is present, i.e. NOT
         # readable. Failing the other way would drop the equality-delete
         # blocker and let compaction resurrect deleted rows.
+        # Unknown -> assume absent. Declaring a layout feature we could not
+        # demonstrate is how a configured evolution gets silently ignored.
+        added_files_honour_spec=_added_files_honour_their_spec() is True,
         equality_deletes_readable=not _guard_anywhere_in_scan_planning(),
         # Unknown -> assume NOT writable, which limits dangling-delete removal
         # to whole manifests. Guessing the other way would let us rewrite a
@@ -250,6 +261,121 @@ def _pruning_behaves() -> bool | None:
             return sorted(table.scan().to_arrow()["k"].to_pylist()) == [1, 2]
     except Exception:  # pragma: no cover - any failure means "could not establish"
         logger.debug("manifest-pruning behavioural probe did not complete", exc_info=True)
+        return None
+
+
+def _added_files_honour_their_spec() -> bool | None:
+    """Does the build write an added file under the spec it was written for?
+
+    Behavioural, because the question is what the library *does* with a file it
+    is handed, and the shape of the failure is not something a signature shows.
+
+    The smallest thing that would go wrong: a day-partitioned table, evolved to
+    add a second field, then an overwrite that adds a file still belonging to
+    the old spec. `_write_added_manifest` declares one manifest under
+    `table_metadata.spec()` -- the table default -- for every added file, while
+    `_write_delete_manifest` groups by each file's own `spec_id`. A partition
+    Record has the arity of the spec that produced it, so a one-field record
+    written into a two-field manifest makes the Avro writer index past the end:
+
+        IndexError: list index out of range   (pyiceberg/typedef.py)
+
+    So the probe does not compare labels; it just tries, and a build that cannot
+    do this fails loudly enough to catch. That also means it answers correctly
+    for a build that fixes it some other way than ours.
+
+    Partition evolution is the only thing that needs this -- it is definitionally
+    the case where added files span two specs -- so a False answer withdraws that
+    one layout feature and leaves the six operations alone.
+
+    Returns None when the probe could not run: no `sql` extra, no writable temp
+    directory. Treated by the caller as "assume absent", because declaring a
+    feature we cannot demonstrate is how a config gets silently ignored.
+    """
+    try:
+        import datetime as dt
+        import tempfile
+        import uuid
+
+        import pyarrow as pa
+        from pyiceberg.catalog.sql import SqlCatalog
+        from pyiceberg.io.pyarrow import _dataframe_to_data_files
+        from pyiceberg.partitioning import PartitionField, PartitionSpec
+        from pyiceberg.schema import Schema
+        from pyiceberg.transforms import DayTransform
+        from pyiceberg.types import NestedField, StringType, TimestampType
+    except ImportError:  # pragma: no cover - depends on the install
+        return None
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="zamboni-probe-") as root:
+            catalog = SqlCatalog(
+                "zamboni_probe", uri=f"sqlite:///{root}/c.db", warehouse=f"file://{root}"
+            )
+            catalog.create_namespace("probe")
+            table = catalog.create_table(
+                "probe.evolved",
+                schema=Schema(
+                    NestedField(1, "ts", TimestampType(), required=False),
+                    NestedField(2, "region", StringType(), required=False),
+                ),
+                partition_spec=PartitionSpec(
+                    PartitionField(source_id=1, field_id=1000, transform=DayTransform(), name="d")
+                ),
+                properties={"format-version": "2"},
+            )
+            rows = pa.table(
+                {
+                    "ts": pa.array([dt.datetime(2026, 1, 3, 1)], type=pa.timestamp("us")),
+                    "region": pa.array(["eu"]),
+                }
+            )
+            table.append(rows)
+            spec0_metadata = table.metadata
+
+            table.update_spec().add_identity("region").commit()
+            table = catalog.load_table("probe.evolved")
+
+            # Written for the *old* spec while the table default is the new one,
+            # which is exactly what evolving a partition produces.
+            replacement = list(
+                _dataframe_to_data_files(
+                    table_metadata=spec0_metadata, df=rows, io=table.io, write_uuid=uuid.uuid4()
+                )
+            )
+            for data_file in replacement:
+                data_file.spec_id = 0
+
+            doomed = [task.file for task in table.scan().plan_files()]
+            try:
+                with table.transaction() as tx, tx.update_snapshot().overwrite() as overwrite:
+                    for data_file in doomed:
+                        overwrite.delete_data_file(data_file)
+                    for data_file in replacement:
+                        overwrite.append_data_file(data_file)
+            except Exception:
+                # The commit itself failing *is* the answer, not a probe that
+                # could not run: a build that writes the file into a manifest
+                # for the wrong spec raises from the Avro writer. Distinguished
+                # from the setup failures below, which return None, because
+                # "cannot do this" and "could not find out" lead an operator to
+                # different places.
+                logger.debug("added-file spec probe: the commit was refused", exc_info=True)
+                return False
+
+            # It committed. Confirm the manifest agrees with its entries rather
+            # than trusting that no exception means success.
+            committed = catalog.load_table("probe.evolved")
+            snapshot = committed.current_snapshot()
+            if snapshot is None:
+                return None
+            for manifest in snapshot.manifests(io=committed.io):
+                entries = manifest.fetch_manifest_entry(io=committed.io, discard_deleted=False)
+                if any(e.data_file.spec_id != manifest.partition_spec_id for e in entries):
+                    return False
+            return True
+    except Exception:  # pragma: no cover - any failure means "could not establish"
+        logger.debug("added-file spec behavioural probe did not complete", exc_info=True)
         return None
 
 

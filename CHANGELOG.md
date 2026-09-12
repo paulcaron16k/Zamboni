@@ -190,6 +190,46 @@ Two categories beyond the usual set, because this tool deletes files:
   admits, `prunes_manifests_by_predicate` is false and the guard never fires. The
   exposure would have arrived with the cap being lifted.
 
+### Changed
+
+- **PyIceberg is now `>=0.12,<0.13`, resolved from a maintenance fork.** Partition
+  evolution needs a library that writes an added data file under *its own*
+  partition spec rather than the table default. Stock PyIceberg does not: a
+  partition `Record` has the arity of the spec that produced it, so an evolved
+  file written into a manifest declared under another spec raises
+  `IndexError: list index out of range` from inside the Avro writer, four frames
+  down and naming nothing.
+
+  That behaviour moved **out of Zamboni and into the library** — 241 lines of
+  private-API override deleted from `evolution.py` — and lives on
+  `feature/maintenance` in our PyIceberg fork, pinned by commit.
+
+  **What this means for an install.** The wheel publishes only the range;
+  `[tool.uv.sources]` is a uv workspace directive and does not reach wheel
+  metadata, so `pip install iceberg-zamboni` gets stock PyIceberg. Rather than
+  fail obscurely there, `capabilities.detect()` gained a behavioural probe —
+  `added_files_honour_spec` — and a build without the behaviour has **partition
+  evolution withdrawn as a layout feature**, with the reason stated. The six
+  operations are unaffected and still run.
+
+  A consumer that wants evolution redirects the source itself:
+
+  ```toml
+  dependencies = ["iceberg-zamboni", "pyiceberg"]
+
+  [tool.uv.sources]
+  pyiceberg = { git = "https://github.com/paulcaron16k/iceberg-python.git", rev = "<sha>" }
+  ```
+
+  `pyiceberg` has to be a *direct* dependency there — uv applies `tool.uv.sources`
+  to the declaring project's own dependencies, and a redirect aimed only at a
+  transitive one is silently ignored.
+
+- **`pyiceberg-core` is a declared dependency.** 0.12 moved it out of the
+  `[pyarrow]` extra while `transforms.pyarrow_transform` still needs it for six
+  transforms — bucket, day, month, year, hour, truncate — so relying on that extra
+  installs a build that cannot write a partitioned table at all.
+
 ### Fixed
 
 - **`MultiSpecReplaceFiles` now builds the delete predicate its base class

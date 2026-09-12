@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from dataclasses import replace
 
 import pytest
 
@@ -33,6 +34,7 @@ def _caps(**overrides) -> PyIcebergCapabilities:
         "replace_summary_supported": False,
         "streaming_write_supported": False,
         "prunes_manifests_by_predicate": False,
+        "added_files_honour_spec": False,
         "derives_delete_predicate": False,
         "equality_deletes_readable": False,
         "delete_manifests_writable": False,
@@ -251,4 +253,59 @@ def test_no_symbol_can_override_what_was_observed(monkeypatch):
     assert with_symbol is without_symbol is False, (
         "the presence of a private symbol changed the safety verdict; that "
         "symbol exists on corrupting builds too"
+    )
+
+
+# -- added files and their partition spec (ZMBNI-59) ----------------------
+
+
+def test_evolution_is_withdrawn_when_added_files_cannot_carry_their_spec(monkeypatch):
+    """The one layout feature that needs it, and only that one.
+
+    Partition evolution is definitionally the case where a run adds files under
+    more than one spec. A library that writes every added file under the table
+    default turns that into an `IndexError` from the Avro writer -- a partition
+    Record has the arity of the spec that produced it -- four frames down and
+    naming nothing. Withdrawing the feature is what turns that into a sentence.
+
+    The six operations are deliberately untouched: none of the others adds a
+    file under a non-default spec, so none of them is affected.
+    """
+    from zamboni.maintainers import LayoutFeature, Operation, Support
+    from zamboni.maintainers import local as local_module
+    from zamboni.maintainers.local import LocalMaintainer
+
+    for honoured in (True, False):
+        monkeypatch.setattr(
+            local_module, "detect", lambda h=honoured: replace(detect(), added_files_honour_spec=h)
+        )
+        caps = LocalMaintainer.capabilities()
+
+        assert (LayoutFeature.PARTITION_EVOLUTION in caps.layout) is honoured, (
+            f"added_files_honour_spec={honoured} should "
+            f"{'declare' if honoured else 'withdraw'} partition evolution"
+        )
+        # Every other layout feature survives either way.
+        assert {LayoutFeature.ZORDER, LayoutFeature.SORT, LayoutFeature.TARGET_FILE_SIZE} <= (
+            caps.layout
+        )
+        # And no operation becomes unsupported over it.
+        assert all(caps.of(op).support is not Support.UNSUPPORTED for op in Operation), (
+            "withdrawing a layout feature must not withdraw an operation"
+        )
+
+
+def test_the_probe_answers_no_rather_than_dont_know_when_the_commit_is_refused():
+    """`False` and `None` are different answers and lead somewhere different.
+
+    A build that cannot write an added file under its own spec *raises* when the
+    commit is attempted, and that refusal is the answer. `None` is reserved for
+    a probe that could not run at all -- no `sql` extra, no writable temp
+    directory -- which an operator resolves differently.
+    """
+    from zamboni import capabilities
+
+    assert capabilities._added_files_honour_their_spec() is True, (
+        "the installed build should honour an added file's spec; if this fails, "
+        "check that pyiceberg resolves to the maintenance fork"
     )

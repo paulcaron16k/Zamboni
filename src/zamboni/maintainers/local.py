@@ -70,7 +70,17 @@ class LocalMaintainer(Maintainer):
             # The only engine with partition evolution, and one of two that can
             # Z-order. Worth stating plainly: "no cluster" is not the same as
             # "less capable" on layout.
-            layout=frozenset(LayoutFeature),
+            # Every layout feature except, on a build that cannot honour an
+            # added file's own partition spec, evolution itself. Withdrawn
+            # rather than left to fail at commit time: a run that evolves on
+            # such a build writes the new file into a manifest declared under
+            # the old spec and the Avro writer raises from four frames down,
+            # naming nothing. Probe-driven, so a build that gains the behaviour
+            # -- ours does, see docs/pyiceberg-private-api.md -- gets the
+            # feature back without a version comparison anywhere.
+            layout=frozenset(LayoutFeature)
+            if probes.added_files_honour_spec
+            else frozenset(LayoutFeature) - {LayoutFeature.PARTITION_EVOLUTION},
             operations={
                 Operation.COMPACT: cls._compact_support(probes),
                 Operation.EXPIRE: OperationSupport(

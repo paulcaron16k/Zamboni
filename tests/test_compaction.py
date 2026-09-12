@@ -88,47 +88,44 @@ def test_partitioned_compaction_is_partition_scoped(session, partitioned):
 
 
 def test_the_rust_core_arrives_with_the_base_install():
-    """No extra declares `pyiceberg-core`, and none should.
+    """`pyiceberg-core` is installed by a plain `pip install iceberg-zamboni`.
 
-    There used to be a `bucket` extra for it, which did nothing: `pyiceberg[pyarrow]`
-    is a hard dependency here and already requires `pyiceberg-core`. An extra that
-    installs what you already have reads as a caution to anyone writing bucket-
-    partitioned tables, and there is nothing to caution them about (ZMBNI-1815).
+    It is not optional here, whatever upstream calls it. `pyarrow_transform` --
+    called for every partition field when writing a partitioned table --
+    delegates to the Rust core for **six** transforms, so without it a
+    day-partitioned write raises `NotInstalledError`. Not just bucket ones: the
+    old `bucket` extra understated the claim as well as duplicating it
+    (ZMBNI-1815).
 
-    The claim is also broader than that name was. `pyarrow_transform` -- called for
-    every partition field when writing a partitioned table -- delegates to the Rust
-    core for **six** transforms, so were this dependency ever genuinely optional it
-    would take day-partitioned tables with it, not just bucket ones. That is what
-    this test guards: it fails if upstream moves the dependency out of `[pyarrow]`,
-    rather than leaving a user to discover it by writing a table.
+    **This assertion changed shape when 0.12 shipped.** It used to require that
+    `pyiceberg[pyarrow]` supply the core, as a tripwire for upstream moving it.
+    Upstream moved it -- 0.12 gave `pyiceberg-core` an extra of its own -- and the
+    tripwire fired, which is what it was for. The answer was to declare it
+    directly rather than to keep asserting an arrangement upstream had left
+    behind, so what is pinned now is the property that matters: it is installed,
+    and this project is what guarantees that.
     """
     import importlib.util
     import tomllib
-    from importlib.metadata import requires
     from pathlib import Path
 
     from packaging.requirements import Requirement
 
     assert importlib.util.find_spec("pyiceberg_core") is not None, (
         "pyiceberg-core is not installed, so bucket/day/month/year/hour/truncate "
-        "partitioned writes cannot work -- check pyiceberg's [pyarrow] extra"
+        "partitioned writes cannot work"
     )
 
-    supplied_by_pyarrow_extra = any(
-        Requirement(r).name.lower().replace("_", "-") == "pyiceberg-core"
-        and 'extra == "pyarrow"' in r
-        for r in (requires("pyiceberg") or [])
+    declared = tomllib.loads(
+        (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text()
+    )["project"]["dependencies"]
+    assert any(
+        Requirement(r).name.lower().replace("_", "-") == "pyiceberg-core" for r in declared
+    ), (
+        "pyiceberg-core must be a declared dependency: since 0.12 the `[pyarrow]` "
+        "extra no longer supplies it, so relying on that extra installs a build "
+        "that cannot write a partitioned table"
     )
-    assert supplied_by_pyarrow_extra, (
-        "pyiceberg[pyarrow] no longer pulls in pyiceberg-core; it now has to be "
-        "declared here as a dependency, not as an extra"
-    )
-
-    project = tomllib.loads((Path(__file__).parent.parent / "pyproject.toml").read_text())
-    for name, deps in project["project"]["optional-dependencies"].items():
-        assert not any("pyiceberg-core" in dep for dep in deps), (
-            f"extra {name!r} declares pyiceberg-core, which the base install already has"
-        )
 
 
 def test_bucket_partitioned_table_compacts(session, bucketed):
