@@ -187,10 +187,8 @@ and its header maps every id that moved to the issue it became.
 
 Several things in this codebase look like removable dead code and are not. The
 convention is that a workaround explains itself in place, with an issue link
-where one exists. Three examples worth reading before changing anything nearby:
+where one exists. Two examples worth reading before changing anything nearby:
 
-- `_surviving_manifests` in `evolution.py`, which replaces upstream's pruning
-  `_existing_manifests` and exists because that pruning double-counts rows;
 - `_guard_anywhere_in_scan_planning` in `capabilities.py`, which searches a
   whole module rather than one function, because the first version inspected one
   function and reported a guard as absent after upstream extracted the planner;

@@ -334,3 +334,40 @@ def test_dependabot_watches_the_actions_it_pins():
         "silently rot; .github/dependabot.yml is what closes that loop"
     )
     assert "github-actions" in config.read_text()
+
+
+#: The two places that name the non-obvious workarounds, as (file, section
+#: heading). CLAUDE.md's convention 4 and CONTRIBUTING.md's longer treatment are
+#: the same list at two lengths, and they went out of step: ZMBNI-59 deleted
+#: `_surviving_manifests` and updated CLAUDE.md, leaving CONTRIBUTING.md
+#: describing why it "exists" for a day.
+WORKAROUND_LISTS = (
+    ("CLAUDE.md", "**Workarounds explain themselves in place**"),
+    ("CONTRIBUTING.md", "## Non-obvious workarounds carry their reason"),
+)
+
+
+def test_every_named_workaround_still_exists():
+    """A doc naming a workaround that was deleted is the same defect inverted.
+
+    The list exists to stop someone removing live code as dead. Once a name on
+    it is gone, the entry sends the next reader looking for something that is
+    not there -- and, worse, implies the surrounding code still needs guarding.
+    Identifiers are matched against `src/` rather than the whole tree so that a
+    mention in CHANGELOG.md or a historical doc does not satisfy the check.
+    """
+    source = "\n".join(p.read_text() for p in (ROOT / "src").rglob("*.py"))
+    checked = 0
+    for filename, heading in WORKAROUND_LISTS:
+        text = (ROOT / filename).read_text()
+        assert heading in text, f"{filename} lost the workaround list at {heading!r}"
+        section = text.split(heading, 1)[1]
+        # Bulleted entries lead with the identifier; stop at the next heading.
+        section = re.split(r"\n#{2,3} ", section, maxsplit=1)[0]
+        for name in re.findall(r"`(_[a-z][a-z0-9_]+)`", section):
+            assert f"def {name}" in source or name in source, (
+                f"{filename} names the workaround `{name}`, which no longer "
+                f"appears anywhere under src/ -- delete the entry or restore it"
+            )
+            checked += 1
+    assert checked >= 2, f"matched only {checked} workaround names; the regex stopped working"
