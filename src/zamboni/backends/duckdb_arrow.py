@@ -506,9 +506,18 @@ def _resolve_mode(group: FileGroup, ctx: RewriteContext) -> MemoryMode:
 def _bin_pack(reader: pa.RecordBatchReader, target_bytes: int) -> Iterator[pa.Table]:
     """Accumulate record batches into tables of roughly ``target_bytes``.
 
-    PyIceberg 0.11.1 has no ``bin_pack_record_batches``, so this stands in for
-    it. The weight is uncompressed in-memory Arrow bytes, which overshoots the
-    compressed Parquet size -- the same approximation upstream makes.
+    No longer a stand-in for a missing upstream function. It was written when
+    PyIceberg 0.11.1 had no ``bin_pack_record_batches``; the floor is now 0.12,
+    which has one -- but only for *unpartitioned* tables, because
+    ``_dataframe_to_data_files`` refuses a ``RecordBatchReader`` on a
+    partitioned spec. So this is the only path partitioned tables have, which is
+    a different justification for the same code and a reason it cannot be
+    deleted when the probe goes True. Pinned by
+    ``test_streaming_is_only_used_where_pyiceberg_supports_it``.
+
+    The weight is uncompressed in-memory Arrow bytes, which overshoots the
+    compressed Parquet size -- the same approximation upstream makes, so
+    ``target_file_size_bytes`` means the same thing on both paths.
     """
     schema = reader.schema
     batch_buffer: list[pa.RecordBatch] = []

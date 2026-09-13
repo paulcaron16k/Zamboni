@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from zamboni import CompactionConfig, MemoryMode, TableCompactor
@@ -553,3 +555,100 @@ def test_read_ahead_preserves_row_order_across_files(session, partitioned):
 def test_the_read_ahead_settings_are_validated(field, value):
     with pytest.raises(ValueError, match=field):
         CompactionConfig(**{field: value})
+
+
+# -- the streaming write path (#16) ----------------------------------------
+#
+# Adopted from `feature/pyiceberg-0.12`, where these were written and could only
+# skip: the probe was False on every build the `<0.12` floor admitted. The floor
+# is now 0.12 and they run. Preserved at `archive/feature-pyiceberg-0.12` when
+# that branch was deleted.
+#
+# Two tests already reach the streaming branch incidentally --
+# `test_unpartitioned_compaction_preserves_data[CHUNKED]` and
+# `test_compaction_preserves_live_rows_not_physical_rows[CHUNKED]` -- but only on
+# whichever answer the installed build gives. These pin the *decision* instead.
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+def test_unpartitioned_chunked_output_is_correct_either_way(
+    session, unpartitioned, monkeypatch, streaming
+):
+    """Both branches of the chunked write, forced, on whatever is installed.
+
+    An unpartitioned CHUNKED rewrite either hands the reader to PyIceberg's
+    streaming writer or bin-packs locally, decided by
+    `capabilities.streaming_write_supported`. The two must agree: a compaction
+    that returns different rows depending on which library happens to be
+    installed is a correctness bug that no single-path test can see.
+    """
+    from zamboni.backends import duckdb_arrow
+    from zamboni.capabilities import detect
+
+    if streaming and not detect().streaming_write_supported:
+        # Forcing the probe True on a build with no streaming writer is not a
+        # configuration that can exist -- PyIceberg raises AttributeError inside
+        # its own writer. Skipping proves the probe is load-bearing rather than
+        # decorative.
+        pytest.skip("installed PyIceberg has no streaming write path")
+
+    probes = replace(detect(), streaming_write_supported=streaming)
+    monkeypatch.setattr(duckdb_arrow, "detect", lambda: probes)
+
+    before = rows(unpartitioned)
+    TableCompactor(
+        session,
+        "db.unpartitioned",
+        CompactionConfig(
+            memory_mode=MemoryMode.CHUNKED, target_file_size_bytes=200, rewrite_all=True
+        ),
+    ).execute()
+
+    tbl = session.table("db.unpartitioned")
+    assert rows(tbl) == before, "the streaming path must not change the data"
+    assert profile_table(tbl).live_files, "nothing was written"
+
+
+def test_streaming_is_only_used_where_pyiceberg_supports_it(session, partitioned, monkeypatch):
+    """A partitioned table must still bin-pack locally, even with the probe True.
+
+    `_dataframe_to_data_files` raises `NotImplementedError` for a
+    `RecordBatchReader` on a partitioned spec, so `_bin_pack` is not a stand-in
+    for an unreleased feature -- it is the only path partitioned tables have.
+    Pinned because the temptation on seeing the probe go True is to delete it.
+
+    Deliberately not cited to apache/iceberg-python#2152: that issue is *closed*,
+    because it delivered the unpartitioned half, and citing it here reads as
+    "already fixed" to anyone who checks. The refusal itself is the citation --
+    see the comment at the branch in `backends/duckdb_arrow.py`.
+    """
+    from zamboni.backends import duckdb_arrow
+    from zamboni.capabilities import detect
+
+    if not detect().streaming_write_supported:
+        pytest.skip("installed PyIceberg has no streaming write path")
+
+    used_local_binpack = False
+    original = duckdb_arrow._bin_pack
+
+    def spy(reader, target_bytes):
+        nonlocal used_local_binpack
+        used_local_binpack = True
+        yield from original(reader, target_bytes)
+
+    monkeypatch.setattr(
+        duckdb_arrow, "detect", lambda: replace(detect(), streaming_write_supported=True)
+    )
+    monkeypatch.setattr(duckdb_arrow, "_bin_pack", spy)
+
+    before = rows(partitioned)
+    TableCompactor(
+        session,
+        "db.partitioned",
+        CompactionConfig(
+            memory_mode=MemoryMode.CHUNKED, target_file_size_bytes=200, rewrite_all=True
+        ),
+    ).execute()
+
+    assert used_local_binpack, "a partitioned table must still bin-pack locally"
+    assert rows(session.table("db.partitioned")) == before
