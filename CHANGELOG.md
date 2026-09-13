@@ -232,6 +232,25 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **The dev stack's object storage is Silo (`pgsty/silo`), a maintained fork of
+  MinIO.** Between 2026-09-09 and 2026-09-12 the `minio/minio` and `minio/mc`
+  Docker Hub repositories stopped resolving — an anonymous `docker pull` answers
+  `repository does not exist`, and the Hub v2 API 404s — which took out the
+  `dev-stack` and `spark` CI jobs on every branch and any developer's
+  `docker compose up`. MinIO has ended community distribution.
+
+  The quay.io mirror was tried first and **rejected**: its last community
+  release is `RELEASE.2025-09-07`, a year old, and everything pushed there since
+  is a customer hotfix build on a 2024/2025 base. It resolves today but can
+  never carry a security fix. Silo is the same lineage under maintenance — S3
+  API, `MINIO_*` variables, `RELEASE.<timestamp>Z` tags and on-disk format
+  unchanged, only its own delivery surfaces renamed.
+
+  **Nothing in the stack's interface moves**: the service is still `minio`, the
+  endpoint still `http://minio:9000`, and the credentials still `MINIO_ROOT_*`.
+  `MINIO_VERSION` in `dev-stack/.env.sample` becomes `SILO_VERSION` — the only
+  rename a developer with an existing `.env` has to make. (ZMBNI-67)
+
 - **`MultiSpecReplaceFiles` now builds the delete predicate its base class
   requires.** Overriding `_OverwriteFiles._manifests` takes on that method's
   ordering, and ours called `_deleted_entries()` without the
