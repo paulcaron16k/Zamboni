@@ -191,8 +191,9 @@ Read this before depending on it.
   rather than a claim about it.
 - **Verified against real infrastructure.** Every operation has been run against a
   live Lakekeeper + MinIO, and against real Trino 483 and Spark 4.0.4 servers.
-- **PyIceberg 0.11.x is fully supported**, and `pyproject.toml` caps at `<0.12` while the
-  0.12 release candidates are being tested -- see [below](#why-pyiceberg-is-capped-at-012).
+- **PyIceberg `>=0.12,<0.13`.** 0.11.x is no longer supported: the floor moved when 0.12
+  shipped the fix for the defect the old cap was holding against -- see
+  [below](#why-pyiceberg-is-pinned-to-012x).
 - **On PyPI as `iceberg-zamboni`**, imported as `zamboni`. See
   [Install](#install); the names differ because `zamboni` on PyPI is a dormant
   registration by an unrelated project.
@@ -227,9 +228,10 @@ Nothing in the MinIO + Lakekeeper stack compacts tables today:
   or removes orphan files. `tests/test_dev_stack.py` checks the queue set against an
   allow-list, so a genuinely new queue fails the build rather than slipping past a
   keyword match.
-- **PyIceberg** (0.11.1, the current release) exposes `table.maintenance.expire_snapshots()`
-  and nothing else.
-  That call is metadata-only — it emits a `RemoveSnapshotsUpdate` and never deletes a file.
+- **PyIceberg** (0.12.0, the current release) exposes `table.maintenance.expire_snapshots()`
+  and nothing else. 0.12 made it a builder — `older_than`, `by_id`, `by_ids`, `commit` —
+  which is more than 0.11.x offered, but it is still metadata-only: it emits a
+  `RemoveSnapshotsUpdate` and never deletes a file.
 - **DuckDB's released Iceberg extension** has no compaction. `iceberg_rewrite_data_files`
   exists on `duckdb-iceberg` main but is not in the shipped extension; loading `iceberg`
   in DuckDB 1.5.4 exposes 16 `iceberg_*` functions and that is not one of them.
@@ -777,10 +779,10 @@ activated venv and never picks up global packages:
 
 ```console
 $ /path/to/Zamboni/bin/zamboni doctor
-  pyiceberg                    0.11.1
+  pyiceberg                    0.12.0
   operation injectable         True
   REPLACE summary native       False
-  streaming writes             False
+  streaming writes             True
   ...
 usable: True
 ```
@@ -937,42 +939,44 @@ Iceberg has no clustering concept distinct from sort order, and neither PyIceber
 duckdb-iceberg has z-order or Hilbert curves anywhere. Express a z-order as a
 bit-interleaving expression in `sort_expression`.
 
-## Why PyIceberg is capped at `<0.12`
+## Why PyIceberg is pinned to `0.12.x`
 
-`pyproject.toml` pins `pyiceberg[pyarrow]>=0.11.1,<0.12`. **0.11.x is fully supported**;
-the cap is a held position while the 0.12 release candidates are tested, not a judgement
-about 0.12.
+`pyproject.toml` declares `pyiceberg[pyarrow]>=0.12,<0.13`, and `pyiceberg-core>=0.10.1,<0.11`
+alongside it — 0.12 moved the Rust core out of the `[pyarrow]` extra while
+`transforms.pyarrow_transform` still needs it for six transforms, so relying on that extra
+now installs a build that cannot write a partitioned table.
 
-Zamboni is tested against each 0.12 release candidate as it appears. Issues found are
-reported upstream and fixed; that is ordinary, and it is how a cap gets lifted rather than
-a reason to keep one. What was found, and where it stands:
+**0.11.x is no longer supported.** The floor moved because the reason for the old `<0.12`
+cap went away. That cap was held against
+[iceberg-python#3758](https://github.com/apache/iceberg-python/issues/3758) — `upsert` on a
+table partitioned by a type-changing transform (`day`, `month`, `year`, `hour`, `bucket`)
+kept the replaced row beside its replacement and duplicated an untouched one, silently, or
+raised for `bucket`. [#3780](https://github.com/apache/iceberg-python/pull/3780) fixed it,
+merged 2026-08-19, and the fix is in released 0.12.
 
-| Issue | What it is | Fix |
-|---|---|---|
-| [iceberg-python#3758](https://github.com/apache/iceberg-python/issues/3758) | `upsert` on a table partitioned by a **type-changing** transform (`day`, `month`, `year`, `hour`, `bucket`) keeps the replaced row beside its replacement and duplicates an untouched one, silently — or raises, for `bucket`. Overwrite's new manifest pruning keeps a non-matching manifest verbatim, including the entries being deleted | [#3780](https://github.com/apache/iceberg-python/pull/3780), **merged 2026-08-19**; the issue closed with it. **`0.12.0rc2` carries the fix** — measured, all six transforms correct |
+That is still not taken on trust: `test_upsert_on_a_transformed_partition_replaces_rather_than_duplicates`
+is our own reproduction and it passes on the installed build. It fails on a build that
+regressed, which is the only form of the claim worth keeping — the prose document that used
+to sit here was replaced by the test (ZMBNI-19).
 
-The issue and its PR are the source of detail; there is no second copy here. Our own
-reproduction is a test --
-`test_upsert_on_a_transformed_partition_replaces_rather_than_duplicates` -- which
-fails on a build that regressed and passes on one that does not. That is the
-question a document would have been answering in prose, so the document is gone
-(ZMBNI-19).
+**The `<0.13` ceiling is policy, not staleness.** An open-ended bound means the day a new
+minor publishes, any `uv lock --upgrade` pulls it in with nobody touching this code. The
+ceiling is deliberate and it has a stated lift condition: run the suite against the new
+minor and raise the bound. `scripts/version_watch.py` reads every cap out of
+`pyproject.toml` and keeps an issue current when PyPI publishes above one, so a ceiling
+cannot quietly become a permanent habit.
 
-Two things worth being clear about:
+**One install does not resolve from PyPI.** Partition evolution needs a library that writes
+an added data file under *its own* partition spec rather than the table default, which
+stock PyIceberg does not do. That behaviour lives in our maintenance fork, and
+`[tool.uv.sources]` redirects `pyiceberg` there for anyone building from this repository.
+It is a uv workspace directive and **does not reach wheel metadata**: `pip install
+iceberg-zamboni` gets stock PyIceberg from PyPI, within the range above. On such a build
+the `added_files_honour_spec` probe answers False and partition evolution is withdrawn as a
+layout feature, with the reason stated; the six operations are unaffected. See
+[docs/pyiceberg-private-api.md](docs/pyiceberg-private-api.md).
 
-- **This is an ingest hazard, not a maintenance one.** What the defect reaches is any
-  *write* path going through overwrite on a partitioned table, which is most merge-style
-  ingestion — Zamboni does not call `upsert` at all. That its own operations pass on 0.12
-  is established by running them: the suite on the `feature/pyiceberg-0.12` branch, 527
-  passed, plus the live dev-stack run recorded on
-  [#17](https://github.com/paulcaron16k/Zamboni/issues/17). The cap protects your ingest.
-- **The cap is deliberate, not staleness.** The original bound was open-ended, which meant
-  the day 0.12 published, any `uv lock --upgrade` would have pulled it in with nobody
-  touching this code.
-
-When 0.12 releases and the suite passes against it, the supported range will include it.
-
-Note the capability probes do not catch a defect like this by design: they answer "can this
+Note the capability probes do not catch a defect like #3758 by design: they answer "can this
 build do X", and such a build *can* upsert -- it simply does it wrongly. Proving
 correctness means writing data and reading it back, which is a test, not a probe. Where a
 probe genuinely must ask about behaviour rather than structure, it runs the operation --
@@ -984,23 +988,27 @@ Every version-dependent decision routes through `capabilities.detect()`, which p
 installed PyIceberg structurally — does this function exist, what does this signature
 accept, what does this source say. `zamboni doctor` prints the result.
 
-This is not defensive over-engineering; it is the shape of the problem. PyIceberg 0.11.1
-is the current release, and unreleased main (heading for 0.12) already changes three of the
-six probes:
+This is not defensive over-engineering; it is the shape of the problem. Eight probes, and
+`zamboni doctor` on a checkout of this repository reports:
 
-| Probe | 0.11.1 | main |
-|---|---|---|
-| `operation` injectable into `_SnapshotProducer` | yes | yes |
-| `update_snapshot_summaries` accepts `REPLACE` | no | no |
-| `_dataframe_to_data_files` takes a `RecordBatchReader` | no | **yes** |
-| `_existing_manifests` prunes by predicate | no | **yes** |
-| producer derives the delete predicate | no | **yes** |
-| equality deletes readable | no | no |
+| Probe | Answer |
+|---|---|
+| `operation` injectable into `_SnapshotProducer` | yes |
+| `update_snapshot_summaries` accepts `REPLACE` | no |
+| `_dataframe_to_data_files` takes a `RecordBatchReader` | yes |
+| `_existing_manifests` prunes by predicate | yes |
+| producer derives the delete predicate | yes |
+| added files honour their own partition spec | yes |
+| equality deletes readable | no |
+| delete manifests writable | no |
 
-Concretely, on a 0.12 build this package will automatically hand PyIceberg the record-batch
-stream instead of bin-packing itself, and the equality-delete blocker will lift on its own
-the day scan planning supports them. A version comparison would have had to be revisited by
-hand for each of those.
+Run it yourself rather than trusting the table — that is the point of the command.
+
+**Two installs of the same declared range differ here.** On stock PyIceberg 0.12 from PyPI,
+`added files honour their own partition spec` is **no**; it is yes only on the maintenance
+fork. No version number distinguishes those two, which is the argument for probes in one
+line. The last two rows are why `remove-dangling-deletes` and equality-delete tables stay
+blocked; they lift on their own the day upstream supports them, with nothing changed here.
 
 The probes also gate safety. `manifest_pruning_is_safe` requires the delete-predicate
 derivation whenever predicate pruning is on; a build with pruning and no derivation would
@@ -1015,16 +1023,18 @@ moves:
 1. **`Operation.REPLACE`.** `replace` is the spec's operation for compaction and it is not
    cosmetic — incremental and CDC readers use it to decide whether a snapshot changed any
    rows. PyIceberg cannot emit one: `UpdateSnapshot.overwrite()` hardcodes `OVERWRITE`, and
-   `update_snapshot_summaries` rejects anything outside `{APPEND, OVERWRITE, DELETE}` in
-   0.11.1 *and* on current main. `_ReplaceFiles` lets PyIceberg compute the summary totals
+   `update_snapshot_summaries` rejects anything outside `{APPEND, OVERWRITE, DELETE}` —
+   still true on 0.12.0, checked. `_ReplaceFiles` lets PyIceberg compute the summary totals
    as an overwrite and relabels the finished summary. Set
    `CompactionConfig(snapshot_operation="overwrite")` to avoid the subclass entirely.
-2. **`_OverwriteFiles._existing_manifests`.** In 0.11.1 it scans every manifest and rewrites
-   any containing a removed file. Later versions added a partition-predicate manifest
-   evaluator plus a `_build_delete_files_partition_predicate` step that derives the
-   predicate from the removed files. Both are correct, but a version with the evaluator and
-   *without* the derivation would keep those manifests verbatim and double-count their rows.
-   The guard refuses to run on such a build.
+2. **`_OverwriteFiles._existing_manifests`.** It once scanned every manifest and rewrote any
+   containing a removed file; 0.12 added a partition-predicate manifest evaluator plus a
+   `_build_delete_files_partition_predicate` step that derives the predicate from the removed
+   files, and both are present on the installed build. Both designs are correct, but a build
+   with the evaluator and *without* the derivation would keep those manifests verbatim and
+   double-count their rows. The guard refuses to run on such a build — and the probe for it is
+   behavioural, because `_build_delete_files_partition_predicate` exists by name on a build
+   that corrupts data.
 
 Removed files are passed as the `DataFile` objects read from the manifests, never
 reconstructed, because that method matches them with `entry.data_file in
@@ -1138,8 +1148,10 @@ says how many metadata files are already stranded.
 writes them with PyIceberg's writer, neither of which carries those fields, so it would
 silently reassign them.
 
-PyIceberg 0.11.1 cannot serialise V3 metadata at all — `TableMetadataV3.model_dump_json`
-raises — which makes this fail loudly on a SQL catalog. But a REST catalog builds metadata
+PyIceberg still cannot serialise V3 metadata: on 0.12.0,
+`TableMetadataV3.model_dump_json()` raises `NotImplementedError: Writing V3 is not yet
+supported`, citing [iceberg-python#1551](https://github.com/apache/iceberg-python/issues/1551).
+That makes this fail loudly on a SQL catalog — but a REST catalog builds metadata
 server-side and never calls it, so nothing upstream would stop it there. Hence an explicit
 blocker rather than reliance on the upstream one.
 

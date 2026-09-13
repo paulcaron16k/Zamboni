@@ -334,3 +334,35 @@ def test_dependabot_watches_the_actions_it_pins():
         "silently rot; .github/dependabot.yml is what closes that loop"
     )
     assert "github-actions" in config.read_text()
+
+
+#: Anything shaped like `pyiceberg[extra]>=X,<Y` in prose. The version policy is
+#: stated in three places -- pyproject.toml, README.md and docs/roadmap.md -- and
+#: they went out of step: ZMBNI-59 moved the floor to 0.12 while the README went
+#: on promising that "0.11.x is fully supported", a line `uv sync` could no
+#: longer produce.
+PYICEBERG_RANGE = re.compile(r"pyiceberg(?:\[[a-z0-9,_-]+\])?(>=[0-9.]+,<[0-9.]+)")
+
+
+def test_no_doc_states_a_pyiceberg_range_the_project_does_not_declare():
+    """A README promising a range the build cannot install is a lie with a version number on it.
+
+    Checks the *range*, not the extra: `[pyarrow]` and `[sql-sqlite]` are
+    different dependencies carrying the same policy, and it is the policy that
+    drifts. Any range found in a doc must be one pyproject.toml actually
+    declares.
+    """
+    declared = set(PYICEBERG_RANGE.findall((ROOT / "pyproject.toml").read_text()))
+    assert declared, "pyproject.toml declares no pyiceberg range; this check lost its anchor"
+
+    found_anywhere = 0
+    for doc in [*all_docs(), *(ROOT / name for name in ROOT_DOCS)]:
+        if doc.name in ("tasks_historical.md", "CHANGELOG.md"):
+            continue  # frozen archive, and a changelog records what *was* true
+        for stated in PYICEBERG_RANGE.findall(doc.read_text()):
+            found_anywhere += 1
+            assert stated in declared, (
+                f"{doc.name} states pyiceberg{stated}, which pyproject.toml does not "
+                f"declare (it declares {sorted(declared)})"
+            )
+    assert found_anywhere, "no doc states the pyiceberg range; the policy lost its statement"

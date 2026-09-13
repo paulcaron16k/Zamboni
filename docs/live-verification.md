@@ -20,7 +20,11 @@ uv run scripts/verify-live.py --direct-s3 s3://warehouse/zamboni-verify \
     --s3-endpoint http://172.19.0.2:9000
 ```
 
-Verified against Lakekeeper **0.13.1**, MinIO, PyIceberg 0.11.1.
+Verified against Lakekeeper **0.13.1**, MinIO and PyIceberg 0.11.1 when this was
+written. The stack has moved since — object storage is now Silo (a maintained MinIO
+fork) and the supported line is PyIceberg `>=0.12,<0.13` — and the same checks run as
+`tests/test_dev_stack.py` on every CI run, which is the current evidence; this page is
+the procedure, not the certificate.
 
 ---
 

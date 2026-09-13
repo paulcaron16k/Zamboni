@@ -232,6 +232,21 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **The docs said PyIceberg 0.11.x was fully supported, five days after it stopped
+  being installable.** ZMBNI-59 moved the floor to `>=0.12,<0.13`; the README still
+  carried a section headed "Why PyIceberg is capped at `<0.12`" telling readers the
+  pin was `>=0.11.1,<0.12` and that "0.11.x is fully supported" — a promise
+  `uv sync` could not keep. `docs/roadmap.md` still listed the support-window
+  question as open after it had been answered by events.
+
+  Both rewritten, along with the probe table (six probes, listed against a "main"
+  that has since released — now eight, reported from `zamboni doctor`), the
+  `doctor` sample output, and the V3 blocker, whose claim about 0.11.1's
+  serialiser was re-checked on 0.12: still true, and now cited to the
+  `NotImplementedError` it actually raises.
+  `test_no_doc_states_a_pyiceberg_range_the_project_does_not_declare` makes the
+  next such drift a build failure. (ZMBNI-18)
+
 - **The dev stack's object storage is Silo (`pgsty/silo`), a maintained fork of
   MinIO.** Between 2026-09-09 and 2026-09-12 the `minio/minio` and `minio/mc`
   Docker Hub repositories stopped resolving — an anonymous `docker pull` answers
