@@ -209,7 +209,7 @@ added **without** becoming the default.
 One caveat worth knowing: PyIceberg's stock snapshot producer hardcodes the added manifest
 to the table's *default* spec while grouping deleted entries by each file's own spec. Left
 alone it writes month-partitioned files into a day-spec manifest — metadata that reads fine
-until a predicate tries to prune on it. `zamboni` overrides that (`MultiSpecReplaceFiles`)
+until a predicate tries to prune on it. The maintenance fork Zamboni resolves PyIceberg from fixes that
 and tests assert manifest/file spec agreement on every evolved table.
 
 **Compound specs are supported** when exactly one field matches the rule's `from`

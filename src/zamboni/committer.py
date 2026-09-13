@@ -72,13 +72,24 @@ class _ReplaceFiles(_OverwriteFiles):
         super().__init__(*args, **kwargs)
 
     def _summary(self, snapshot_properties: dict[str, str] = EMPTY_DICT) -> Summary:
+        # Built as OVERWRITE because `update_snapshot_summaries` rejects REPLACE,
+        # then relabelled. The label restored afterwards is **whatever was asked
+        # for**, not a hardcoded REPLACE: the committer sets `_operation` to
+        # OVERWRITE for `snapshot_operation="overwrite"`, the escape hatch for
+        # anyone unwilling to depend on a private producer subclass, and forcing
+        # REPLACE here silently ignored it.
+        #
+        # `MultiSpecReplaceFiles._summary` used to correct this from the
+        # subclass. That override is gone -- its per-spec half now lives in the
+        # library -- so the fix belongs where the hardcoding was.
+        wanted = self._operation
         self._operation = Operation.OVERWRITE
         try:
             summary = super()._summary(snapshot_properties)
         finally:
-            self._operation = Operation.REPLACE
+            self._operation = wanted
         # Summary is a frozen pydantic model, so rebuild rather than mutate.
-        return Summary(operation=Operation.REPLACE, **summary.additional_properties)
+        return Summary(operation=wanted, **summary.additional_properties)
 
 
 class ConcurrentModification(RuntimeError):

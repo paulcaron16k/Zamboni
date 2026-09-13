@@ -190,7 +190,66 @@ Two categories beyond the usual set, because this tool deletes files:
   admits, `prunes_manifests_by_predicate` is false and the guard never fires. The
   exposure would have arrived with the cap being lifted.
 
+### Changed
+
+- **PyIceberg is now `>=0.12,<0.13`, resolved from a maintenance fork.** Partition
+  evolution needs a library that writes an added data file under *its own*
+  partition spec rather than the table default. Stock PyIceberg does not: a
+  partition `Record` has the arity of the spec that produced it, so an evolved
+  file written into a manifest declared under another spec raises
+  `IndexError: list index out of range` from inside the Avro writer, four frames
+  down and naming nothing.
+
+  That behaviour moved **out of Zamboni and into the library** — 241 lines of
+  private-API override deleted from `evolution.py` — and lives on
+  `feature/maintenance` in our PyIceberg fork, pinned by commit.
+
+  **What this means for an install.** The wheel publishes only the range;
+  `[tool.uv.sources]` is a uv workspace directive and does not reach wheel
+  metadata, so `pip install iceberg-zamboni` gets stock PyIceberg. Rather than
+  fail obscurely there, `capabilities.detect()` gained a behavioural probe —
+  `added_files_honour_spec` — and a build without the behaviour has **partition
+  evolution withdrawn as a layout feature**, with the reason stated. The six
+  operations are unaffected and still run.
+
+  A consumer that wants evolution redirects the source itself:
+
+  ```toml
+  dependencies = ["iceberg-zamboni", "pyiceberg"]
+
+  [tool.uv.sources]
+  pyiceberg = { git = "https://github.com/paulcaron16k/iceberg-python.git", rev = "<sha>" }
+  ```
+
+  `pyiceberg` has to be a *direct* dependency there — uv applies `tool.uv.sources`
+  to the declaring project's own dependencies, and a redirect aimed only at a
+  transitive one is silently ignored.
+
+- **`pyiceberg-core` is a declared dependency.** 0.12 moved it out of the
+  `[pyarrow]` extra while `transforms.pyarrow_transform` still needs it for six
+  transforms — bucket, day, month, year, hour, truncate — so relying on that extra
+  installs a build that cannot write a partitioned table at all.
+
 ### Fixed
+
+- **The dev stack's object storage is Silo (`pgsty/silo`), a maintained fork of
+  MinIO.** Between 2026-09-09 and 2026-09-12 the `minio/minio` and `minio/mc`
+  Docker Hub repositories stopped resolving — an anonymous `docker pull` answers
+  `repository does not exist`, and the Hub v2 API 404s — which took out the
+  `dev-stack` and `spark` CI jobs on every branch and any developer's
+  `docker compose up`. MinIO has ended community distribution.
+
+  The quay.io mirror was tried first and **rejected**: its last community
+  release is `RELEASE.2025-09-07`, a year old, and everything pushed there since
+  is a customer hotfix build on a 2024/2025 base. It resolves today but can
+  never carry a security fix. Silo is the same lineage under maintenance — S3
+  API, `MINIO_*` variables, `RELEASE.<timestamp>Z` tags and on-disk format
+  unchanged, only its own delivery surfaces renamed.
+
+  **Nothing in the stack's interface moves**: the service is still `minio`, the
+  endpoint still `http://minio:9000`, and the credentials still `MINIO_ROOT_*`.
+  `MINIO_VERSION` in `dev-stack/.env.sample` becomes `SILO_VERSION` — the only
+  rename a developer with an existing `.env` has to make. (ZMBNI-67)
 
 - **`MultiSpecReplaceFiles` now builds the delete predicate its base class
   requires.** Overriding `_OverwriteFiles._manifests` takes on that method's

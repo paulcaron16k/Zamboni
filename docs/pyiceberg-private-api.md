@@ -102,17 +102,20 @@ Four names, at the sites `git grep -nE "super\(\)\._"` reports.
 
 | Override | In | Why |
 |---|---|---|
-| `_summary()` | `committer.py:40`, `evolution.py:81` | Let PyIceberg compute the totals as an overwrite, then relabel the finished summary `replace` |
+| `_summary()` | `committer.py:74` **only** | Let PyIceberg compute the totals as an overwrite, then relabel the finished summary as whatever was asked for. `evolution.py`'s copy is gone: its per-spec half moved into the maintenance fork, and the operation-label half turned out to be correcting a hardcode in `_ReplaceFiles`, now fixed there (ZMBNI-59) |
 | `_existing_manifests()` | `deletes.py:97` **only** | Refuse the one path that corrupts metadata: upstream rewrites a partially-emptied manifest through `write_manifest`, which stamps `content: data`. Delegates to `super()` otherwise |
-| `_manifests()` | `evolution.py:140`, `manifests.py` (via `_RewriteManifests`), `testing.py` | `_SnapshotProducer._manifests` passes `spec=table_metadata.spec()` — the table default — to `write_manifest`, while entries are grouped by each file's own spec |
+| `_manifests()` | `manifests.py` (via `_RewriteManifests`), `testing.py` | `evolution.py`'s override is **gone**: `_SnapshotProducer._manifests` used to declare the added manifest under `table_metadata.spec()` while grouping deleted entries by each file's own spec, and the maintenance fork now groups both the same way |
 | `_meta` | `testing.py:219` | A **property**, not a method. Labels a manifest `content: deletes`, which `ManifestWriterV2` will not do |
 
-**`evolution.py` overrides neither `_existing_manifests` nor `_deleted_entries`,
-and that is deliberate.** It defines `_surviving_manifests` (`evolution.py:200`)
-whose docstring opens "Deliberately *not* `_existing_manifests()`", and it
-*calls* the inherited `self._deleted_entries()` at `evolution.py:177`. A previous
-revision of this table sent a reader to `evolution.py` looking for two overrides
-that are not there, with the real workaround under a third name.
+**`evolution.py` now overrides nothing.** It had three: `_manifests`, `_summary`
+and a `_surviving_manifests` that replaced upstream's pruning. The first moved
+into the fork; the second was correcting its own parent; the third existed only
+because of ZMBNI-58, a call this project had failed to make, and was measurably
+unnecessary once that was fixed. `MultiSpecReplaceFiles` survives as a name so
+the committer's producer choice still reads as a decision.
+
+That is what this document is for. Three entries left this table in one change,
+and two of them were never upstream's problem.
 
 ### 2.4 Inherited private attributes
 
@@ -413,11 +416,26 @@ The single most important finding of this review, and it changes the strategy:
 | Upstream | State | Overlaps |
 |---|---|---|
 | [PR #3131](https://github.com/apache/iceberg-python/pull/3131) metadata-only replace API | open since 2026-03-09, +1130/-82 | `_ReplaceFiles` and the `_summary` relabel — **the whole reason that subclass exists** |
-| [PR #3624](https://github.com/apache/iceberg-python/pull/3624) write V3 manifests and manifest lists | open since 2026-07-08, +761/-15 | `ManifestWriterV3`, hence `_meta`, `_FastAppendFiles`, `_existing_manifests`, and ZMBNI-9 |
+| [PR #3624](https://github.com/apache/iceberg-python/pull/3624) write V3 manifests and manifest lists | open since 2026-07-08, +761/-15 | **Nothing of ours — measured.** See the correction below |
 | [PR #3631](https://github.com/apache/iceberg-python/pull/3631) `rewrite_manifests` maintenance | open | `manifests.py`'s `_RewriteManifests` |
 | [issue #3925](https://github.com/apache/iceberg-python/issues/3925) remove dangling delete files | open | `deletes.py` |
 | [PR #3858](https://github.com/apache/iceberg-python/pull/3858) preserve explicit `delete_data_file()` | open | the delete-entry path ZMBNI-58 sits in |
 | [issue #1818](https://github.com/apache/iceberg-python/issues/1818) V3 tracking | open | ZMBNI-10, ZMBNI-12 |
+
+**#3624 was checked and does not do what its title suggests to us.** It adds
+`ManifestWriterV3` and the V3 record layout; it does **not** make a delete
+manifest writable. Measured against the PR: `ManifestWriterV1`, `V2` **and `V3`**
+all return `ManifestContent.DATA` from `content()`, and `write_manifest` still
+has no `content` parameter — its arguments are `format_version, spec, schema,
+output_file, snapshot_id, avro_compression, first_row_id`. Our
+`delete_manifests_writable` probe reports `False` against the PR, which is
+correct.
+
+That claim was written into this document from the PR's title before it was
+measured, and it was wrong. It is left visible rather than quietly deleted,
+because inferring a capability from a title is the exact failure this document
+exists to prevent. **`_meta`, `_FastAppendFiles`, `_existing_manifests` and
+ZMBNI-9 are unaffected by #3624.**
 
 So the correct contribution for most of this surface is **not a new pull
 request**. It is testing an in-flight one against a real workload and saying what
@@ -462,7 +480,7 @@ the first is the extension point working, the second is ours to delete.
 1. Read the comment above the probe or override before editing it. Several
    explain a specific bug that a "cleanup" reintroduces —
    `_guard_anywhere_in_scan_planning` searches a whole module on purpose, and
-   `_surviving_manifests` replaces upstream's pruning on purpose.
+   `_guard_anywhere_in_scan_planning` searches a whole module on purpose.
 2. Exercise both lines. `uv pip install -e ../iceberg-python` then
    `.venv/bin/python -m pytest` — via the venv interpreter, because `uv run`
    re-syncs from `uv.lock` and undoes the install you just made.

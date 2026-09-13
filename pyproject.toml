@@ -45,11 +45,24 @@ dependencies = [
     # verified to fail on a build that regressed and pass on 0.11.1 and on
     # 0.12.0rc2, which carries the fix.
     #
-    # Without a cap, the day 0.12 publishes any `uv lock --upgrade` pulls it in
-    # and nobody had to touch our code for that to happen. Lift it when 0.12 is
-    # released *and* the regression is fixed; the feature/pyiceberg-0.12 branch
-    # is where that is being tracked.
-    "pyiceberg[pyarrow]>=0.11.1,<0.12",
+    # The cap moved to <0.13 once 0.12.0 shipped and the tripwire above passed
+    # on it (ZMBNI-58 / ZMBNI-18).
+    #
+    # **This is a range, not a source.** Partition evolution needs a PyIceberg
+    # that writes added files under their own partition spec, which stock 0.12
+    # does not -- see `[tool.uv.sources]` below for the build this repo develops
+    # and tests against, and `capabilities.detect()` for the probe that refuses
+    # rather than corrupting when the installed build lacks it. A consumer
+    # redirects the source itself; nothing here obliges them to use our fork.
+    "pyiceberg[pyarrow]>=0.12,<0.13",
+    # 0.12 moved `pyiceberg-core` out of the `[pyarrow]` extra into one of its
+    # own, while `transforms.pyarrow_transform` still needs it for **six**
+    # transforms -- bucket, day, month, year, hour, truncate. Without it a
+    # day-partitioned write raises `NotInstalledError`, so this is not optional
+    # for a tool whose subject is partitioned tables. Declared here rather than
+    # relied upon through an extra, which is exactly what
+    # `test_the_rust_core_arrives_with_the_base_install` asks for.
+    "pyiceberg-core>=0.10.1,<0.11",
     "duckdb>=1.5.0",
     "pyarrow>=18",
     # zamboni.yml and .env: the DevOps surface (docs/devops.md), not optional.
@@ -72,7 +85,7 @@ Issues = "https://github.com/paulcaron16k/Zamboni/issues"
 # Object-store access for a real MinIO/Lakekeeper warehouse.
 s3 = ["s3fs>=2024.6.0"]
 # Local SQL catalog, used by the test suite and handy for dry runs.
-sql = ["pyiceberg[sql-sqlite]>=0.11.1,<0.12"]
+sql = ["pyiceberg[sql-sqlite]>=0.12,<0.13"]
 # A *client* for a Trino you already have -- the dev stack's `trino` compose
 # profile, or a cluster. Optional so nobody installs a query-engine client to
 # compact a table locally.
@@ -130,6 +143,19 @@ dev = [
     # promise to keep and not a thing this suite should be proving.
     "pyspark-client>=4.0.4,<4.1",
 ]
+
+[tool.uv.sources]
+# Development, CI and `bin/` generation resolve PyIceberg from our maintenance
+# fork, pinned to a commit rather than tracking the branch so a rebase is a
+# decision rather than something that happens to a build.
+#
+# **Not published.** `tool.uv.sources` is a uv workspace directive and does not
+# reach wheel metadata -- verified by building one: it declares only
+# `Requires-Dist: pyiceberg[pyarrow]<0.13,>=0.12`. A consumer installing from
+# PyPI therefore gets stock PyIceberg and must redirect the source itself, which
+# is what ExperienceFlow IWS does. The probe in `capabilities.detect()` is what
+# makes that failure loud rather than silent.
+pyiceberg = { git = "https://github.com/paulcaron16k/iceberg-python.git", rev = "3f71be5e7308176c99db9dc6dce7a9a66185107e" }
 
 [tool.uv]
 # The whole point of this project's environment: never resolve against whatever

@@ -60,8 +60,31 @@ services:
       - "${LAKEKEEPER_PORT}:8181"
     networks: [zamboni]
 
+  # Silo (`pgsty/silo`), a maintained fork of MinIO -- not `minio/minio`.
+  # MinIO ended community distribution: the Docker Hub repository stopped
+  # resolving between 2026-09-09 and 2026-09-12 (an anonymous pull answers
+  # `repository does not exist`, and the Hub v2 API 404s), and the quay.io
+  # mirror is a frozen archive -- its last community release is
+  # RELEASE.2025-09-07, a year old, and everything pushed since is a
+  # customer hotfix build on a 2024/2025 base that we cannot use. A dev stack
+  # that can never take a security fix is not a dev stack we want.
+  #
+  # Silo keeps the S3 API, the `MINIO_*` variables, the `RELEASE.<ts>Z` tag
+  # form and the on-disk format; it renames only its own delivery surfaces
+  # (the binary is `silo`, the image is `pgsty/silo`). Two consequences are
+  # load-bearing here and were checked rather than assumed:
+  #
+  #   - the image's entrypoint translates a leading `server` to `silo server`,
+  #     so the `command:` below is unchanged from the MinIO original;
+  #   - the healthcheck bypasses the entrypoint, so it needs a real binary --
+  #     `/usr/bin/mc` is present in the server image (`mcli` too).
+  #
+  # The service stays named `minio`, because that name is the S3 endpoint
+  # Lakekeeper stores in the warehouse config and is what `MINIO_*` and
+  # `S3_GATEWAY` are about. Renaming it would rewrite bootstrap.py, the Trino
+  # and Spark configs and the tests to buy nothing.
   minio:
-    image: minio/minio:${MINIO_VERSION}
+    image: pgsty/silo:${SILO_VERSION}
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
@@ -82,7 +105,7 @@ services:
   # Creates the bucket and exits. `restart: on-failure` rather than "no" so a
   # cold start where MinIO is slow to accept writes still converges.
   createbucket:
-    image: minio/mc:${MC_VERSION}
+    image: pgsty/mc:${MC_VERSION}
     depends_on:
       minio:
         condition: service_healthy
