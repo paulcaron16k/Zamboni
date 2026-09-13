@@ -342,15 +342,24 @@ inside `LocalMaintainer`, with the interface pinning its observable behaviour.
 
 ## Open questions
 
-Recorded here rather than discovered mid-implementation. Three of the four are
-now answered; the answers are kept beside the questions because *what was
+Recorded here rather than discovered mid-implementation. All four are now
+answered; the answers are kept beside the questions because *what was
 uncertain at the time* is part of the record:
 
-1. **Does Zamboni support two PyIceberg lines at once?** Still open, and now the
-   only genuinely open question here. RM-1 can either keep 0.11.1 working
-   alongside 0.12 or move the floor. The probes make both technically possible;
-   the cost is a test matrix that doubles. It is a release-timing decision rather
-   than a technical one, which is why ZMBNI-1106 is deliberately unstarted.
+1. ~~**Does Zamboni support two PyIceberg lines at once?**~~ **Answered: one
+   line. `pyiceberg[pyarrow]>=0.12,<0.13`, and 0.11.x is no longer supported.**
+   The floor moved rather than the range widening, so the `test` matrix stays a
+   3-leg Python one and CI keeps `uv sync --frozen` — a second PyIceberg leg
+   could not have used it, because `uv.lock` pins one `pyiceberg` and installing
+   over the top is exactly the guarantee `--frozen` exists to provide.
+
+   What was traded: nothing runs against 0.11.1 any more, so it is not
+   *supported*, it is untested — stated in those terms because a line with no CI
+   leg is the thing this question was really about. The cost of the decision was
+   paid elsewhere instead: the one install that matters is no longer identified
+   by a version at all, since partition evolution needs the maintenance fork, and
+   `capabilities.added_files_honour_spec` is what tells the two apart. That is
+   the probes doing the job version numbers could not (ZMBNI-59, ZMBNI-18).
 2. ~~**What does `--engine trino` do about `--yes`?**~~ **Answered by ZMBNI-1206.**
    Neither option in the original framing was taken. Where an engine cannot
    preview an operation, a run without `--yes` **refuses** — it does not execute,

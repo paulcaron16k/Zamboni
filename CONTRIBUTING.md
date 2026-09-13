@@ -110,7 +110,8 @@ uv sync                                 # back to the pinned line
 
 **Through `.venv/bin/python`, not `uv run`.** `uv run` re-syncs the environment
 from `uv.lock` before running, and it does not merely ignore the install you just
-made -- it **reverts** it, so every later command is wrong too. Measured:
+made -- it **reverts** it, so every later command is wrong too. Measured when the
+lock pinned 0.11.1, so the numbers below are that era's; the behaviour is not:
 
 ```
 uv pip install -e ../iceberg-python
