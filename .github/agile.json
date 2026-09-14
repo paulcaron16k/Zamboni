@@ -7,6 +7,10 @@
     {
       "name": "Kanban",
       "type": "kanban"
+    },
+    {
+      "name": "Backlog",
+      "type": "backlog"
     }
   ],
   "keys": [
