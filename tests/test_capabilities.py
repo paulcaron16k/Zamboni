@@ -27,6 +27,33 @@ def test_installed_build_is_usable():
     assert detect().unsupported_reason() is None
 
 
+def test_installed_build_writes_added_files_under_their_own_spec():
+    """This repository develops and tests against a build that can evolve partitions.
+
+    Without it `pyproject.toml`'s `[tool.uv.sources]` redirect is the only thing
+    pointing `pyiceberg` at the maintenance fork, and nothing notices if that
+    stops working -- drop the pin, make the rev unreachable, or re-lock without
+    it, and uv resolves stock PyIceberg from PyPI, the probe answers False,
+    partition evolution is *silently withdrawn as a layout feature*, and the
+    whole suite still passes. A capability this project ships would quietly stop
+    being exercised, with nothing red.
+
+    Deliberately asserts the **capability**, not where the code came from. If
+    upstream merges the patch and a release carries the behaviour, the fork
+    retires, `[tool.uv.sources]` goes, and this test keeps passing unchanged --
+    which is the end state the fork exists to reach. Checking the git URL
+    instead would have to be deleted on the day it finally mattered most.
+    """
+    assert detect().added_files_honour_spec is True, (
+        "the installed PyIceberg does not write an added data file under its own "
+        "partition spec, so partition evolution is withdrawn and untested here. "
+        "This repository resolves `pyiceberg` from the maintenance fork via "
+        "`[tool.uv.sources]` in pyproject.toml; run `uv sync` and check the pinned "
+        "rev is reachable. See MAINTENANCE-FORK.md on that branch and "
+        "docs/pyiceberg-private-api.md."
+    )
+
+
 def _caps(**overrides) -> PyIcebergCapabilities:
     base = {
         "version": "test",
