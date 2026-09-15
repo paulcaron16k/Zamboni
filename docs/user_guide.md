@@ -1051,8 +1051,47 @@ planner builds them like this:
 2. Drop the ones already at or above `target_file_size_bytes` — they need no
    rewriting. (Unless `rewrite_all` is set, which keeps them.)
 3. Bucket what remains by **(partition spec id, partition value)**.
-4. Drop buckets with fewer than `min_input_files` files, and buckets of one.
-5. Every surviving bucket is one group.
+4. If `skip_partitions_newer_than_days` is set, drop buckets whose partition
+   window has not yet closed that many days ago.
+5. Drop buckets with fewer than `min_input_files` files, and buckets of one.
+6. Every surviving bucket is one group.
+
+### Leaving partitions that are still being written (`skip_partitions_newer_than_days`)
+
+Unset by default, which compacts every eligible partition — the behaviour before
+this setting existed.
+
+Set it to stop compacting the partition a loader is currently filling. This is
+about **wasted work, not correctness**: a commit is a compare-and-swap, and a
+compaction that loses the race to a live writer has rewritten every file in the
+group for nothing. Leaving that partition alone means those files are never
+rewritten in the first place.
+
+**It does not, on its own, stop the commit from being refused.** Measured
+against a live catalog with an append-only writer: with the floor set so that
+only a 30-day-old partition was planned, compaction was *still* refused on every
+attempt. The reason is that Zamboni's pre-commit check compares the **table's**
+snapshot id, not the files it is replacing, so any commit anywhere in the table
+trips it — even one touching a completely different partition. Making that check
+file-aware is tracked separately; until then, treat this setting as a way to
+stop rewriting data that is about to change, not as a way to win the race.
+
+It is measured from the **end** of the partition window, the same as
+`partition_evolution`'s `older_than_days` and through the same code. A
+`day=2026-09-14` partition is not one day old the moment the 15th begins — rows
+timestamped 23:59 are still arriving — so a floor of `1` still holds it.
+
+It only applies where the spec has exactly one temporal partition field
+(`hour`, `day`, `month`, `year`). Where a partition cannot be dated — no
+temporal field, more than one, or a missing value — the partition is **skipped
+with the reason in the plan** rather than compacted. The instruction was not to
+touch partitions that may still be receiving rows; where that cannot be
+established, it has not been established. Nothing is silent: run `zamboni plan`
+and the reason is printed.
+
+This does not make contention impossible. A copy-on-write upsert can migrate a
+row between partitions and so rewrite an *old* one, which is why a lost race is
+still handled as a clean exit-3 refusal.
 
 There is **no cap on how large a bucket may be**, so an unpartitioned table is
 one group. That is no longer a memory problem, but it is still three other

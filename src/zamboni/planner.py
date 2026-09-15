@@ -15,6 +15,7 @@ multiple partition specs. We split by spec instead, so each group holds a single
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass, field
 
 from pyiceberg.table import Table
@@ -22,6 +23,7 @@ from pyiceberg.typedef import Record
 
 from .config import CompactionConfig, resolve_target_file_size
 from .profile import LiveFile, TableProfile
+from .windows import is_temporal, transform_name, window_end
 
 
 @dataclass(frozen=True)
@@ -92,7 +94,9 @@ class CompactionPlanner:
     def __init__(self, config: CompactionConfig) -> None:
         self._config = config
 
-    def plan(self, tbl: Table, profile: TableProfile) -> CompactionPlan:
+    def plan(
+        self, tbl: Table, profile: TableProfile, *, today: dt.date | None = None
+    ) -> CompactionPlan:
         target = resolve_target_file_size(self._config, dict(tbl.properties))
         plan = CompactionPlan(
             identifier=profile.identifier,
@@ -108,8 +112,25 @@ class CompactionPlanner:
                 continue
             buckets.setdefault((live.spec_id, live.partition), []).append(live)
 
+        floor = self._config.skip_partitions_newer_than_days
+        cutoff = (
+            None
+            if floor is None
+            else (today or dt.datetime.now(dt.UTC).date()) - dt.timedelta(days=floor)
+        )
+
         for (spec_id, partition), files in sorted(buckets.items(), key=lambda kv: str(kv[0])):
             label = f"spec={spec_id} partition={_partition_label(partition)}"
+            # Checked before min_input_files so the reported reason is the
+            # specific one: "we deliberately left this alone" reads very
+            # differently from "not enough files yet".
+            if (
+                cutoff is not None
+                and floor is not None
+                and (reason := _still_open(tbl, spec_id, partition, cutoff, floor))
+            ):
+                plan.skipped.append((label, reason))
+                continue
             if not self._config.rewrite_all and len(files) < self._config.min_input_files:
                 reason = (
                     f"{len(files)} candidate file(s) < "
@@ -141,3 +162,44 @@ def _partition_label(partition: Record) -> str:
     except TypeError:  # pragma: no cover - defensive
         return repr(partition)
     return "()" if not values else "(" + ", ".join(repr(v) for v in values) + ")"
+
+
+def _still_open(
+    tbl: Table, spec_id: int, partition: Record, cutoff: dt.date, floor: int
+) -> str | None:
+    """Why this partition must be left alone, or None if its window has closed.
+
+    Refuses rather than guesses in every case it cannot answer. The operator
+    asked not to touch partitions that may still be receiving rows; where we
+    cannot establish that a window has closed, the conservative reading of that
+    instruction is to leave it -- and the reason lands in the plan, so a
+    partition skipped this way is never silent.
+    """
+    spec = tbl.specs().get(spec_id)
+    if spec is None:  # pragma: no cover - a group is built from a live file's spec
+        return f"spec {spec_id} is not in the table metadata"
+
+    temporal = [(i, f) for i, f in enumerate(spec.fields) if is_temporal(f.transform)]
+    if not temporal:
+        return (
+            f"no temporal partition field, so it cannot be shown to be closed "
+            f"(skip_partitions_newer_than_days={floor})"
+        )
+    if len(temporal) > 1:
+        # Same reasoning as partition evolution's: two fields of the same kind
+        # give two answers about which one dates the partition, and guessing
+        # would age data by the wrong column.
+        names = ", ".join(f.name for _, f in temporal)
+        return (
+            f"{len(temporal)} temporal partition fields ({names}); which one dates it is ambiguous"
+        )
+
+    position, pfield = temporal[0]
+    values: tuple = tuple(partition)  # type: ignore[arg-type]  # Record is iterable
+    if position >= len(values) or values[position] is None:
+        return "partition value is missing, so its window cannot be dated"
+
+    ends = window_end(transform_name(pfield.transform), int(values[position]))
+    if ends > cutoff:
+        return f"window closes {ends.isoformat()}, inside the {floor}-day floor"
+    return None
