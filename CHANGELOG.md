@@ -232,6 +232,27 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **A table being written to no longer ends the whole fleet run.** Losing a commit
+  race to a live writer is a normal Iceberg outcome, and Zamboni already detected
+  it correctly — `ReplaceCommitter.commit` re-reads the table and refuses rather
+  than losing an update. But `maintain()` did not catch the refusal, so the
+  exception propagated: the run stopped at the first busy table, every later table
+  went unmaintained, and the caller got a traceback instead of the exit-code
+  contract.
+
+  Three exceptions now map to **exit 3**, the documented *"the table is blocked —
+  a refusal, not a failure"* code, because the conflict surfaces at three depths
+  and a fleet run cannot be asked to care which: our `ConcurrentModification`,
+  PyIceberg's `ValidationException` from `_validate_concurrency` (which its own
+  retry loop does not retry), and `CommitFailedException` once
+  `commit.retry.num-retries` is exhausted.
+
+  Found by testing rather than review, against a live Lakekeeper with an upsert
+  writer committing every 50 ms: 67 compaction runs gave 60 successes, 3
+  `ConcurrentModification` and 4 `ValidationException`. **Nothing was corrupted in
+  any of them** — detection worked every time, and the defect was only ever in
+  what happened next. (ZMBNI-76)
+
 - **The docs said PyIceberg 0.11.x was fully supported, five days after it stopped
   being installable.** ZMBNI-59 moved the floor to `>=0.12,<0.13`; the README still
   carried a section headed "Why PyIceberg is capped at `<0.12`" telling readers the

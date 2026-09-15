@@ -26,7 +26,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .committer import UnsupportedPyIceberg
+from pyiceberg.exceptions import CommitFailedException, ValidationException
+
+from .committer import ConcurrentModification, UnsupportedPyIceberg
 from .compactor import CompactionBlocked
 from .config import CompactionConfig, config_from_table_settings
 from .expire import ExpiryAborted
@@ -290,6 +292,36 @@ def _run(
         # attempted. Added with ZMBNI-37, which gave five more operations a way
         # to raise it.
         return Outcome(table, operation, 3, str(exc))
+    except (ConcurrentModification, CommitFailedException, ValidationException) as exc:
+        # Another writer committed to this table while the operation was running.
+        # A refusal, not a failure: nothing was changed, and the answer is to run
+        # again outside the load window rather than to investigate.
+        #
+        # Three exceptions because the conflict surfaces at three different
+        # depths, and a fleet run must not care which:
+        #
+        #   ConcurrentModification   ours -- `ReplaceCommitter.commit` re-reads
+        #                            the table and refuses when the snapshot moved
+        #                            between planning and commit
+        #   ValidationException      PyIceberg's `_validate_concurrency`, which
+        #                            checks the commit window before the swap and
+        #                            is *not* retried by its own retry loop
+        #   CommitFailedException    the CAS itself, after PyIceberg exhausts
+        #                            `commit.retry.num-retries` (default 4)
+        #
+        # Measured rather than reasoned about: against a live Lakekeeper with an
+        # upsert writer committing every 50ms, 67 compaction runs produced 60
+        # successes, 3 ConcurrentModification and 4 ValidationException -- and
+        # before this, the first of them ended the whole run, leaving every later
+        # table unmaintained. Nothing was corrupted in any of them; detection
+        # worked every time. The defect was only ever in what happened next.
+        return Outcome(
+            table,
+            operation,
+            3,
+            f"another writer committed to this table during {operation.value}; "
+            f"nothing was changed -- retry outside the load window ({exc})",
+        )
     except (ExpiryAborted, OrphanCleanupAborted) as exc:
         # A safety check refused. Nothing was deleted, and the operator response
         # is the same in both cases: stop and look.
