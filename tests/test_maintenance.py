@@ -13,10 +13,12 @@ import json
 
 import pyarrow as pa
 import pytest
+from pyiceberg.exceptions import CommitFailedException, ValidationException
 from pyiceberg.schema import Schema
 from pyiceberg.types import IntegerType, NestedField
 
 from zamboni import CatalogSession, maintain
+from zamboni.committer import ConcurrentModification
 from zamboni.maintainers import Operation
 from zamboni.maintenance import RUNBOOK_ORDER, Outcome
 from zamboni.tableconfig import TableConfigError
@@ -214,3 +216,53 @@ def test_the_cli_and_the_api_agree_on_the_exit_code(warehouse, tmp_path, monkeyp
     capsys.readouterr()
 
     assert api == cli == 3
+
+
+@pytest.mark.parametrize(
+    ("exc_type", "message"),
+    [
+        (ConcurrentModification, "table snapshot changed between planning and commit"),
+        (ValidationException, "Added data files were found matching the filter"),
+        (CommitFailedException, "Table has been updated by another process"),
+    ],
+    ids=["ours", "pyiceberg-validation", "pyiceberg-cas"],
+)
+def test_a_busy_table_is_a_refusal_and_the_run_continues(
+    warehouse, tmp_path, monkeypatch, exc_type, message
+):
+    """Losing to a live writer must not end the fleet run.
+
+    All three arrive from a different depth -- ours from `ReplaceCommitter`'s
+    pre-commit check, PyIceberg's two from `_validate_concurrency` and from the
+    CAS after its retries are exhausted -- and a caller maintaining a hundred
+    tables cannot be asked to care which. Before this they propagated, so the
+    first busy table ended the run and every later table went unmaintained,
+    returning a traceback instead of the exit-code contract.
+
+    Reproduced against a live Lakekeeper before being fixed: an upsert writer
+    committing every 50ms gave 3 ConcurrentModification and 4
+    ValidationException across 67 compaction runs.
+    """
+    from zamboni.maintainers.local import LocalMaintainer
+
+    original = LocalMaintainer.execute
+
+    def busy(self, operation, table, *, request, dry_run):
+        if operation is Operation.COMPACT:
+            raise exc_type(message)
+        return original(self, operation, table, request=request, dry_run=dry_run)
+
+    monkeypatch.setattr(LocalMaintainer, "execute", busy)
+
+    report = maintain(warehouse, table_config=config(tmp_path), commit=True)
+
+    compact = [o for o in report.outcomes if o.operation is Operation.COMPACT]
+    assert compact, "compact never ran"
+    assert compact[0].exit_code == 3, "a busy table is blocked, not a failure"
+    assert "retry outside the load window" in compact[0].detail
+
+    # The run must have carried on past it rather than stopping there.
+    later = [o for o in report.outcomes if o.operation is not Operation.COMPACT]
+    assert later, "the run stopped at the busy table instead of continuing"
+    assert any(o.exit_code == 0 for o in later), "no later operation succeeded"
+    assert report.exit_code == 3

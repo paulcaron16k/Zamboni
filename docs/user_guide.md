@@ -1542,7 +1542,7 @@ and how to get a stack trace out of a cron job. The short version:
 |---|---|
 | 0 | Success |
 | 2 | Usage error — fix the invocation |
-| 3 | The table is **blocked** (V1, equality deletes, unusable PyIceberg). A refusal, not a failure |
+| 3 | The table is **blocked** (V1, equality deletes, unusable PyIceberg, or another writer committing to it). A refusal, not a failure |
 | 4 | A **safety check aborted** the run. **Nothing was deleted.** Investigate before retrying |
 
 Exit 4 is the interesting one and should never be worked around by narrowing
