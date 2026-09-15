@@ -1061,11 +1061,32 @@ planner builds them like this:
 Unset by default, which compacts every eligible partition — the behaviour before
 this setting existed.
 
-Set it to stop compacting the partition a loader is currently filling. This is
-about **wasted work, not correctness**: a commit is a compare-and-swap, and a
-compaction that loses the race to a live writer has rewritten every file in the
-group for nothing. Leaving that partition alone means those files are never
-rewritten in the first place.
+Set it to stop compacting the partition a loader is currently filling.
+
+**The reason is write amplification, and it is larger than it looks.** A
+copy-on-write loader — PyIceberg's `upsert`, and so Meltano's `target-iceberg` —
+rewrites the *whole data file* containing a matched row. Compacting the active
+partition therefore makes every subsequent update more expensive, in proportion
+to how well you compacted it. Measured, one upserted row into today's partition:
+
+| partition layout | files rewritten by the upsert | bytes |
+|---|---|---|
+| left alone (10 small files) | 1 | **3,542** |
+| compacted into one file | 1 | **26,126** |
+
+7.4x, and the ratio is roughly *the number of files merged* — so at a 512MB
+target against ~8MB batch files it is nearer 64x. Compaction is not neutral on a
+partition that is still being written; the better it compacts, the more it costs
+the writer. That cost is paid on every batch until the partition closes.
+
+The effect is specific to **update** workloads. An append-only loader never
+rewrites an existing file, so it sees none of this, and the existing
+`target_file_size_bytes` filter already skips files that are large enough — for
+those tables the setting buys little and can stay unset.
+
+A second, smaller benefit: a compaction that loses a commit race to a live
+writer has rewritten every file in the group for nothing, and a partition that
+was never planned cannot lose.
 
 **It does not, on its own, stop the commit from being refused.** Measured
 against a live catalog with an append-only writer: with the floor set so that
