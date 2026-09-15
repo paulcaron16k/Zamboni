@@ -80,3 +80,115 @@ def test_rejects_nonsense_config():
         CompactionConfig(min_input_files=0)
     with pytest.raises(ValueError, match="snapshot_operation"):
         CompactionConfig(snapshot_operation="rewrite")
+
+
+# -- the recency floor (#78) ------------------------------------------------
+
+
+@pytest.fixture
+def two_days(session):
+    """One closed day partition and one that closed yesterday, 2 files each."""
+    import datetime as dt
+
+    import pyarrow as pa
+    from pyiceberg.partitioning import PartitionField, PartitionSpec
+    from pyiceberg.schema import Schema
+    from pyiceberg.transforms import DayTransform
+    from pyiceberg.types import IntegerType, NestedField, TimestampType
+
+    schema = Schema(
+        NestedField(1, "id", IntegerType(), required=False),
+        NestedField(2, "ts", TimestampType(), required=False),
+    )
+    arrow = pa.schema([pa.field("id", pa.int32()), pa.field("ts", pa.timestamp("us"))])
+    spec = PartitionSpec(
+        PartitionField(source_id=2, field_id=1000, transform=DayTransform(), name="ts_day")
+    )
+    tbl = session.catalog.create_table(
+        "db.two_days", schema=schema, partition_spec=spec, properties={"format-version": "2"}
+    )
+    today = dt.datetime.now(dt.UTC).replace(tzinfo=None)
+    for day_offset in (0, 30):
+        for i in range(2):
+            tbl.append(
+                pa.table(
+                    {"id": [i], "ts": [today - dt.timedelta(days=day_offset)]},
+                    schema=arrow,
+                )
+            )
+    return session.catalog.load_table("db.two_days")
+
+
+def test_the_floor_is_off_by_default(session, two_days):
+    """CONTRIBUTING rule 6: a changed default decides what a nightly run touches.
+
+    An unset floor must compact exactly what it compacted before the setting
+    existed, or every installed config quietly changes meaning on upgrade.
+    """
+    assert CompactionConfig().skip_partitions_newer_than_days is None
+
+    plan = CompactionPlanner(CompactionConfig()).plan(two_days, profile_table(two_days))
+
+    assert len(plan.groups) == 2, "both day partitions compact when no floor is set"
+    assert not [r for _, r in plan.skipped if "floor" in r]
+
+
+def test_the_floor_leaves_the_partition_still_being_written(session, two_days):
+    plan = CompactionPlanner(CompactionConfig(skip_partitions_newer_than_days=7)).plan(
+        two_days, profile_table(two_days)
+    )
+
+    assert len(plan.groups) == 1, "only the 30-day-old partition is eligible"
+    held = [r for _, r in plan.skipped if "floor" in r]
+    assert len(held) == 1
+    # The reason names the date, so an operator can tell when it becomes eligible
+    # rather than re-deriving the arithmetic.
+    assert "window closes" in held[0] and "7-day floor" in held[0]
+
+
+def test_the_floor_measures_from_the_end_of_the_window_like_evolution(session, two_days):
+    """The same configured number of days must mean the same thing in both.
+
+    Today's partition is *not* zero days old the moment tomorrow begins: rows
+    timestamped 23:59 are still arriving, which is the whole reason
+    `EvolutionRule.older_than_days` measures from the window end. A floor of 1
+    must therefore still hold today's partition.
+    """
+    import datetime as dt
+
+    today = dt.datetime.now(dt.UTC).date()
+    plan = CompactionPlanner(CompactionConfig(skip_partitions_newer_than_days=1)).plan(
+        two_days, profile_table(two_days), today=today
+    )
+
+    held = [r for _, r in plan.skipped if "floor" in r]
+    assert held, "today's partition closes tomorrow, so a 1-day floor still holds it"
+
+
+def test_evolution_and_compaction_share_one_definition_of_a_closed_window():
+    """Not a comment asking them to agree -- the same function, asserted.
+
+    Two implementations of "has this window ended" would drift into meaning
+    different things under the same configured number of days, and the drift
+    would be invisible until someone compared a plan against an evolution.
+    """
+    from zamboni import evolution, planner, windows
+
+    assert evolution._window_end is windows.window_end
+    assert planner.window_end is windows.window_end
+
+
+def test_the_floor_refuses_a_partition_it_cannot_date(session, partitioned):
+    """`partitioned` is identity-partitioned on category -- no window at all.
+
+    Refusing is the conservative reading of "do not touch partitions still being
+    written": where that cannot be established, it is not established. The
+    reason lands in the plan, so the refusal is never silent.
+    """
+    plan = CompactionPlanner(CompactionConfig(skip_partitions_newer_than_days=7)).plan(
+        partitioned, profile_table(partitioned)
+    )
+
+    assert plan.is_empty
+    assert plan.skipped
+    assert all("no temporal partition field" in reason for _, reason in plan.skipped)

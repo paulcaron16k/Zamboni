@@ -72,6 +72,18 @@ class CompactionConfig:
     Attributes:
         target_file_size_bytes: Desired output file size. ``None`` resolves from
             table properties, then ``DEFAULT_TARGET_FILE_SIZE_BYTES``.
+        skip_partitions_newer_than_days: Leave partitions whose time window has
+            not closed this many days ago alone. ``None`` (the default) compacts
+            every eligible partition, which is the behaviour before this existed.
+            Measured from the **end** of the partition window, the same as
+            ``EvolutionRule.older_than_days`` and via the same code -- a
+            ``day=2026-09-14`` partition is not a day old the moment the 15th
+            begins, because rows timestamped 23:59 are still arriving. Its
+            purpose is contention: a partition a loader is still writing to is
+            one whose compaction will lose the commit race and have rewritten
+            everything for nothing. Only meaningful where the spec has exactly
+            one temporal partition field; see ``planner`` for what happens
+            otherwise, which is to refuse rather than guess.
         min_input_files: A partition is only compacted when it has at least this
             many rewrite candidates. Ignored when ``rewrite_all`` is set.
         rewrite_all: Rewrite every live data file, including files that already
@@ -136,6 +148,7 @@ class CompactionConfig:
 
     target_file_size_bytes: int | None = None
     min_input_files: int = 2
+    skip_partitions_newer_than_days: int | None = None
     rewrite_all: bool = False
     memory_mode: MemoryMode = MemoryMode.AUTO
     memory_budget_bytes: int = 256 * 1024 * 1024
@@ -170,6 +183,14 @@ class CompactionConfig:
             raise ValueError(f"max_read_ahead_files must be >= 1, got {self.max_read_ahead_files}")
         if self.min_input_files < 1:
             raise ValueError(f"min_input_files must be >= 1, got {self.min_input_files}")
+        if (
+            self.skip_partitions_newer_than_days is not None
+            and self.skip_partitions_newer_than_days < 0
+        ):
+            raise ValueError(
+                "skip_partitions_newer_than_days must be >= 0, got "
+                f"{self.skip_partitions_newer_than_days}"
+            )
         chosen = [
             name
             for name, on in (
@@ -245,6 +266,7 @@ def config_from_table_settings(settings, base: CompactionConfig | None = None) -
         base,
         target_file_size_bytes=settings.target_file_size_bytes,
         min_input_files=settings.min_input_files,
+        skip_partitions_newer_than_days=settings.skip_partitions_newer_than_days,
         sort_by_table_order=False,
         sort_expression=sort_expression,
         zorder_columns=zorder_columns,
