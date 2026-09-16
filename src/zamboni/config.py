@@ -72,18 +72,26 @@ class CompactionConfig:
     Attributes:
         target_file_size_bytes: Desired output file size. ``None`` resolves from
             table properties, then ``DEFAULT_TARGET_FILE_SIZE_BYTES``.
-        skip_partitions_newer_than_days: Leave partitions whose time window has
-            not closed this many days ago alone. ``None`` (the default) compacts
-            every eligible partition, which is the behaviour before this existed.
-            Measured from the **end** of the partition window, the same as
-            ``EvolutionRule.older_than_days`` and via the same code -- a
-            ``day=2026-09-14`` partition is not a day old the moment the 15th
-            begins, because rows timestamped 23:59 are still arriving. Its
-            purpose is contention: a partition a loader is still writing to is
-            one whose compaction will lose the commit race and have rewritten
-            everything for nothing. Only meaningful where the spec has exactly
-            one temporal partition field; see ``planner`` for what happens
-            otherwise, which is to refuse rather than guess.
+        skip_partitions_newer_than_windows: Leave partitions whose time window is
+            still open, plus this many that have closed recently, alone.
+            Defaults to ``1`` -- on a day-partitioned table that holds *today and
+            yesterday*, because a loader extracting yesterday's data at 02:00
+            writes it into **yesterday's** partition, not today's. ``0`` holds
+            only the open window; ``None`` disables the floor entirely.
+
+            Counted in partition windows rather than days because that is the
+            only unit that means the same thing at every granularity: "8 days"
+            is incoherent on a month-partitioned table, whose partitions are
+            whole months, whereas "1 window" is this month and last.
+
+            Scoped to temporal partitions (``hour``/``day``/``month``/``year``).
+            A table partitioned on ``identity``, ``bucket`` or ``truncate`` has
+            no window, so the floor does not apply to it rather than blocking it.
+
+            Its purpose is the *writer's* cost, not contention: a copy-on-write
+            upsert rewrites the whole data file holding a matched row, so
+            compacting a partition that is still being written makes every later
+            update more expensive in proportion to how well it was compacted.
         min_input_files: A partition is only compacted when it has at least this
             many rewrite candidates. Ignored when ``rewrite_all`` is set.
         rewrite_all: Rewrite every live data file, including files that already
@@ -148,7 +156,7 @@ class CompactionConfig:
 
     target_file_size_bytes: int | None = None
     min_input_files: int = 2
-    skip_partitions_newer_than_days: int | None = None
+    skip_partitions_newer_than_windows: int | None = 1
     rewrite_all: bool = False
     memory_mode: MemoryMode = MemoryMode.AUTO
     memory_budget_bytes: int = 256 * 1024 * 1024
@@ -184,12 +192,12 @@ class CompactionConfig:
         if self.min_input_files < 1:
             raise ValueError(f"min_input_files must be >= 1, got {self.min_input_files}")
         if (
-            self.skip_partitions_newer_than_days is not None
-            and self.skip_partitions_newer_than_days < 0
+            self.skip_partitions_newer_than_windows is not None
+            and self.skip_partitions_newer_than_windows < 0
         ):
             raise ValueError(
-                "skip_partitions_newer_than_days must be >= 0, got "
-                f"{self.skip_partitions_newer_than_days}"
+                "skip_partitions_newer_than_windows must be >= 0, got "
+                f"{self.skip_partitions_newer_than_windows}"
             )
         chosen = [
             name
@@ -266,7 +274,7 @@ def config_from_table_settings(settings, base: CompactionConfig | None = None) -
         base,
         target_file_size_bytes=settings.target_file_size_bytes,
         min_input_files=settings.min_input_files,
-        skip_partitions_newer_than_days=settings.skip_partitions_newer_than_days,
+        skip_partitions_newer_than_windows=settings.skip_partitions_newer_than_windows,
         sort_by_table_order=False,
         sort_expression=sort_expression,
         zorder_columns=zorder_columns,

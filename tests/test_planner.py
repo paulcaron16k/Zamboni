@@ -86,109 +86,103 @@ def test_rejects_nonsense_config():
 
 
 @pytest.fixture
-def two_days(session):
-    """One closed day partition and one that closed yesterday, 2 files each."""
+def daily(session):
+    """Day-partitioned, 3 files each in today, yesterday, D-2 and D-3."""
     import datetime as dt
 
     import pyarrow as pa
     from pyiceberg.partitioning import PartitionField, PartitionSpec
     from pyiceberg.schema import Schema
     from pyiceberg.transforms import DayTransform
-    from pyiceberg.types import IntegerType, NestedField, TimestampType
+    from pyiceberg.types import NestedField, TimestamptzType
 
-    schema = Schema(
-        NestedField(1, "id", IntegerType(), required=False),
-        NestedField(2, "ts", TimestampType(), required=False),
-    )
-    arrow = pa.schema([pa.field("id", pa.int32()), pa.field("ts", pa.timestamp("us"))])
+    schema = Schema(NestedField(1, "ts", TimestamptzType(), required=False))
+    arrow = pa.schema([pa.field("ts", pa.timestamp("us", tz="UTC"))])
     spec = PartitionSpec(
-        PartitionField(source_id=2, field_id=1000, transform=DayTransform(), name="ts_day")
+        PartitionField(source_id=1, field_id=1000, transform=DayTransform(), name="ts_day")
     )
     tbl = session.catalog.create_table(
-        "db.two_days", schema=schema, partition_spec=spec, properties={"format-version": "2"}
+        "db.daily", schema=schema, partition_spec=spec, properties={"format-version": "2"}
     )
-    today = dt.datetime.now(dt.UTC).replace(tzinfo=None)
-    for day_offset in (0, 30):
-        for i in range(2):
-            tbl.append(
-                pa.table(
-                    {"id": [i], "ts": [today - dt.timedelta(days=day_offset)]},
-                    schema=arrow,
-                )
-            )
-    return session.catalog.load_table("db.two_days")
+    now = dt.datetime.now(dt.UTC)
+    for offset in (0, 1, 2, 3):
+        for _ in range(3):
+            tbl.append(pa.table({"ts": [now - dt.timedelta(days=offset)]}, schema=arrow))
+    return session.catalog.load_table("db.daily")
 
 
-def test_the_floor_is_off_by_default(session, two_days):
-    """CONTRIBUTING rule 6: a changed default decides what a nightly run touches.
-
-    An unset floor must compact exactly what it compacted before the setting
-    existed, or every installed config quietly changes meaning on upgrade.
-    """
-    assert CompactionConfig().skip_partitions_newer_than_days is None
-
-    plan = CompactionPlanner(CompactionConfig()).plan(two_days, profile_table(two_days))
-
-    assert len(plan.groups) == 2, "both day partitions compact when no floor is set"
-    assert not [r for _, r in plan.skipped if "floor" in r]
+def _offsets(plan, today_index):
+    """Which day-offsets from today the plan actually compacts."""
+    return sorted(today_index - int(next(iter(g.partition))) for g in plan.groups)
 
 
-def test_the_floor_leaves_the_partition_still_being_written(session, two_days):
-    plan = CompactionPlanner(CompactionConfig(skip_partitions_newer_than_days=7)).plan(
-        two_days, profile_table(two_days)
-    )
+def test_the_default_floor_holds_today_and_yesterday(session, daily):
+    """The default exists for a daily loader extracting *yesterday* at 02:00.
 
-    assert len(plan.groups) == 1, "only the 30-day-old partition is eligible"
-    held = [r for _, r in plan.skipped if "floor" in r]
-    assert len(held) == 1
-    # The reason names the date, so an operator can tell when it becomes eligible
-    # rather than re-deriving the arithmetic.
-    assert "window closes" in held[0] and "7-day floor" in held[0]
-
-
-def test_the_floor_measures_from_the_end_of_the_window_like_evolution(session, two_days):
-    """The same configured number of days must mean the same thing in both.
-
-    Today's partition is *not* zero days old the moment tomorrow begins: rows
-    timestamped 23:59 are still arriving, which is the whole reason
-    `EvolutionRule.older_than_days` measures from the window end. A floor of 1
-    must therefore still hold today's partition.
+    That run writes into yesterday's partition, not today's, so holding only the
+    open window would compact the partition being actively written. A floor of 1
+    counts the most recently closed window as still at risk, which is why the
+    default holds two partitions rather than one.
     """
     import datetime as dt
 
-    today = dt.datetime.now(dt.UTC).date()
-    plan = CompactionPlanner(CompactionConfig(skip_partitions_newer_than_days=1)).plan(
-        two_days, profile_table(two_days), today=today
+    from zamboni.windows import current_index
+
+    assert CompactionConfig().skip_partitions_newer_than_windows == 1
+
+    now = dt.datetime.now(dt.UTC)
+    plan = CompactionPlanner(CompactionConfig()).plan(daily, profile_table(daily), now=now)
+
+    assert _offsets(plan, current_index("day", now)) == [2, 3]
+
+
+@pytest.mark.parametrize(
+    ("floor", "expected"),
+    [(None, [0, 1, 2, 3]), (0, [1, 2, 3]), (1, [2, 3]), (2, [3])],
+    ids=["disabled", "open-window-only", "default", "two-closed"],
+)
+def test_each_floor_releases_the_windows_it_says(session, daily, floor, expected):
+    import datetime as dt
+
+    from zamboni.windows import current_index
+
+    now = dt.datetime.now(dt.UTC)
+    plan = CompactionPlanner(CompactionConfig(skip_partitions_newer_than_windows=floor)).plan(
+        daily, profile_table(daily), now=now
     )
+    assert _offsets(plan, current_index("day", now)) == expected
 
+
+def test_the_held_partition_says_why(session, daily):
+    plan = CompactionPlanner(CompactionConfig()).plan(daily, profile_table(daily))
     held = [r for _, r in plan.skipped if "floor" in r]
-    assert held, "today's partition closes tomorrow, so a 1-day floor still holds it"
+    assert len(held) == 2, "today and yesterday"
+    assert any("still open" in r for r in held)
+    assert any("closed 0 day(s) ago" in r for r in held)
 
 
-def test_evolution_and_compaction_share_one_definition_of_a_closed_window():
-    """Not a comment asking them to agree -- the same function, asserted.
+def test_a_table_with_no_time_partition_is_out_of_scope_not_blocked(session, partitioned):
+    """`partitioned` is identity-partitioned on category.
 
-    Two implementations of "has this window ended" would drift into meaning
-    different things under the same configured number of days, and the drift
-    would be invisible until someone compared a plan against an evolution.
+    The control is about time windows, and this table has none. Out of scope is
+    not the same as refused: the floor is on by default, so refusing would
+    silently stop compacting every non-temporal table in a warehouse, and not
+    compacting is itself a harm.
+    """
+    plan = CompactionPlanner(CompactionConfig()).plan(partitioned, profile_table(partitioned))
+
+    assert plan.groups, "an identity-partitioned table still compacts"
+    assert not [r for _, r in plan.skipped if "floor" in r]
+
+
+def test_evolution_and_compaction_share_one_definition_of_a_window():
+    """Not a comment asking them to agree -- the same module, asserted.
+
+    Two implementations of "when did this window close" would drift into meaning
+    different things under the same configured number, and the drift would be
+    invisible until someone compared a plan against an evolution.
     """
     from zamboni import evolution, planner, windows
 
     assert evolution._window_end is windows.window_end
-    assert planner.window_end is windows.window_end
-
-
-def test_the_floor_refuses_a_partition_it_cannot_date(session, partitioned):
-    """`partitioned` is identity-partitioned on category -- no window at all.
-
-    Refusing is the conservative reading of "do not touch partitions still being
-    written": where that cannot be established, it is not established. The
-    reason lands in the plan, so the refusal is never silent.
-    """
-    plan = CompactionPlanner(CompactionConfig(skip_partitions_newer_than_days=7)).plan(
-        partitioned, profile_table(partitioned)
-    )
-
-    assert plan.is_empty
-    assert plan.skipped
-    assert all("no temporal partition field" in reason for _, reason in plan.skipped)
+    assert planner.windows_since_close is windows.windows_since_close

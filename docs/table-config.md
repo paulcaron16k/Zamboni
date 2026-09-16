@@ -375,7 +375,7 @@ choosing `sort` or `zorder`.
 |---|---|---|
 | `target_file_size_bytes` | table property, else 128 MiB | Falls back to `write.parquet.target-file-size-bytes`, then `write.target-file-size-bytes` |
 | `min_input_files` | 2 | A partition is only compacted with at least this many candidates |
-| `skip_partitions_newer_than_days` | _unset_ | Leave partitions whose time window closed fewer than this many days ago alone, so compaction does not contend with a loader still writing them. Measured from the **end** of the window, like `older_than_days` |
+| `skip_partitions_newer_than_windows` | 1 | Hold the open partition window plus this many recently closed ones, so compaction does not rewrite data a loader is still writing (which inflates every later copy-on-write update). Temporal partitions only |
 
 ---
 

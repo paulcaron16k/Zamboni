@@ -265,7 +265,7 @@
         "min_input_files": {
           "type": "integer"
         },
-        "skip_partitions_newer_than_days": {
+        "skip_partitions_newer_than_windows": {
           "type": [
             "integer",
             "null"
@@ -542,7 +542,7 @@
                 "min_input_files": {
                   "type": "integer"
                 },
-                "skip_partitions_newer_than_days": {
+                "skip_partitions_newer_than_windows": {
                   "type": [
                     "integer",
                     "null"

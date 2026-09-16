@@ -1051,23 +1051,29 @@ planner builds them like this:
 2. Drop the ones already at or above `target_file_size_bytes` — they need no
    rewriting. (Unless `rewrite_all` is set, which keeps them.)
 3. Bucket what remains by **(partition spec id, partition value)**.
-4. If `skip_partitions_newer_than_days` is set, drop buckets whose partition
-   window has not yet closed that many days ago.
+4. Drop buckets whose partition window is still open, or closed too recently —
+   see `skip_partitions_newer_than_windows` below.
 5. Drop buckets with fewer than `min_input_files` files, and buckets of one.
 6. Every surviving bucket is one group.
 
-### Leaving partitions that are still being written (`skip_partitions_newer_than_days`)
+### Leaving partitions that are still being written (`skip_partitions_newer_than_windows`)
 
-Unset by default, which compacts every eligible partition — the behaviour before
-this setting existed.
+**Defaults to `1`**, which on a day-partitioned table holds **today and
+yesterday**. Set `0` to hold only the open window, or `null` to disable the
+floor entirely.
 
-Set it to stop compacting the partition a loader is currently filling.
+Why two partitions and not one: a loader that extracts *yesterday's* data at
+02:00 writes it into **yesterday's** partition, not today's — the partition
+value comes from the row's own timestamp, not from when it was written. So the
+window that closed most recently is still receiving data, and holding only the
+open one would compact the partition being actively filled.
 
 **The reason is write amplification, and it is larger than it looks.** A
 copy-on-write loader — PyIceberg's `upsert`, and so Meltano's `target-iceberg` —
 rewrites the *whole data file* containing a matched row. Compacting the active
 partition therefore makes every subsequent update more expensive, in proportion
-to how well you compacted it. Measured, one upserted row into today's partition:
+to how well you compacted it. Measured, one upserted row into an active
+partition:
 
 | partition layout | files rewritten by the upsert | bytes |
 |---|---|---|
@@ -1079,14 +1085,25 @@ target against ~8MB batch files it is nearer 64x. Compaction is not neutral on a
 partition that is still being written; the better it compacts, the more it costs
 the writer. That cost is paid on every batch until the partition closes.
 
-The effect is specific to **update** workloads. An append-only loader never
-rewrites an existing file, so it sees none of this, and the existing
-`target_file_size_bytes` filter already skips files that are large enough — for
-those tables the setting buys little and can stay unset.
+**Counted in partition windows, not days**, because that is the only unit that
+means the same thing at every granularity. "8 days" is incoherent on a
+month-partitioned table, whose partitions are whole months; "1 window" is this
+month and last. On an hourly table it is this hour and last. Raise it where data
+arrives late — a tap that can be three days behind on a daily table wants `3`.
 
-A second, smaller benefit: a compaction that loses a commit race to a live
-writer has rewritten every file in the group for nothing, and a partition that
-was never planned cannot lose.
+**Scoped to temporal partitions** (`hour`, `day`, `month`, `year` — Iceberg has
+no `week` or `quarter`). A table partitioned on `identity`, `bucket` or
+`truncate` has no window, so the floor does not apply to it rather than
+blocking it: the floor is on by default, and refusing would silently stop
+compacting every non-temporal table in a warehouse.
+
+Where a spec carries **more than one** temporal field, the partition is held if
+any of them is still inside the floor. If a row's `updated_at` window is
+current, that partition is receiving writes whatever its `created_at` says.
+
+It does **not** stop a commit being refused when a writer is active elsewhere in
+the table: Zamboni's pre-commit check compares the table's snapshot id, not the
+files being replaced, so any concurrent commit trips it. Tracked separately.
 
 **It does not, on its own, stop the commit from being refused.** Measured
 against a live catalog with an append-only writer: with the floor set so that
