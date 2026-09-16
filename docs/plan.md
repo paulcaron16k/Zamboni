@@ -138,7 +138,7 @@ test stops existing, so this table cannot rot silently.
 | FR-6.3 | Bounded memory: peak ≈ one output file | `test_chunked_mode_splits_output_by_target_size`, `test_chunked_mode_with_sort_routes_through_duckdb` |
 | FR-6.4 | Refuse to run on a PyIceberg build that would corrupt a table | `test_pruning_without_derivation_is_refused`, `test_missing_operation_argument_is_refused` |
 | FR-6.5 | Non-zero exit on a blocked table | `test_blocked_table_exits_nonzero` |
-| FR-6.6 | A concurrent write is refused, not lost | `test_concurrent_write_is_refused_not_lost` |
+| FR-6.6 | A concurrent write is refused, not lost | `test_a_concurrent_commit_touching_our_files_is_still_refused`, `test_an_unrelated_concurrent_commit_no_longer_refuses_the_rewrite` |
 | FR-6.7 | A row-count mismatch aborts before committing | `test_row_count_mismatch_aborts_before_commit` |
 | FR-6.8 | Format version 1 is blocked | `test_format_version_1_is_blocked` |
 | FR-6.9 | Capabilities are probed, not inferred from a version | `test_probes_the_installed_build`, `test_equality_delete_blocker_follows_the_capability` |

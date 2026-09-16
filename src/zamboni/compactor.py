@@ -216,7 +216,7 @@ class TableCompactor:
 
         # Adding a partition spec is a metadata update that leaves
         # `current_snapshot_id` alone (verified), so the spec change can land
-        # first and one expected-snapshot check still covers the whole run.
+        # before the rewrite without looking like a concurrent write.
         if evolution_plan.groups:
             needed = {
                 g.target_spec_id: evolution_plan.required_specs[g.target_spec_id]
@@ -247,7 +247,6 @@ class TableCompactor:
         best-effort and its leftovers are ordinary orphans, which is a storage
         cost rather than a correctness one.
         """
-        expected = tbl.metadata.current_snapshot_id
         removed: list[DataFile] = []
         added: list[DataFile] = []
         pending: list[tuple[GroupResult, bool]] = []
@@ -279,9 +278,7 @@ class TableCompactor:
                 producer_cls=MultiSpecReplaceFiles,
                 snapshot_properties=_evolution_labels(evolution_plan),
             )
-            outcome = committer.commit(
-                tbl, expected_snapshot_id=expected, removed=removed, added=added
-            )
+            outcome = committer.commit(tbl, removed=removed, added=added)
         except Exception:
             cleanup_orphans(tbl, added)
             raise
@@ -336,7 +333,6 @@ class TableCompactor:
         try:
             return committer.commit(
                 tbl,
-                expected_snapshot_id=tbl.metadata.current_snapshot_id,
                 removed=[f.data_file for f in files],
                 added=output.data_files,
             )

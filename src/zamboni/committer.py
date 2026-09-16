@@ -133,7 +133,6 @@ class ReplaceCommitter:
         self,
         tbl: Table,
         *,
-        expected_snapshot_id: int | None,
         removed: list[DataFile],
         added: list[DataFile],
     ) -> CommitOutcome:
@@ -157,25 +156,26 @@ class ReplaceCommitter:
         nothing for an unusable build to corrupt, and refusing it would fail a
         fleet run that simply had no work for a table.
 
-        Args:
-            expected_snapshot_id: The snapshot the plan was built against. The
-                table is re-read and checked against this immediately before
-                committing, so a concurrent writer produces a clean failure
-                instead of a lost update.
+        **This no longer checks the table's snapshot id**, and did until
+        ZMBNI-79. That check refused whenever the table had moved *at all*,
+        which is coarser than the loss it was guarding against: compaction
+        replaces named files, so a commit touching none of them cannot cause a
+        lost update. PyIceberg 0.12 validates the right thing --
+        ``_validate_data_files_exist`` checks that every file this producer
+        deletes still exists -- and does it per file. Proven adversarially by
+        ``test_a_concurrent_commit_touching_our_files_is_still_refused``: with
+        the old guard gone, a writer that rewrites a file in the removal set is
+        still refused, the rows are not duplicated and its update survives.
+
+        Keeping both was rejected. The old check is not a second opinion, it is
+        a broader one: on a live catalog it refused 39 of 42 compactions that
+        were touching partitions the writer never went near, so it cost the
+        whole rewrite every time and protected nothing extra.
         """
         if not added and not removed:
             return CommitOutcome(tbl.metadata.current_snapshot_id, 0, 0, 0, 0)
 
         assert_supported_pyiceberg()
-
-        tbl.refresh()
-        current = tbl.current_snapshot()
-        current_id = current.snapshot_id if current else None
-        if current_id != expected_snapshot_id:
-            raise ConcurrentModification(
-                f"table snapshot changed between planning ({expected_snapshot_id}) "
-                f"and commit ({current_id})"
-            )
 
         properties = {
             "zamboni.operation": "compaction",

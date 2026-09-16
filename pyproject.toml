@@ -155,7 +155,7 @@ dev = [
 # PyPI therefore gets stock PyIceberg and must redirect the source itself, which
 # is what ExperienceFlow IWS does. The probe in `capabilities.detect()` is what
 # makes that failure loud rather than silent.
-pyiceberg = { git = "https://github.com/paulcaron16k/iceberg-python.git", rev = "3f71be5e7308176c99db9dc6dce7a9a66185107e" }
+pyiceberg = { git = "https://github.com/paulcaron16k/iceberg-python.git", rev = "16c85e421eeb4efe43b7acc39d515471fae60f5f" }
 
 [tool.uv]
 # The whole point of this project's environment: never resolve against whatever
