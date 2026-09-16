@@ -288,6 +288,13 @@ class DanglingDeleteCleaner:
         if self._dry_run:
             return result
 
+        # Kept, where compaction's equivalent was deleted in ZMBNI-79. This
+        # producer does populate `_deleted_data_files`, so upstream's
+        # `_validate_data_files_exist` does run -- but what it hands it are
+        # *delete* files routed through `delete_data_file` (see this module's
+        # header), and whether that validator finds them has not been measured.
+        # Compaction's removal was backed by an adversarial test on a live
+        # catalog; this one would need its own before the same argument applies.
         snapshot = tbl.current_snapshot()
         expected = snapshot.snapshot_id if snapshot else None
 

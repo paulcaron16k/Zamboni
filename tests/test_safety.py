@@ -57,21 +57,52 @@ def test_blockers_and_warnings_are_separated():
     assert [f.code for f in profile.warnings] == ["dangling-delete-files"]
 
 
-def test_concurrent_write_is_refused_not_lost(session, unpartitioned):
-    """A writer that lands between planning and commit must fail the commit."""
-    stale_snapshot_id = unpartitioned.metadata.current_snapshot_id
+def test_a_concurrent_commit_touching_our_files_is_still_refused(session, unpartitioned):
+    """The safety property that survived deleting the table-level guard (ZMBNI-79).
+
+    Compaction reads rows at plan time and writes them into new files. If a
+    concurrent commit has since replaced one of the files being removed, adding
+    the new files anyway would resurrect the stale rows and lose the other
+    writer's update. That must still be refused -- now by PyIceberg's
+    `_validate_data_files_exist`, which checks per file rather than asking
+    whether the table moved.
+
+    Asserted against the installed build rather than assumed: if a future
+    PyIceberg stopped validating, this fails instead of silently committing.
+    """
+    from pyiceberg.exceptions import ValidationException
 
     tbl = session.table("db.unpartitioned")
-    tbl.append(batch(999, 5))  # someone else commits
+    doomed = _any_live_data_file(tbl)
+    replacement = _any_live_data_file(tbl)
+
+    # Someone else replaces the very file we are about to remove.
+    other = session.table("db.unpartitioned")
+    with other.transaction() as txn, txn.update_snapshot().overwrite() as update:
+        update.delete_data_file(doomed)
 
     tbl = session.table("db.unpartitioned")
-    with pytest.raises(ConcurrentModification, match="snapshot changed"):
-        ReplaceCommitter().commit(
-            tbl,
-            expected_snapshot_id=stale_snapshot_id,
-            removed=[],
-            added=[_any_live_data_file(tbl)],
-        )
+    with pytest.raises((ValidationException, ConcurrentModification)):
+        ReplaceCommitter().commit(tbl, removed=[doomed], added=[replacement])
+
+
+def test_an_unrelated_concurrent_commit_no_longer_refuses_the_rewrite(session, unpartitioned):
+    """The behaviour change: a commit touching none of our files must not refuse us.
+
+    The old guard compared the table's snapshot id, so any commit anywhere --
+    including an append to a partition compaction never planned -- ended the
+    rewrite. On a live catalog that refused 39 of 42 compactions against
+    partitions the writer never went near.
+    """
+    tbl = session.table("db.unpartitioned")
+    keep = _any_live_data_file(tbl)
+
+    tbl.append(batch(999, 5))  # someone else commits, touching nothing of ours
+
+    tbl = session.table("db.unpartitioned")
+    # Removes nothing; adds a file. Nothing we depend on has changed.
+    outcome = ReplaceCommitter().commit(tbl, removed=[], added=[keep])
+    assert outcome.snapshot_id is not None, "an unrelated commit must not refuse the rewrite"
 
 
 def test_row_count_mismatch_aborts_before_commit(session, unpartitioned, monkeypatch):
@@ -242,7 +273,7 @@ def test_the_committer_refuses_even_when_it_picks_the_stock_producer(monkeypatch
             # `added`/`removed` are non-empty so the early return for a no-op
             # commit cannot be what raises -- and the guard runs before it anyway.
             ReplaceCommitter(snapshot_operation=snapshot_operation).commit(
-                None, expected_snapshot_id=None, removed=[object()], added=[object()]
+                None, removed=[object()], added=[object()]
             )
 
 

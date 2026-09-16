@@ -359,6 +359,13 @@ class ManifestRewriter:
         if self._dry_run:
             return result
 
+        # Kept, where compaction's equivalent was deleted in ZMBNI-79. The
+        # argument there was that PyIceberg's `_validate_data_files_exist`
+        # already checks per file -- but it only runs `if self._deleted_data_files`,
+        # and rewriting manifests deletes no *data* files, so that validator
+        # never fires for this producer. The redundancy does not transfer, and
+        # removing this without establishing what replaces it would be removing
+        # a guard on the evidence for a different one.
         expected = snapshot.snapshot_id
         tbl.refresh()
         current = tbl.current_snapshot()

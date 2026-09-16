@@ -250,7 +250,48 @@ Two categories beyond the usual set, because this tool deletes files:
   transforms — bucket, day, month, year, hour, truncate — so relying on that extra
   installs a build that cannot write a partitioned table at all.
 
+### BREAKING
+
+- **`ReplaceCommitter.commit` no longer takes `expected_snapshot_id`.** It backed a
+  table-level conflict check that has been deleted (below). The parameter is gone
+  rather than ignored: a library caller passing it gets a `TypeError` and reads
+  this entry, where a silently accepted no-op would have taken away a guard they
+  believed they had. `ReplaceCommitter` is public API; nothing else in its surface
+  changed. (ZMBNI-79)
+
 ### Fixed
+
+- **Compaction no longer refuses because *something else* committed.** The
+  pre-commit check compared the **table's** snapshot id against the one planning
+  saw, so any commit anywhere — an append to a partition compaction never
+  planned — ended the rewrite. Measured on a live catalog against an appending
+  writer: **0 of 42 compactions succeeded**, every one having already rewritten
+  its files.
+
+  The check is redundant as well as coarse. PyIceberg 0.12 validates the right
+  thing per file: `_validate_data_files_exist` refuses when a file this operation
+  is deleting no longer exists, which is exactly the lost update the old check
+  guarded against. Proven adversarially rather than argued — with the old check
+  gone, a writer that rewrites a file in the removal set is still refused, the
+  rows are not duplicated, and its update survives.
+
+  A second, matching narrowing landed in the maintenance fork: serializable
+  isolation ran `_validate_added_data_files` with a `None` filter for any
+  operation without a predicate, and a `None` filter matches everything — so a
+  file rewrite conflicted with *every* concurrent append. Java's `RewriteFiles`
+  draws the line the same way this now does.
+
+  Together: **0 → 31 of 32 successful compactions** against a writer committing
+  continuously into another partition, and 27 of 32 into the *same* partition.
+  The few remaining are the raw compare-and-swap after PyIceberg exhausts its
+  retries — a real lost race, reported as the clean exit-3 refusal added in
+  ZMBNI-76 rather than as a failure.
+
+  `rewrite-manifests` and `remove-dangling-deletes` **keep** their equivalent
+  checks, with the reason recorded at each: the redundancy argument depends on
+  the producer populating `_deleted_data_files`, which rewriting manifests does
+  not do at all, and which `remove-dangling-deletes` does only with *delete*
+  files whose handling by that validator has not been measured. (ZMBNI-79)
 
 - **A table being written to no longer ends the whole fleet run.** Losing a commit
   race to a live writer is a normal Iceberg outcome, and Zamboni already detected
