@@ -47,8 +47,9 @@ from pyiceberg.transforms import DayTransform, HourTransform, MonthTransform, Ye
 from .committer import _ReplaceFiles
 from .profile import LiveFile
 from .tableconfig import EvolutionRule, TableSettings
-
-EPOCH = dt.date(1970, 1, 1)
+from .windows import EPOCH
+from .windows import transform_name as _transform_name
+from .windows import window_end as _window_end
 
 
 def _label(tbl: Table) -> str:
@@ -290,10 +291,6 @@ def _resolve_target_spec(
     return spec, next_spec_id
 
 
-def _transform_name(transform) -> str:
-    return str(transform)
-
-
 def _partition_values(live: LiveFile, expected: int) -> tuple | None:
     """A file's partition tuple, or None if it does not match the spec's arity.
 
@@ -315,24 +312,6 @@ def _group_label(current_spec, target_spec, position: int, key: tuple, rule) -> 
         f"{field.name}={key[i]}" for i, field in enumerate(current_spec.fields) if i != position
     ]
     return f"{head} [{', '.join(others)}]" if others else head
-
-
-def _window_end(granularity: str, value: int) -> dt.date:
-    """The first date *after* the partition window, so ageing is conservative."""
-    if granularity == "hour":
-        return (dt.datetime(1970, 1, 1) + dt.timedelta(hours=value + 1)).date()
-    if granularity == "day":
-        return EPOCH + dt.timedelta(days=value + 1)
-    if granularity == "month":
-        year, month = divmod(value, 12)
-        return _add_month(dt.date(1970 + year, month + 1, 1))
-    if granularity == "year":
-        return dt.date(1970 + value + 1, 1, 1)
-    raise ValueError(f"unsupported granularity {granularity!r}")
-
-
-def _add_month(d: dt.date) -> dt.date:
-    return dt.date(d.year + 1, 1, 1) if d.month == 12 else dt.date(d.year, d.month + 1, 1)
 
 
 def _coarse_value(granularity: str, day: dt.date) -> int:

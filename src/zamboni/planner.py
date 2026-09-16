@@ -15,6 +15,7 @@ multiple partition specs. We split by spec instead, so each group holds a single
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass, field
 
 from pyiceberg.table import Table
@@ -22,6 +23,7 @@ from pyiceberg.typedef import Record
 
 from .config import CompactionConfig, resolve_target_file_size
 from .profile import LiveFile, TableProfile
+from .windows import is_temporal, transform_name, windows_since_close
 
 
 @dataclass(frozen=True)
@@ -92,7 +94,9 @@ class CompactionPlanner:
     def __init__(self, config: CompactionConfig) -> None:
         self._config = config
 
-    def plan(self, tbl: Table, profile: TableProfile) -> CompactionPlan:
+    def plan(
+        self, tbl: Table, profile: TableProfile, *, now: dt.datetime | None = None
+    ) -> CompactionPlan:
         target = resolve_target_file_size(self._config, dict(tbl.properties))
         plan = CompactionPlan(
             identifier=profile.identifier,
@@ -108,8 +112,17 @@ class CompactionPlanner:
                 continue
             buckets.setdefault((live.spec_id, live.partition), []).append(live)
 
+        floor = self._config.skip_partitions_newer_than_windows
+        now = now or dt.datetime.now(dt.UTC)
+
         for (spec_id, partition), files in sorted(buckets.items(), key=lambda kv: str(kv[0])):
             label = f"spec={spec_id} partition={_partition_label(partition)}"
+            # Checked before min_input_files so the reported reason is the
+            # specific one: "we deliberately left this alone" reads very
+            # differently from "not enough files yet".
+            if floor is not None and (reason := _still_open(tbl, spec_id, partition, now, floor)):
+                plan.skipped.append((label, reason))
+                continue
             if not self._config.rewrite_all and len(files) < self._config.min_input_files:
                 reason = (
                     f"{len(files)} candidate file(s) < "
@@ -141,3 +154,40 @@ def _partition_label(partition: Record) -> str:
     except TypeError:  # pragma: no cover - defensive
         return repr(partition)
     return "()" if not values else "(" + ", ".join(repr(v) for v in values) + ")"
+
+
+def _still_open(
+    tbl: Table, spec_id: int, partition: Record, now: dt.datetime, floor: int
+) -> str | None:
+    """Why this partition must be left alone, or None if it may be compacted.
+
+    Scoped to temporal partitions on purpose. The control is about time windows;
+    an identity- or bucket-partitioned table has none, so it is out of scope
+    rather than refused. Refusing would be worse than the problem: with a floor
+    applied by default, it would silently stop compacting whole tables, and not
+    compacting is itself a harm.
+
+    Where a spec carries more than one temporal field, the partition is held if
+    **any** of them is still open. That is conservative rather than a guess: if
+    a row's `updated_at` window is current, the partition is receiving writes
+    whatever its `created_at` says.
+    """
+    spec = tbl.specs().get(spec_id)
+    if spec is None:  # pragma: no cover - a group is built from a live file's spec
+        return None
+
+    values: tuple = tuple(partition)  # type: ignore[arg-type]  # Record is iterable
+    for position, pfield in enumerate(spec.fields):
+        if not is_temporal(pfield.transform):
+            continue
+        if position >= len(values) or values[position] is None:
+            continue
+        granularity = transform_name(pfield.transform)
+        elapsed = windows_since_close(granularity, int(values[position]), now)
+        if elapsed < floor:
+            closed = "still open" if elapsed < 0 else f"closed {elapsed} {granularity}(s) ago"
+            return (
+                f"{pfield.name} window {closed}, inside the {floor}-window floor "
+                f"(skip_partitions_newer_than_windows={floor})"
+            )
+    return None

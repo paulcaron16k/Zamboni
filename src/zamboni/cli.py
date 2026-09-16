@@ -599,6 +599,15 @@ def _add_config_args(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("compaction")
     g.add_argument("--target-file-size-bytes", type=int)
     g.add_argument("--min-input-files", type=int, default=_DEFAULTS.min_input_files)
+    g.add_argument(
+        "--skip-partitions-newer-than-windows",
+        type=int,
+        default=_DEFAULTS.skip_partitions_newer_than_windows,
+        help=(
+            "leave the open partition window plus N recently closed ones alone "
+            "(default 1: today and yesterday, on a daily table)"
+        ),
+    )
     g.add_argument("--rewrite-all", action="store_true")
     g.add_argument(
         "--partial-progress",
@@ -738,6 +747,7 @@ def _config_from(args: argparse.Namespace) -> CompactionConfig:
     return CompactionConfig(
         target_file_size_bytes=args.target_file_size_bytes,
         min_input_files=args.min_input_files,
+        skip_partitions_newer_than_windows=args.skip_partitions_newer_than_windows,
         rewrite_all=args.rewrite_all,
         partial_progress=args.partial_progress,
         memory_mode=MemoryMode(args.memory_mode),

@@ -340,6 +340,7 @@ class TableSettings:
     retention: Retention = field(default_factory=Retention)
     target_file_size_bytes: int | None = None
     min_input_files: int = 2
+    skip_partitions_newer_than_windows: int | None = None
     description: str | None = None
 
     def validate(self, where: str) -> None:
@@ -355,6 +356,11 @@ class TableSettings:
             raise TableConfigError(f"{where}.target_file_size_bytes: must be >= 100")
         if self.min_input_files < 1:
             raise TableConfigError(f"{where}.min_input_files: must be >= 1")
+        if (
+            self.skip_partitions_newer_than_windows is not None
+            and self.skip_partitions_newer_than_windows < 0
+        ):
+            raise TableConfigError(f"{where}.skip_partitions_newer_than_windows: must be >= 0")
 
         # An evolution rule that names a granularity the table does not
         # partition by is almost always a typo, and silently doing nothing is
@@ -479,6 +485,14 @@ class TableConfig:
                 override.retention if override.retention != Retention() else self.defaults.retention
             ),
             min_input_files=override.min_input_files,
+            # Same shape as target_file_size_bytes: an unset table block inherits
+            # the default rather than silently meaning "no floor", which would
+            # make `defaults` unable to express a fleet-wide contention policy.
+            skip_partitions_newer_than_windows=(
+                override.skip_partitions_newer_than_windows
+                if override.skip_partitions_newer_than_windows is not None
+                else self.defaults.skip_partitions_newer_than_windows
+            ),
             description=override.description,
         )
 
@@ -725,6 +739,7 @@ def _settings_from_dict(raw: dict[str, Any], where: str) -> TableSettings:
             "retention",
             "target_file_size_bytes",
             "min_input_files",
+            "skip_partitions_newer_than_windows",
             "description",
         },
         where,
@@ -757,6 +772,9 @@ def _settings_from_dict(raw: dict[str, Any], where: str) -> TableSettings:
             raw, "target_file_size_bytes", where, expect=int, nullable=True
         ),
         min_input_files=_value(raw, "min_input_files", where, expect=int, default=2),
+        skip_partitions_newer_than_windows=_value(
+            raw, "skip_partitions_newer_than_windows", where, expect=int, nullable=True
+        ),
         description=_value(raw, "description", where, expect=str, nullable=True),
     )
 

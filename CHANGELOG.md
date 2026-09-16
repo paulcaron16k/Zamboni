@@ -192,6 +192,26 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Changed
 
+- **Compaction now leaves the partition a loader is still writing alone**, by
+  default. `skip_partitions_newer_than_windows` defaults to `1`, which on a
+  day-partitioned table holds **today and yesterday** — two partitions, because a
+  loader extracting yesterday's data at 02:00 writes it into *yesterday's*
+  partition, not today's.
+
+  **DevOps should know this before deploying**: on time-partitioned tables, the
+  most recent one or two partitions stop being compacted until their window
+  closes. Nothing is deleted and no data changes; only how soon recent data is
+  compacted. Set `0` to hold only the open window, or `null` to restore the
+  previous behaviour. Tables partitioned on `identity`, `bucket` or `truncate`
+  are unaffected — the floor is scoped to `hour`/`day`/`month`/`year`.
+
+  The reason is the *writer's* cost. A copy-on-write upsert rewrites the whole
+  data file holding a matched row, so compacting an active partition makes every
+  later update more expensive in proportion to how well it was compacted.
+  Measured, one upserted row: 3,542 bytes rewritten against 10 small files,
+  26,126 once compacted into one — 7.4x, and the ratio is roughly the number of
+  files merged, so nearer 64x at production file sizes. (ZMBNI-78)
+
 - **PyIceberg is now `>=0.12,<0.13`, resolved from a maintenance fork.** Partition
   evolution needs a library that writes an added data file under *its own*
   partition spec rather than the table default. Stock PyIceberg does not: a

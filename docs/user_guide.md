@@ -1051,8 +1051,85 @@ planner builds them like this:
 2. Drop the ones already at or above `target_file_size_bytes` — they need no
    rewriting. (Unless `rewrite_all` is set, which keeps them.)
 3. Bucket what remains by **(partition spec id, partition value)**.
-4. Drop buckets with fewer than `min_input_files` files, and buckets of one.
-5. Every surviving bucket is one group.
+4. Drop buckets whose partition window is still open, or closed too recently —
+   see `skip_partitions_newer_than_windows` below.
+5. Drop buckets with fewer than `min_input_files` files, and buckets of one.
+6. Every surviving bucket is one group.
+
+### Leaving partitions that are still being written (`skip_partitions_newer_than_windows`)
+
+**Defaults to `1`**, which on a day-partitioned table holds **today and
+yesterday**. Set `0` to hold only the open window, or `null` to disable the
+floor entirely.
+
+Why two partitions and not one: a loader that extracts *yesterday's* data at
+02:00 writes it into **yesterday's** partition, not today's — the partition
+value comes from the row's own timestamp, not from when it was written. So the
+window that closed most recently is still receiving data, and holding only the
+open one would compact the partition being actively filled.
+
+**The reason is write amplification, and it is larger than it looks.** A
+copy-on-write loader — PyIceberg's `upsert`, and so Meltano's `target-iceberg` —
+rewrites the *whole data file* containing a matched row. Compacting the active
+partition therefore makes every subsequent update more expensive, in proportion
+to how well you compacted it. Measured, one upserted row into an active
+partition:
+
+| partition layout | files rewritten by the upsert | bytes |
+|---|---|---|
+| left alone (10 small files) | 1 | **3,542** |
+| compacted into one file | 1 | **26,126** |
+
+7.4x, and the ratio is roughly *the number of files merged* — so at a 512MB
+target against ~8MB batch files it is nearer 64x. Compaction is not neutral on a
+partition that is still being written; the better it compacts, the more it costs
+the writer. That cost is paid on every batch until the partition closes.
+
+**Counted in partition windows, not days**, because that is the only unit that
+means the same thing at every granularity. "8 days" is incoherent on a
+month-partitioned table, whose partitions are whole months; "1 window" is this
+month and last. On an hourly table it is this hour and last. Raise it where data
+arrives late — a tap that can be three days behind on a daily table wants `3`.
+
+**Scoped to temporal partitions** (`hour`, `day`, `month`, `year` — Iceberg has
+no `week` or `quarter`). A table partitioned on `identity`, `bucket` or
+`truncate` has no window, so the floor does not apply to it rather than
+blocking it: the floor is on by default, and refusing would silently stop
+compacting every non-temporal table in a warehouse.
+
+Where a spec carries **more than one** temporal field, the partition is held if
+any of them is still inside the floor. If a row's `updated_at` window is
+current, that partition is receiving writes whatever its `created_at` says.
+
+It does **not** stop a commit being refused when a writer is active elsewhere in
+the table: Zamboni's pre-commit check compares the table's snapshot id, not the
+files being replaced, so any concurrent commit trips it. Tracked separately.
+
+**It does not, on its own, stop the commit from being refused.** Measured
+against a live catalog with an append-only writer: with the floor set so that
+only a 30-day-old partition was planned, compaction was *still* refused on every
+attempt. The reason is that Zamboni's pre-commit check compares the **table's**
+snapshot id, not the files it is replacing, so any commit anywhere in the table
+trips it — even one touching a completely different partition. Making that check
+file-aware is tracked separately; until then, treat this setting as a way to
+stop rewriting data that is about to change, not as a way to win the race.
+
+It is measured from the **end** of the partition window, the same as
+`partition_evolution`'s `older_than_days` and through the same code. A
+`day=2026-09-14` partition is not one day old the moment the 15th begins — rows
+timestamped 23:59 are still arriving — so a floor of `1` still holds it.
+
+It only applies where the spec has exactly one temporal partition field
+(`hour`, `day`, `month`, `year`). Where a partition cannot be dated — no
+temporal field, more than one, or a missing value — the partition is **skipped
+with the reason in the plan** rather than compacted. The instruction was not to
+touch partitions that may still be receiving rows; where that cannot be
+established, it has not been established. Nothing is silent: run `zamboni plan`
+and the reason is printed.
+
+This does not make contention impossible. A copy-on-write upsert can migrate a
+row between partitions and so rewrite an *old* one, which is why a lost race is
+still handled as a clean exit-3 refusal.
 
 There is **no cap on how large a bucket may be**, so an unpartitioned table is
 one group. That is no longer a memory problem, but it is still three other
