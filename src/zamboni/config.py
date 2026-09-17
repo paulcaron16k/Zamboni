@@ -97,6 +97,22 @@ class CompactionConfig:
         rewrite_all: Rewrite every live data file, including files that already
             meet the target size.
         memory_mode: See :class:`MemoryMode`.
+        streaming_writes: Hand an unpartitioned ``CHUNKED`` rewrite's record-batch
+            reader to PyIceberg's writer and let it bin-pack, instead of
+            bin-packing here. **Off by default, and measured before choosing
+            that default** (ZMBNI-16): across 20/40/80 input files the streaming
+            writer ran 12-25% faster and used 55-60% more memory -- 551MB against
+            347MB of compaction working set at the largest size. Both are
+            bounded, so neither breaks FR-6.3; but ``CHUNKED`` is selected
+            precisely when a group will not fit the memory budget, so paying
+            more memory there is the wrong default trade. Opt in where there is
+            headroom and the wall-clock matters.
+
+            Ignored where it cannot apply: a partitioned rewrite always
+            bin-packs locally, because ``_dataframe_to_data_files`` refuses a
+            reader on a partitioned spec, and a build whose
+            ``streaming_write_supported`` probe is false has no streaming writer
+            to delegate to.
         read_ahead_bytes: How much of the group CHUNKED may have in flight at
             once, in on-disk bytes. The window is sized in **bytes rather than
             files** because that is what the memory contract is denominated in:
@@ -159,6 +175,7 @@ class CompactionConfig:
     skip_partitions_newer_than_windows: int | None = 1
     rewrite_all: bool = False
     memory_mode: MemoryMode = MemoryMode.AUTO
+    streaming_writes: bool = False
     memory_budget_bytes: int = 256 * 1024 * 1024
     read_ahead_bytes: int = 64 * 1024 * 1024
     #: Hard cap on files in flight, whatever ``read_ahead_bytes`` allows. A

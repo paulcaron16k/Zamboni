@@ -186,7 +186,13 @@ class LocalMaintainer(Maintainer):
             "refuses a PyIceberg build that would corrupt the table",
         ]
         if probes.streaming_write_supported:
-            invariants.append("delegates bin-packing to PyIceberg's streaming writer")
+            # "can", not "does": since ZMBNI-16 the streaming writer is opt-in
+            # (`streaming_writes`), so the probe says it is available, not that
+            # it is in use. Declaring it as an invariant would have `engines`
+            # promise behaviour a default run does not have.
+            invariants.append(
+                "can delegate bin-packing to PyIceberg's streaming writer (streaming_writes)"
+            )
 
         if reason := probes.unsupported_reason():
             return OperationSupport(
