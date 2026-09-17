@@ -10,7 +10,6 @@ from pyiceberg.manifest import DataFile
 
 from .backends.base import RewriteBackend, RewriteContext, RewriteOutput
 from .backends.duckdb_arrow import DuckDBArrowBackend
-from .capabilities import detect
 from .committer import ReplaceCommitter, assert_supported_pyiceberg, cleanup_orphans
 from .config import (
     DEFAULT_TARGET_FILE_SIZE_BYTES,
@@ -346,28 +345,15 @@ class TableCompactor:
         if self._settings is None:
             return EvolutionPlan(groups=[], skipped=[], required_specs={})
 
-        # Evolution is the one layout feature that needs the library to write an
-        # added file under *its own* partition spec. Where it will not, plan
-        # nothing and say so: the alternative is an `IndexError` out of the Avro
-        # writer at commit time, four frames down and naming nothing. Skipped
-        # rather than raised, because the rest of compaction is unaffected and a
-        # nightly run should still do the other work.
-        if not detect().added_files_honour_spec:
-            return EvolutionPlan(
-                groups=[],
-                skipped=[
-                    (
-                        "partition evolution",
-                        (
-                            "this PyIceberg writes added files under the table's default "
-                            "partition spec, so an evolved file would be described by the "
-                            "wrong spec. Everything else still runs; see "
-                            "docs/pyiceberg-private-api.md for the build that supports it."
-                        ),
-                    )
-                ],
-                required_specs={},
-            )
+        # Evolution is the one layout feature that needs an added file written
+        # under *its own* partition spec: a partition `Record` has the arity of
+        # the spec that produced it, so the wrong spec is an `IndexError` out of
+        # the Avro writer at commit time, four frames down and naming nothing.
+        #
+        # No longer planned around. The maintenance fork does it in the library,
+        # and where the installed build does not, `MultiSpecReplaceFiles` does it
+        # in the committer -- so there is no build on which planning evolution is
+        # unsafe, and nothing here to skip.
         return plan_evolution(tbl, self._settings, profile.live_files)
 
     def _rewrite_evolution_group(self, tbl, group) -> RewriteOutput:

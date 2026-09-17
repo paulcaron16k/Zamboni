@@ -972,9 +972,11 @@ stock PyIceberg does not do. That behaviour lives in our maintenance fork, and
 `[tool.uv.sources]` redirects `pyiceberg` there for anyone building from this repository.
 It is a uv workspace directive and **does not reach wheel metadata**: `pip install
 iceberg-zamboni` gets stock PyIceberg from PyPI, within the range above. On such a build
-the `added_files_honour_spec` probe answers False and partition evolution is withdrawn as a
-layout feature, with the reason stated; the six operations are unaffected. See
-[docs/pyiceberg-private-api.md](docs/pyiceberg-private-api.md).
+the `added_files_honour_spec` probe answers False and `MultiSpecReplaceFiles` supplies the
+behaviour from the committer instead, so **partition evolution works either way**. The
+override runs *only* when the probe says the library will not do it — which is what keeps two
+implementations from becoming two behaviours, and is why it cannot mask a library that has
+been fixed. See [docs/pyiceberg-private-api.md](docs/pyiceberg-private-api.md).
 
 Note the capability probes do not catch a defect like #3758 by design: they answer "can this
 build do X", and such a build *can* upsert -- it simply does it wrongly. Proving

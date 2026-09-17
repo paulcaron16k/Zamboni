@@ -579,7 +579,7 @@ sequenceDiagram
 | Constraint | Handling |
 |---|---|
 | Cannot emit `Operation.REPLACE` — `update_snapshot_summaries` rejects it, in 0.11.1 **and** `main` | `_ReplaceFiles` computes the summary as an overwrite and relabels |
-| `_SnapshotProducer._manifests` declared the added manifest under the **default** spec while grouping deleted entries by each file's own spec | Fixed in the maintenance fork, which Zamboni resolves PyIceberg from; `capabilities.added_files_honour_spec` probes for it and withdraws partition evolution where a build lacks it, rather than letting an evolved file be described by the wrong spec |
+| `_SnapshotProducer._manifests` declared the added manifest under the **default** spec while grouping deleted entries by each file's own spec | Fixed in the maintenance fork, which Zamboni resolves PyIceberg from; `capabilities.added_files_honour_spec` probes for it behaviourally, and `MultiSpecReplaceFiles` falls back to doing it in the committer where a build lacks it -- so the feature is available everywhere and the override is dead code on the fork |
 | Scan planning raises on **equality deletes** | Such tables are blocked, capability-gated so the block lifts automatically |
 | No streaming write path (`_dataframe_to_data_files` takes a `pa.Table`) | Bin-packing done locally; native path used when a build has it |
 | Partitioned streaming writes unsupported (apache/iceberg-python#2152) | Partitioned tables always bin-pack locally |

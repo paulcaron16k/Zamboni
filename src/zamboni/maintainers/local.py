@@ -78,9 +78,11 @@ class LocalMaintainer(Maintainer):
             # naming nothing. Probe-driven, so a build that gains the behaviour
             # -- ours does, see docs/pyiceberg-private-api.md -- gets the
             # feature back without a version comparison anywhere.
-            layout=frozenset(LayoutFeature)
-            if probes.added_files_honour_spec
-            else frozenset(LayoutFeature) - {LayoutFeature.PARTITION_EVOLUTION},
+            # No longer gated on `added_files_honour_spec`: where the library
+            # does not write added files under their own spec,
+            # `MultiSpecReplaceFiles` does it instead, so the feature is
+            # available on every supported build rather than only on the fork.
+            layout=frozenset(LayoutFeature),
             operations={
                 Operation.COMPACT: cls._compact_support(probes),
                 Operation.EXPIRE: OperationSupport(

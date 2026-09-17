@@ -163,9 +163,15 @@ rejects password/token/secret keys by name.
   `pyiceberg` is `>=0.12,<0.13` and resolved from the **maintenance fork** via
   `[tool.uv.sources]` — see `MAINTENANCE-FORK.md` on that branch. The wheel
   publishes only the range, so an install that does not redirect the source gets
-  stock PyIceberg; `capabilities.added_files_honour_spec` probes for the
-  difference and withdraws partition evolution rather than letting it corrupt
-  metadata. The old `<0.12` cap is gone: 0.12.0 shipped and
+  stock PyIceberg. `capabilities.added_files_honour_spec` probes for the
+  difference behaviourally, and `MultiSpecReplaceFiles` carries a **fallback**
+  that runs only when it answers false -- so every consumer gets partition
+  evolution, and on the fork the override is dead code. The probe is what stops
+  the two implementations drifting: the fallback disables itself the moment the
+  library gains the behaviour, so it can never mask a fixed library the way
+  `_surviving_manifests` masked ZMBNI-58. It is exercised by forcing the probe
+  false in `tests/test_evolution.py`, because this repo's own CI never takes it.
+  The old `<0.12` cap is gone: 0.12.0 shipped and
   `test_upsert_on_a_transformed_partition_replaces_rather_than_duplicates`
   passes on it.
 - Removed files are passed as the `DataFile` objects read from the manifests,
