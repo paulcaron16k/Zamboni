@@ -403,3 +403,35 @@ def test_no_doc_states_a_pyiceberg_range_the_project_does_not_declare():
                 f"declare (it declares {sorted(declared)})"
             )
     assert found_anywhere, "no doc states the pyiceberg range; the policy lost its statement"
+
+
+def test_every_extra_the_readme_names_exists():
+    """The install table is a promise about `pip install iceberg-zamboni[...]`.
+
+    A row naming an extra that was renamed or never added sends someone to a
+    command that fails, and the failure looks like their mistake. Checked in
+    both directions: an extra the README does not mention is one nobody can
+    find, which is how `read_ahead_bytes` shipped unusable (see
+    `test_the_guide_documents_every_run_control`).
+    """
+    import tomllib
+
+    with (ROOT / "pyproject.toml").open("rb") as fh:
+        declared = set(tomllib.load(fh)["project"]["optional-dependencies"])
+
+    readme = (ROOT / "README.md").read_text()
+    # Scoped to the extras table: other tables in this file also lead with a
+    # code span (the CI jobs, for one), so matching document-wide would compare
+    # job names against package extras.
+    heading = "### Optional Package Extensions"
+    assert heading in readme, f"README lost {heading!r}; this check has no table to read"
+    section = readme.split(heading, 1)[1].split("\n### ", 1)[0]
+    named = set(re.findall(r"^\| `([a-z][a-z0-9-]*)` \|", section, re.M))
+
+    assert named, "the extras table has no rows; it lost its first column"
+    assert not (named - declared), (
+        f"README names extras pyproject.toml does not declare: {sorted(named - declared)}"
+    )
+    assert not (declared - named), (
+        f"pyproject.toml declares extras the README does not name: {sorted(declared - named)}"
+    )

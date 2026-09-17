@@ -82,8 +82,26 @@ Changelog = "https://github.com/paulcaron16k/Zamboni/blob/main/CHANGELOG.md"
 Issues = "https://github.com/paulcaron16k/Zamboni/issues"
 
 [project.optional-dependencies]
-# Object-store access for a real MinIO/Lakekeeper warehouse.
+# Object-store access where the *fsspec* FileIO is in play. Not needed merely
+# because data lives in a bucket: `s3` and `gs` both prefer `PyArrowFileIO`,
+# whose S3, GCS and Azure filesystems are built into pyarrow. What forces fsspec
+# is a catalog that vends remote signing, or one that sets `py-io-impl`.
 s3 = ["s3fs>=2024.6.0"]
+# Azure is the one that needs a package outright: `abfs`/`abfss` *prefer*
+# `FsspecFileIO`, and the fallback to `PyArrowFileIO` cannot save it --
+# `_infer_file_io_from_scheme` falls through only on `ModuleNotFoundError` at
+# construction, and `FsspecFileIO({})` constructs fine without `adlfs`. The
+# failure is deferred to first use: `get_fs("abfs")` raises. Measured, not read.
+azure = ["adlfs>=2024.7.0"]
+# GCS needs nothing in the ordinary case -- `gs` maps to `PyArrowFileIO` *only*,
+# so fsspec is never chosen for it. This is for the narrow case where a catalog
+# overrides `py-io-impl` to fsspec and takes that choice away.
+gcs = ["gcsfs>=2024.6.0"]
+# For an image built before the tenant's cloud is known. Deliberately not the
+# default: a deployment uses one cloud, and CONTRIBUTING's rule (ZMBNI-914) is
+# that a dependency belongs in the base install when its absence stops the tool
+# doing its job -- not when it covers a case this install will never take.
+cloud = ["s3fs>=2024.6.0", "adlfs>=2024.7.0", "gcsfs>=2024.6.0"]
 # Local SQL catalog, used by the test suite and handy for dry runs.
 sql = ["pyiceberg[sql-sqlite]>=0.12,<0.13"]
 # A *client* for a Trino you already have -- the dev stack's `trino` compose

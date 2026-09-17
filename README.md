@@ -76,9 +76,10 @@ needs the `trino` extra either. That extra is only for `--engine trino`.
 ### Enterprise -- `iceberg-zamboni[s3,spark]`
 
 Your Spark cluster does the heavy lifting: large-scale compaction and sorting, on hardware
-sized for it rather than on one machine's disk and CPU. IT provides the object store (MinIO
-on real disk, AWS S3, GCS), the REST catalog (Lakekeeper or Polaris), and the Spark
-master -- you point Zamboni at those services when you run it.
+sized for it rather than on one machine's disk and CPU. IT provides the object store, the
+REST catalog (Lakekeeper or Polaris), and the Spark master -- you point Zamboni at those
+services when you run it. Which object stores have actually been run against, and which
+have not, is in [Verified against](#verified-against) below.
 
 ```bash
 pip install "iceberg-zamboni[s3,spark]"
@@ -98,7 +99,10 @@ extensions or extras.
 
 | Extra | Purpose, and when you need it | Python dependencies |
 |---|---|---|
-| `s3` | Object-store access. Required whenever data files live in S3, MinIO or GCS rather than on a local path -- so for every use-case above except Dev. Provides the fsspec filesystem PyIceberg and orphan removal use to read, write, **list** and delete objects | `s3fs` |
+| `s3` | The **fsspec** filesystem for S3-compatible storage. Not needed merely because data lives in a bucket: `s3` prefers PyIceberg's `PyArrowFileIO`, whose S3 filesystem is built into pyarrow. What forces fsspec is a catalog that vends **remote signing**, or one that sets `py-io-impl` -- and that is also the posture in which orphan removal is refused, because the signer will not sign `ListObjectsV2` | `s3fs` |
+| `azure` | **Required for Azure.** `abfs`/`abfss` *prefer* `FsspecFileIO`, and the fallback to `PyArrowFileIO` does not save you: PyIceberg falls through only on a `ModuleNotFoundError` at construction, and `FsspecFileIO` constructs fine without `adlfs`. The failure is deferred to first use | `adlfs` |
+| `gcs` | Not needed for ordinary GCS -- `gs` maps to `PyArrowFileIO` **only**, so fsspec is never chosen for it and pyarrow's `GcsFileSystem` does the work. This covers the narrow case where a catalog overrides `py-io-impl` to fsspec and takes that choice away | `gcsfs` |
+| `cloud` | All three of the above, for an image built before the tenant's cloud is known. Not the default: one deployment uses one cloud | `s3fs`, `adlfs`, `gcsfs` |
 | `sql` | A local SQLite catalog, with no catalog server to run. Enough to create and open a warehouse on a laptop; used by the test suite, the demo, and dry runs. Not needed against a REST catalog such as Lakekeeper or Polaris | `pyiceberg[sql-sqlite]` (`sqlalchemy`) |
 | `trino` | The client for `--engine trino`, which runs five of the six operations as `ALTER TABLE … EXECUTE`. **Requires a local Trino stand-alone instance via `dev-stack --profile trino`, or an Enterprise Trino cluster** -- this extra is a client and starts nothing. Not needed to *query* through Trino from a BI tool | `trino` |
 | `spark` | The Spark **Connect** client for `--engine spark --spark-remote sc://…`, which runs all six operations through the Iceberg Spark procedures, Z-order included. **Requires a local Spark stand-alone instance via `dev-stack --profile spark`, or an Enterprise Spark master/cluster.** ~13MB on disk, pure Python, and **no JVM on your machine** -- the driver runs on the server. Needs Spark 4 | `pyspark-client` |
@@ -107,6 +111,33 @@ extensions or extras.
 `spark` and `spark-lib` are the two halves of the same engine and the names say which side
 the JVM is on. Pick `spark` if a cluster exists, `spark-lib` only if none does and you
 would rather carry half a gigabyte than run a server.
+
+### Verified against
+
+Zamboni does not implement any object-store protocol: it calls PyIceberg's `FileIO`, which
+calls pyarrow or fsspec. So the axis that actually changes its behaviour is **not the
+vendor** but the storage *posture* the catalog hands it — credential vending gives
+`PyArrowFileIO` and every operation works, while remote signing gives `FsspecFileIO` and a
+signer that refuses `ListObjectsV2`, `HeadObject` and multi-object `DELETE`, so orphan
+removal cannot run at all. Both postures are exercised on every push.
+
+That is why one store in CI is a deliberate choice rather than a gap, and why this table
+names where the others are verified instead of implying they are not:
+
+| Object store | Status |
+|---|---|
+| **Silo** (maintained MinIO fork) | **Verified, every push.** The `dev-stack` and `spark` CI jobs run a real Lakekeeper against it, in both postures — a credential-vending warehouse and a remote-signing one |
+| **MinIO** | Previously verified, on the same jobs, until MinIO ended community distribution and the images stopped resolving. Silo is the same lineage under maintenance and keeps the S3 API, so the coverage carried over rather than lapsed |
+| **Garage** | Verified **elsewhere**: ExperienceFlow's end-to-end ELT testing runs IWS + Zamboni against it. Deliberately not duplicated here — it would re-test the same two postures against a second implementation of the same API |
+| **AWS S3** | Not run against. Nothing is known to be wrong; nothing has been measured either |
+| **GCS** | Not run against. `gs` maps to `PyArrowFileIO` only, so pyarrow's `GcsFileSystem` does the work and **no extra is required** |
+| **Azure Blob** | Not run against, and it is the one that needs a package: see the `azure` extra above |
+| **Ceph RGW** | Not run against |
+
+"Not run against" is the honest state for most S3-compatible stores, and the reason to
+publish it is that the differences are real when they bite. One example from this
+codebase's own ecosystem: botocore's flexible-checksum default breaks ranged `GET`s
+against Garage, and Zamboni issues ranged reads for every Parquet footer.
 
 ### What "Spark works" has actually been run against
 

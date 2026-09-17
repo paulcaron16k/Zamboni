@@ -261,6 +261,18 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **`azure`, `gcs` and `cloud` extras.** Azure was the gap: `abfs`/`abfss` *prefer*
+  `FsspecFileIO`, and PyIceberg's fallback to `PyArrowFileIO` cannot save it —
+  `_infer_file_io_from_scheme` falls through only on a `ModuleNotFoundError` at
+  construction, and `FsspecFileIO({})` constructs fine without `adlfs`, so the
+  failure is deferred to first use.
+
+  **GCS needs no extra** and never did: `gs` maps to `PyArrowFileIO` only, so
+  fsspec is never chosen for it and pyarrow's `GcsFileSystem` does the work. The
+  `gcs` extra exists for the narrow case where a catalog overrides `py-io-impl`.
+  `cloud` pulls all three, for an image built before the tenant's cloud is known;
+  it is deliberately not the default, because one deployment uses one cloud.
+
 - **Partition evolution now works on a stock PyIceberg install**, not only on one
   redirected to the maintenance fork. `[tool.uv.sources]` is a uv workspace
   directive and does not reach wheel metadata, so `pip install iceberg-zamboni`
@@ -284,6 +296,18 @@ Two categories beyond the usual set, because this tool deletes files:
   instrumentation to enter both branches, once each. (ZMBNI-16)
 
 ### Fixed
+
+- **The README claimed object stores nobody had run against.** It told an operator
+  that IT provides the store "(MinIO on real disk, AWS S3, GCS)" and that the `s3`
+  extra covers "S3, MinIO or GCS". Neither GCS nor AWS S3 proper has been run
+  against — `docs/live-verification.md` records Lakekeeper + MinIO, now Silo — and
+  the `s3` extra is not what makes a bucket work, since `s3` and `gs` both prefer
+  `PyArrowFileIO`.
+
+  Replaced with a **Verified against** table naming each store's real status,
+  including the ones verified elsewhere (Garage, in ExperienceFlow's end-to-end
+  ELT testing) and the ones simply not run against. `test_every_extra_the_readme_names_exists`
+  now ties the install table to `pyproject.toml` in both directions. (ZMBNI-85)
 
 - **`target_file_size_bytes` was ignored on the streaming write path.** PyIceberg's
   writer bin-packs a `RecordBatchReader` by the table property
