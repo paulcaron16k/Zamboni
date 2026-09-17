@@ -21,107 +21,20 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
-### Added
+## [0.4.0] - 2026-09-17
 
-- **`as_dict()` on every operation result**, alongside `describe()`. Until now the
-  only machine-readable thing a run produced was an exit code: everything about
-  *what changed* was English prose, so an integrator exporting per-operation
-  counters had to regex sentences that [docs/releasing.md](docs/releasing.md)
-  explicitly does not cover — meaning a wording improvement was a breaking change
-  by accident, in the one direction the contract could not describe.
+### BREAKING
 
-  `Outcome` and `MaintenanceReport` carry it too, so a whole run serialises in one
-  call. Keys are stable identifiers, JSON-serialisable, and never contain a
-  PyIceberg object — `DanglingReport.removable` and `RewritePlan.replaced` hold
-  `DataFile`/`ManifestFile` and are reported as counts, so upstream's internal
-  representation does not become something this package owns.
 
-  **The keys are now a covered surface**: removing or renaming one is breaking,
-  adding one is not, and `describe()`'s wording remains explicitly uncovered.
-  Trino reports no counters and so has none — absent rather than zero, because
-  inventing `files_rewritten: 0` would be a false measurement dressed as a uniform
-  schema. Raised by the first production integrator.
-
-- **`remove-orphans` and `expire` now reclaim storage on Zamboni's own object-store
-  credentials, governed by `ZAMBONI_CREDENTIAL_USE`.** A warehouse whose catalog
-  remote-signs instead of vending credentials could not reclaim anything: Lakekeeper's
-  signer refuses `ListObjectsV2`, `HeadObject` and multi-object `DELETE`, so `expire`
-  committed and freed nothing while `remove-orphans` failed outright. Reads and writes
-  worked throughout, which is why the warehouse looked healthy until you tried to free a
-  byte.
-
-  The warehouse system owns its object store; the catalog is a service in front of it, and
-  remote signing exists to constrain external readers rather than the maintenance job. So
-  given bucket credentials, Zamboni now uses them and the signing policy no longer applies
-  to it — which is what Spark has always done via `spark.hadoop.fs.s3a.*` on the Spark
-  server.
-
-  | `ZAMBONI_CREDENTIAL_USE` | Behaviour |
-  |---|---|
-  | `always` *(default)* | Zamboni's credentials for every operation, when configured |
-  | `reclaim-only` | `expire` and `remove-orphans` only; reads stay on the catalog's |
-  | `never` | The catalog governs Zamboni as it governs any client |
-
-  Under the first two, **a signing catalog with no credentials configured is refused before
-  anything runs**, naming the table and what to set — rather than a reclaim pass that lists
-  what it can and deletes what it managed to sign.
-
-  Not a change for a credential-vending (`sts-enabled: true`) warehouse: there is nothing to
-  override, and nothing is refused. Not a way around a deliberate boundary either — it needs
-  credentials someone has to grant. The safety invariants are untouched: owning the storage
-  changes who authenticates, not what may be deleted.
-
-  Implemented by replacing the table's `FileIO`, because PyIceberg has no supported
-  precedence for client-supplied storage credentials — passing `s3.access-key-id` and
-  `s3.endpoint` to a signing catalog is measurably a no-op, and silently so. Tracked as
-  ZMBNI-56 with the measurements, and the override is deleted when upstream gains one.
-
-- **A JSON Schema for `table-config.json`, shipped in the wheel and served by
-  `zamboni.get_table_config_spec()`.** Anything that *writes* these files — a
-  Meltano catalog conversion, a UI, a service modelling its own warehouses — had
-  nothing machine-readable to check its output against, and had to pull a copy
-  from GitHub or guess a path inside the installed package.
-
-  **Generated from the dataclasses in `zamboni.tableconfig`, not hand-written.**
-  A hand-written schema would make three descriptions of one format —
-  `docs/table-config.md`, `tableconfig.py`, and the schema — and two of them
-  would drift. `scripts/build-table-config-schema.py` regenerates it and a test
-  fails when the committed file falls behind, the same arrangement as `bin/`.
-
-  It is a **shape** check: keys, types, enumerations, and
-  `additionalProperties: false` everywhere, matching the loader's own refusal of
-  unknown keys. Cross-field rules cannot be expressed in JSON Schema —
-  `ordering.mode: "sort"` requiring a non-empty `sort` list, evolution having to
-  move to a coarser granularity — so `TableConfig.load()` stays the authority and
-  a document can satisfy the schema and still be refused. The reverse never
-  happens, and a test pins it by comparing the schema's keys against the key set
-  the loader's own error message declares.
-
-  The schema declares its dialect with `$schema` (draft 2020-12) and pins the
-  format's `version` to `SPEC_VERSION`, so a schema from an older wheel rejects a
-  newer file loudly rather than half-accepting it. `jsonschema` is a test-only
-  dependency: the API hands back a dict and lets the caller pick a validator
-  rather than making every install carry one.
-
-### Removed
-
-- **`docs/upstream-0.12-upsert-regression.md`**, which both this file and the
-  README linked. Its reproduction is now
-  `test_upsert_on_a_transformed_partition_replaces_rather_than_duplicates`, which
-  fails on a build exhibiting the bug and passes on one that does not — the
-  question the document was answering in prose. The upstream issue
-  ([#3758](https://github.com/apache/iceberg-python/issues/3758)) and its fix
-  ([#3780](https://github.com/apache/iceberg-python/pull/3780), merged) remain the
-  source of detail, and every reference now points at one of those or at the test.
-
-  Two things the document carried that prose was the wrong home for are now
-  assertions instead: the partition spec being *required* to reproduce is
-  `test_the_upsert_defect_needs_a_partition_spec`, and which transforms are
-  affected is measured per transform in the test's own docstring rather than
-  characterised — an earlier draft said "any non-identity transform", and
-  `truncate` is non-identity and correct.
+- **`ReplaceCommitter.commit` no longer takes `expected_snapshot_id`.** It backed a
+  table-level conflict check that has been deleted (below). The parameter is gone
+  rather than ignored: a library caller passing it gets a `TypeError` and reads
+  this entry, where a silently accepted no-op would have taken away a guard they
+  believed they had. `ReplaceCommitter` is public API; nothing else in its surface
+  changed. (ZMBNI-79)
 
 ### SAFETY
+
 
 - **`table-config.json` now type-checks every value, and a `null` is refused
   where it used to be swallowed.** The case this is filed under SAFETY for:
@@ -163,7 +76,6 @@ Two categories beyond the usual set, because this tool deletes files:
   than one that is refused. If you have a `null` in a `table-config.json`, the
   run now tells you where — and if it was on an `enabled` flag, that operation
   was not running.
-
 - **Every operation that commits through the private snapshot producers now
   refuses an unsupported PyIceberg build.** `assert_supported_pyiceberg()` had
   one caller, so five of the six mutating operations never consulted it — and
@@ -190,7 +102,148 @@ Two categories beyond the usual set, because this tool deletes files:
   admits, `prunes_manifests_by_predicate` is false and the guard never fires. The
   exposure would have arrived with the cap being lifted.
 
+### Security
+
+
+- **Every GitHub Action is pinned to a commit SHA**, with the release in a
+  trailing comment. They were pinned to movable refs, so each job ran whatever
+  `v4` or `release/v1` pointed at that morning — including the `release.yml`
+  job holding an OIDC credential that can publish to PyPI. `.github/dependabot.yml`
+  proposes monthly bumps so the pins do not rot, and two tests keep both halves
+  honest. Raised by the 0.3.0 security review; ZMBNI-1817.
+
+### Added
+
+
+- **`as_dict()` on every operation result**, alongside `describe()`. Until now the
+  only machine-readable thing a run produced was an exit code: everything about
+  *what changed* was English prose, so an integrator exporting per-operation
+  counters had to regex sentences that [docs/releasing.md](docs/releasing.md)
+  explicitly does not cover — meaning a wording improvement was a breaking change
+  by accident, in the one direction the contract could not describe.
+
+  `Outcome` and `MaintenanceReport` carry it too, so a whole run serialises in one
+  call. Keys are stable identifiers, JSON-serialisable, and never contain a
+  PyIceberg object — `DanglingReport.removable` and `RewritePlan.replaced` hold
+  `DataFile`/`ManifestFile` and are reported as counts, so upstream's internal
+  representation does not become something this package owns.
+
+  **The keys are now a covered surface**: removing or renaming one is breaking,
+  adding one is not, and `describe()`'s wording remains explicitly uncovered.
+  Trino reports no counters and so has none — absent rather than zero, because
+  inventing `files_rewritten: 0` would be a false measurement dressed as a uniform
+  schema. Raised by the first production integrator.
+- **`remove-orphans` and `expire` now reclaim storage on Zamboni's own object-store
+  credentials, governed by `ZAMBONI_CREDENTIAL_USE`.** A warehouse whose catalog
+  remote-signs instead of vending credentials could not reclaim anything: Lakekeeper's
+  signer refuses `ListObjectsV2`, `HeadObject` and multi-object `DELETE`, so `expire`
+  committed and freed nothing while `remove-orphans` failed outright. Reads and writes
+  worked throughout, which is why the warehouse looked healthy until you tried to free a
+  byte.
+
+  The warehouse system owns its object store; the catalog is a service in front of it, and
+  remote signing exists to constrain external readers rather than the maintenance job. So
+  given bucket credentials, Zamboni now uses them and the signing policy no longer applies
+  to it — which is what Spark has always done via `spark.hadoop.fs.s3a.*` on the Spark
+  server.
+
+  | `ZAMBONI_CREDENTIAL_USE` | Behaviour |
+  |---|---|
+  | `always` *(default)* | Zamboni's credentials for every operation, when configured |
+  | `reclaim-only` | `expire` and `remove-orphans` only; reads stay on the catalog's |
+  | `never` | The catalog governs Zamboni as it governs any client |
+
+  Under the first two, **a signing catalog with no credentials configured is refused before
+  anything runs**, naming the table and what to set — rather than a reclaim pass that lists
+  what it can and deletes what it managed to sign.
+
+  Not a change for a credential-vending (`sts-enabled: true`) warehouse: there is nothing to
+  override, and nothing is refused. Not a way around a deliberate boundary either — it needs
+  credentials someone has to grant. The safety invariants are untouched: owning the storage
+  changes who authenticates, not what may be deleted.
+
+  Implemented by replacing the table's `FileIO`, because PyIceberg has no supported
+  precedence for client-supplied storage credentials — passing `s3.access-key-id` and
+  `s3.endpoint` to a signing catalog is measurably a no-op, and silently so. Tracked as
+  ZMBNI-56 with the measurements, and the override is deleted when upstream gains one.
+- **A JSON Schema for `table-config.json`, shipped in the wheel and served by
+  `zamboni.get_table_config_spec()`.** Anything that *writes* these files — a
+  Meltano catalog conversion, a UI, a service modelling its own warehouses — had
+  nothing machine-readable to check its output against, and had to pull a copy
+  from GitHub or guess a path inside the installed package.
+
+  **Generated from the dataclasses in `zamboni.tableconfig`, not hand-written.**
+  A hand-written schema would make three descriptions of one format —
+  `docs/table-config.md`, `tableconfig.py`, and the schema — and two of them
+  would drift. `scripts/build-table-config-schema.py` regenerates it and a test
+  fails when the committed file falls behind, the same arrangement as `bin/`.
+
+  It is a **shape** check: keys, types, enumerations, and
+  `additionalProperties: false` everywhere, matching the loader's own refusal of
+  unknown keys. Cross-field rules cannot be expressed in JSON Schema —
+  `ordering.mode: "sort"` requiring a non-empty `sort` list, evolution having to
+  move to a coarser granularity — so `TableConfig.load()` stays the authority and
+  a document can satisfy the schema and still be refused. The reverse never
+  happens, and a test pins it by comparing the schema's keys against the key set
+  the loader's own error message declares.
+
+  The schema declares its dialect with `$schema` (draft 2020-12) and pins the
+  format's `version` to `SPEC_VERSION`, so a schema from an older wheel rejects a
+  newer file loudly rather than half-accepting it. `jsonschema` is a test-only
+  dependency: the API hands back a dict and lets the caller pick a validator
+  rather than making every install carry one.
+
+- **`azure`, `gcs` and `cloud` extras.** Azure was the gap: `abfs`/`abfss` *prefer*
+  `FsspecFileIO`, and PyIceberg's fallback to `PyArrowFileIO` cannot save it —
+  `_infer_file_io_from_scheme` falls through only on a `ModuleNotFoundError` at
+  construction, and `FsspecFileIO({})` constructs fine without `adlfs`, so the
+  failure is deferred to first use.
+
+  **GCS needs no extra** and never did: `gs` maps to `PyArrowFileIO` only, so
+  fsspec is never chosen for it and pyarrow's `GcsFileSystem` does the work. The
+  `gcs` extra exists for the narrow case where a catalog overrides `py-io-impl`.
+  `cloud` pulls all three, for an image built before the tenant's cloud is known;
+  it is deliberately not the default, because one deployment uses one cloud.
+- **Partition evolution now works on a stock PyIceberg install**, not only on one
+  redirected to the maintenance fork. `[tool.uv.sources]` is a uv workspace
+  directive and does not reach wheel metadata, so `pip install iceberg-zamboni`
+  resolves PyIceberg from PyPI — and until now that build had the feature
+  *withdrawn*, because the library writes every added data file under the table's
+  default partition spec.
+
+  `MultiSpecReplaceFiles` carries the behaviour again as a **fallback**, and the
+  behavioural probe `added_files_honour_spec` decides: where the library already
+  does it, every override delegates to `super()` and the class is a name. So the
+  complexity is absorbed here rather than pushed onto consumers, and no consumer
+  has to redirect a source to get the full feature set.
+
+  Two copies of one behaviour is the arrangement that hid ZMBNI-58 for months, so
+  the guard against a repeat is structural rather than a comment: the fallback
+  runs *only* when the probe says the library will not, so it disables itself the
+  moment the library gains the behaviour and can never mask a fixed one. Because
+  that makes it dead code on this repository's own CI,
+  `test_evolution_condenses_days_into_a_month` is parametrised to force the probe
+  false and drive the whole evolution path through the fallback — verified by
+  instrumentation to enter both branches, once each. (ZMBNI-16)
+
+- **A monthly version watch, in place of a nightly test run.** Every `<` bound in
+  `pyproject.toml` is a decision with an expiry date -- `pyiceberg<0.12` is a
+  data-corruption workaround, the dev group's `pyspark-client<4.1` is matched to
+  the dev stack's server -- and nothing announced when one went stale.
+  Dependabot cannot: its `uv` ecosystem updates `uv.lock` and not
+  `pyproject.toml`, so with `<4.1` written down the most it can offer is a 4.0.x
+  patch. `scripts/version_watch.py` asks PyPI about every cap the file declares,
+  ignores pre-releases and fully yanked versions, and keeps one issue current.
+  Seconds, no containers, no matrix. It found `pyspark-client` 4.2.0 on its first
+  run.
+
+  A nightly re-run of the suite was considered and rejected: every input to the
+  tests is pinned -- `uv.lock`, exact image tags, pinned Maven jars, SHA-pinned
+  actions -- so against an unchanged commit it re-proves the tick that commit
+  already has.
+
 ### Changed
+
 
 - **Compaction now leaves the partition a loader is still writing alone**, by
   default. `skip_partitions_newer_than_windows` defaults to `1`, which on a
@@ -211,7 +264,6 @@ Two categories beyond the usual set, because this tool deletes files:
   Measured, one upserted row: 3,542 bytes rewritten against 10 small files,
   26,126 once compacted into one — 7.4x, and the ratio is roughly the number of
   files merged, so nearer 64x at production file sizes. (ZMBNI-78)
-
 - **PyIceberg is now `>=0.12,<0.13`, resolved from a maintenance fork.** Partition
   evolution needs a library that writes an added data file under *its own*
   partition spec rather than the table default. Stock PyIceberg does not: a
@@ -244,81 +296,10 @@ Two categories beyond the usual set, because this tool deletes files:
   `pyiceberg` has to be a *direct* dependency there — uv applies `tool.uv.sources`
   to the declaring project's own dependencies, and a redirect aimed only at a
   transitive one is silently ignored.
-
 - **`pyiceberg-core` is a declared dependency.** 0.12 moved it out of the
   `[pyarrow]` extra while `transforms.pyarrow_transform` still needs it for six
   transforms — bucket, day, month, year, hour, truncate — so relying on that extra
   installs a build that cannot write a partitioned table at all.
-
-### BREAKING
-
-- **`ReplaceCommitter.commit` no longer takes `expected_snapshot_id`.** It backed a
-  table-level conflict check that has been deleted (below). The parameter is gone
-  rather than ignored: a library caller passing it gets a `TypeError` and reads
-  this entry, where a silently accepted no-op would have taken away a guard they
-  believed they had. `ReplaceCommitter` is public API; nothing else in its surface
-  changed. (ZMBNI-79)
-
-### Added
-
-- **`azure`, `gcs` and `cloud` extras.** Azure was the gap: `abfs`/`abfss` *prefer*
-  `FsspecFileIO`, and PyIceberg's fallback to `PyArrowFileIO` cannot save it —
-  `_infer_file_io_from_scheme` falls through only on a `ModuleNotFoundError` at
-  construction, and `FsspecFileIO({})` constructs fine without `adlfs`, so the
-  failure is deferred to first use.
-
-  **GCS needs no extra** and never did: `gs` maps to `PyArrowFileIO` only, so
-  fsspec is never chosen for it and pyarrow's `GcsFileSystem` does the work. The
-  `gcs` extra exists for the narrow case where a catalog overrides `py-io-impl`.
-  `cloud` pulls all three, for an image built before the tenant's cloud is known;
-  it is deliberately not the default, because one deployment uses one cloud.
-
-- **Partition evolution now works on a stock PyIceberg install**, not only on one
-  redirected to the maintenance fork. `[tool.uv.sources]` is a uv workspace
-  directive and does not reach wheel metadata, so `pip install iceberg-zamboni`
-  resolves PyIceberg from PyPI — and until now that build had the feature
-  *withdrawn*, because the library writes every added data file under the table's
-  default partition spec.
-
-  `MultiSpecReplaceFiles` carries the behaviour again as a **fallback**, and the
-  behavioural probe `added_files_honour_spec` decides: where the library already
-  does it, every override delegates to `super()` and the class is a name. So the
-  complexity is absorbed here rather than pushed onto consumers, and no consumer
-  has to redirect a source to get the full feature set.
-
-  Two copies of one behaviour is the arrangement that hid ZMBNI-58 for months, so
-  the guard against a repeat is structural rather than a comment: the fallback
-  runs *only* when the probe says the library will not, so it disables itself the
-  moment the library gains the behaviour and can never mask a fixed one. Because
-  that makes it dead code on this repository's own CI,
-  `test_evolution_condenses_days_into_a_month` is parametrised to force the probe
-  false and drive the whole evolution path through the fallback — verified by
-  instrumentation to enter both branches, once each. (ZMBNI-16)
-
-### Fixed
-
-- **The README claimed object stores nobody had run against.** It told an operator
-  that IT provides the store "(MinIO on real disk, AWS S3, GCS)" and that the `s3`
-  extra covers "S3, MinIO or GCS". Neither GCS nor AWS S3 proper has been run
-  against — `docs/live-verification.md` records Lakekeeper + MinIO, now Silo — and
-  the `s3` extra is not what makes a bucket work, since `s3` and `gs` both prefer
-  `PyArrowFileIO`.
-
-  Replaced with a **Verified against** table naming each store's real status,
-  including the ones verified elsewhere (Garage, in ExperienceFlow's end-to-end
-  ELT testing) and the ones simply not run against. `test_every_extra_the_readme_names_exists`
-  now ties the install table to `pyproject.toml` in both directions. (ZMBNI-85)
-
-- **`target_file_size_bytes` was ignored on the streaming write path.** PyIceberg's
-  writer bin-packs a `RecordBatchReader` by the table property
-  `write.target-file-size-bytes`, falling back to its own 512MB default — so the
-  configured value was honoured when an unpartitioned chunked rewrite bin-packed
-  locally and silently ignored when it delegated. One config key, two meanings,
-  decided by whether a table happened to be partitioned. A 16MB target produced
-  **1 output file one way and 14 the other** from identical input. The resolved
-  target now travels with the metadata handed to the writer. (ZMBNI-16)
-
-### Changed
 
 - **PyIceberg's streaming writer is now opt-in (`streaming_writes`), not
   automatic.** It was selected whenever the build supported it and the rewrite was
@@ -333,7 +314,6 @@ Two categories beyond the usual set, because this tool deletes files:
   `zamboni engines` now reports the writer as *available* rather than in use: the
   probe says the build has one, which since this change no longer means a run
   will take that path. (ZMBNI-16)
-
 - **Compaction no longer refuses because *something else* committed.** The
   pre-commit check compared the **table's** snapshot id against the one planning
   saw, so any commit anywhere — an append to a partition compaction never
@@ -365,7 +345,6 @@ Two categories beyond the usual set, because this tool deletes files:
   the producer populating `_deleted_data_files`, which rewriting manifests does
   not do at all, and which `remove-dangling-deletes` does only with *delete*
   files whose handling by that validator has not been measured. (ZMBNI-79)
-
 - **A table being written to no longer ends the whole fleet run.** Losing a commit
   race to a live writer is a normal Iceberg outcome, and Zamboni already detected
   it correctly — `ReplaceCommitter.commit` re-reads the table and refuses rather
@@ -386,7 +365,6 @@ Two categories beyond the usual set, because this tool deletes files:
   `ConcurrentModification` and 4 `ValidationException`. **Nothing was corrupted in
   any of them** — detection worked every time, and the defect was only ever in
   what happened next. (ZMBNI-76)
-
 - **The docs said PyIceberg 0.11.x was fully supported, five days after it stopped
   being installable.** ZMBNI-59 moved the floor to `>=0.12,<0.13`; the README still
   carried a section headed "Why PyIceberg is capped at `<0.12`" telling readers the
@@ -401,7 +379,6 @@ Two categories beyond the usual set, because this tool deletes files:
   `NotImplementedError` it actually raises.
   `test_no_doc_states_a_pyiceberg_range_the_project_does_not_declare` makes the
   next such drift a build failure. (ZMBNI-18)
-
 - **The dev stack's object storage is Silo (`pgsty/silo`), a maintained fork of
   MinIO.** Between 2026-09-09 and 2026-09-12 the `minio/minio` and `minio/mc`
   Docker Hub repositories stopped resolving — an anonymous `docker pull` answers
@@ -420,7 +397,6 @@ Two categories beyond the usual set, because this tool deletes files:
   endpoint still `http://minio:9000`, and the credentials still `MINIO_ROOT_*`.
   `MINIO_VERSION` in `dev-stack/.env.sample` becomes `SILO_VERSION` — the only
   rename a developer with an existing `.env` has to make. (ZMBNI-67)
-
 - **`MultiSpecReplaceFiles` now builds the delete predicate its base class
   requires.** Overriding `_OverwriteFiles._manifests` takes on that method's
   ordering, and ours called `_deleted_entries()` without the
@@ -438,7 +414,6 @@ Two categories beyond the usual set, because this tool deletes files:
   Measured: 19 test failures on PyIceberg 0.12.0 and on upstream `main`
   (`9299bdb8`) become 1, the remainder being an unrelated packaging assertion.
   This is what stood between us and adopting 0.12.
-
 - **`apply-properties` no longer fails a run when the config declares no metadata
   properties.** `MetadataSettings` defaults both `previous_versions_max` and
   `delete_after_commit` to `None`, and its own documentation defines that as
@@ -471,8 +446,6 @@ Two categories beyond the usual set, because this tool deletes files:
   what the asymmetric fifth row of the covered surface in
   [docs/releasing.md](docs/releasing.md) is about.
 
-### Changed
-
 - **The demo is `zamboni.demo`, not a top-level `himsdemo`.** Installing
   `iceberg-zamboni` put an unnamespaced `himsdemo` package on the import path --
   a name that says nothing about where it came from, and one any other
@@ -501,26 +474,6 @@ Two categories beyond the usual set, because this tool deletes files:
   shipping to people who never run the demo -- is recorded in #24 for if the
   fixtures grow.
 
-### Added
-
-- **A monthly version watch, in place of a nightly test run.** Every `<` bound in
-  `pyproject.toml` is a decision with an expiry date -- `pyiceberg<0.12` is a
-  data-corruption workaround, the dev group's `pyspark-client<4.1` is matched to
-  the dev stack's server -- and nothing announced when one went stale.
-  Dependabot cannot: its `uv` ecosystem updates `uv.lock` and not
-  `pyproject.toml`, so with `<4.1` written down the most it can offer is a 4.0.x
-  patch. `scripts/version_watch.py` asks PyPI about every cap the file declares,
-  ignores pre-releases and fully yanked versions, and keeps one issue current.
-  Seconds, no containers, no matrix. It found `pyspark-client` 4.2.0 on its first
-  run.
-
-  A nightly re-run of the suite was considered and rejected: every input to the
-  tests is pinned -- `uv.lock`, exact image tags, pinned Maven jars, SHA-pinned
-  actions -- so against an unchanged commit it re-proves the tick that commit
-  already has.
-
-### Changed
-
 - **Epics and stories are GitHub issues, not rows in a markdown file.** Ids came
   from us before -- `ZMBNI-1xx` per epic, assigned by hand -- and now they come
   from GitHub, tracked on project #23 with the `gh agile` extension.
@@ -530,7 +483,6 @@ Two categories beyond the usual set, because this tool deletes files:
   are gone -- three are now covered by GitHub or by `gh agile validate`, and the
   story-count check died with the hand-written totals it existed to police. The
   fifth, FR traceability, was broadened to every document instead.
-
 - **The PyPI development status is Beta**, not Alpha. Alpha understated where
   this is: the scope is delivered, every operation is verified against a live
   Lakekeeper and MinIO plus real Trino and Spark servers, and CI runs green on
@@ -538,7 +490,6 @@ Two categories beyond the usual set, because this tool deletes files:
   same two things `1.0.0` does, a maintenance cycle against a warehouse we did
   not build and a second user on the config schema. Takes effect on the next
   release; PyPI metadata cannot be edited in place.
-
 - **CI tests every Python `pyproject.toml` claims**, not only the endpoints.
   The matrix was 3.11 and 3.13 -- the floor and the development pin -- while the
   classifiers promised 3.12 as well. Endpoints catch a 3.12-only *construct*,
@@ -546,17 +497,6 @@ Two categories beyond the usual set, because this tool deletes files:
   passes both and breaks for whoever is on 3.12. The legs run in parallel, so
   the third costs no wall-clock. 507 tests pass there, so the claim was true --
   it simply had no evidence behind it.
-
-### Security
-
-- **Every GitHub Action is pinned to a commit SHA**, with the release in a
-  trailing comment. They were pinned to movable refs, so each job ran whatever
-  `v4` or `release/v1` pointed at that morning — including the `release.yml`
-  job holding an OIDC credential that can publish to PyPI. `.github/dependabot.yml`
-  proposes monthly bumps so the pins do not rot, and two tests keep both halves
-  honest. Raised by the 0.3.0 security review; ZMBNI-1817.
-
-### Changed
 
 - **What "Spark works" means is now stated per connection path.** The security
   review flagged `spark-lib`'s `pyspark>=3.5` floor as looser than the Connect
@@ -573,6 +513,48 @@ Two categories beyond the usual set, because this tool deletes files:
   table per path, and every Spark run logs the version it reached and how it
   connected -- once per run -- so a failure on an untested combination names
   the combination. ZMBNI-1818.
+
+### Removed
+
+
+- **`docs/upstream-0.12-upsert-regression.md`**, which both this file and the
+  README linked. Its reproduction is now
+  `test_upsert_on_a_transformed_partition_replaces_rather_than_duplicates`, which
+  fails on a build exhibiting the bug and passes on one that does not — the
+  question the document was answering in prose. The upstream issue
+  ([#3758](https://github.com/apache/iceberg-python/issues/3758)) and its fix
+  ([#3780](https://github.com/apache/iceberg-python/pull/3780), merged) remain the
+  source of detail, and every reference now points at one of those or at the test.
+
+  Two things the document carried that prose was the wrong home for are now
+  assertions instead: the partition spec being *required* to reproduce is
+  `test_the_upsert_defect_needs_a_partition_spec`, and which transforms are
+  affected is measured per transform in the test's own docstring rather than
+  characterised — an earlier draft said "any non-identity transform", and
+  `truncate` is non-identity and correct.
+
+### Fixed
+
+
+- **The README claimed object stores nobody had run against.** It told an operator
+  that IT provides the store "(MinIO on real disk, AWS S3, GCS)" and that the `s3`
+  extra covers "S3, MinIO or GCS". Neither GCS nor AWS S3 proper has been run
+  against — `docs/live-verification.md` records Lakekeeper + MinIO, now Silo — and
+  the `s3` extra is not what makes a bucket work, since `s3` and `gs` both prefer
+  `PyArrowFileIO`.
+
+  Replaced with a **Verified against** table naming each store's real status,
+  including the ones verified elsewhere (Garage, in ExperienceFlow's end-to-end
+  ELT testing) and the ones simply not run against. `test_every_extra_the_readme_names_exists`
+  now ties the install table to `pyproject.toml` in both directions. (ZMBNI-85)
+- **`target_file_size_bytes` was ignored on the streaming write path.** PyIceberg's
+  writer bin-packs a `RecordBatchReader` by the table property
+  `write.target-file-size-bytes`, falling back to its own 512MB default — so the
+  configured value was honoured when an unpartitioned chunked rewrite bin-packed
+  locally and silently ignored when it delegated. One config key, two meanings,
+  decided by whether a table happened to be partitioned. A 16MB target produced
+  **1 output file one way and 14 the other** from identical input. The resolved
+  target now travels with the metadata handed to the writer. (ZMBNI-16)
 
 ## [0.3.0] - 2026-08-13
 
