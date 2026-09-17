@@ -30,7 +30,7 @@
     "ahead": 2,
     "autocreate": true,
     "cadence_days": 14,
-    "name_template": "{key} Sprint {n}",
+    "name_template": "{n:04d} W{iso_week}-{year}",
     "start_day": "monday",
     "template": "2-week"
   }
