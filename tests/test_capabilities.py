@@ -286,17 +286,21 @@ def test_no_symbol_can_override_what_was_observed(monkeypatch):
 # -- added files and their partition spec (ZMBNI-59) ----------------------
 
 
-def test_evolution_is_withdrawn_when_added_files_cannot_carry_their_spec(monkeypatch):
-    """The one layout feature that needs it, and only that one.
+def test_evolution_stays_available_whichever_build_is_installed(monkeypatch):
+    """Partition evolution is no longer withdrawn, because it no longer has to be.
 
-    Partition evolution is definitionally the case where a run adds files under
-    more than one spec. A library that writes every added file under the table
-    default turns that into an `IndexError` from the Avro writer -- a partition
-    Record has the arity of the spec that produced it -- four frames down and
-    naming nothing. Withdrawing the feature is what turns that into a sentence.
+    It was, and the reasoning held at the time: evolution is definitionally the
+    case where a run adds files under more than one spec, and a library that
+    writes every added file under the table default turns that into an
+    `IndexError` from the Avro writer -- a partition `Record` has the arity of
+    the spec that produced it -- four frames down and naming nothing.
 
-    The six operations are deliberately untouched: none of the others adds a
-    file under a non-default spec, so none of them is affected.
+    What changed is that the capability no longer depends on the library.
+    `MultiSpecReplaceFiles` carries a probe-gated fallback, so a build whose
+    `added_files_honour_spec` is false gets the behaviour from the committer
+    instead of losing the feature. Declaring it either way is therefore the
+    truthful declaration -- and `engines` must not advertise less than a run
+    will do, any more than more.
     """
     from zamboni.maintainers import LayoutFeature, Operation, Support
     from zamboni.maintainers import local as local_module
@@ -308,18 +312,12 @@ def test_evolution_is_withdrawn_when_added_files_cannot_carry_their_spec(monkeyp
         )
         caps = LocalMaintainer.capabilities()
 
-        assert (LayoutFeature.PARTITION_EVOLUTION in caps.layout) is honoured, (
-            f"added_files_honour_spec={honoured} should "
-            f"{'declare' if honoured else 'withdraw'} partition evolution"
+        assert LayoutFeature.PARTITION_EVOLUTION in caps.layout, (
+            f"added_files_honour_spec={honoured}: evolution is available on both, "
+            "via the library or via the fallback"
         )
-        # Every other layout feature survives either way.
-        assert {LayoutFeature.ZORDER, LayoutFeature.SORT, LayoutFeature.TARGET_FILE_SIZE} <= (
-            caps.layout
-        )
-        # And no operation becomes unsupported over it.
-        assert all(caps.of(op).support is not Support.UNSUPPORTED for op in Operation), (
-            "withdrawing a layout feature must not withdraw an operation"
-        )
+        assert caps.layout == frozenset(LayoutFeature), "no layout feature is withdrawn"
+        assert caps.of(Operation.COMPACT).support is not Support.UNSUPPORTED
 
 
 def test_the_probe_answers_no_rather_than_dont_know_when_the_commit_is_refused():

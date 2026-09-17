@@ -109,7 +109,28 @@ def test_retention_window_protects_recent_data(session, daily):
     assert plan.is_empty
 
 
-def test_evolution_condenses_days_into_a_month(session, daily):
+@pytest.mark.parametrize("library_honours_spec", [True, False], ids=["library", "fallback"])
+def test_evolution_condenses_days_into_a_month(session, daily, monkeypatch, library_honours_spec):
+    """Both ways of writing an added file under its own spec, through one assertion set.
+
+    The behaviour lives in the maintenance fork's library, and
+    `MultiSpecReplaceFiles` carries a fallback for a build without it -- a
+    `pip install iceberg-zamboni` off PyPI resolves stock PyIceberg, because
+    `[tool.uv.sources]` does not reach wheel metadata.
+
+    Parametrised because on this repository's own CI the probe is **true**, so
+    the fallback is dead code here and would never be exercised by an ordinary
+    run. A fallback nobody runs is a fallback nobody can rely on; forcing the
+    probe false runs the real committer through it.
+    """
+    from dataclasses import replace as _replace
+
+    from zamboni import evolution as _evolution
+    from zamboni.capabilities import detect as _detect
+
+    probes = _replace(_detect(), added_files_honour_spec=library_honours_spec)
+    monkeypatch.setattr(_evolution, "detect", lambda: probes)
+
     before_ids = sorted(daily.scan().to_arrow()["id"].to_pylist())
     config = TableConfig(warehouse="w", defaults=settings())
 

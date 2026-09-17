@@ -259,6 +259,30 @@ Two categories beyond the usual set, because this tool deletes files:
   believed they had. `ReplaceCommitter` is public API; nothing else in its surface
   changed. (ZMBNI-79)
 
+### Added
+
+- **Partition evolution now works on a stock PyIceberg install**, not only on one
+  redirected to the maintenance fork. `[tool.uv.sources]` is a uv workspace
+  directive and does not reach wheel metadata, so `pip install iceberg-zamboni`
+  resolves PyIceberg from PyPI — and until now that build had the feature
+  *withdrawn*, because the library writes every added data file under the table's
+  default partition spec.
+
+  `MultiSpecReplaceFiles` carries the behaviour again as a **fallback**, and the
+  behavioural probe `added_files_honour_spec` decides: where the library already
+  does it, every override delegates to `super()` and the class is a name. So the
+  complexity is absorbed here rather than pushed onto consumers, and no consumer
+  has to redirect a source to get the full feature set.
+
+  Two copies of one behaviour is the arrangement that hid ZMBNI-58 for months, so
+  the guard against a repeat is structural rather than a comment: the fallback
+  runs *only* when the probe says the library will not, so it disables itself the
+  moment the library gains the behaviour and can never mask a fixed one. Because
+  that makes it dead code on this repository's own CI,
+  `test_evolution_condenses_days_into_a_month` is parametrised to force the probe
+  false and drive the whole evolution path through the fallback — verified by
+  instrumentation to enter both branches, once each. (ZMBNI-16)
+
 ### Fixed
 
 - **`target_file_size_bytes` was ignored on the streaming write path.** PyIceberg's
