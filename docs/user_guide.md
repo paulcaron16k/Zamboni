@@ -1006,6 +1006,42 @@ nothing, so it was set high to avoid paying for a slower path. Now the trade is
 real — `IN_MEMORY` on a 1 GiB group was measured at ~2.3 GiB of growth, more
 than a small host has, while CHUNKED stays flat.
 
+### Who bin-packs a chunked rewrite (`streaming_writes`)
+
+For an **unpartitioned** CHUNKED rewrite there are two ways to turn the record
+batch stream into target-sized files: bin-pack here, or hand the reader to
+PyIceberg's writer and let it do so. Zamboni bin-packs locally by default;
+`streaming_writes = true` delegates instead.
+
+The default was chosen by measuring, not assumed. Same table, same target,
+compaction working set only (the build is excluded):
+
+| input files | local bin-pack | streaming writer |
+|---|---|---|
+| 20 | 264 MB · 0.72 s | 410 MB · 0.54 s |
+| 40 | 324 MB · 1.37 s | 520 MB · 1.09 s |
+| 80 | 347 MB · 2.49 s | 551 MB · 2.20 s |
+
+The streaming writer is consistently **12–25% faster and 55–60% hungrier**. Both
+are bounded — peak plateaus rather than tracking table size, so neither breaks
+the bounded-memory guarantee above — but CHUNKED is selected precisely when a
+group will not fit the memory budget, and spending more memory *there* is the
+wrong default. Turn it on where there is headroom and wall-clock matters.
+
+It is ignored where it cannot apply: a **partitioned** rewrite always bin-packs
+locally, because `_dataframe_to_data_files` refuses a `RecordBatchReader` on a
+partitioned spec, and a build without the streaming writer has nothing to
+delegate to. `zamboni engines` reports the writer as *available* rather than in
+use, for the same reason.
+
+The two do not pack identically — upstream fills a bin closer to the target than
+the local packer does — but both treat `target_file_size_bytes` as the same
+ceiling, which `test_both_write_paths_respect_target_file_size` pins. That was
+not true until recently: PyIceberg bin-packs by the table property
+`write.target-file-size-bytes` and defaulted to its own 512 MB, so the config
+value was honoured locally and ignored when delegating. A 16 MB target produced
+1 file one way and 14 the other before it was fixed.
+
 **What CHUNKED costs in time: nothing worth planning around.** Bounding the
 reads originally meant reading strictly one file at a time, which serialised the
 round trips as well — measured 1.26× slower at 10 ms of latency and 1.39× at

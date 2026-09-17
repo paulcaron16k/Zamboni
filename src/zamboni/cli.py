@@ -620,6 +620,15 @@ def _add_config_args(p: argparse.ArgumentParser) -> None:
         "--memory-mode", choices=[m.value for m in MemoryMode], default=MemoryMode.AUTO.value
     )
     g.add_argument(
+        "--streaming-writes",
+        action="store_true",
+        default=_DEFAULTS.streaming_writes,
+        help=(
+            "let PyIceberg bin-pack an unpartitioned chunked rewrite: faster, "
+            "but uses more memory than bin-packing locally"
+        ),
+    )
+    g.add_argument(
         "--memory-budget-bytes",
         type=int,
         default=_DEFAULTS.memory_budget_bytes,
@@ -733,6 +742,7 @@ def _operational_config(args: argparse.Namespace) -> CompactionConfig:
         rewrite_all=args.rewrite_all,
         partial_progress=args.partial_progress,
         memory_mode=MemoryMode(args.memory_mode),
+        streaming_writes=args.streaming_writes,
         memory_budget_bytes=args.memory_budget_bytes,
         read_ahead_bytes=args.read_ahead_bytes,
         max_read_ahead_files=args.max_read_ahead_files,

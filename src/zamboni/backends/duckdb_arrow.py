@@ -28,7 +28,7 @@ from contextlib import contextmanager
 import pyarrow as pa
 from pyiceberg.io.pyarrow import ArrowScan, _dataframe_to_data_files
 from pyiceberg.manifest import DataFile
-from pyiceberg.table import FileScanTask
+from pyiceberg.table import FileScanTask, TableProperties
 from pyiceberg.table.sorting import NullOrder, SortDirection
 from pyiceberg.transforms import IdentityTransform
 
@@ -78,9 +78,15 @@ class DuckDBArrowBackend(RewriteBackend):
             # at all. Upstream's own docstring still points at it for the
             # partitioned remainder, so the number reads as "already fixed" to
             # anyone who checks it, which is the opposite of what it means here.
-            # Use the streaming path when the installed build has it; otherwise
-            # bin-pack here.
-            if detect().streaming_write_supported and _is_unpartitioned(ctx):
+            # Opt-in, not automatic. Measured in ZMBNI-16: the streaming writer
+            # is 12-25% faster and uses 55-60% more memory, and CHUNKED is the
+            # mode chosen when a group will not fit the budget -- so the default
+            # keeps the smaller path and the faster one is asked for.
+            if (
+                ctx.config.streaming_writes
+                and detect().streaming_write_supported
+                and _is_unpartitioned(ctx)
+            ):
                 return RewriteOutput(self._write(stream, group, ctx), source_live_rows)
 
             written: list[DataFile] = []
@@ -367,7 +373,7 @@ class DuckDBArrowBackend(RewriteBackend):
             return []
         files = list(
             _dataframe_to_data_files(
-                table_metadata=_write_metadata(ctx),
+                table_metadata=_write_metadata(ctx, group.target_file_size_bytes),
                 df=data,
                 io=ctx.table.io,
             )
@@ -393,22 +399,37 @@ class DuckDBArrowBackend(RewriteBackend):
         return files
 
 
-def _write_metadata(ctx: RewriteContext):
+def _write_metadata(ctx: RewriteContext, target_file_size_bytes: int):
     """Table metadata as the writer should see it.
 
     A pydantic copy with a different ``default_spec_id`` makes PyIceberg's
     writer partition the output by the target spec and stamp that spec id on
     each file. Nothing is committed from this view -- the real table metadata is
     untouched -- so the table's actual default spec never changes.
+
+    It also carries the resolved target file size, and that is load-bearing on
+    the streaming path. ``_dataframe_to_data_files`` bin-packs a
+    ``RecordBatchReader`` by ``write.target-file-size-bytes`` read off *these*
+    properties, defaulting to PyIceberg's 512MB -- so without this,
+    ``CompactionConfig.target_file_size_bytes`` was silently ignored for an
+    unpartitioned table and honoured for a partitioned one, which is the same
+    config key meaning two different things. Measured before fixing: a 16MB
+    target produced 1 output file through the streaming path and 14 through the
+    local bin-packer, from identical input.
     """
-    if ctx.write_spec_id is None:
-        return ctx.table.metadata
-    if ctx.write_spec_id not in ctx.table.metadata.specs():
-        raise ValueError(
-            f"write_spec_id {ctx.write_spec_id} is not registered on the table; "
-            "add the spec before rewriting under it"
-        )
-    return ctx.table.metadata.model_copy(update={"default_spec_id": ctx.write_spec_id})
+    properties = {
+        **ctx.table.metadata.properties,
+        TableProperties.WRITE_TARGET_FILE_SIZE_BYTES: str(target_file_size_bytes),
+    }
+    update: dict = {"properties": properties}
+    if ctx.write_spec_id is not None:
+        if ctx.write_spec_id not in ctx.table.metadata.specs():
+            raise ValueError(
+                f"write_spec_id {ctx.write_spec_id} is not registered on the table; "
+                "add the spec before rewriting under it"
+            )
+        update["default_spec_id"] = ctx.write_spec_id
+    return ctx.table.metadata.model_copy(update=update)
 
 
 def _is_unpartitioned(ctx: RewriteContext) -> bool:

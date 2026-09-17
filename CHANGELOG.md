@@ -261,6 +261,31 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **`target_file_size_bytes` was ignored on the streaming write path.** PyIceberg's
+  writer bin-packs a `RecordBatchReader` by the table property
+  `write.target-file-size-bytes`, falling back to its own 512MB default — so the
+  configured value was honoured when an unpartitioned chunked rewrite bin-packed
+  locally and silently ignored when it delegated. One config key, two meanings,
+  decided by whether a table happened to be partitioned. A 16MB target produced
+  **1 output file one way and 14 the other** from identical input. The resolved
+  target now travels with the metadata handed to the writer. (ZMBNI-16)
+
+### Changed
+
+- **PyIceberg's streaming writer is now opt-in (`streaming_writes`), not
+  automatic.** It was selected whenever the build supported it and the rewrite was
+  unpartitioned. Measured across 20/40/80 input files, compaction working set
+  only: the streaming writer is **12–25% faster and uses 55–60% more memory**
+  (551MB against 347MB at the largest size). Both are bounded, so neither breaks
+  the bounded-memory guarantee — but `CHUNKED` is chosen precisely when a group
+  will not fit the memory budget, so spending more memory there is the wrong
+  default. Set `streaming_writes = true`, or `--streaming-writes`, where there is
+  headroom and wall-clock matters.
+
+  `zamboni engines` now reports the writer as *available* rather than in use: the
+  probe says the build has one, which since this change no longer means a run
+  will take that path. (ZMBNI-16)
+
 - **Compaction no longer refuses because *something else* committed.** The
   pre-commit check compared the **table's** snapshot id against the one planning
   saw, so any commit anywhere — an append to a partition compaction never
