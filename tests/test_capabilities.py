@@ -44,13 +44,26 @@ def test_installed_build_writes_added_files_under_their_own_spec():
     which is the end state the fork exists to reach. Checking the git URL
     instead would have to be deleted on the day it finally mattered most.
     """
-    assert detect().added_files_honour_spec is True, (
-        "the installed PyIceberg does not write an added data file under its own "
-        "partition spec, so partition evolution is withdrawn and untested here. "
-        "This repository resolves `pyiceberg` from the maintenance fork via "
-        "`[tool.uv.sources]` in pyproject.toml; run `uv sync` and check the pinned "
-        "rev is reachable. See MAINTENANCE-FORK.md on that branch and "
-        "docs/pyiceberg-private-api.md."
+    from tests.conftest import library_honours_spec_expected
+
+    expected = library_honours_spec_expected()
+    actual = detect().added_files_honour_spec
+    assert actual is expected, (
+        (
+            "the installed PyIceberg does not write an added data file under its own "
+            "partition spec, but this environment expects the maintenance fork. "
+            "`[tool.uv.sources]` in pyproject.toml is what redirects it; run `uv sync` "
+            "and check the pinned rev is reachable. See MAINTENANCE-FORK.md on that "
+            "branch and docs/pyiceberg-private-api.md."
+        )
+        if expected
+        else (
+            "this environment expects a stock PyIceberg (ZAMBONI_EXPECT_BUILD=stock) "
+            "but the installed build already honours an added file's own spec. Either "
+            "the leg resolved the fork by mistake -- in which case it proves nothing "
+            "about what a consumer installs -- or upstream has shipped the behaviour, "
+            "in which case the fork can retire and this expectation should go."
+        )
     )
 
 
@@ -328,8 +341,14 @@ def test_the_probe_answers_no_rather_than_dont_know_when_the_commit_is_refused()
     a probe that could not run at all -- no `sql` extra, no writable temp
     directory -- which an operator resolves differently.
     """
+    from tests.conftest import library_honours_spec_expected
     from zamboni import capabilities
 
+    if not library_honours_spec_expected():
+        # On a stock build the probe's *answer* is False, which is this test's
+        # other half: `False` rather than `None`. Asserted below.
+        assert capabilities._added_files_honour_their_spec() is False
+        return
     assert capabilities._added_files_honour_their_spec() is True, (
         "the installed build should honour an added file's spec; if this fails, "
         "check that pyiceberg resolves to the maintenance fork"

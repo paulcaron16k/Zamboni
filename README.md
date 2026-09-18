@@ -484,18 +484,22 @@ Event catalogue: [data/healthims/HIMS_Discharge_Process_Events.md](data/healthim
 
 ## CI
 
-[.github/workflows/ci.yml](.github/workflows/ci.yml) defines five jobs on push and pull
+[.github/workflows/ci.yml](.github/workflows/ci.yml) defines six jobs on push and pull
 request:
 
 | Job | What it guards |
 |---|---|
 | `lint` | ruff check and format; mypy over `src` and `scripts`; `uv sync --frozen` fails on a stale lockfile; pre-commit and CI must pin the same ruff; every source file carries its SPDX tag |
 | `test` | The suite on Python **3.11, 3.12 and 3.13** — every version `pyproject.toml` carries a classifier for. 3.11 is the floor `requires-python` declares, 3.13 is the pinned development version, and 3.12 is tested because it is claimed |
+| `consumer` | **What a normal install gets.** Every other job resolves PyIceberg from the maintenance fork via `[tool.uv.sources]`; a consumer installs from PyPI and gets stock, because that directive does not reach wheel metadata. This job builds the wheel, `pip install`s it into a clean venv, asserts the build really is stock, and runs the suite against it — so the probe-gated fallback that is dead code everywhere else is actually executed |
 | `executables` | `bin/` regenerates to a no-op, and both PEP 723 scripts run **from outside the project directory** |
 | `spark` | Builds a Spark Connect server with the Iceberg runtime and S3A, then runs the live Spark tests against it |
 | `dev-stack` | The real thing: brings up Lakekeeper + Postgres + MinIO from `.env.sample`, bootstraps it, runs the dev-stack tests, then the demo end to end |
 
-Two jobs guard against a green tick that means nothing. `dev-stack` sets
+Three jobs guard against a green tick that means nothing. `consumer` asserts the
+installed build is stock before running anything, because a leg that resolved the fork by
+mistake would agree with whatever it found and pass while testing the wrong thing.
+`dev-stack` sets
 `ZAMBONI_REQUIRE_DEV_STACK=1`, which turns "cannot reach the stack" from a skip into a
 failure; `spark` selects its tests by marker and fails if any of them *skipped*, because
 those fixtures skip on a closed port by design. Without both, a stack that never started

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import NamedTuple
 
 import pyarrow as pa
@@ -37,6 +38,22 @@ def session(tmp_path):
     sess.catalog.create_namespace_if_not_exists("db")
     yield sess
     sess.close()
+
+
+def library_honours_spec_expected() -> bool:
+    """Whether the *installed library* should write added files under their own spec.
+
+    This repository resolves PyIceberg from the maintenance fork, which does.
+    A consumer installs from PyPI and gets a build that does not, where
+    `MultiSpecReplaceFiles` supplies the behaviour instead (ZMBNI-83).
+
+    Both are supported and both are tested, so the expectation is declared by
+    the environment rather than discovered from the build: a leg that silently
+    resolved the wrong PyIceberg would otherwise agree with whatever it found
+    and prove nothing. `ZAMBONI_EXPECT_BUILD=stock` is set by the consumer CI
+    leg; unset means the fork, which is what a checkout has.
+    """
+    return os.environ.get("ZAMBONI_EXPECT_BUILD", "fork") != "stock"
 
 
 def batch(start: int, count: int, category: str = "a") -> pa.Table:
