@@ -21,6 +21,28 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### Added
+
+- **A `consumer` CI job, running what a normal install gets.** Every other job
+  resolves PyIceberg from the maintenance fork via `[tool.uv.sources]`, which is
+  right for developing against unreleased fixes and is not what anyone downstream
+  has — that directive does not reach wheel metadata, so `pip install
+  iceberg-zamboni` resolves PyIceberg from PyPI.
+
+  ZMBNI-83 makes that build work by carrying a probe-gated fallback, which on
+  every other leg is **dead code**. This job builds the wheel, `pip install`s it
+  into a clean venv, asserts the build really is stock, and runs the suite
+  against it.
+
+  It found three tests that only held on the fork, which is the point of having
+  it: two capability guards that hard-asserted the fork, and an evolution
+  parametrisation that forced a probe True on a library that cannot honour it —
+  a configuration that cannot exist, and which produced a silently wrong result
+  rather than an error. The guards are now build-aware in both directions, so a
+  leg that resolved the wrong PyIceberg fails instead of agreeing with whatever
+  it found. (ZMBNI-40)
+
+
 ## [0.4.0] - 2026-09-17
 
 ### BREAKING

@@ -128,6 +128,15 @@ def test_evolution_condenses_days_into_a_month(session, daily, monkeypatch, libr
     from zamboni import evolution as _evolution
     from zamboni.capabilities import detect as _detect
 
+    if library_honours_spec and not _detect().added_files_honour_spec:
+        # Forcing the probe True on a library that does not do it is not a
+        # configuration that can exist: the override steps aside and the commit
+        # writes an evolved file under the wrong spec. Skipping proves the probe
+        # is load-bearing rather than decorative -- the same reason
+        # `test_unpartitioned_chunked_output_is_correct_either_way` skips its
+        # streaming half on a build with no streaming writer.
+        pytest.skip("installed PyIceberg does not honour an added file's own spec")
+
     probes = _replace(_detect(), added_files_honour_spec=library_honours_spec)
     monkeypatch.setattr(_evolution, "detect", lambda: probes)
 

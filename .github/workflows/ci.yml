@@ -71,6 +71,67 @@ jobs:
       # no Docker services, and the dedicated job below is where they must run.
       - run: uv run --python ${{ matrix.python }} pytest -q --ignore=tests/test_dev_stack.py
 
+  consumer:
+    # What a normal install gets. Every other job resolves PyIceberg from the
+    # maintenance fork via `[tool.uv.sources]`, which is right for developing
+    # against unreleased fixes and is *not* what anyone downstream has:
+    # `tool.uv.sources` is a uv workspace directive and does not reach wheel
+    # metadata, so `pip install iceberg-zamboni` resolves PyIceberg from PyPI.
+    #
+    # ZMBNI-83 makes that build work by carrying a probe-gated fallback in
+    # `MultiSpecReplaceFiles` -- which, on every other leg, is dead code. This
+    # job is the one that runs it, against the artifact and the resolution a
+    # consumer actually gets rather than against a forced probe.
+    #
+    # It installs the built wheel with pip into a clean venv, deliberately not
+    # `uv sync`: the lockfile pins the fork, so syncing would reproduce the
+    # developer's environment and prove nothing. Running pytest from the
+    # repository picks up the *installed* package because the project is
+    # src-layout, so `src/` is not on `sys.path`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Build the wheel a consumer would install
+        run: uv build --wheel
+
+      - name: Install it from PyPI resolution, with no source redirect
+        run: |
+          uv venv --python 3.13 /tmp/consumer
+          uv pip install --python /tmp/consumer/bin/python \
+            "$(ls dist/*.whl)[sql,s3,trino,cloud]" \
+            pytest jsonschema "pyspark-client>=4.0.4,<4.1"
+
+      # Asserted rather than assumed. A leg that resolved the fork by mistake
+      # would agree with whatever it found and look green while testing the
+      # wrong build, which is the failure this job exists to prevent.
+      - name: Prove this really is the stock build
+        run: |
+          /tmp/consumer/bin/python - <<'EOF'
+          import pyiceberg
+          from zamboni.capabilities import detect
+          import zamboni
+          assert "site-packages" in zamboni.__file__, zamboni.__file__
+          caps = detect()
+          assert caps.added_files_honour_spec is False, (
+              "expected stock PyIceberg, but the installed build honours an added "
+              "file's own spec -- either the fork leaked in, or upstream shipped it "
+              "and the fork can retire"
+          )
+          print(f"stock pyiceberg {caps.version}: added_files_honour_spec=False, as a consumer gets")
+          EOF
+
+      # ZAMBONI_EXPECT_BUILD flips the two capability guards from "must be the
+      # fork" to "must be stock", so both legs assert rather than one skipping.
+      - name: The suite, against what a consumer installs
+        env:
+          ZAMBONI_EXPECT_BUILD: stock
+        run: /tmp/consumer/bin/python -m pytest -q --ignore=tests/test_dev_stack.py
+
   executables:
     # bin/zamboni and bin/zamboni-demo are PEP 723 scripts that reference the project as
     # an editable path install. Two bugs have already come from that path: one
