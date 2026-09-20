@@ -266,3 +266,34 @@ def test_a_busy_table_is_a_refusal_and_the_run_continues(
     assert later, "the run stopped at the busy table instead of continuing"
     assert any(o.exit_code == 0 for o in later), "no later operation succeeded"
     assert report.exit_code == 3
+
+
+def test_no_writable_spill_directory_is_a_config_refusal_not_a_dead_run(
+    warehouse, tmp_path, monkeypatch
+):
+    """A deployment misconfiguration must not end the fleet run (#90).
+
+    It will be raised by every table, which is the point: the operator sees one
+    clear reason per table naming the setting, rather than a traceback from the
+    first one. That is the shape ZMBNI-76 fixed for concurrency exceptions, and
+    a new uncaught exception type would have reintroduced it.
+    """
+    from zamboni.maintainers.local import LocalMaintainer
+    from zamboni.workdir import WorkspaceUnavailable
+
+    original = LocalMaintainer.execute
+
+    def unwritable(self, operation, table, *, request, dry_run):
+        if operation is Operation.COMPACT:
+            raise WorkspaceUnavailable("'/nope' is not writable ... set temp_directory ...")
+        return original(self, operation, table, request=request, dry_run=dry_run)
+
+    monkeypatch.setattr(LocalMaintainer, "execute", unwritable)
+
+    report = maintain(warehouse, table_config=config(tmp_path), commit=True)
+
+    compact = [o for o in report.outcomes if o.operation is Operation.COMPACT]
+    assert compact and compact[0].exit_code == 2, "a config problem is exit 2"
+    assert "temp_directory" in compact[0].detail
+    later = [o for o in report.outcomes if o.operation is not Operation.COMPACT]
+    assert any(o.exit_code == 0 for o in later), "the run stopped instead of continuing"

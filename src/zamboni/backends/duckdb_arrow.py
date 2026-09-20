@@ -35,6 +35,7 @@ from pyiceberg.transforms import IdentityTransform
 from ..capabilities import detect
 from ..config import MemoryMode
 from ..planner import FileGroup
+from ..workdir import resolve_temp_directory
 from ..zorder import build_zorder_sql
 from .base import RewriteBackend, RewriteContext, RewriteOutput
 
@@ -361,8 +362,14 @@ class DuckDBArrowBackend(RewriteBackend):
             self._con.unregister("_zamboni_stream")
 
     def _configure_duckdb(self, ctx: RewriteContext) -> None:
-        if ctx.config.temp_directory:
-            self._con.execute(f"SET temp_directory = '{ctx.config.temp_directory}'")
+        # Always set, not only when configured. Left alone, DuckDB spills to its
+        # own default of `.tmp` -- *relative to the current working directory* --
+        # which a container with a read-only root filesystem cannot create, and
+        # creates lazily, so the failure lands partway through a large rewrite
+        # (ZMBNI-90). `resolve_temp_directory` falls back to `tempfile.gettempdir()`,
+        # which honours TMPDIR.
+        spill = resolve_temp_directory(ctx.config.temp_directory).replace("'", "''")
+        self._con.execute(f"SET temp_directory = '{spill}'")
 
     # -- write -----------------------------------------------------------
 

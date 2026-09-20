@@ -722,3 +722,63 @@ def test_both_write_paths_respect_target_file_size(session, unpartitioned, monke
             f"streaming={streaming} wrote a {max(sizes)}B file for a {target}B target -- "
             "the paths have diverged on what the setting means"
         )
+
+
+def test_a_rewrite_that_could_spill_refuses_an_unwritable_spill_directory(session, unpartitioned):
+    """Refused before the rewrite, not partway through it (#90).
+
+    DuckDB creates its spill directory lazily, only when a rewrite actually
+    exceeds the memory budget -- so an unwritable location fails on the *large*
+    tables, deep in the backend, after the read is done. Checking at the top of
+    `execute()` turns that into a sentence naming the setting.
+    """
+    import stat
+
+    from zamboni.workdir import WorkspaceUnavailable
+
+    read_only = tmp_path_for(session) / "ro"
+    read_only.mkdir()
+    read_only.chmod(stat.S_IRUSR | stat.S_IXUSR)
+    try:
+        with pytest.raises(WorkspaceUnavailable, match="temp_directory"):
+            TableCompactor(
+                session,
+                "db.unpartitioned",
+                CompactionConfig(
+                    memory_mode=MemoryMode.CHUNKED,
+                    temp_directory=str(read_only / "spill"),
+                    rewrite_all=True,
+                ),
+            ).execute()
+    finally:
+        read_only.chmod(stat.S_IRWXU)
+
+
+def test_in_memory_does_not_require_a_spill_directory(session, unpartitioned):
+    """IN_MEMORY never spills, so refusing it would reject a working configuration."""
+    import stat
+
+    read_only = tmp_path_for(session) / "ro2"
+    read_only.mkdir()
+    read_only.chmod(stat.S_IRUSR | stat.S_IXUSR)
+    try:
+        TableCompactor(
+            session,
+            "db.unpartitioned",
+            CompactionConfig(
+                memory_mode=MemoryMode.IN_MEMORY,
+                temp_directory=str(read_only / "spill"),
+                rewrite_all=True,
+            ),
+        ).execute()
+    finally:
+        read_only.chmod(stat.S_IRWXU)
+
+    assert rows(session.table("db.unpartitioned")), "the rewrite should have run"
+
+
+def tmp_path_for(session):
+    """A scratch directory beside the session's warehouse."""
+    from pathlib import Path
+
+    return Path(session.catalog.properties["warehouse"].replace("file://", "")).parent

@@ -14,6 +14,7 @@ from .committer import ReplaceCommitter, assert_supported_pyiceberg, cleanup_orp
 from .config import (
     DEFAULT_TARGET_FILE_SIZE_BYTES,
     CompactionConfig,
+    MemoryMode,
     config_from_table_settings,
 )
 from .evolution import EvolutionPlan, MultiSpecReplaceFiles, ensure_specs, plan_evolution
@@ -21,6 +22,7 @@ from .planner import CompactionPlan, CompactionPlanner, FileGroup
 from .profile import Severity, TableProfile, profile_table
 from .session import CatalogSession
 from .tableconfig import TableConfig, TableSettings
+from .workdir import assert_writable, resolve_temp_directory
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +173,20 @@ class TableCompactor:
 
     def execute(self, *, dry_run: bool = False) -> CompactionResult:
         assert_supported_pyiceberg()
+
+        # Before any rewrite work, because the alternative is finding out
+        # partway through one. DuckDB creates its spill directory lazily, only
+        # when a rewrite actually exceeds the memory budget -- so an unwritable
+        # location fails on the *large* tables, deep inside the backend, after
+        # the read is done. IN_MEMORY never spills, so only the modes that can
+        # are checked: refusing a configuration that would have worked is its
+        # own kind of wrong.
+        if self._config.memory_mode is not MemoryMode.IN_MEMORY:
+            assert_writable(
+                resolve_temp_directory(self._config.temp_directory),
+                setting="temp_directory",
+                flag="--temp-directory",
+            )
 
         tbl = self._session.table(self._identifier)
         profile = profile_table(tbl)

@@ -21,6 +21,42 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### BREAKING
+
+- **DuckDB now spills to the system temp directory, not to `.tmp` under the
+  working directory.** Previously `temp_directory` was left unset by default,
+  which meant DuckDB's own default — `.tmp`, *relative to the current working
+  directory*. After upgrading, a run writes its spill files somewhere different;
+  an operator who granted write access to the working directory specifically, or
+  who sized a volume for it, needs to know. The new default honours `TMPDIR`.
+  Setting `temp_directory` explicitly is unchanged and still wins.
+
+  It is a `BREAKING` line under the rule that a changed default which decides
+  where a nightly run writes is public surface, not an implementation detail.
+
+### Fixed
+
+- **A container with a read-only root filesystem failed partway through a
+  rewrite instead of refusing up front.** DuckDB creates its spill directory
+  lazily, only when a rewrite actually exceeds the memory budget — and `CHUNKED`
+  is chosen precisely when a group will not fit — so the failure struck the
+  *largest* tables, deep inside the backend, after the read was done.
+  Reproduced before fixing:
+
+  ```
+  temp_directory setting : '.tmp'
+  spill                  : IOException: Failed to create directory ".tmp": Permission denied
+  ```
+
+  The location is now resolved and checked at the top of `execute()` for any
+  memory mode that can spill, with a refusal naming `temp_directory`,
+  `--temp-directory`, `TMPDIR` and the Kubernetes `emptyDir` fix. `zamboni
+  doctor` reports the resolved path and whether it is writable, so the check can
+  be run before deploying. `maintain()` maps it to **exit 2** beside the other
+  configuration refusals, so one misconfigured deployment does not end a fleet
+  run with a traceback. (ZMBNI-90)
+
+
 ### Added
 
 - **A `consumer` CI job, running what a normal install gets.** Every other job
