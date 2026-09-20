@@ -20,8 +20,11 @@ from __future__ import annotations
 
 import inspect
 import logging
-from dataclasses import dataclass
+import os
+from dataclasses import asdict, dataclass, fields
 from functools import lru_cache
+
+from . import probecache
 
 logger = logging.getLogger(__name__)
 
@@ -115,8 +118,74 @@ class PyIcebergCapabilities:
         return "\n".join(f"  {name:<28} {value}" for name, value in rows)
 
 
+#: How the last :func:`detect` answered, for ``zamboni doctor``. Not a
+#: capability, so it is deliberately not a field on the frozen dataclass --
+#: two runs against one build differ here and must still compare equal.
+_cache_state = "not yet probed"
+
+
+def cache_status() -> str:
+    """One line on where the last :func:`detect` answer came from."""
+    return _cache_state
+
+
 @lru_cache(maxsize=1)
 def detect() -> PyIcebergCapabilities:
+    """The installed build's capabilities, probed once per process.
+
+    The probes cost ~0.5s because two of them create a table and commit to it.
+    `lru_cache` covers one process, which is enough for a run over many tables
+    but not for a cron line that invokes the CLI per table -- so the answers are
+    also remembered on disk, keyed to a hash of what is installed (see
+    :mod:`zamboni.probecache`). A build that cannot be keyed safely, or a
+    filesystem that cannot be written, costs the half second and nothing else.
+    """
+    global _cache_state
+
+    if os.environ.get("ZAMBONI_NO_PROBE_CACHE"):
+        _cache_state = "disabled (ZAMBONI_NO_PROBE_CACHE)"
+        return _probe()
+
+    signature = probecache.build_signature()
+    if signature is None:
+        _cache_state = probecache.describe(None, hit=False)
+        return _probe()
+
+    stored = probecache.load(signature)
+    if stored is not None:
+        restored = _from_cache(stored)
+        if restored is not None:
+            _cache_state = probecache.describe(signature, hit=True)
+            return restored
+
+    probed = _probe()
+    written = probecache.store(signature, asdict(probed))
+    _cache_state = (
+        probecache.describe(signature, hit=False)
+        if written
+        else (f"miss {signature[:12]} (probed, nowhere writable to store it)")
+    )
+    return probed
+
+
+def _from_cache(stored: dict) -> PyIcebergCapabilities | None:
+    """Rebuild the answers, or ``None`` if the document does not fit this class.
+
+    Belt and braces over ``CACHE_SCHEMA``: a field added or renamed without
+    bumping it lands here and re-probes, rather than constructing something
+    half-populated.
+    """
+    expected = {f.name for f in fields(PyIcebergCapabilities)}
+    if set(stored) != expected:
+        return None
+    try:
+        return PyIcebergCapabilities(**stored)
+    except TypeError:
+        return None
+
+
+def _probe() -> PyIcebergCapabilities:
+    """Ask the installed PyIceberg, every time. The uncached half of `detect`."""
     from importlib.metadata import version
 
     from pyiceberg.table.snapshots import Operation

@@ -59,6 +59,29 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **Probe results are remembered on disk, keyed to a hash of the installed
+  build.** `zamboni doctor` and every run call `capabilities.detect()`, which
+  costs ~0.6s because two of its probes create a table and commit to it. That
+  was already cached per process, which is enough for a run over a hundred
+  tables and useless to an operator whose cron line invokes the CLI per table —
+  where it was the dominant cost of a no-op run.
+
+  Keyed on **content, not on a version**: the fork and stock PyIceberg both
+  declare `0.12.0` and disagree about `added_files_honour_spec`, so the key is a
+  hash over each distribution's version, its `direct_url.json` and its `RECORD`,
+  whose per-file hashes move whenever a shipped file does. Measured on a real
+  venv: installing the fork over stock changed the key and re-probed, and
+  installing stock back again restored the original answers from its own entry
+  without probing.
+
+  **An editable install of either PyIceberg or Zamboni disables it entirely.**
+  An editable `RECORD` lists 15 entries rather than the installed files, and the
+  tree underneath moves with `git checkout` — the exact scenario that closed
+  ZMBNI-39 as not planned. Nothing here can fail a run: an unwritable
+  filesystem, an unreadable entry or a build that cannot be keyed all mean
+  probe, which costs the half second and nothing else. `zamboni doctor` reports
+  which happened, and `ZAMBONI_NO_PROBE_CACHE=1` turns it off. (ZMBNI-88)
+
 - **A `consumer` CI job, running what a normal install gets.** Every other job
   resolves PyIceberg from the maintenance fork via `[tool.uv.sources]`, which is
   right for developing against unreleased fixes and is not what anyone downstream
