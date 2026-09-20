@@ -31,6 +31,23 @@ def test_doctor_needs_no_catalog(capsys):
     assert "pyiceberg" in capsys.readouterr().out
 
 
+def test_doctor_says_where_the_capability_answers_came_from(capsys):
+    """Probed just now, or restored from a previous run against this build.
+
+    An operator reading a surprising capability needs to know which, and on a
+    read-only container the "nowhere writable" line is the one that explains a
+    slow no-op run. Derived from `cache_status()` rather than matched against a
+    literal, because which line is correct depends on how Zamboni is installed.
+    """
+    from zamboni import capabilities
+
+    assert main(["doctor"]) == 0
+
+    out = capsys.readouterr().out
+    assert "probe cache" in out
+    assert capabilities.cache_status() in out
+
+
 def test_describe_is_read_only(warehouse, session, capsys):
     before = profile_table(session.table("db.events")).snapshot_id
 
