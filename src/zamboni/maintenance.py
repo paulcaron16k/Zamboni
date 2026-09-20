@@ -45,6 +45,7 @@ from .maintainers import get as get_maintainer
 from .orphans import OrphanCleanupAborted
 from .session import CatalogSession
 from .tableconfig import TableConfig, TableConfigError
+from .workdir import WorkspaceUnavailable
 
 #: Runbook order. Three of the five gaps between these are load-bearing -- see
 #: docs/runbook-dev.md. Shared with `settings.DEFAULT_OPERATIONS`, which is the
@@ -326,7 +327,12 @@ def _run(
         # A safety check refused. Nothing was deleted, and the operator response
         # is the same in both cases: stop and look.
         return Outcome(table, operation, 4, f"aborted, nothing deleted: {exc}")
-    except (PreviewUnavailable, EngineConfigProblem) as exc:
+    except (PreviewUnavailable, EngineConfigProblem, WorkspaceUnavailable) as exc:
+        # `WorkspaceUnavailable` is a deployment misconfiguration -- no writable
+        # spill directory -- so it is exit 2 beside the other config refusals
+        # rather than an uncaught exception. It will be raised by every table in
+        # the run, which is the point: the operator sees one clear reason per
+        # table instead of a traceback from the first one (ZMBNI-76's shape).
         return Outcome(table, operation, 2, str(exc))
 
     return Outcome(table, operation, 0, result.describe(), result=result)

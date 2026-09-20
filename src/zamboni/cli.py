@@ -70,6 +70,7 @@ from .tableconfig import (
     TableConfigError,
     TableSettings,
 )
+from .workdir import describe_temp_directory
 
 USAGE = """\
 getting started
@@ -173,6 +174,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "doctor":
         caps = detect()
         print(caps.describe())
+        spill_path, spill_state = describe_temp_directory(getattr(args, "temp_directory", None))
+        print(f"  {'spill directory':<28} {spill_path} ({spill_state})")
         reason = caps.unsupported_reason()
         print(f"\nusable: {reason is None}" + (f"\nreason: {reason}" if reason else ""))
         return 0 if reason is None else 1

@@ -1291,8 +1291,20 @@ a great deal.
   while freeing nothing. Check this *before* your first run; it looks perfectly
   healthy until you try to free a byte. See
   [live-verification.md](live-verification.md).
-- **DuckDB spills sorts to disk.** Set `temp_directory` somewhere with room if
-  you Z-order large partitions; the sort itself is not held in memory.
+- **DuckDB spills sorts to disk**, so Zamboni needs a writable directory that is
+  not the warehouse. It defaults to the system temp directory, which honours
+  `TMPDIR` — so on Kubernetes an `emptyDir` mounted at `/tmp` is enough, with no
+  configuration. Set `temp_directory` (or `--temp-directory`) to put it
+  somewhere with more room if you Z-order large partitions; the sort itself is
+  not held in memory.
+
+  **On a container with a read-only root filesystem, check this before your
+  first run.** `zamboni doctor` reports the resolved location and whether it is
+  writable. A rewrite that exceeds the memory budget streams through DuckDB and
+  spills — and DuckDB creates that directory *lazily*, so an unwritable one
+  fails on your largest tables, partway through a rewrite. Zamboni refuses up
+  front instead, naming the setting, for any memory mode that can spill;
+  `IN_MEMORY` never does and is not checked.
 
 ### What the local engine does *not* do badly
 
