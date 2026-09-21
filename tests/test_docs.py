@@ -462,3 +462,32 @@ def test_the_dev_stack_warehouse_is_the_combination_its_readme_claims():
         "no longer the 'both enabled, by Lakekeeper's default' row that dev-stack/README.md "
         "describes. Update the four-combination table to say which row it is now"
     )
+
+
+def test_the_reclaim_page_names_every_credential_mode_and_no_invented_setting():
+    """The operator page tells someone what to put in `.env`. It has to be current.
+
+    Two ways it rots. A `ZAMBONI_*` variable could be renamed, leaving the page
+    naming something that does nothing -- and the failure is silent, because an
+    unrecognised variable is simply not read. A fourth `CredentialUse` mode could
+    be added and left undocumented, which is worse than a wrong name: the page
+    would read as a complete list of the choices when it is not.
+
+    So the modes are derived from the enum rather than compared to a literal
+    list, per CONTRIBUTING rule 2.
+    """
+    from zamboni.session import CredentialUse
+
+    page = (DOCS / "reclaiming-storage.md").read_text()
+
+    named = set(re.findall(r"`(ZAMBONI_[A-Z0-9_]+)`", page))
+    source = " ".join(p.read_text() for p in (ROOT / "src").rglob("*.py"))
+    unknown = {v for v in named if v not in source}
+    assert not unknown, f"reclaiming-storage.md names settings that no longer exist: {unknown}"
+
+    documented = set(re.findall(r"`(always|reclaim-only|never)`", page))
+    assert documented == {mode.value for mode in CredentialUse}, (
+        "reclaiming-storage.md presents the credential modes as a complete list; "
+        f"it names {sorted(documented)} and CredentialUse has "
+        f"{sorted(mode.value for mode in CredentialUse)}"
+    )

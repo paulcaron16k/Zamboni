@@ -1332,7 +1332,11 @@ and signing is only the fallback. Apache Polaris has no signing mode at all: it 
 STS credentials scoped to the table locations *and the operations the principal is
 authorised for*, so the thing to check there is that the principal may list and delete,
 not just read and write. All four Lakekeeper combinations, with what each means for
-maintenance, are in [dev-stack/README.md](../dev-stack/README.md).
+maintenance, are in [dev-stack/README.md](../dev-stack/README.md), and
+[reclaiming-storage.md](reclaiming-storage.md) is the operator page for the whole
+question: what still works under a restrictive catalog, the settings for
+Lakekeeper and Polaris, and the bucket permissions to ask for when neither is an
+option.
 
 **The two paths are not equivalent.** A credential-vending catalog hands over temporary
 keys and a session token, and your client signs locally — every S3 verb works. A

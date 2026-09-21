@@ -674,6 +674,11 @@ engine with, secrets handling, and the local engine's measured memory ceiling.
   which shipped. Mostly a record now: what each was for, the evidence it was chosen on, and
   the one place the sequencing was wrong. The remaining item is PyIceberg 0.12, blocked
   upstream.
+- **[docs/reclaiming-storage.md](docs/reclaiming-storage.md)** — the two operations
+  that delete files are the two a catalog's storage policy can take away. What still
+  works under a restrictive catalog, the settings that fix it on Lakekeeper and
+  Polaris, and the bucket permissions to hand an administrator when neither is an
+  option.
 - **[docs/engine-comparison.md](docs/engine-comparison.md)** — what Zamboni, Trino and Spark
   each can do, and the twelve places where the same-sounding operation differs.
 - **[docs/ice-keeper-comparison.md](docs/ice-keeper-comparison.md)** — against a deployed
