@@ -114,8 +114,9 @@ class LocalMaintainer(Maintainer):
                         (
                             "needs a bucket listing, so a remote-signing warehouse refuses "
                             "unless Zamboni has the object store's own credentials "
-                            "(ZAMBONI_S3_ACCESS_KEY_ID; see ZAMBONI_CREDENTIAL_USE). No "
-                            "inventory-report path yet (ZMBNI-1602)"
+                            "(ZAMBONI_S3_ACCESS_KEY_ID, ZAMBONI_GCS_TOKEN or "
+                            "ZAMBONI_AZURE_ACCOUNT_NAME for the store the table is in; see "
+                            "ZAMBONI_CREDENTIAL_USE). No inventory-report path yet (ZMBNI-94)"
                         ),
                     ),
                     invariants=RECLAIM_INVARIANTS,

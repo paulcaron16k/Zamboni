@@ -172,11 +172,31 @@ is not going to be reconfigured. Give Zamboni the object store's own credentials
 and it reaches storage directly — the warehouse system owns that store, and the
 catalog is a service in front of it, not its owner.
 
+Which settings, for the store the warehouse is actually in — the table's own
+location decides, and credentials for the wrong one are **refused up front**
+rather than failing at the first read:
+
 ```bash
 # .env, mode 600 -- never zamboni.yml, which is committable
+
+# S3, and every S3-compatible store: MinIO, Silo, Garage, Ceph RGW
 ZAMBONI_S3_ACCESS_KEY_ID=...
 ZAMBONI_S3_SECRET_ACCESS_KEY=...
+
+# Google Cloud Storage. A path to a service-account key file, or the literal
+# `google_default` to use ambient credentials -- which is what GKE Workload
+# Identity provides, and needs no secret in the environment at all.
+ZAMBONI_GCS_TOKEN=/var/run/secrets/gcp/key.json
+ZAMBONI_GCS_PROJECT_ID=...            # optional
+
+# Azure Blob / ADLS Gen2. An account name plus exactly one credential.
+ZAMBONI_AZURE_ACCOUNT_NAME=...
+ZAMBONI_AZURE_ACCOUNT_KEY=...         # or ZAMBONI_AZURE_SAS_TOKEN, or
+                                      # ZAMBONI_AZURE_CLIENT_ID + _CLIENT_SECRET + _TENANT_ID
 ```
+
+Configure one provider, not two: a session holds one set of credentials, and a
+fleet spanning two stores needs two runs.
 
 `ZAMBONI_CREDENTIAL_USE` decides when they are preferred over the catalog's:
 `always` (the default), `reclaim-only` for `expire` and `remove-orphans` alone —
@@ -186,6 +206,8 @@ can and deleting what it managed to sign. See
 [Storage credentials](user_guide.md#storage-credentials-who-talks-to-the-object-store).
 
 ### The permissions to ask for
+
+#### S3, and S3-compatible stores
 
 Derived from the calls the reclaim path actually makes, not from a template:
 the listing is one recursive `ListObjectsV2` per storage root
@@ -227,6 +249,48 @@ per-object (`tbl.io.delete(...)`, one path at a time).
   the same credential is also to run `compact`, which writes the rewritten files
   — and which uses `s3:DeleteObject` too, to clean up its own output when a
   rewrite is abandoned before committing.
+
+#### Google Cloud Storage
+
+The same three capabilities, as one predefined role on the bucket:
+
+```bash
+gcloud storage buckets add-iam-policy-binding gs://WAREHOUSE-BUCKET \
+  --member=serviceAccount:zamboni@PROJECT.iam.gserviceaccount.com \
+  --role=roles/storage.objectAdmin
+```
+
+`roles/storage.objectAdmin` covers list, read and delete on objects, and
+deliberately not `storage.buckets.*` — nothing here creates or deletes a bucket.
+`roles/storage.objectViewer` is the read-only half and is **not** enough: it
+cannot delete, so a reclaim run would list correctly and then fail on every
+removal.
+
+On GKE, prefer **Workload Identity** over a key file: bind that service account
+to the pod's Kubernetes service account and set `ZAMBONI_GCS_TOKEN=google_default`.
+No secret reaches the environment, and the credential refreshes itself. A
+downloaded key file works too — give `ZAMBONI_GCS_TOKEN` its path — and is the
+reason GCS is routed through `gcsfs` rather than pyarrow, which accepts only a
+bearer token with an expiry.
+
+#### Azure Blob / ADLS Gen2
+
+**Storage Blob Data Contributor** on the container, which carries read, write,
+delete and list. Its read-only counterpart, *Storage Blob Data Reader*, has the
+same shortfall as `objectViewer` above.
+
+```bash
+az role assignment create \
+  --assignee <principal-id> \
+  --role "Storage Blob Data Contributor" \
+  --scope "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Storage/storageAccounts/<account>/blobServices/default/containers/<container>"
+```
+
+An account key or a SAS token grants the same access without a role assignment;
+prefer the service principal where the deployment allows it, because it is the
+one that can be scoped and revoked per identity.
+
+#### All three
 
 Whoever administers the bucket is entitled to ask what this is for, and the
 honest answer is that it is a deliberate grant, not a way around a boundary:

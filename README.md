@@ -130,9 +130,18 @@ names where the others are verified instead of implying they are not:
 | **MinIO** | Previously verified, on the same jobs, until MinIO ended community distribution and the images stopped resolving. Silo is the same lineage under maintenance and keeps the S3 API, so the coverage carried over rather than lapsed |
 | **Garage** | Verified **elsewhere**: ExperienceFlow's end-to-end ELT testing runs IWS + Zamboni against it. Deliberately not duplicated here — it would re-test the same two postures against a second implementation of the same API |
 | **AWS S3** | Not run against. Nothing is known to be wrong; nothing has been measured either |
-| **GCS** | Not run against. `gs` maps to `PyArrowFileIO` only, so pyarrow's `GcsFileSystem` does the work and **no extra is required** |
-| **Azure Blob** | Not run against, and it is the one that needs a package: see the `azure` extra above |
-| **Ceph RGW** | Not run against |
+| **GCS** | Not run against. On the *delegated* path `gs` maps to `PyArrowFileIO` and no extra is required. On the **own-credentials** path Zamboni uses `gcsfs` instead, so the `gcs` extra *is* required — see below |
+| **Azure Blob** | Not run against, and it needs a package on both paths: see the `azure` extra above |
+| **Ceph RGW** | Not run against. Reached as S3 — it needs no code of its own, only an endpoint |
+
+**Two paths, and the table above is about both.** Which one a deployment takes is
+decided by the catalog, not by the vendor: where it vends credentials Zamboni
+uses the FileIO PyIceberg selects, and where it remote-signs Zamboni must supply
+the object store's own credentials and build the FileIO itself. Every provider is
+supported on both paths (ZMBNI-97), and the second one is the one that needs an
+extra — `iceberg-zamboni[cloud]` covers all three. See
+[reclaiming-storage.md](docs/reclaiming-storage.md) for which settings and which
+bucket permissions each provider needs.
 
 "Not run against" is the honest state for most S3-compatible stores, and the reason to
 publish it is that the differences are real when they bite. One example from this
