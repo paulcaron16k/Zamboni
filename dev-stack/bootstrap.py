@@ -14,9 +14,16 @@ bringing the stack up.
 
 The warehouse is created with **STS credential vending**, deliberately. Lakekeeper
 can instead remote-sign each request, and a remote-signing warehouse refuses
-ListObjectsV2, HeadObject and multi-object DELETE -- which means compaction fails
-and no storage can ever be reclaimed. That is not hypothetical; it is what the
-first live verification run hit. See docs/live-verification.md.
+ListObjectsV2, HeadObject and multi-object DELETE -- so compaction fails and a
+catalog-governed client can reclaim nothing. That is not hypothetical; it is what
+the first live verification run hit. See docs/live-verification.md.
+
+It is no longer a dead end, which is the one correction to make to that story:
+since ZMBNI-30 Zamboni reclaims on the object store's own credentials when it has
+them, and a signing catalog cannot prevent that because it is not the storage
+owner. Without them the run still refuses up front. `remote-signing-enabled` is
+deliberately left unset below -- it defaults to true, and STS is tried first, so
+this warehouse is the both-enabled case.
 
 MinIO needs no trust setup for STS. Lakekeeper's own docs: "Unlike for AWS, we do
 not need any special trust-setup for vended credentials / STS with most S3

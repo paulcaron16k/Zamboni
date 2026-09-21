@@ -42,32 +42,119 @@ There is **no separate UI container** — Lakekeeper serves its own UI at `/ui/`
 Everything else here is ordinary compose. These two are the ones that took a
 failed verification run to find.
 
-### `sts-enabled: true`
+### `sts-enabled: true`, and the three others it is not
 
-Lakekeeper can give a client access to storage two ways, and only one of them
-lets Zamboni reclaim anything:
+A remote-signing warehouse **looks perfectly healthy**. Reads work, writes work,
+tables are queryable. It fails only when you try to free a byte — which is why
+`tests/test_dev_stack.py` asserts the setting directly rather than inferring it
+from a successful read.
+
+#### The two ways a catalog gives a client access to storage
+
+**STS — a security token service.** A service that issues short-lived credentials
+on request: AWS's STS, or the equivalent an S3-compatible store implements (MinIO
+has one, which is why this stack works). The catalog holds the real credentials,
+calls STS to exchange them for a temporary set scoped to the table's prefix, and
+hands those to the client with a session token. The client then **talks to the object store directly** and signs
+its own requests, exactly as if it held a key of its own — because for the next
+hour, it does. Every S3 verb the scoped policy allows works, because nothing is
+mediating them.
+
+**Remote signing — the catalog signs on your behalf.** The client receives no
+credentials at all. For each request it POSTs the request details to the catalog,
+which returns an `Authorization` header, and the client then sends the request to
+storage carrying that signature. The catalog decides per request, which is the
+point: access is revoked by declining to sign rather than by rotating a key. It
+is strictly better than vending for the job it exists for — handing a BI tool a
+catalog token so it never sees a storage credential — and the consequence for us
+is that **a verb the catalog will not sign is simply unavailable.**
+
+Measured against Lakekeeper 0.13.1 and MinIO, from
+[live-verification.md](../docs/live-verification.md):
 
 | | STS credential vending | Remote signing |
 |---|---|---|
 | Client receives | temporary credentials + session token | nothing; each request is signed by Lakekeeper |
 | FileIO selected | `PyArrowFileIO` | `FsspecFileIO` + `S3V4RestSigner` |
 | `GET` / `PUT` | works | works |
-| `ListObjectsV2` | works | **refused** (400 from the signer) |
-| `HeadObject` | works | **refused** (403) |
+| `ListObjectsV2` | works | **refused** — `SignError: Failed to sign request 400` |
+| `HeadObject` | works | **refused** — `403 Forbidden` from MinIO |
 | multi-object `DELETE` | works | **refused** |
-| Consequence | everything works | compaction fails; `expire` commits but frees nothing; `remove-orphans` cannot run |
 
-A remote-signing warehouse looks perfectly healthy. Reads work, writes work,
-tables are queryable. It fails only when you try to free a byte — which is why
-`tests/test_dev_stack.py` asserts the setting directly rather than inferring it
-from a successful read.
+The refusal is not about scope: the `ListObjectsV2` above was refused with a
+prefix **inside the table's own location**.
 
-Note that `remote-signing-enabled` may *also* be true on this warehouse. **STS
-takes precedence**; it is the presence of STS that matters, not the absence of
-signing. `bootstrap.py` warns if it finds an existing warehouse without it.
+#### All four combinations
 
-MinIO needs no trust setup for this — per Lakekeeper's docs, an access key that
-can read and write the bucket is enough, with `flavor: s3-compat`.
+Both fields are independent, and the defaults are not symmetric —
+`sts-enabled` is **required with no default**, while `remote-signing-enabled`
+is optional and **defaults to `true`**. So a warehouse created without
+mentioning signing has it on.
+
+| `sts-enabled` | `remote-signing-enabled` | What a client gets | Maintenance |
+|---|---|---|---|
+| `true` | `false` | vended credentials | everything works |
+| `true` | `true` | vended credentials — **STS is tried first and signing is only the fallback** | everything works. **This stack is here**: `bootstrap.py`'s storage profile sets `sts-enabled` and leaves `remote-signing-enabled` unset, so signing is on by Lakekeeper's default |
+| `false` | `true` | signed requests only | reads and writes fine; `compact` fails on `HeadObject`, `expire` commits and frees nothing, `remove-orphans` cannot list — *unless Zamboni has the object store's own credentials, below* |
+| `false` | `false` | nothing usable | no vending and no signing, so nothing can reach storage. **Derived from Lakekeeper's documented semantics, not measured here** — its wording is that with signing disabled, "clients cannot use remote signing for this storage profile even if STS is disabled" |
+
+`push-s3-delete-disabled` (default `true`) is a third field worth knowing:
+it controls whether the `s3.delete-enabled=false` flag is sent to clients,
+which is a separate way for deletion to be switched off underneath a run.
+
+#### Row three is not a dead end
+
+A signing warehouse denies *the catalog's* clients those verbs. It is not the
+storage owner, and Zamboni does not have to be one of its clients: given the
+object store's own read/write credentials it lists and deletes directly, and the
+catalog cannot prevent that. Set `ZAMBONI_S3_ACCESS_KEY_ID` and
+`ZAMBONI_S3_SECRET_ACCESS_KEY` in `.env` — never in `zamboni.yml` — and see
+[Storage credentials](../docs/user_guide.md#storage-credentials-who-talks-to-the-object-store)
+for `ZAMBONI_CREDENTIAL_USE`, which decides whether they are used for everything,
+for reclaim only, or never. With none configured, a reclaim run **refuses up
+front** rather than listing what it can and deleting what it managed to sign.
+
+To try that path here: `WAREHOUSE_NAME=zamboni-signed S3_STS_ENABLED=false uv run bootstrap.py`.
+
+#### Lakekeeper: what to set
+
+Create the warehouse with `sts-enabled: true`. That is the whole instruction —
+signing can stay at its default, because STS is tried first. For `flavor: aws`
+you must also supply `sts-role-arn` or `assume-role-arn`; for `flavor: s3-compat`
+(MinIO, and this stack) no trust setup is needed at all, per Lakekeeper's docs:
+an access key that can read and write the bucket is enough.
+
+`bootstrap.py` warns if it finds an existing warehouse without STS. A warehouse's
+storage profile cannot be edited into a different posture after the fact by this
+script — check with `uv run bootstrap.py --show`.
+
+#### Polaris
+
+The matrix does not apply. **Polaris vends credentials only and has no remote
+signing mode**, so there is no setting here to get wrong: it calls AWS STS
+`AssumeRole` with an inline session policy scoped to the table locations and the
+operations the principal is authorised for, and returns `s3.access-key-id`,
+`s3.secret-access-key`, `s3.session-token` and `s3.session-token-expires-at-ms`
+— the same shape Lakekeeper's STS path produces, which is why PyIceberg selects
+`PyArrowFileIO` for both.
+
+What to check instead is that **the principal is authorised for the operations
+maintenance needs**, because the session policy is scoped to them: reclaiming
+storage needs list and delete, not just read and write. A Polaris warehouse that
+reads and writes correctly can still refuse to free a byte, for the same reason a
+signing Lakekeeper does and by a different mechanism — and the same escape hatch
+applies, since Polaris does not own the bucket either.
+
+#### Telling what yours does
+
+```bash
+uv run bootstrap.py --show                 # prints `sts=... signing=...` for this warehouse
+zamboni doctor                             # what the installed build can do
+```
+
+Against any catalog, the honest test is to run the thing that fails:
+`zamboni remove-orphans <table>` previews without `--yes` and refuses up front if
+it cannot list, naming the setting.
 
 ### The endpoint is the compose gateway, not `minio`
 
