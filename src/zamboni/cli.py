@@ -577,7 +577,19 @@ def _add_catalog_args(p: argparse.ArgumentParser) -> None:
         help="path to a filesystem warehouse with a SQL catalog, instead of --uri",
     )
 
-    s = p.add_argument_group("s3 / minio")
+    # Named for the question rather than for one provider: `--credential-use`
+    # governs GCS and Azure too, and an operator on either would read a group
+    # titled "s3 / minio" as having nothing for them. Their credentials have no
+    # flags -- every one is a secret or one field of a set -- so the description
+    # is the only place `--help` can point at them.
+    s = p.add_argument_group(
+        "object storage",
+        "GCS and Azure credentials are environment-only: ZAMBONI_GCS_TOKEN (a "
+        "service-account key file path, or `google_default` for ambient "
+        "credentials), or ZAMBONI_AZURE_ACCOUNT_NAME with one of "
+        "ZAMBONI_AZURE_ACCOUNT_KEY / _SAS_TOKEN / _CLIENT_SECRET. Configure the "
+        "one your warehouse lives in; see docs/reclaiming-storage.md.",
+    )
     s.add_argument("--s3-endpoint", default=os.environ.get("ZAMBONI_S3_ENDPOINT"))
     s.add_argument("--s3-access-key-id", default=os.environ.get("ZAMBONI_S3_ACCESS_KEY_ID"))
     s.add_argument(
@@ -717,8 +729,9 @@ def _session_from(args: argparse.Namespace) -> CatalogSession:
         # Environment only: the flags that used to set these were removed
         # because a command line is world-readable. `_RemovedSecretFlag` says so
         # if anyone passes the old ones.
-        credential=os.environ.get("ZAMBONI_CREDENTIAL"),
-        token=os.environ.get("ZAMBONI_TOKEN"),
+        # Environment first, profile as the fallback -- the ordinary precedence.
+        credential=os.environ.get("ZAMBONI_CREDENTIAL") or args.zamboni_profile.credential,
+        token=os.environ.get("ZAMBONI_TOKEN") or args.zamboni_profile.token,
         oauth2_server_uri=args.oauth2_server_uri,
         scope=args.scope,
         storage=storage,
@@ -731,60 +744,77 @@ def _session_from(args: argparse.Namespace) -> CatalogSession:
 def _storage_from(args: argparse.Namespace) -> S3Settings | GCSSettings | AzureSettings | None:
     """Zamboni's own object-store credentials, for whichever provider is configured.
 
-    **Environment only for GCS and Azure, deliberately.** S3 keeps its
-    `--s3-endpoint` / `--s3-access-key-id` flags because they predate this and
-    are not secrets, but a command line is world-readable on a shared host --
-    which is why `--s3-secret-access-key` was removed. Every credential added
-    here is either a secret or one field of a set, so none gets a flag.
+    **Resolution is the ordinary one**: a flag, then a `ZAMBONI_*` variable (which
+    a `.env` has already been loaded into), then the profile's `storage:` block.
+    So a deployment that injects secrets through the environment is unaffected by
+    anything written in `zamboni.yml`, and one that mounts its whole
+    configuration from a Kubernetes Secret can keep it in a single file --
+    which, holding a secret, is then held to `.env`'s mode rule
+    (`settings.check_profile_permissions`).
+
+    **No flags for GCS and Azure.** S3 keeps `--s3-endpoint` /
+    `--s3-access-key-id` because they predate this and are not secrets, but a
+    command line is world-readable on a shared host -- which is why
+    `--s3-secret-access-key` was removed. Every credential added since is either
+    a secret or one field of a set, so none gets a flag.
 
     At most one provider may be configured. Two would be ambiguous rather than
     additive: a fleet whose tables span two stores needs two runs, because a
     session holds one set of credentials and the table's own location decides
     whether they fit (`CatalogSession.table`).
     """
+    profile_storage = getattr(getattr(args, "zamboni_profile", None), "storage", {}) or {}
+
+    def setting(provider: str, key: str, env: str) -> str | None:
+        return os.environ.get(env) or profile_storage.get(provider, {}).get(key)
+
     configured: list[tuple[str, S3Settings | GCSSettings | AzureSettings]] = []
 
-    if args.s3_endpoint:
-        secret = os.environ.get("ZAMBONI_S3_SECRET_ACCESS_KEY")
-        if not (args.s3_access_key_id and secret):
+    endpoint = args.s3_endpoint or profile_storage.get("s3", {}).get("endpoint")
+    if endpoint:
+        key_id = args.s3_access_key_id or profile_storage.get("s3", {}).get("access_key_id")
+        secret = setting("s3", "secret_access_key", "ZAMBONI_S3_SECRET_ACCESS_KEY")
+        if not (key_id and secret):
             raise ValueError(
-                "--s3-endpoint also needs --s3-access-key-id (or "
-                "ZAMBONI_S3_ACCESS_KEY_ID) and ZAMBONI_S3_SECRET_ACCESS_KEY. "
-                "The secret has no flag on purpose -- see "
-                "docs/user_guide.md#secrets."
+                "an S3 endpoint also needs an access key id (--s3-access-key-id or "
+                "ZAMBONI_S3_ACCESS_KEY_ID) and a secret (ZAMBONI_S3_SECRET_ACCESS_KEY). "
+                "The secret has no flag on purpose -- see docs/user_guide.md#secrets. "
+                "Both may also be set under `storage.s3` in zamboni.yml."
             )
         configured.append(
             (
                 "S3",
                 S3Settings(
-                    endpoint=args.s3_endpoint,
-                    access_key_id=args.s3_access_key_id,
+                    endpoint=endpoint,
+                    access_key_id=key_id,
                     secret_access_key=secret,
-                    region=args.s3_region,
+                    region=args.s3_region
+                    or profile_storage.get("s3", {}).get("region")
+                    or "us-east-1",
                 ),
             )
         )
 
-    if token := os.environ.get("ZAMBONI_GCS_TOKEN"):
+    if token := setting("gcs", "token", "ZAMBONI_GCS_TOKEN"):
         configured.append(
             (
                 "GCS",
                 GCSSettings(
                     token=token,
-                    project_id=os.environ.get("ZAMBONI_GCS_PROJECT_ID"),
-                    service_host=os.environ.get("ZAMBONI_GCS_SERVICE_HOST"),
+                    project_id=setting("gcs", "project_id", "ZAMBONI_GCS_PROJECT_ID"),
+                    service_host=setting("gcs", "service_host", "ZAMBONI_GCS_SERVICE_HOST"),
                 ),
             )
         )
 
-    if account := os.environ.get("ZAMBONI_AZURE_ACCOUNT_NAME"):
+    if account := setting("azure", "account_name", "ZAMBONI_AZURE_ACCOUNT_NAME"):
         azure = AzureSettings(
             account_name=account,
-            account_key=os.environ.get("ZAMBONI_AZURE_ACCOUNT_KEY"),
-            sas_token=os.environ.get("ZAMBONI_AZURE_SAS_TOKEN"),
-            client_id=os.environ.get("ZAMBONI_AZURE_CLIENT_ID"),
-            client_secret=os.environ.get("ZAMBONI_AZURE_CLIENT_SECRET"),
-            tenant_id=os.environ.get("ZAMBONI_AZURE_TENANT_ID"),
+            account_key=setting("azure", "account_key", "ZAMBONI_AZURE_ACCOUNT_KEY"),
+            sas_token=setting("azure", "sas_token", "ZAMBONI_AZURE_SAS_TOKEN"),
+            client_id=setting("azure", "client_id", "ZAMBONI_AZURE_CLIENT_ID"),
+            client_secret=setting("azure", "client_secret", "ZAMBONI_AZURE_CLIENT_SECRET"),
+            tenant_id=setting("azure", "tenant_id", "ZAMBONI_AZURE_TENANT_ID"),
         )
         if not (azure.account_key or azure.sas_token or azure.client_secret):
             raise ValueError(

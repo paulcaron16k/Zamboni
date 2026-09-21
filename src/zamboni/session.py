@@ -113,9 +113,10 @@ class CatalogSession:
                     f"{identifier}: this catalog vends no usable storage credentials -- it "
                     "remote-signs, and its signer refuses the LIST and DELETE that reclaiming "
                     "storage is made of. Zamboni needs the object store's own read/write "
-                    f"credentials. {_credential_hint(scheme)} (in .env, never in zamboni.yml), "
-                    "or set ZAMBONI_CREDENTIAL_USE=never to leave the catalog in charge and "
-                    "accept that reclaim will not run."
+                    f"credentials. {_credential_hint(scheme)} -- in the environment, in "
+                    ".env, or under `storage:` in zamboni.yml, which is then held to "
+                    ".env's mode rule. Or set ZAMBONI_CREDENTIAL_USE=never to leave the "
+                    "catalog in charge and accept that reclaim will not run."
                 )
             # The catalog vends credentials that work, so there is nothing to
             # override and nothing to complain about.

@@ -120,8 +120,14 @@ safety-critical module in the repo.
 
 **`settings.py`** resolves the operator config: flag > `ZAMBONI_*` env var >
 `./zamboni.yml` > `$ZAMBONI_ROOT/zamboni.yml` > built-in default. `zamboni.yml`
-is committable; credentials live in `.env`. `ENGINE_SETTINGS` deliberately
-rejects password/token/secret keys by name.
+is normally committable with credentials in `.env`, but it **may** hold them
+(`credential`, `token`, `storage.*`) — a Kubernetes Secret mounts as a file, and
+splitting one deployment's config across two mechanisms buys nothing. A profile
+containing any key in `SECRET_PROFILE_KEYS` becomes a credential file and gets
+`.env`'s mode rule via `check_profile_permissions`: group- or other-readable is
+a hard error. `ENGINE_SETTINGS` and `STORAGE_SETTINGS` are allow-lists so a typo
+fails at load instead of silently doing nothing; the engine blocks still have no
+password key, because neither maintainer accepts one.
 
 **`cli.py`** is argparse, grouped by how much a verb changes: read-only
 (`doctor`, `engines`, `describe`, `plan`, `validate-config`, `from-catalog`,

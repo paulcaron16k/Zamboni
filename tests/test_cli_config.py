@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 
 import pytest
@@ -600,3 +601,130 @@ def test_the_s3_settings_repr_redacts_the_secret():
     assert "10" not in text, "extra may hold secrets too, so its values stay out"
     # The properties still carry it, or nothing could authenticate.
     assert settings.as_properties()["s3.secret-access-key"] == "hunter2"
+
+
+# -- secrets in the profile (ZMBNI-97 follow-up) ---------------------------
+#
+# The profile was defined as "everything that is not a secret". That assumed it
+# is committed, which is the common case and not the only one: a Kubernetes
+# Secret mounts as a file, and a profile projected from one is exactly as
+# protected as an environment variable. So secrets are allowed here and the file
+# is then held to `.env`'s mode rule.
+
+
+def _profile(tmp_path, body, mode=0o600):
+    path = tmp_path / "zamboni.yml"
+    path.write_text(body)
+    path.chmod(mode)
+    return path
+
+
+def test_a_profile_carrying_a_secret_must_not_be_readable_by_others(tmp_path):
+    """The same rule `.env` has, and a hard error for the same reason: a warning
+    on a nightly cron job is a line in a log nobody opens."""
+    from zamboni.settings import ProfileError, load_profile
+
+    path = _profile(tmp_path, "uri: http://c\ncredential: id:secret\n", mode=0o644)
+
+    with pytest.raises(ProfileError) as caught:
+        load_profile(path)
+    assert "chmod 600" in str(caught.value)
+
+
+def test_a_profile_with_no_secrets_stays_committable(tmp_path):
+    """Checking every profile would break every deployment that has one, to
+    protect a file with nothing in it. World-readable is *correct* here."""
+    from zamboni.settings import load_profile
+
+    path = _profile(tmp_path, "uri: http://c\nwarehouse: w\n", mode=0o644)
+
+    assert load_profile(path).uri == "http://c"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "credential: id:secret\n",
+        "token: bearer-value\n",
+        "storage:\n  s3:\n    secret_access_key: s\n",
+        "storage:\n  azure:\n    account_key: k\n",
+        "storage:\n  gcs:\n    token: google_default\n",
+    ],
+)
+def test_every_shape_of_secret_triggers_the_mode_rule(tmp_path, body):
+    """Including one nested two levels down, which is the one a top-level-only
+    check would miss -- and the file that most needs the rule.
+
+    `gcs.token` is included even though `google_default` is not a secret:
+    deciding per value would make a file a credential file on Tuesday and not on
+    Wednesday, and being wrong the safe way costs one chmod.
+    """
+    from zamboni.settings import ProfileError, load_profile
+
+    with pytest.raises(ProfileError, match="readable by group or other"):
+        load_profile(_profile(tmp_path, body, mode=0o644))
+
+
+def test_an_access_key_id_alone_is_not_a_secret(tmp_path):
+    """The same judgement that keeps `--s3-access-key-id` as a flag: a key id is
+    an identifier. Treating it as a secret would be applying the rule by rote."""
+    from zamboni.settings import load_profile
+
+    path = _profile(tmp_path, "storage:\n  s3:\n    access_key_id: AKIA\n", mode=0o644)
+
+    assert load_profile(path).storage["s3"]["access_key_id"] == "AKIA"
+
+
+def test_the_environment_still_wins_over_the_profile(monkeypatch, tmp_path):
+    """The whole point of allowing secrets here is to add a place, not to move
+    one. A deployment injecting credentials properly must be unaffected by
+    whatever a committed file happens to say."""
+    from zamboni.cli import _storage_from
+    from zamboni.settings import load_profile
+
+    path = _profile(tmp_path, "storage:\n  gcs:\n    token: from-the-profile\n")
+    monkeypatch.setenv("ZAMBONI_GCS_TOKEN", "from-the-environment")
+
+    args = argparse.Namespace(
+        s3_endpoint=None,
+        s3_access_key_id=None,
+        s3_region=None,
+        zamboni_profile=load_profile(path),
+    )
+    assert _storage_from(args).token == "from-the-environment"
+
+
+def test_the_profile_is_used_when_the_environment_is_silent(monkeypatch, tmp_path):
+    from zamboni.cli import _storage_from
+    from zamboni.settings import load_profile
+
+    path = _profile(tmp_path, "storage:\n  gcs:\n    token: from-the-profile\n    project_id: p\n")
+    monkeypatch.delenv("ZAMBONI_GCS_TOKEN", raising=False)
+
+    args = argparse.Namespace(
+        s3_endpoint=None,
+        s3_access_key_id=None,
+        s3_region=None,
+        zamboni_profile=load_profile(path),
+    )
+    settings = _storage_from(args)
+    assert settings.token == "from-the-profile"
+    assert settings.project_id == "p"
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("storage:\n  swift:\n    token: t\n", "unknown provider"),
+        ("storage:\n  gcs:\n    tokne: t\n", "unknown key"),
+        ("storage:\n  gcs:\n    token: t\n  s3:\n    endpoint: e\n", "more than one provider"),
+        ("storage: nonsense\n", "must be a block"),
+    ],
+)
+def test_a_storage_block_is_validated_at_load(tmp_path, body, expected):
+    """A typo should fail here, not become a setting that silently does nothing
+    -- the same discipline the engine blocks have."""
+    from zamboni.settings import ProfileError, load_profile
+
+    with pytest.raises(ProfileError, match=expected):
+        load_profile(_profile(tmp_path, body))

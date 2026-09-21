@@ -222,7 +222,59 @@ history keeps it. Set ZAMBONI_TOKEN in the environment or in a .env file
 (mode 600) instead -- see docs/user_guide.md#secrets.
 ```
 
-Every secret arrives through the environment, and nothing else:
+### Where a secret may live
+
+Three places, and the ordinary precedence decides: a **flag**, then a
+**`ZAMBONI_*` variable** (which `--env` / `.env` is loaded into), then
+**`zamboni.yml`**.
+
+The profile used to be defined as everything that is *not* a secret, and that
+rule assumed it is committed — the common case, and not the only one. A
+Kubernetes Secret mounts as a *file*, so a profile projected from one is exactly
+as protected as an environment variable, and splitting a single deployment's
+configuration across two mechanisms buys nothing. Forcing the split has a cost
+too: an operator who cannot put a credential where the rest of the configuration
+lives tends to move the rest of the configuration to where the credential is,
+and `.env` quietly becomes the profile.
+
+So a secret in `zamboni.yml` is allowed, and **the file is then treated as what
+it has become**:
+
+```yaml
+uri: https://catalog.internal/catalog
+warehouse: acme
+credential: client-id:client-secret     # or `token:` for a bearer
+storage:
+  gcs:
+    token: google_default               # or a key-file path
+```
+
+The moment any of those is present, the profile is a credential file and gets
+the same mode rule `.env` has always had — readable by group or other is a
+**hard error**, not a warning, for the same reason: a warning on a nightly cron
+job is a line in a log nobody opens.
+
+```
+zamboni.yml holds credentials and is readable by group or other (mode 644).
+Fix it and re-run:
+    chmod 600 zamboni.yml
+Or move the secret to .env or the environment, and keep this file committable.
+```
+
+A profile with no secrets in it is unaffected and stays world-readable, because
+checking every profile would break every deployment that has one in order to
+protect a file with nothing in it.
+
+Two details worth knowing. `storage.s3.access_key_id` does **not** count as a
+secret — a key id is an identifier, which is the same judgement that keeps
+`--s3-access-key-id` as a flag. `storage.gcs.token` does count, even though it
+usually holds a key-file path or `google_default`: deciding per value would make
+a file a credential file on Tuesday and not on Wednesday, and being wrong the
+safe way costs one `chmod`.
+
+### Removed flags
+
+Every secret that once had a flag arrives through the environment instead:
 
 | Instead of | Set |
 |---|---|
@@ -233,6 +285,20 @@ Every secret arrives through the environment, and nothing else:
 `--s3-access-key-id` is deliberately **kept**: a key id is an identifier, not a
 secret, and removing it alongside would be applying the rule by rote rather than
 for its reason.
+
+The GCS and Azure credentials never had a flag to remove — they arrived after
+this rule and were written to it, so they are environment-only from the start:
+
+| Provider | Secret | Not a secret |
+|---|---|---|
+| GCS | `ZAMBONI_GCS_TOKEN`, when it holds a raw token | the same variable holding a key-file *path* or `google_default`, and `ZAMBONI_GCS_PROJECT_ID` / `ZAMBONI_GCS_SERVICE_HOST` |
+| Azure | `ZAMBONI_AZURE_ACCOUNT_KEY`, `ZAMBONI_AZURE_SAS_TOKEN`, `ZAMBONI_AZURE_CLIENT_SECRET` | `ZAMBONI_AZURE_ACCOUNT_NAME`, `ZAMBONI_AZURE_CLIENT_ID`, `ZAMBONI_AZURE_TENANT_ID` |
+
+`ZAMBONI_GCS_TOKEN` is the one variable that is a secret or not depending on its
+value, which is why it is treated as one throughout: `GCSSettings.__repr__`
+prints a path and `google_default` but redacts anything else. On GKE prefer
+`google_default` — Workload Identity supplies the credential, so no secret
+reaches the environment and nothing needs rotating.
 
 ### Every variable is prefixed `ZAMBONI_`
 
@@ -1361,7 +1427,7 @@ policy — the same thing Spark has always done, which needs `spark.hadoop.fs.s3
 Spark server.
 
 ```bash
-# .env, mode 600 -- never zamboni.yml
+# .env, mode 600 -- or in zamboni.yml, see below
 ZAMBONI_S3_ACCESS_KEY_ID=...          # S3, MinIO, Silo, Garage, Ceph RGW
 ZAMBONI_S3_SECRET_ACCESS_KEY=...
 ZAMBONI_GCS_TOKEN=...                 # GCS: a key-file path, or `google_default`
