@@ -48,7 +48,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-from . import maintainers, settings, version_banner
+from . import capabilities, maintainers, settings, version_banner
 from .capabilities import detect
 from .catalog_import import config_from_catalog, load_catalog
 from .compactor import CompactionBlocked, TableCompactor
@@ -176,6 +176,10 @@ def main(argv: list[str] | None = None) -> int:
         print(caps.describe())
         spill_path, spill_state = describe_temp_directory(getattr(args, "temp_directory", None))
         print(f"  {'spill directory':<28} {spill_path} ({spill_state})")
+        # Where the answers above came from. An operator reading a surprising
+        # capability needs to know whether it was measured just now or restored
+        # from a previous run against this same build.
+        print(f"  {'probe cache':<28} {capabilities.cache_status()}")
         reason = caps.unsupported_reason()
         print(f"\nusable: {reason is None}" + (f"\nreason: {reason}" if reason else ""))
         return 0 if reason is None else 1

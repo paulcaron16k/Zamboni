@@ -158,6 +158,19 @@ Pair it with `zamboni doctor`, which reports whether the installed PyIceberg is
 usable at all — a probe rather than a version comparison, so it stays true
 across upgrades.
 
+Its `probe cache` line says where those answers came from. The probes cost about
+half a second because two of them commit to a scratch table, so the results are
+remembered under a key derived from the installed files — `hit` means restored,
+`miss` means measured just now. Two lines are worth reacting to:
+
+- `disabled (editable install …)` on a server. Correct in a developer checkout
+  and a sign of a hand-patched deployment anywhere else; the answers are right,
+  they are just re-measured every run.
+- `probed, nowhere writable to store it`, which on a read-only container costs
+  that half second per invocation. Point `ZAMBONI_CACHE_DIR` at any writable
+  path — a tmpfs is fine, it just means once per pod rather than once per
+  install.
+
 
 `zamboni describe` and `./bin/zamboni-demo status` report these. Rules of thumb, with the
 reasoning so you can adapt them:
