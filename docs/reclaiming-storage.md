@@ -177,7 +177,8 @@ location decides, and credentials for the wrong one are **refused up front**
 rather than failing at the first read:
 
 ```bash
-# .env, mode 600 -- never zamboni.yml, which is committable
+# .env, mode 600. These may also go under `storage:` in zamboni.yml --
+# which then holds credentials, and is held to the same mode rule.
 
 # S3, and every S3-compatible store: MinIO, Silo, Garage, Ceph RGW
 ZAMBONI_S3_ACCESS_KEY_ID=...

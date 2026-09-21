@@ -97,6 +97,32 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **`zamboni.yml` may hold secrets**, with the ordinary precedence: a flag, then
+  a `ZAMBONI_*` variable, then the profile. `credential`, `token` and a
+  `storage:` block (`s3` / `gcs` / `azure`) are now accepted there.
+
+  The rule that made them illegal assumed the profile is committed — the common
+  case, and not the only one. A Kubernetes Secret mounts as a *file*, so a
+  profile projected from one is exactly as protected as an environment variable,
+  and splitting a single deployment's configuration across two mechanisms buys
+  nothing. Forcing the split also pushes the other way: an operator who cannot
+  put a credential where the rest of the configuration lives moves the rest of
+  the configuration to where the credential is, and `.env` becomes the profile.
+
+  **A profile holding a secret is treated as a credential file**: it gets the
+  same mode rule `.env` has always had, and readable by group or other is a hard
+  error rather than a warning — a warning on a nightly cron job is a line in a
+  log nobody opens. A profile with no secrets is unaffected and stays
+  world-readable. `storage.s3.access_key_id` does not count as a secret, for the
+  same reason `--s3-access-key-id` is still a flag; `storage.gcs.token` does,
+  even when it holds `google_default`, because deciding per value would make a
+  file a credential file on one day and not the next.
+
+  Nothing existing changes: the environment still wins, so a deployment that
+  injects secrets properly is unaffected by anything the profile says. The
+  engine blocks still have no password key — not because the file may not hold
+  one, but because neither maintainer accepts one.
+
 - **Storage credentials for GCS and Azure, not only S3.** `CredentialUse` is how
   Zamboni reclaims storage from a warehouse whose catalog remote-signs — and
   until now the only credentials it could be given were S3's, so a GCS or Azure

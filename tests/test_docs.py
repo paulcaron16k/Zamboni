@@ -491,3 +491,44 @@ def test_the_reclaim_page_names_every_credential_mode_and_no_invented_setting():
         f"it names {sorted(documented)} and CredentialUse has "
         f"{sorted(mode.value for mode in CredentialUse)}"
     )
+
+
+#: Read by the code but deliberately absent from `env.sample`. Each entry needs
+#: a reason, because the default is that an operator should be able to discover
+#: every setting from the template.
+_NOT_IN_ENV_SAMPLE = {
+    # The demo picks its own catalog; `zamboni-demo` is a narrative, not a
+    # deployment, and its settings would be noise in a production template.
+    "ZAMBONI_DEMO_CATALOG",
+}
+
+
+def test_env_sample_declares_every_variable_the_code_reads():
+    """The template is how an operator discovers what can be set.
+
+    Two ways it goes wrong and neither is visible at runtime. A variable the code
+    reads but the sample omits is simply undiscoverable -- nothing fails, the
+    feature just never gets used. A variable the sample names but the code does
+    not read is worse: it is *set*, it looks configured, and it does nothing.
+
+    That second one was real. `env.sample` carried `ZAMBONI_OAUTH_SERVER_URI`
+    while the code reads `ZAMBONI_OAUTH2_SERVER_URI`, so anyone who configured a
+    token endpoint from the template got PyIceberg's guessed one instead -- the
+    exact deprecation ELT-513 is about, arriving silently.
+    """
+    read = set()
+    for path in (ROOT / "src").rglob("*.py"):
+        read |= set(re.findall(r"ZAMBONI_[A-Z0-9_]+", path.read_text()))
+    declared = set(re.findall(r"ZAMBONI_[A-Z0-9_]+", (ROOT / "env.sample").read_text()))
+
+    undiscoverable = read - declared - _NOT_IN_ENV_SAMPLE
+    assert not undiscoverable, (
+        f"env.sample does not mention {sorted(undiscoverable)}, so nothing tells an "
+        "operator these exist. Add them, or name them in _NOT_IN_ENV_SAMPLE with a reason"
+    )
+
+    inert = declared - read
+    assert not inert, (
+        f"env.sample names {sorted(inert)}, which nothing in src/ reads -- setting one "
+        "looks like configuration and does nothing. Check the spelling against the code"
+    )

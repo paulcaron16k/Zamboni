@@ -5,7 +5,7 @@
 and Profile here is the operator-facing config file. Two different senses of
 the word, one of which was already taken.)
 
-Two files, split by whether the contents are secret:
+Two files, and the usual split is by whether the contents are secret:
 
 * ``zamboni.yml`` -- catalog URI, warehouse, engine, which operations to run.
   Belongs in version control.
@@ -16,6 +16,24 @@ command. The split is not cosmetic: putting credentials in the crontab puts them
 in ``crontab -l``, in every backup of ``/var/spool/cron``, and in the process
 table, so there has to be somewhere else for them to live that is not the
 profile people commit.
+
+**The profile may nevertheless hold secrets**, and that is deliberate rather
+than a loosening. The rule that made them illegal here assumed this file is
+committed -- which is the common case and not the only one. A Kubernetes Secret
+mounts as a *file*, so a profile projected from one is exactly as protected as
+an environment variable and splitting the same deployment's configuration across
+two mechanisms buys nothing. Forcing the split also has a cost that is easy to
+miss: an operator who cannot put a credential where the rest of the
+configuration lives will put the rest of the configuration where the credential
+is, and ``.env`` becomes the profile.
+
+So a secret in the profile is allowed and **treated as what it is**: the moment
+one is present the file is a credential file, and
+:func:`check_profile_permissions` applies the same mode rule ``.env`` has always
+had -- readable by group or other is a hard error, not a warning. Precedence is
+unchanged and ordinary: a flag, then a ``ZAMBONI_*`` variable, then the profile.
+A deployment that injects secrets properly keeps working untouched, because the
+environment still wins.
 
 **Resolution order**, highest wins: a command-line flag, a ``ZAMBONI_*``
 environment variable, ``./zamboni.yml``, ``$ZAMBONI_ROOT/zamboni.yml``, the
@@ -48,13 +66,40 @@ DEFAULT_OPERATIONS = (
 )
 
 
-#: What may appear under `trino:`/`spark:` in the profile. Deliberately no
-#: password, token or secret key: those are the one thing this file must not
-#: hold, and rejecting them by name is better than trusting a convention.
+#: What may appear under `trino:`/`spark:` in the profile. Still no password or
+#: token -- not because the file may not hold secrets (it may, see the module
+#: docstring) but because neither maintainer *accepts* one. Adding a key the
+#: engine cannot use would be inventing configuration.
 ENGINE_SETTINGS = {
     "trino": frozenset({"host", "port", "user", "catalog", "version"}),
     "spark": frozenset({"remote", "master", "catalog"}),
 }
+
+#: What may appear under `storage:` in the profile, per provider. An allow-list
+#: for the same reason the engine blocks have one: a typo should be an error at
+#: load rather than a setting that silently does nothing.
+STORAGE_SETTINGS = {
+    "s3": frozenset(
+        {"endpoint", "region", "access_key_id", "secret_access_key", "path_style_access"}
+    ),
+    "gcs": frozenset({"token", "project_id", "service_host", "default_location"}),
+    "azure": frozenset(
+        {"account_name", "account_key", "sas_token", "client_id", "client_secret", "tenant_id"}
+    ),
+}
+
+#: Keys whose presence makes the profile a credential file. Conservative on
+#: purpose:
+#:
+#: * ``access_key_id`` is **not** here -- a key id is an identifier, which is the
+#:   same judgement that keeps `--s3-access-key-id` as a flag.
+#: * ``gcs.token`` **is**, even though it usually holds a key-file path or
+#:   ``google_default``, neither of which is a secret. Deciding per value would
+#:   mean a file that is a credential file on Tuesday and not on Wednesday, and
+#:   the cost of being wrong the safe way is one `chmod`.
+SECRET_PROFILE_KEYS = frozenset(
+    {"credential", "token", "secret_access_key", "account_key", "sas_token", "client_secret"}
+)
 
 
 class ProfileError(ValueError):
@@ -79,9 +124,17 @@ class Profile:
     #: credentials file. Only the password-shaped things belong there.
     engines: dict[str, dict[str, str]] = field(default_factory=dict)
     #: Whether Zamboni reclaims storage on its own credentials rather than the
-    #: catalog's. Non-secret -- it is a policy, not a key -- so it belongs here
-    #: and the credentials themselves stay in `.env`.
+    #: catalog's. A policy, not a key.
     credential_use: str = "always"
+    #: Catalog OAuth2 client credentials, ``client_id:client_secret``. A secret,
+    #: and allowed here -- see the module docstring. The environment still wins.
+    credential: str | None = None
+    #: A catalog bearer token, as an alternative to :attr:`credential`.
+    token: str | None = None
+    #: Object-store credentials, per provider: ``{"gcs": {"token": ...}}``.
+    #: Which provider a run uses is decided by the table's own location, not by
+    #: this block, so configuring two is refused rather than merged.
+    storage: dict[str, dict[str, str]] = field(default_factory=dict)
     #: Where this came from, for `--help` and error messages. `None` means
     #: nothing was found and the defaults are in force.
     source: Path | None = None
@@ -174,6 +227,48 @@ def check_env_permissions(path: Path) -> None:
         )
 
 
+def profile_holds_secrets(raw: dict[str, Any]) -> bool:
+    """Whether this profile carries anything that makes it a credential file.
+
+    Looks one level into the nested blocks as well as at the top, because
+    `storage.azure.account_key` is every bit as much a secret as a top-level
+    `credential` -- and a check that only saw the top level would pass the file
+    that most needs the mode rule.
+    """
+    if SECRET_PROFILE_KEYS & set(raw):
+        return True
+    for block in raw.values():
+        if isinstance(block, dict):
+            if SECRET_PROFILE_KEYS & set(block):
+                return True
+            for inner in block.values():
+                if isinstance(inner, dict) and SECRET_PROFILE_KEYS & set(inner):
+                    return True
+    return False
+
+
+def check_profile_permissions(path: Path) -> None:
+    """The same mode rule `.env` has, applied once the profile holds a secret.
+
+    Deliberately identical to :func:`check_env_permissions`, including that it
+    is a hard error: a warning on a nightly cron job is a line in a log nobody
+    opens. What differs is when it applies -- a profile carrying no secrets is
+    meant to be committed and world-readable, so checking it unconditionally
+    would break every existing deployment to protect a file with nothing in it.
+    """
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError as exc:  # pragma: no cover - raced with a delete
+        raise ProfileError(f"{path}: cannot stat: {exc}") from exc
+    if mode & 0o077:
+        raise ProfileError(
+            f"{path} holds credentials and is readable by group or other "
+            f"(mode {mode:03o}). Fix it and re-run:\n    chmod 600 {path}\n"
+            "Or move the secret to .env or the environment, and keep this file "
+            "committable."
+        )
+
+
 def load_env(path: Path | None, *, explicit: bool = False) -> dict[str, str]:
     """Load the ``ZAMBONI_*`` entries of ``path`` into ``os.environ``.
 
@@ -253,6 +348,11 @@ def load_profile(path: Path | None) -> Profile:
         "credential_use",
         "trino",
         "spark",
+        # Secrets, allowed here since they may legitimately be projected from a
+        # Kubernetes Secret. Their presence turns on `.env`'s mode rule.
+        "credential",
+        "token",
+        "storage",
     }
     if unknown := sorted(set(raw) - known):
         raise ProfileError(
@@ -276,10 +376,46 @@ def load_profile(path: Path | None) -> Profile:
         if unknown := sorted(set(block) - allowed):
             raise ProfileError(
                 f"{path}: {engine_name}: unknown key(s) {', '.join(unknown)}. "
-                f"Known keys: {', '.join(sorted(allowed))}. Credentials do not go "
-                "here -- this file is meant to be committed."
+                f"Known keys: {', '.join(sorted(allowed))}. Neither maintainer "
+                "accepts a password or token, so there is no key for one here; "
+                "catalog and object-store credentials go under `credential`, "
+                "`token` or `storage`."
             )
         engines[engine_name] = {k: str(v) for k, v in block.items()}
+
+    storage: dict[str, dict[str, str]] = {}
+    storage_block = raw.get("storage") or {}
+    if not isinstance(storage_block, dict):
+        raise ProfileError(f"{path}: 'storage' must be a block, keyed by provider")
+    if unknown := sorted(set(storage_block) - set(STORAGE_SETTINGS)):
+        raise ProfileError(
+            f"{path}: storage: unknown provider(s) {', '.join(unknown)}. "
+            f"Known: {', '.join(sorted(STORAGE_SETTINGS))}"
+        )
+    for provider, settings in storage_block.items():
+        if not isinstance(settings, dict):
+            raise ProfileError(f"{path}: storage.{provider} must be a block of settings")
+        allowed = STORAGE_SETTINGS[provider]
+        if unknown := sorted(set(settings) - allowed):
+            raise ProfileError(
+                f"{path}: storage.{provider}: unknown key(s) {', '.join(unknown)}. "
+                f"Known keys: {', '.join(sorted(allowed))}"
+            )
+        storage[provider] = {k: str(v) for k, v in settings.items()}
+    if len(storage) > 1:
+        # Refused rather than merged: a run uses one object store, and the
+        # table's own location decides which credentials fit. Two blocks means
+        # the operator expects something this cannot do.
+        raise ProfileError(
+            f"{path}: storage names more than one provider ({', '.join(sorted(storage))}). "
+            "A run uses one object store; configure the one this warehouse lives in."
+        )
+
+    # Once it holds a secret it is a credential file, and gets `.env`'s mode
+    # rule. Checked after parsing so a malformed profile fails on its contents
+    # rather than on its permissions.
+    if profile_holds_secrets(raw):
+        check_profile_permissions(path)
 
     base = _from_environment(source=path)
     root = raw.get("root")
@@ -295,6 +431,9 @@ def load_profile(path: Path | None) -> Profile:
         root=Path(root).expanduser() if root else base.root,
         operations=operations,
         engines=engines,
+        credential=raw.get("credential") or base.credential,
+        token=raw.get("token") or base.token,
+        storage=storage,
         tables=tuple(raw.get("tables") or ()),
         source=path,
     )
