@@ -435,3 +435,30 @@ def test_every_extra_the_readme_names_exists():
     assert not (declared - named), (
         f"pyproject.toml declares extras the README does not name: {sorted(declared - named)}"
     )
+
+
+def test_the_dev_stack_warehouse_is_the_combination_its_readme_claims():
+    """dev-stack/README.md says this warehouse has STS *and* signing enabled.
+
+    Not a restatement of the source: the claim rests on an absence. Lakekeeper's
+    `remote-signing-enabled` defaults to `true`, so leaving it out of the storage
+    profile turns it on, and the README's four-combination table places this
+    stack in the both-enabled row on exactly that basis. Someone setting the
+    field explicitly -- in either direction -- moves the stack to a different row
+    and makes the table wrong, silently, because nothing about the stack
+    misbehaves.
+    """
+    bootstrap = (ROOT / "dev-stack" / "bootstrap.py").read_text()
+    profile = bootstrap[
+        bootstrap.index('"storage-profile"') : bootstrap.index('"storage-credential"')
+    ]
+
+    assert '"sts-enabled"' in profile, (
+        "the storage profile no longer sets sts-enabled, which is required and has no "
+        "default -- dev-stack/README.md's matrix and bootstrap.py's own warning are both wrong now"
+    )
+    assert "remote-signing-enabled" not in profile, (
+        "the storage profile now sets remote-signing-enabled explicitly, so this stack is "
+        "no longer the 'both enabled, by Lakekeeper's default' row that dev-stack/README.md "
+        "describes. Update the four-combination table to say which row it is now"
+    )

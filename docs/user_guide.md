@@ -1322,8 +1322,17 @@ Worth stating plainly, because "no cluster" invites suspicion:
 
 ## Storage credentials: who talks to the object store
 
-Skip this if your catalog vends credentials (Lakekeeper with `sts-enabled: true`, the
-default). It matters when it remote-signs instead.
+Skip this if your catalog vends credentials. It matters when it remote-signs instead.
+
+Which one you have is worth checking rather than assuming. On Lakekeeper `sts-enabled`
+is **required and has no default**, while `remote-signing-enabled` is optional and
+**defaults to `true`** — so a warehouse created without mentioning either is a signing
+warehouse, and one created with both is a vending warehouse, because STS is tried first
+and signing is only the fallback. Apache Polaris has no signing mode at all: it vends
+STS credentials scoped to the table locations *and the operations the principal is
+authorised for*, so the thing to check there is that the principal may list and delete,
+not just read and write. All four Lakekeeper combinations, with what each means for
+maintenance, are in [dev-stack/README.md](../dev-stack/README.md).
 
 **The two paths are not equivalent.** A credential-vending catalog hands over temporary
 keys and a session token, and your client signs locally — every S3 verb works. A
