@@ -36,6 +36,35 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **A build observed losing rows could still be declared safe.**
+  `manifest_pruning_is_safe` read `derives_delete_predicate or not
+  prunes_manifests_by_predicate`, and the structural half short-circuited the
+  behavioural one — so "this build shows no sign of pruning" granted safety with
+  nothing measured. What decides that is the string `manifest_evaluator` grepped
+  out of `_OverwriteFiles._existing_manifests`, and on 0.12 it matches a **local
+  variable name inside the function body**. An upstream rename — a refactor
+  changing no behaviour — was enough to skip the measurement and declare a
+  pruning build safe. That is the ZMBNI-1109 class one level cheaper to trigger.
+
+  The measurement is authoritative now: the overwrite runs whatever the source
+  looks like, and the structural answer is consulted only when nothing could be
+  observed, where it can withdraw safety but never grant it unexamined. Its
+  original justification was cost — "does not prune → no cost, this is 0.11.1,
+  which is every current user" — and both halves have expired: the floor is
+  `>=0.12`, every supported build prunes, and since ZMBNI-88 the probe is paid
+  once per install. (ZMBNI-38)
+
+- **`delete_manifests_writable` believed a parameter name.** It returned True
+  merely because `write_manifest` had grown a `content` parameter. A parameter
+  that exists but does not mean what we assume would engage ZMBNI-9's rewrite
+  path and stamp a delete manifest `content: data`, after which a reader treats
+  position deletes as **rows** — silent corruption, and the only structural
+  probe whose wrong answer was silent rather than loud. It now writes a manifest
+  holding a position-delete entry and reads the label back off
+  `to_manifest_file()`, which is where the label actually lives. Measured at
+  **3 ms**, against the ~200 ms the story estimated: that assumed a table, and
+  no table is needed. (ZMBNI-38)
+
 - **A container with a read-only root filesystem failed partway through a
   rewrite instead of refusing up front.** DuckDB creates its spill directory
   lazily, only when a rewrite actually exceeds the memory budget — and `CHUNKED`
@@ -58,6 +87,18 @@ Two categories beyond the usual set, because this tool deletes files:
 
 
 ### Added
+
+- **Every capability probe now has an independent cross-check.**
+  `operation_is_injectable`, `replace_summary_supported` and
+  `streaming_write_supported` were asserted only to be real booleans and to
+  appear in `doctor` output — neither asks whether the value is *right*, so a
+  probe that silently flipped passed both. Each is now re-derived by a different
+  route: constructing a producer with `operation=` for real, reading what
+  `update_snapshot_summaries` accepts, and handing `_dataframe_to_data_files` an
+  actual `RecordBatchReader`. That last one matters most, because the streaming
+  compaction tests *skip* when the probe is False — a wrongly-False probe made
+  them pass by not running. Verified by flipping each probe and confirming the
+  matching cross-check fails. (ZMBNI-38, ZMBNI-14)
 
 - **Probe results are remembered on disk, keyed to a hash of the installed
   build.** `zamboni doctor` and every run call `capabilities.detect()`, which
