@@ -91,17 +91,31 @@ def test_pruning_without_derivation_is_refused():
 
 
 @pytest.mark.parametrize(
-    "prunes,derives",
+    "prunes",
     [
-        (False, False),  # 0.11.1: scans every manifest
-        (True, True),  # main/0.12: prunes, and derives the predicate
-        (False, True),
+        True,  # 0.12: prunes, and the overwrite kept the right rows
+        False,  # shows no sign of pruning, and the overwrite agreed
     ],
 )
-def test_safe_pruning_combinations(prunes, derives):
-    caps = _caps(prunes_manifests_by_predicate=prunes, derives_delete_predicate=derives)
+def test_the_observed_outcome_decides_whichever_way_the_source_looks(prunes):
+    caps = _caps(prunes_manifests_by_predicate=prunes, derives_delete_predicate=True)
     assert caps.manifest_pruning_is_safe
     assert caps.unsupported_reason() is None
+
+
+def test_a_structural_no_cannot_overrule_an_observed_row_loss():
+    """`or not prunes_manifests_by_predicate` used to grant safety here.
+
+    The combination is "the overwrite lost rows, on a build whose source shows
+    no sign of pruning" -- and the source is what is wrong, not the measurement.
+    The needle deciding it is `manifest_evaluator`, which in 0.12 matches a
+    **local variable name inside a function body**, so renaming a local was
+    enough to reach this square. Rows lost is rows lost.
+    """
+    caps = _caps(prunes_manifests_by_predicate=False, derives_delete_predicate=False)
+
+    assert not caps.manifest_pruning_is_safe
+    assert "counted twice" in caps.unsupported_reason()
 
 
 def test_missing_operation_argument_is_refused():
@@ -177,6 +191,93 @@ def test_the_delete_manifest_probe_agrees_with_the_installed_writer():
     assert detect().delete_manifests_writable is not writes_data_only
 
 
+# -- the three probes that had no independent cross-check (ZMBNI-14/38) ---
+#
+# `test_probes_the_installed_build` asserts each answer is a real bool and
+# `test_doctor_reports_...` that it reaches the output. Neither asks whether the
+# value is *right*, so a structural probe that silently flipped would pass both.
+# These three re-derive the answer by a different route. None compares against a
+# per-version literal: a table saying "0.12 says X" is the compare-to-a-literal
+# pattern CONTRIBUTING rule 2 forbids, and would keep passing after the
+# behaviour it describes changed.
+
+
+def test_the_operation_probe_agrees_with_what_the_producer_accepts(unpartitioned):
+    """Derived by constructing one, not by reading the signature again.
+
+    The probe asks `inspect.signature`. This hands a real `_OverwriteFiles` the
+    `operation=` argument against a real transaction, which is what
+    `ReplaceCommitter.commit` does -- so a build where the parameter exists but
+    is rejected, or is accepted under another name, disagrees here.
+    """
+    from pyiceberg.table.snapshots import Operation
+    from pyiceberg.table.update.snapshot import _OverwriteFiles
+
+    table = unpartitioned
+    try:
+        with table.transaction() as txn:
+            _OverwriteFiles(
+                operation=Operation.OVERWRITE,
+                transaction=txn,
+                io=table.io,
+                snapshot_properties={},
+            )
+        accepted = True
+    except TypeError:
+        accepted = False
+
+    assert detect().operation_is_injectable is accepted
+
+
+def test_the_replace_summary_probe_agrees_with_the_installed_summary_rules():
+    """Behavioural probe, structural cross-check -- the reverse of the pair above.
+
+    The probe calls `update_snapshot_summaries` and catches `ValueError`. This
+    reads what that function is willing to accept, so the two disagree if the
+    rejection ever moves to a different exception or a different place.
+    """
+    import inspect
+
+    from pyiceberg.table import snapshots
+
+    source = inspect.getsource(snapshots.update_snapshot_summaries)
+    mentions_replace = "Operation.REPLACE" in source
+
+    assert detect().replace_summary_supported is mentions_replace, (
+        "the probe and the installed `update_snapshot_summaries` disagree about "
+        "whether REPLACE is an accepted operation"
+    )
+
+
+def test_the_streaming_probe_agrees_with_what_the_writer_accepts(unpartitioned):
+    """Derived by writing one, not by reading an annotation.
+
+    The probe reads the `df` parameter's type annotation off
+    `_dataframe_to_data_files`, which is the very thing that changed under us
+    once before. This hands it an actual `RecordBatchReader` and looks at
+    whether files come back. An annotation that says one thing while the
+    implementation does another shows up here and nowhere else -- the streaming
+    compaction tests skip when the probe is False, so a wrongly-False probe
+    makes them pass by not running.
+    """
+    import pyarrow as pa
+    from pyiceberg.io.pyarrow import _dataframe_to_data_files
+
+    table = unpartitioned
+    arrow = table.scan().to_arrow()
+    reader = pa.RecordBatchReader.from_batches(arrow.schema, arrow.to_batches())
+
+    try:
+        written = list(
+            _dataframe_to_data_files(table_metadata=table.metadata, df=reader, io=table.io)
+        )
+        accepted = bool(written)
+    except Exception:
+        accepted = False
+
+    assert detect().streaming_write_supported is accepted
+
+
 def test_the_pruning_pair_is_consistent_on_the_installed_build():
     """Pruning without derivation is the combination that double-counts rows.
 
@@ -207,18 +308,48 @@ def test_doctor_reports_the_installed_version_and_every_probe():
 # -- the pruning probe is behavioural, not name-based (ZMBNI-1109) --------
 
 
-def test_a_build_that_does_not_prune_needs_no_probe():
-    """0.11.1 is every current user, and pays nothing for this.
+def test_a_structural_no_cannot_skip_the_observation(monkeypatch):
+    """The short-circuit this replaced was reachable by renaming a local.
 
-    The expensive check exists for a hazard that only arrives with pruning, so
-    a build without pruning short-circuits before touching the filesystem.
+    It read: no sign of pruning -> safe, without running the probe. `prunes` is
+    settled by grepping `_existing_manifests`'s body for `manifest_evaluator`,
+    which matches the local `manifest_evaluators` -- so a pure refactor upstream
+    would have declared a pruning build safe with nothing measured.
+
+    Its justification was cost, on a premise that expired: "does not prune ->
+    no cost, this is 0.11.1, which is every current user". The floor is >=0.12
+    now and every supported build prunes, so it saved a branch no supported
+    install takes -- and since ZMBNI-88 the probe is paid once per install.
     """
-    from zamboni.capabilities import _derivation_is_correct
+    from zamboni import capabilities
 
-    safe, evidence = _derivation_is_correct(prunes=False)
+    observed = []
+    monkeypatch.setattr(capabilities, "_pruning_behaves", lambda: observed.append(1) or False)
 
+    safe, evidence = capabilities._derivation_is_correct(prunes=False)
+
+    assert observed, "the structural answer short-circuited the measurement"
+    assert not safe, "an observed row loss was overruled by the source not looking like pruning"
+    assert evidence.startswith("observed")
+
+
+def test_the_structural_answer_still_decides_when_nothing_can_be_observed(monkeypatch):
+    """It is the fallback now, not the gate -- and it can only withdraw safety.
+
+    A build that cannot be probed at all (no `sql` extra, no writable temp) gets
+    the old treatment, because there is nothing better to go on.
+    """
+    from zamboni import capabilities
+
+    monkeypatch.setattr(capabilities, "_pruning_behaves", lambda: None)
+
+    safe, evidence = capabilities._derivation_is_correct(prunes=False)
     assert safe
-    assert "not applicable" in evidence
+    assert "not observed" in evidence
+
+    safe, evidence = capabilities._derivation_is_correct(prunes=True)
+    assert not safe
+    assert "unknown" in evidence
 
 
 def test_a_pruning_build_is_settled_by_observation(monkeypatch):

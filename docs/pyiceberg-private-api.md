@@ -89,8 +89,13 @@ ManifestWriterV2                    (pyiceberg.manifest -- public name, private 
 
 The third base is easy to miss because its name carries no underscore.
 `ManifestWriterV2.content()` returns `ManifestContent.DATA` unconditionally, which
-is the fact `delete_manifests_writable` probes and the reason dangling-delete
-removal can only drop whole manifests — so subclassing it to override `_meta` is
+is the reason dangling-delete removal can only drop whole manifests. Since
+ZMBNI-38 `delete_manifests_writable` no longer *reads* that method: it writes a
+manifest holding a position-delete entry and reads the label back off
+`to_manifest_file()`, because a `content` parameter that exists but does not mean
+what we assume would stamp a delete manifest `content: data` silently. The
+subclass overriding `_meta` remains as much a private-contract dependency as
+anything above — so subclassing it to override `_meta` is
 as much a private-contract dependency as anything above.
 
 ### 2.3 Overridden private methods
@@ -156,7 +161,7 @@ is not attribute access at all:** three probes depend on upstream's *source text
 
 | Reach | In | Breaks when |
 |---|---|---|
-| `"manifest_evaluator" in getsource(_OverwriteFiles._existing_manifests)` | `capabilities.py:118` | that method's body is refactored |
+| `"manifest_evaluator" in getsource(_OverwriteFiles._existing_manifests)` | `capabilities.py` | that method's body is refactored — and the needle matches a **local variable name** (`manifest_evaluators`), so a rename that changes no behaviour breaks it. Since ZMBNI-38 this can only *withdraw* pruning safety, never grant it: the behavioural probe runs regardless and decides |
 | `"does not yet support equality deletes" in getsource(pyiceberg.table)` | `capabilities.py:274-278` | an **error message** is reworded |
 | `inspect.signature(_dataframe_to_data_files).parameters["df"].annotation` | `capabilities.py:320` | a type annotation changes — **which it did**, see §3 |
 

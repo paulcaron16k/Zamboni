@@ -2,18 +2,70 @@
 """What can this PyIceberg build actually do?
 
 Every version-dependent decision in this package routes through here rather than
-through a version comparison or a comment. The reason is concrete: the
-behaviours that matter are split across a release boundary that is currently
-open. PyIceberg 0.11.1 is the latest release; unreleased main (heading for 0.12)
-already changes three of the seven probes below -- streaming writes, manifest
-pruning and delete-predicate derivation all go False -> True, the last two
-together, which is what keeps ``manifest_pruning_is_safe`` true across the
-boundary. Pinning to "0.11.1 behaves like X" would silently rot the day 0.12
-ships. See docs/roadmap.md RM-1 for the full delta.
+through a version comparison or a comment. The reason is concrete and was
+measured, not assumed: **two installs both declaring ``0.12.0`` disagree.** The
+maintenance fork and stock PyPI answer ``added_files_honour_spec`` differently,
+which is why the tested-versions table proposed in ZMBNI-39 was closed as not
+planned and why the probe cache in :mod:`zamboni.probecache` is keyed on a hash
+of the installed files rather than on a version string.
 
-Probes are structural -- they ask whether a function exists or what a parameter
-set contains -- so they answer for whatever build is installed, including a
-checkout of main installed with ``uv pip install -e``.
+**Structural or behavioural, and why each is what it is (ZMBNI-38).** A
+structural probe asks whether a function exists or what a parameter set
+contains; a behavioural one performs the operation and looks at the result. The
+difference that matters is not accuracy, it is **how a wrong answer fails**.
+Since ZMBNI-83 a probe answer can *select an implementation* rather than merely
+withdraw a feature, so a silently wrong answer no longer costs a capability --
+it runs the wrong code.
+
+Costs below measured on this machine, 2026-09-21, after the conversions:
+
+===============================  ==========  =========  ==============================
+probe                            kind             cost  a wrong answer
+===============================  ==========  =========  ==============================
+``operation_is_injectable``      structural     0.0 ms  raises, or refuses with exit 3
+``replace_summary_supported``    behavioural    0.0 ms  cross-checked; loud either way
+``streaming_write_supported``    structural     0.0 ms  raises, or bin-packs locally
+``prunes_manifests_by_predicate`` structural    0.3 ms  fallback only; cannot decide
+``derives_delete_predicate``     behavioural  143.0 ms  rows counted twice
+``added_files_honour_spec``      behavioural  169.5 ms  metadata written under a wrong spec
+``equality_deletes_readable``    structural     0.3 ms  raises during scan planning
+``delete_manifests_writable``    behavioural    3.2 ms  a delete manifest labelled ``data``
+===============================  ==========  =========  ==============================
+
+``detect()`` is **330 ms** cold, and since ZMBNI-88 that is paid once per
+install rather than once per process, so the cost argument that once justified
+leaving a probe structural has largely expired.
+
+**Converted:** ``delete_manifests_writable``, the only structural probe whose
+wrong answer was silent corruption rather than a loud failure -- it returned
+True merely because ``write_manifest`` had grown a ``content`` parameter. Now it
+writes a manifest holding a position-delete entry and reads the label back. The
+story estimated ~200 ms for this; it is 3 ms, because no table is needed.
+
+**Restructured:** ``prunes_manifests_by_predicate`` is no longer a gate. It used
+to short-circuit the behavioural half, and ``manifest_pruning_is_safe`` read
+``derives or not prunes`` -- so a False from it declared the build safe with
+nothing measured. The needle that decides it matches a **local variable name
+inside a function body**, so an upstream rename changing no behaviour was enough
+to reach that. The measurement is authoritative now and the structural answer is
+consulted only when nothing could be observed.
+
+**Left structural, each for a stated reason** -- their silent failure is loud,
+not silent:
+
+* ``operation_is_injectable`` -- wrong-True raises ``TypeError`` at construction,
+  wrong-False refuses with exit 3. Safe both ways, and now cross-checked by
+  constructing a producer for real.
+* ``streaming_write_supported`` -- since ZMBNI-16 it sits behind opt-in config
+  whose default is off. Wrong-True raises inside PyIceberg; wrong-False
+  bin-packs locally, which is the default path anyway.
+* ``equality_deletes_readable`` -- wrong-True raises during scan planning, and
+  the conversion is *harder than the thing it protects*: PyIceberg cannot write
+  equality deletes, so a behavioural probe would have to fabricate one through
+  the same private reach it is meant to replace.
+
+Each probe's unknown-answer default is chosen per probe for the safe direction
+and says which direction that is at the point it is applied.
 """
 
 from __future__ import annotations
@@ -38,7 +90,7 @@ class PyIcebergCapabilities:
     operation_is_injectable: bool
 
     #: ``update_snapshot_summaries`` accepts ``Operation.REPLACE`` directly.
-    #: False in 0.11.1 and on main, which is why :class:`_ReplaceFiles` exists.
+    #: False on 0.12.0, which is why :class:`_ReplaceFiles` exists.
     replace_summary_supported: bool
 
     #: ``_dataframe_to_data_files`` accepts a ``pa.RecordBatchReader``, so the
@@ -49,9 +101,12 @@ class PyIcebergCapabilities:
     #: predicate evaluator instead of scanning all of them.
     prunes_manifests_by_predicate: bool
 
-    #: The producer derives that predicate from the removed data files. Required
-    #: whenever ``prunes_manifests_by_predicate`` is true, otherwise manifests
-    #: holding removed files are kept verbatim and their rows count twice.
+    #: **An overwrite on a transformed partition kept the right rows.** Named
+    #: for the mechanism because that is what it originally checked; since
+    #: ZMBNI-1109 it is settled by performing the operation, so what it records
+    #: is the outcome rather than whether any particular code derives anything.
+    #: False means the manifest holding replaced files was kept verbatim and
+    #: their rows counted twice -- measured, not inferred.
     derives_delete_predicate: bool
 
     #: Added data files are written under the partition spec they were written
@@ -64,12 +119,12 @@ class PyIcebergCapabilities:
     #: Scan planning can materialise equality deletes.
     equality_deletes_readable: bool
 
-    #: A *delete* manifest can be written. ``ManifestWriterV2.content`` returns
-    #: ``ManifestContent.DATA`` unconditionally in 0.11.1 and on main, and the
-    #: avro metadata it writes says ``content: data`` too -- so rewriting a
-    #: delete manifest through it produces a manifest that claims to hold data
-    #: files. Dangling-delete removal is therefore limited to dropping whole
-    #: delete manifests; see :mod:`zamboni.deletes`.
+    #: A *delete* manifest can be written. Established by writing one and
+    #: reading the label back, not by inspecting the writer: on 0.12.0
+    #: ``ManifestWriterV2.content`` returns ``ManifestContent.DATA``
+    #: unconditionally, so a manifest written through it claims to hold data
+    #: files whatever it was handed. Dangling-delete removal is therefore
+    #: limited to dropping whole delete manifests; see :mod:`zamboni.deletes`.
     delete_manifests_writable: bool
 
     #: *How* ``derives_delete_predicate`` was established. Reported by
@@ -80,7 +135,22 @@ class PyIcebergCapabilities:
 
     @property
     def manifest_pruning_is_safe(self) -> bool:
-        return self.derives_delete_predicate or not self.prunes_manifests_by_predicate
+        """Did an overwrite keep the right rows on this build?
+
+        **`or not prunes_manifests_by_predicate` was removed (ZMBNI-38).** That
+        clause let the structural probe overrule a measurement: a build observed
+        losing rows was still declared safe if the source showed no sign of
+        pruning. The needle deciding that is a local variable name inside a
+        function body, so a rename -- a refactor changing no behaviour -- was
+        enough to reach it.
+
+        The clause existed for builds that do not prune, where the hazard cannot
+        arise. Those are still safe, and now say so for the right reason: the
+        observation runs on them too and finds the rows intact. It is only
+        consulted when nothing could be observed, where it decides the fallback
+        inside :func:`_derivation_is_correct`.
+        """
+        return self.derives_delete_predicate
 
     def unsupported_reason(self) -> str | None:
         """Why this build cannot be used, or ``None`` if it can."""
@@ -217,7 +287,7 @@ def _probe() -> PyIcebergCapabilities:
         # Unknown -> assume NOT writable, which limits dangling-delete removal
         # to whole manifests. Guessing the other way would let us rewrite a
         # delete manifest into one labelled as data.
-        delete_manifests_writable=_delete_manifests_writable(),
+        delete_manifests_writable=_delete_manifests_writable() is True,
     )
 
 
@@ -242,25 +312,45 @@ def _derivation_is_correct(prunes: bool) -> tuple[bool, str]:
     safe. A second name in the list would not have helped; it would have made
     the wrong answer arrive faster.
 
-    So the structural check is kept only for the cheap half -- does this build
-    prune at all -- and the expensive half is settled by
-    :func:`_pruning_behaves`, which does the operation and looks at the result.
+    **The observation is authoritative, and the structural answer is only a
+    fallback (ZMBNI-38).** It used to be the other way around: a False from the
+    structural half short-circuited, and `manifest_pruning_is_safe` is
+    ``derives or not prunes``, so "this build does not prune" declared the build
+    safe *without observing anything*. The needle that decides it is
+    ``manifest_evaluator``, which in 0.12 matches a **local variable name inside
+    a function body** (``manifest_evaluators``, line 4 of
+    ``_OverwriteFiles._existing_manifests``). Renaming a local is a pure
+    refactor that changes no behaviour -- and it would have flipped this probe
+    to False, skipped the observation, and declared a pruning build safe. The
+    same class as ZMBNI-1109, one level cheaper to trigger.
 
-    * Does not prune -> nothing to be unsafe about, and no cost. This is
-      0.11.1, which is every current user.
-    * Prunes -> run the probe once per process (~150ms warm, ~600ms cold).
+    The old short-circuit was justified by cost, on a premise that has since
+    expired: "does not prune -> no cost, this is 0.11.1, which is every current
+    user". The floor is `>=0.12` now, and every supported build prunes, so the
+    branch it saved is one no supported install takes. What it still saves is
+    the probe on a build that genuinely does not prune -- paid once per install
+    since ZMBNI-88 caches the answers, rather than once per process.
+
+    * Observed either way -> that is the answer, whatever the source looks like.
+    * Could not observe -> fall back to the structural answer, which can now
+      only *withdraw* pruning safety and never grant it unexamined.
 
     A build that changes behaviour without changing a name is exactly what
     happened, and it is the only kind of check that catches it.
     """
-    if not prunes:
-        return True, "not applicable -- this build does not prune"
-
     observed = _pruning_behaves()
     if observed is True:
         return True, "observed -- an overwrite on a transformed partition kept the right rows"
     if observed is False:
         return False, "observed -- an overwrite on a transformed partition kept a replaced row"
+
+    if not prunes:
+        # Unobserved, and nothing in the source suggests pruning. Safe, but say
+        # that it was not measured -- `doctor` prints this line.
+        return (
+            True,
+            "not observed -- the probe could not run, and this build shows no sign of pruning",
+        )
     return False, "unknown -- the behavioural probe could not run; assuming unsafe"
 
 
@@ -477,20 +567,95 @@ def _guard_anywhere_in_scan_planning() -> bool:
         return True
 
 
-def _delete_manifests_writable() -> bool:
-    """Can this build write a manifest that declares itself a delete manifest?
+def _delete_manifests_writable() -> bool | None:
+    """Write one and read back what it claims to be.
 
-    Two ways it could: ``write_manifest`` growing a content argument, or a
-    writer class whose ``content()`` returns ``DELETES``. Neither exists today.
+    **Converted from structural to behavioural (ZMBNI-38).** It used to return
+    True merely because ``write_manifest`` had grown a ``content`` parameter --
+    a parameter that existed but did not mean what we assumed would engage
+    ZMBNI-9's rewrite path and stamp a delete manifest ``content: data``, after
+    which a reader treats position deletes as **rows**. That is the ZMBNI-1109
+    shape exactly: a name-based probe declaring a corrupting build safe.
+
+    So this asks the question by doing it. It writes a real manifest holding a
+    real position-delete entry, asking for ``DELETES`` if the API accepts such a
+    request, and reads the content label back off the resulting
+    ``ManifestFile`` -- which is where the label actually lives. The avro file
+    itself carries no content marker; ``ManifestWriter._meta`` writes schema,
+    partition-spec, partition-spec-id, format-version and the codec, and nothing
+    else, so the label a reader sees is the one ``to_manifest_file()`` puts in
+    the manifest *list*. That is precisely what ``ManifestWriterV2.content``
+    returning ``DATA`` unconditionally decides.
+
+    **Measured at 2-4 ms** on this build, against the ~200 ms the story
+    estimated for it: the estimate assumed a table, and no table is needed. It
+    is the cheapest of the three conversions considered and the only one whose
+    wrong answer is silent corruption rather than a loud failure.
+
+    Returns None when the probe could not run at all, which the caller treats as
+    "not writable" -- the safe direction, limiting dangling-delete removal to
+    dropping whole delete manifests.
     """
-    from pyiceberg.manifest import ManifestContent, ManifestWriterV2, write_manifest
-
-    if "content" in inspect.signature(write_manifest).parameters:
-        return True
     try:
-        return ManifestWriterV2.content(None) is ManifestContent.DELETES  # type: ignore[arg-type]
-    except Exception:
-        return False
+        import tempfile
+
+        from pyiceberg.io.pyarrow import PyArrowFileIO
+        from pyiceberg.manifest import (
+            DataFile,
+            DataFileContent,
+            FileFormat,
+            ManifestContent,
+            ManifestEntry,
+            ManifestEntryStatus,
+            write_manifest,
+        )
+        from pyiceberg.partitioning import PartitionSpec
+        from pyiceberg.schema import Schema
+        from pyiceberg.types import IntegerType, NestedField
+    except ImportError:  # pragma: no cover - depends on the install
+        return None
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="zamboni-probe-") as root:
+            arguments = {
+                "format_version": 2,
+                "spec": PartitionSpec(),
+                "schema": Schema(NestedField(1, "k", IntegerType(), required=False)),
+                "output_file": PyArrowFileIO().new_output(f"{root}/m.avro"),
+                "snapshot_id": 1,
+                # "null" rather than "uncompressed": `compression_codec` rejects
+                # the latter, and the probe must not fail on its own arguments.
+                "avro_compression": "null",
+            }
+            # Ask for a delete manifest where the API allows it to be asked for.
+            # On a build with no such parameter the question becomes "what does
+            # it produce when handed delete entries", which is the same question
+            # the rewrite path would be asking.
+            if "content" in inspect.signature(write_manifest).parameters:
+                arguments["content"] = ManifestContent.DELETES
+
+            with write_manifest(**arguments) as writer:  # type: ignore[arg-type]
+                writer.add_entry(
+                    ManifestEntry.from_args(
+                        status=ManifestEntryStatus.ADDED,
+                        snapshot_id=1,
+                        data_file=DataFile.from_args(
+                            content=DataFileContent.POSITION_DELETES,
+                            file_path=f"{root}/d.parquet",
+                            file_format=FileFormat.PARQUET,
+                            partition={},
+                            record_count=1,
+                            file_size_in_bytes=1,
+                            spec_id=0,
+                        ),
+                    )
+                )
+            # An empty manifest raises on close, which is why an entry is
+            # written rather than an empty file being probed.
+            return writer.to_manifest_file().content is ManifestContent.DELETES
+    except Exception:  # pragma: no cover - any failure means "could not establish"
+        logger.debug("delete-manifest behavioural probe did not complete", exc_info=True)
+        return None
 
 
 def _replace_summary_supported(operation_enum) -> bool:
