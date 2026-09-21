@@ -1362,9 +1362,17 @@ Spark server.
 
 ```bash
 # .env, mode 600 -- never zamboni.yml
-ZAMBONI_S3_ACCESS_KEY_ID=...
+ZAMBONI_S3_ACCESS_KEY_ID=...          # S3, MinIO, Silo, Garage, Ceph RGW
 ZAMBONI_S3_SECRET_ACCESS_KEY=...
+ZAMBONI_GCS_TOKEN=...                 # GCS: a key-file path, or `google_default`
+ZAMBONI_AZURE_ACCOUNT_NAME=...        # Azure: plus one credential, see below
 ```
+
+Configure the provider the warehouse is actually in, and only that one. The
+table's own location decides which credentials fit, and a mismatch is refused
+before anything runs rather than failing at the first read. The full settings per
+provider, and the bucket permissions to ask an administrator for, are in
+[reclaiming-storage.md](reclaiming-storage.md).
 
 **This is not a way around a boundary someone set on purpose.** It needs credentials that
 can list and delete in the bucket, which somebody has to grant deliberately. It is the

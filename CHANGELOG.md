@@ -36,6 +36,15 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **A run with no usable storage credentials ended in a traceback, not a
+  refusal.** `StorageCredentialsRequired` was raised before anything ran — which
+  was the point — but `maintain()` did not catch it, so a fleet run against a
+  remote-signing catalog with no credentials configured failed with a traceback
+  from the first table instead of one clear reason per table. It now joins
+  `WorkspaceUnavailable` and the other config refusals at **exit 2**, which is
+  the shape ZMBNI-76 established. The same applies to the two new refusals:
+  credentials for the wrong store, and a cloud backend that is not installed.
+
 - **A build observed losing rows could still be declared safe.**
   `manifest_pruning_is_safe` read `derives_delete_predicate or not
   prunes_manifests_by_predicate`, and the structural half short-circuited the
@@ -87,6 +96,34 @@ Two categories beyond the usual set, because this tool deletes files:
 
 
 ### Added
+
+- **Storage credentials for GCS and Azure, not only S3.** `CredentialUse` is how
+  Zamboni reclaims storage from a warehouse whose catalog remote-signs — and
+  until now the only credentials it could be given were S3's, so a GCS or Azure
+  Blob warehouse had no way to reclaim at all. That is not a corner: IWS
+  provisions every warehouse with `sts-enabled: false`, so the own-credentials
+  path is not a fallback there but the only path, and ExperienceFlow's IWS
+  deployments run in GCP and Azure.
+
+  `GCSSettings` and `AzureSettings` join `S3Settings`, which is unchanged
+  because it is public API. Set `ZAMBONI_GCS_TOKEN` or
+  `ZAMBONI_AZURE_ACCOUNT_NAME` (with one of key, SAS token, or client secret);
+  S3 keeps its existing flags. Ceph RGW and other S3-compatible stores need
+  nothing new — they differ only in `endpoint`.
+
+  **GCS is routed through `gcsfs`, deliberately diverging from PyIceberg**, whose
+  `SCHEMA_TO_FILE_IO` maps `gs` to `PyArrowFileIO` only. Both read
+  `gcs.oauth2.token`, but pyarrow takes it as a bearer token with an expiry —
+  useless to a deployment holding a service-account key file, and a token that
+  expires part-way through a run. `gcsfs` reads the same property as a key-file
+  path, as `google_default` (Application Default Credentials, which GKE Workload
+  Identity provides and which needs no secret in the environment), or as a raw
+  token. Azure follows PyIceberg's own preference and is not a divergence.
+
+  **Credentials for the wrong store are refused up front.** The table's location
+  scheme decides which provider fits; handing S3 credentials to a `gs://` table
+  would otherwise fail at the first read, or worse return an empty listing,
+  which orphan removal reads as "everything is unreferenced". (ZMBNI-97)
 
 - **Every capability probe now has an independent cross-check.**
   `operation_is_injectable`, `replace_summary_supported` and

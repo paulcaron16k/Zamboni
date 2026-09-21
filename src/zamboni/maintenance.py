@@ -43,7 +43,7 @@ from .maintainers import (
 )
 from .maintainers import get as get_maintainer
 from .orphans import OrphanCleanupAborted
-from .session import CatalogSession
+from .session import CatalogSession, StorageCredentialsRequired
 from .tableconfig import TableConfig, TableConfigError
 from .workdir import WorkspaceUnavailable
 
@@ -327,10 +327,17 @@ def _run(
         # A safety check refused. Nothing was deleted, and the operator response
         # is the same in both cases: stop and look.
         return Outcome(table, operation, 4, f"aborted, nothing deleted: {exc}")
-    except (PreviewUnavailable, EngineConfigProblem, WorkspaceUnavailable) as exc:
+    except (
+        PreviewUnavailable,
+        EngineConfigProblem,
+        WorkspaceUnavailable,
+        StorageCredentialsRequired,
+    ) as exc:
         # `WorkspaceUnavailable` is a deployment misconfiguration -- no writable
-        # spill directory -- so it is exit 2 beside the other config refusals
-        # rather than an uncaught exception. It will be raised by every table in
+        # spill directory -- and `StorageCredentialsRequired` is the same shape:
+        # no usable object-store credentials, credentials for the wrong store, or
+        # a cloud backend that is not installed. Both are exit 2 beside the other
+        # config refusals rather than an uncaught exception. It will be raised by every table in
         # the run, which is the point: the operator sees one clear reason per
         # table instead of a traceback from the first one (ZMBNI-76's shape).
         return Outcome(table, operation, 2, str(exc))

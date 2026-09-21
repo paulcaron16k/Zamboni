@@ -42,7 +42,7 @@ from .orphans import OrphanCleaner
 from .planner import CompactionPlan, CompactionPlanner, FileGroup
 from .profile import Finding, Severity, TableProfile, profile_table
 from .reachable import reachable_files
-from .session import CatalogSession, S3Settings
+from .session import AzureSettings, CatalogSession, GCSSettings, S3Settings
 from .settings import Profile
 from .settings import resolve as resolve_settings
 from .tableconfig import Retention, TableConfig, TableConfigError, TableSettings
@@ -102,6 +102,7 @@ def version_banner() -> str:
 #: detail the generic `Reportable` does not.
 __all__ = [
     "RUNBOOK_ORDER",
+    "AzureSettings",
     "CatalogSession",
     "CompactionBlocked",
     "CompactionConfig",
@@ -113,6 +114,7 @@ __all__ = [
     "EngineConfigProblem",
     "FileGroup",
     "Finding",
+    "GCSSettings",
     "LayoutFeature",
     "Maintainer",
     "MaintainerCapabilities",
