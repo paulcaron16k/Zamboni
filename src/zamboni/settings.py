@@ -88,6 +88,11 @@ STORAGE_SETTINGS = {
     ),
 }
 
+#: What may appear under `ssl:` in the profile. Neither is a secret -- a CA
+#: bundle is a path to a *public* certificate, and `insecure` is a policy -- so
+#: this block does not make the profile a credential file.
+SSL_SETTINGS = frozenset({"ca_bundle", "insecure"})
+
 #: Keys whose presence makes the profile a credential file. Conservative on
 #: purpose:
 #:
@@ -131,6 +136,10 @@ class Profile:
     credential: str | None = None
     #: A catalog bearer token, as an alternative to :attr:`credential`.
     token: str | None = None
+    #: Transport security for the catalog connection: ``ca_bundle`` (a path to
+    #: trust) and ``insecure`` (skip verification). Catalog leg only -- the
+    #: storage FileIO takes no TLS property.
+    ssl: dict[str, str] = field(default_factory=dict)
     #: Object-store credentials, per provider: ``{"gcs": {"token": ...}}``.
     #: Which provider a run uses is decided by the table's own location, not by
     #: this block, so configuring two is refused rather than merged.
@@ -353,6 +362,8 @@ def load_profile(path: Path | None) -> Profile:
         "credential",
         "token",
         "storage",
+        # Not a secret: a CA bundle is a path to a public certificate.
+        "ssl",
     }
     if unknown := sorted(set(raw) - known):
         raise ProfileError(
@@ -411,6 +422,15 @@ def load_profile(path: Path | None) -> Profile:
             "A run uses one object store; configure the one this warehouse lives in."
         )
 
+    ssl_block = raw.get("ssl") or {}
+    if not isinstance(ssl_block, dict):
+        raise ProfileError(f"{path}: 'ssl' must be a block of settings")
+    if unknown := sorted(set(ssl_block) - SSL_SETTINGS):
+        raise ProfileError(
+            f"{path}: ssl: unknown key(s) {', '.join(unknown)}. "
+            f"Known keys: {', '.join(sorted(SSL_SETTINGS))}"
+        )
+
     # Once it holds a secret it is a credential file, and gets `.env`'s mode
     # rule. Checked after parsing so a malformed profile fails on its contents
     # rather than on its permissions.
@@ -431,6 +451,7 @@ def load_profile(path: Path | None) -> Profile:
         root=Path(root).expanduser() if root else base.root,
         operations=operations,
         engines=engines,
+        ssl={k: str(v) for k, v in ssl_block.items()},
         credential=raw.get("credential") or base.credential,
         token=raw.get("token") or base.token,
         storage=storage,

@@ -8,6 +8,8 @@ string `None` -- and it shipped untested, which is why these exist.
 
 from __future__ import annotations
 
+import pytest
+
 from zamboni import CatalogSession, S3Settings
 
 
@@ -78,24 +80,84 @@ def _lk(**over):
     return CatalogSession.lakekeeper_properties(**base)
 
 
-def test_ssl_ca_bundle_is_forwarded_as_the_cabundle_path():
+# -- transport security (ZMBNI-100) ---------------------------------------
+#
+# The key names come from PyIceberg rather than from string literals here. A
+# test that spells them itself can only prove this function agrees with the test
+# -- and the shape is exactly the kind of thing that is easy to get wrong and
+# impossible to notice: PyIceberg reads `properties["ssl"]["cabundle"]`, nested,
+# while every other property it takes is a flat dotted string. Measured: passing
+# the flat `"ssl.cabundle"` instead leaves `session.verify` at True, so the
+# setting silently does nothing and a literal-matching test stays green.
+
+
+def test_ssl_ca_bundle_is_forwarded_under_the_keys_pyiceberg_reads():
+    from pyiceberg.catalog.rest import CA_BUNDLE, SSL
+
     props = _lk(ssl_ca_bundle="/etc/ssl/certs/private-ca.pem")
-    assert props["ssl"] == {"cabundle": "/etc/ssl/certs/private-ca.pem"}
+
+    assert props[SSL] == {CA_BUNDLE: "/etc/ssl/certs/private-ca.pem"}
 
 
 def test_ssl_insecure_becomes_a_real_false_cabundle():
-    # PyIceberg assigns session.verify = ssl.cabundle directly, so only the bool False disables
-    # verification; a truthy string would verify against a file of that name.
+    """`requests` assigns `session.verify = ssl.cabundle` directly, so only the
+    bool False disables verification; the string "false" is truthy and would be
+    read as the name of a certificate file."""
+    from pyiceberg.catalog.rest import CA_BUNDLE, SSL
+
     props = _lk(ssl_insecure=True)
-    assert props["ssl"] == {"cabundle": False}
-    assert props["ssl"]["cabundle"] is False
+
+    assert props[SSL] == {CA_BUNDLE: False}
+    assert props[SSL][CA_BUNDLE] is False
 
 
 def test_ssl_insecure_wins_over_a_ca_bundle():
+    """Skipping and trusting are contradictory; the escape hatch is the more
+    explicit intent, and the safe reading of "both were set" is not to silently
+    keep verifying against a bundle the operator may have meant to bypass."""
+    from pyiceberg.catalog.rest import CA_BUNDLE, SSL
+
     props = _lk(ssl_ca_bundle="/etc/ssl/certs/private-ca.pem", ssl_insecure=True)
-    assert props["ssl"] == {"cabundle": False}
+
+    assert props[SSL] == {CA_BUNDLE: False}
 
 
 def test_ssl_is_absent_when_unset():
-    props = _lk()
-    assert "ssl" not in props
+    from pyiceberg.catalog.rest import SSL
+
+    assert SSL not in _lk()
+
+
+@pytest.mark.parametrize(
+    ("settings", "expected"),
+    [
+        ({}, True),
+        ({"ssl_insecure": True}, False),
+        ({"ssl_ca_bundle": "/etc/ssl/certs/private-ca.pem"}, "/etc/ssl/certs/private-ca.pem"),
+    ],
+)
+def test_the_properties_actually_reach_the_http_session(settings, expected):
+    """The one test that would survive PyIceberg renaming the key.
+
+    Everything above asserts what this function produces. This asserts what
+    `RestCatalog` *does* with it, which is the only thing the operator cares
+    about -- `requests` verifies against `session.verify`, and nothing else in
+    this package can see whether it was set.
+
+    `_fetch_config` is patched out because it is the one part that needs a live
+    catalog; it builds its own session from the same properties, so the value
+    under test is the value that first request would use too.
+    """
+    from unittest.mock import patch
+
+    from pyiceberg.catalog.rest import RestCatalog
+
+    props = _lk(**settings)
+    props.pop("type")
+
+    with patch.object(RestCatalog, "_fetch_config", lambda self: None):
+        catalog = RestCatalog("under-test", **props)
+
+    assert catalog._session.verify == expected
+    if expected is False:
+        assert catalog._session.verify is False, "a truthy 'false' would verify against a filename"

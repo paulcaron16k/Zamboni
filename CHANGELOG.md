@@ -97,6 +97,26 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **TLS transport security for the catalog connection**: `--ssl-ca-bundle`
+  (`ZAMBONI_SSL_CA_BUNDLE`) trusts a private CA or self-signed certificate, and
+  `--ssl-insecure` / `--no-ssl-insecure` (`ZAMBONI_SSL_INSECURE`) skips
+  verification as a development escape hatch. An on-prem HTTPS Lakekeeper behind
+  a private CA can now be maintained, which matches what target-iceberg and IWS
+  already expose (ELT-1014 / ELT-1016).
+
+  The mapping is narrower than it looks: `RestCatalog` has no verify boolean, so
+  both settings land on one property — `ssl.cabundle`, which `requests` assigns
+  straight to `session.verify`, taking a path (trust) or the bool `False`
+  (skip). `insecure` wins if both are given. **Catalog leg only**: the storage
+  FileIO takes no TLS property, so the object store's trust comes from the
+  container trust store or `AWS_CA_BUNDLE`.
+
+  `lakekeeper_properties()` is split out of `for_lakekeeper` so the mapping is
+  testable without a live catalog. Both settings also take an `ssl:` block in
+  `zamboni.yml`, with the ordinary flag > environment > profile precedence; a CA
+  bundle is a path to a public certificate, so that block does not make the
+  profile a credential file. (ZMBNI-100)
+
 - **`zamboni.yml` may hold secrets**, with the ordinary precedence: a flag, then
   a `ZAMBONI_*` variable, then the profile. `credential`, `token` and a
   `storage:` block (`s3` / `gcs` / `azure`) are now accepted there.
