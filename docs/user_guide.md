@@ -222,6 +222,41 @@ history keeps it. Set ZAMBONI_TOKEN in the environment or in a .env file
 (mode 600) instead -- see docs/user_guide.md#secrets.
 ```
 
+### An HTTPS catalog with a private CA
+
+A catalog behind a certificate the system trust store does not know about —
+an on-prem Lakekeeper with a private CA, or a self-signed certificate — needs
+that CA named:
+
+```bash
+zamboni maintenance --ssl-ca-bundle /etc/ssl/certs/internal-ca.pem   # trust it
+export ZAMBONI_SSL_CA_BUNDLE=/etc/ssl/certs/internal-ca.pem          # or in .env
+```
+
+Both may also live in the profile, where a CA bundle path arguably belongs —
+it is a path to a *public* certificate, so this block does not make
+`zamboni.yml` a credential file:
+
+```yaml
+ssl:
+  ca_bundle: /etc/ssl/certs/internal-ca.pem
+  insecure: false
+```
+
+Resolution is the ordinary one: a flag, then a `ZAMBONI_*` variable, then the
+profile.
+
+`--ssl-insecure` (`ZAMBONI_SSL_INSECURE=true`) skips verification instead. It is
+a development escape hatch, not a deployment setting: it disables the check that
+the catalog is who it says it is, on the connection that carries your catalog
+token. `--no-ssl-insecure` turns it back off for a single run, so a deployment
+that sets the variable can still be overridden from the command line.
+
+Both apply to the **catalog connection only**. The object store is reached by
+PyIceberg's FileIO, which takes no TLS setting of its own — its trust comes from
+the container's trust store, or from `AWS_CA_BUNDLE` for the S3 path. If the
+catalog verifies and the object store does not, that is where to look.
+
 ### Where a secret may live
 
 Three places, and the ordinary precedence decides: a **flag**, then a

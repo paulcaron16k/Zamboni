@@ -571,6 +571,32 @@ def _add_catalog_args(p: argparse.ArgumentParser) -> None:
     _add_removed_secret_flag(g, "--token", "ZAMBONI_TOKEN")
     g.add_argument("--oauth2-server-uri", default=os.environ.get("ZAMBONI_OAUTH2_SERVER_URI"))
     g.add_argument("--scope", default=os.environ.get("ZAMBONI_SCOPE"))
+    # Transport security for an HTTPS catalog (ZMBNI-100 / ELT-1014), consistent with target-iceberg
+    # and IWS. Catalog leg only -- the object store's TLS trust is the container trust store /
+    # AWS_CA_BUNDLE, not a flag here.
+    g.add_argument(
+        "--ssl-ca-bundle",
+        default=os.environ.get("ZAMBONI_SSL_CA_BUNDLE"),
+        help="path to a CA bundle/cert (PEM) to TRUST for an HTTPS catalog with a private CA or "
+        "self-signed cert -- the secure on-prem answer",
+    )
+    g.add_argument(
+        # `BooleanOptionalAction`, not `store_true`: with an environment-derived
+        # default, `store_true` can only ever turn this *on*. So
+        # ZAMBONI_SSL_INSECURE=true in a deployment's environment could not be
+        # overridden for one run -- and the value an operator cannot override
+        # locally would be the unsafe one, which is the wrong way round. It also
+        # restores the rule settings.py states: a flag always wins.
+        "--ssl-insecure",
+        action=argparse.BooleanOptionalAction,
+        # `None` when neither the flag nor the variable said anything, so the
+        # profile can still fill the gap. A plain `False` default would make
+        # "nobody said" indistinguishable from "explicitly off" -- the same trap
+        # `_apply_profile` documents for `--engine local`.
+        default=_env_bool("ZAMBONI_SSL_INSECURE"),
+        help="SKIP catalog TLS verification (a dev escape hatch; prefer --ssl-ca-bundle). "
+        "--no-ssl-insecure restores verification for one run. Env: ZAMBONI_SSL_INSECURE=true",
+    )
     g.add_argument(
         "--local-warehouse",
         default=os.environ.get("ZAMBONI_LOCAL_WAREHOUSE"),
@@ -734,11 +760,32 @@ def _session_from(args: argparse.Namespace) -> CatalogSession:
         token=os.environ.get("ZAMBONI_TOKEN") or args.zamboni_profile.token,
         oauth2_server_uri=args.oauth2_server_uri,
         scope=args.scope,
+        ssl_ca_bundle=args.ssl_ca_bundle or args.zamboni_profile.ssl.get("ca_bundle"),
+        ssl_insecure=(
+            args.ssl_insecure
+            if args.ssl_insecure is not None
+            else _as_bool(args.zamboni_profile.ssl.get("insecure"))
+        ),
         storage=storage,
         # Resolved like every other non-secret setting: flag > ZAMBONI_* >
         # zamboni.yml > default. The credentials it governs stay in `.env`.
         credential_use=CredentialUse(getattr(args, "credential_use", None) or "always"),
     )
+
+
+def _as_bool(value: str | None) -> bool:
+    """A profile's YAML scalar as a bool. Absent means False."""
+    return str(value).strip().lower() in ("1", "true", "yes")
+
+
+def _env_bool(name: str) -> bool | None:
+    """True, False, or None when the variable is not set at all.
+
+    The third answer is the point: it is what lets a flag, then a variable, then
+    the profile resolve in that order for a boolean.
+    """
+    raw = os.environ.get(name)
+    return None if raw is None else _as_bool(raw)
 
 
 def _storage_from(args: argparse.Namespace) -> S3Settings | GCSSettings | AzureSettings | None:

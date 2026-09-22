@@ -184,6 +184,52 @@ class CatalogSession:
 
     # -- constructors ----------------------------------------------------
 
+    @staticmethod
+    def lakekeeper_properties(
+        *,
+        uri: str,
+        warehouse: str,
+        credential: str | None = None,
+        token: str | None = None,
+        oauth2_server_uri: str | None = None,
+        scope: str | None = None,
+        ssl_ca_bundle: str | None = None,
+        ssl_insecure: bool = False,
+        storage: StorageSettings | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Assemble the PyIceberg properties for a Lakekeeper REST catalog.
+
+        Split out from :meth:`for_lakekeeper` so the mapping is unit-testable without a live
+        catalog, the same way :meth:`S3Settings.as_properties` is.
+
+        Transport security (ZMBNI-100 / ELT-1014): PyIceberg's ``RestCatalog`` has no verify
+        boolean — ``ssl.cabundle`` is ``requests``' ``session.verify``, taking a CA/cert path
+        (trust) or the bool ``False`` (skip). So ``ssl_ca_bundle`` becomes ``ssl.cabundle=<path>``
+        and ``ssl_insecure`` becomes ``ssl.cabundle=False``; ``insecure`` wins if both are set
+        (skipping and trusting are contradictory, and the escape hatch is the more explicit intent).
+        Catalog leg only — the storage FileIO has no TLS property, so the object store's trust rides
+        on the container trust store / ``AWS_CA_BUNDLE``, not a setting here.
+        """
+        props: dict[str, Any] = {"type": "rest", "uri": uri, "warehouse": warehouse}
+        if credential:
+            props["credential"] = credential
+        if token:
+            props["token"] = token
+        if oauth2_server_uri:
+            props["oauth2-server-uri"] = oauth2_server_uri
+        if scope:
+            props["scope"] = scope
+        if ssl_insecure:
+            props["ssl"] = {"cabundle": False}
+        elif ssl_ca_bundle:
+            props["ssl"] = {"cabundle": ssl_ca_bundle}
+        if storage:
+            props.update(storage.as_properties())
+        if extra:
+            props.update(extra)
+        return props
+
     @classmethod
     def for_lakekeeper(
         cls,
@@ -194,6 +240,8 @@ class CatalogSession:
         token: str | None = None,
         oauth2_server_uri: str | None = None,
         scope: str | None = None,
+        ssl_ca_bundle: str | None = None,
+        ssl_insecure: bool = False,
         s3: S3Settings | None = None,
         storage: StorageSettings | None = None,
         threads: int = 4,
@@ -209,6 +257,10 @@ class CatalogSession:
             token: A bearer token, as an alternative to ``credential``.
             oauth2_server_uri: Token endpoint, when not discoverable from ``uri``.
             scope: OAuth2 scope, e.g. ``lakekeeper``.
+            ssl_ca_bundle: Path to a CA bundle/cert (PEM) to trust for an HTTPS catalog -- the
+                secure answer for a private CA or self-signed cert. Catalog leg only.
+            ssl_insecure: Skip TLS verification for the catalog connection (a dev escape hatch;
+                prefer ``ssl_ca_bundle``). Wins over ``ssl_ca_bundle`` if both are given.
             s3: Zamboni's own object-store credentials, for an S3 or S3-compatible
                 store. Required to reclaim storage from a warehouse whose catalog
                 remote-signs; see :class:`CredentialUse`.
@@ -219,23 +271,21 @@ class CatalogSession:
             credential_use: When to prefer them over the catalog's. Defaults to
                 ``always``.
         """
-        props: dict[str, Any] = {"type": "rest", "uri": uri, "warehouse": warehouse}
-        if credential:
-            props["credential"] = credential
-        if token:
-            props["token"] = token
-        if oauth2_server_uri:
-            props["oauth2-server-uri"] = oauth2_server_uri
-        if scope:
-            props["scope"] = scope
         if s3 and storage:
             raise ValueError("pass `s3` or `storage`, not both -- they set the same thing")
         storage = storage or s3
-        if storage:
-            props.update(storage.as_properties())
-        if extra:
-            props.update(extra)
-
+        props = cls.lakekeeper_properties(
+            uri=uri,
+            warehouse=warehouse,
+            credential=credential,
+            token=token,
+            oauth2_server_uri=oauth2_server_uri,
+            scope=scope,
+            ssl_ca_bundle=ssl_ca_bundle,
+            ssl_insecure=ssl_insecure,
+            storage=storage,
+            extra=extra,
+        )
         catalog = load_catalog("lakekeeper", **props)
         # The credentials are passed to PyIceberg *and* kept here. Passing them
         # is what a non-signing catalog honours; keeping them is what lets us
