@@ -8,7 +8,7 @@ string `None` -- and it shipped untested, which is why these exist.
 
 from __future__ import annotations
 
-from zamboni import S3Settings
+from zamboni import CatalogSession, S3Settings
 
 
 def test_full_credentials_are_all_present():
@@ -69,3 +69,33 @@ def test_extra_overrides_the_derived_properties():
 
     assert props["s3.endpoint"] == "http://override"
     assert props["s3.custom"] == "v"
+
+
+def _lk(**over):
+    """lakekeeper_properties with the two required args filled in."""
+    base = {"uri": "https://catalog.example.com/catalog", "warehouse": "acme"}
+    base.update(over)
+    return CatalogSession.lakekeeper_properties(**base)
+
+
+def test_ssl_ca_bundle_is_forwarded_as_the_cabundle_path():
+    props = _lk(ssl_ca_bundle="/etc/ssl/certs/private-ca.pem")
+    assert props["ssl"] == {"cabundle": "/etc/ssl/certs/private-ca.pem"}
+
+
+def test_ssl_insecure_becomes_a_real_false_cabundle():
+    # PyIceberg assigns session.verify = ssl.cabundle directly, so only the bool False disables
+    # verification; a truthy string would verify against a file of that name.
+    props = _lk(ssl_insecure=True)
+    assert props["ssl"] == {"cabundle": False}
+    assert props["ssl"]["cabundle"] is False
+
+
+def test_ssl_insecure_wins_over_a_ca_bundle():
+    props = _lk(ssl_ca_bundle="/etc/ssl/certs/private-ca.pem", ssl_insecure=True)
+    assert props["ssl"] == {"cabundle": False}
+
+
+def test_ssl_is_absent_when_unset():
+    props = _lk()
+    assert "ssl" not in props

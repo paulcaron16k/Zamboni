@@ -571,6 +571,22 @@ def _add_catalog_args(p: argparse.ArgumentParser) -> None:
     _add_removed_secret_flag(g, "--token", "ZAMBONI_TOKEN")
     g.add_argument("--oauth2-server-uri", default=os.environ.get("ZAMBONI_OAUTH2_SERVER_URI"))
     g.add_argument("--scope", default=os.environ.get("ZAMBONI_SCOPE"))
+    # Transport security for an HTTPS catalog (ZMBNI-100 / ELT-1014), consistent with target-iceberg
+    # and IWS. Catalog leg only -- the object store's TLS trust is the container trust store /
+    # AWS_CA_BUNDLE, not a flag here.
+    g.add_argument(
+        "--ssl-ca-bundle",
+        default=os.environ.get("ZAMBONI_SSL_CA_BUNDLE"),
+        help="path to a CA bundle/cert (PEM) to TRUST for an HTTPS catalog with a private CA or "
+        "self-signed cert -- the secure on-prem answer",
+    )
+    g.add_argument(
+        "--ssl-insecure",
+        action="store_true",
+        default=os.environ.get("ZAMBONI_SSL_INSECURE", "").strip().lower() in ("1", "true", "yes"),
+        help="SKIP catalog TLS verification (a dev escape hatch; prefer --ssl-ca-bundle). "
+        "Env: ZAMBONI_SSL_INSECURE=true",
+    )
     g.add_argument(
         "--local-warehouse",
         default=os.environ.get("ZAMBONI_LOCAL_WAREHOUSE"),
@@ -734,6 +750,8 @@ def _session_from(args: argparse.Namespace) -> CatalogSession:
         token=os.environ.get("ZAMBONI_TOKEN") or args.zamboni_profile.token,
         oauth2_server_uri=args.oauth2_server_uri,
         scope=args.scope,
+        ssl_ca_bundle=args.ssl_ca_bundle,
+        ssl_insecure=args.ssl_insecure,
         storage=storage,
         # Resolved like every other non-secret setting: flag > ZAMBONI_* >
         # zamboni.yml > default. The credentials it governs stay in `.env`.
