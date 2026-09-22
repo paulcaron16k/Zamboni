@@ -810,3 +810,38 @@ def test_an_unknown_ssl_key_fails_at_load(tmp_path):
 
     with pytest.raises(ProfileError, match="unknown key"):
         load_profile(_profile(tmp_path, "ssl:\n  cabundle: /ca.pem\n"))
+
+
+def test_the_profile_repr_hides_every_secret_it_now_holds():
+    """Found by the release checklist, not by a test -- hence this test.
+
+    `Profile` held nothing secret until `credential`, `token` and `storage`
+    were added, at which point the generated dataclass repr printed all three in
+    full. A repr reaches a traceback rendered with locals, a
+    `logger.debug("%s", profile)`, `pytest --showlocals` and any error
+    aggregator, so nothing has to log it deliberately for it to leak.
+
+    Derived from `SECRET_PROFILE_KEYS` rather than from a list written here, so
+    a fourth secret added later is covered without anyone remembering to.
+    """
+    from zamboni.settings import SECRET_PROFILE_KEYS, Profile
+
+    marker = "LEAKED-{}"
+    profile = Profile(
+        uri="https://catalog",
+        credential=marker.format("credential"),
+        token=marker.format("token"),
+        storage={
+            "azure": {key: marker.format(key) for key in sorted(SECRET_PROFILE_KEYS)}
+            | {"account_name": "acme"},
+        },
+    )
+
+    rendered = repr(profile)
+
+    assert "LEAKED" not in rendered, f"a secret reached the repr: {rendered}"
+    # The non-secret parts must survive: "which warehouse, which provider" is
+    # what anyone reading a repr is trying to find out.
+    assert "https://catalog" in rendered
+    assert "acme" in rendered
+    assert "azure" in rendered

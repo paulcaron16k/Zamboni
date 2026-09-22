@@ -149,6 +149,45 @@ class Profile:
     source: Path | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
+    def __repr__(self) -> str:
+        """Redacted, for the reason :meth:`S3Settings.__repr__` gives.
+
+        This class held nothing secret until `credential`, `token` and
+        `storage` were added -- at which point the generated dataclass repr
+        started printing all three in full, anywhere this object reaches a
+        formatted string: a traceback rendered with locals, a
+        `logger.debug("%s", profile)`, `pytest --showlocals`, an error
+        aggregator. Exactly the defect `S3Settings` had and the release
+        checklist's first item exists for; caught by that checklist, not by a
+        test, which is why there is now also a test.
+
+        Non-secret fields print normally, because "which warehouse, which
+        engine, which file" is what anyone reading this is trying to find out.
+        """
+        secrets = {
+            "credential": self.credential,
+            "token": self.token,
+        }
+        shown = {name: ("***" if value else None) for name, value in secrets.items()}
+        # Providers and their setting *names* are not secrets and are worth
+        # seeing; only the values are hidden, and only where they are secret.
+        storage = {
+            provider: {
+                key: ("***" if key in SECRET_PROFILE_KEYS else value)
+                for key, value in block.items()
+            }
+            for provider, block in self.storage.items()
+        }
+        return (
+            f"Profile(uri={self.uri!r}, warehouse={self.warehouse!r}, "
+            f"engine={self.engine!r}, root={self.root!r}, "
+            f"operations={self.operations!r}, tables={self.tables!r}, "
+            f"engines={self.engines!r}, credential_use={self.credential_use!r}, "
+            f"credential={shown['credential']!r}, token={shown['token']!r}, "
+            f"ssl={self.ssl!r}, storage={storage!r}, source={self.source!r}, "
+            f"extra={{{len(self.extra)} key(s)}})"
+        )
+
     def table_config_for(self, warehouse: str) -> Path:
         """``$ZAMBONI_ROOT/configs/{warehouse}/table-config.json``.
 

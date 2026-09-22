@@ -21,6 +21,14 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-22
+
+The release security review (docs/releasing.md §3a) found one item: `Profile`
+gained secret fields this cycle and its generated dataclass repr printed them in
+full. Fixed below, with a test. The other seven items passed, and there is no
+dependency delta at all — `pyproject.toml` and `uv.lock` are unchanged since
+0.4.0 apart from the version itself.
+
 ### BREAKING
 
 - **DuckDB now spills to the system temp directory, not to `.tmp` under the
@@ -35,6 +43,17 @@ Two categories beyond the usual set, because this tool deletes files:
   where a nightly run writes is public surface, not an implementation detail.
 
 ### Fixed
+
+- **`Profile` printed its credentials.** It held nothing secret until
+  `credential`, `token` and `storage` were added this cycle, at which point the
+  generated dataclass repr rendered all three in full — and a repr reaches a
+  traceback with locals, a `logger.debug("%s", profile)`, `pytest --showlocals`
+  and any error aggregator, so nothing had to log it deliberately for it to
+  leak. The same defect `S3Settings` had, found by the release checklist rather
+  than by a test; there is now also a test, deriving what to redact from
+  `SECRET_PROFILE_KEYS` so a future secret is covered without anyone
+  remembering. Non-secret fields still print, because "which warehouse, which
+  provider" is what a repr is read for.
 
 - **A run with no usable storage credentials ended in a traceback, not a
   refusal.** `StorageCredentialsRequired` was raised before anything ran — which
