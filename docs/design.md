@@ -731,6 +731,65 @@ between files reachable before the commit and after it. A file no snapshot ever 
 cannot appear in that difference, so expiry structurally cannot touch a concurrent writer's
 in-flight output.
 
+### 6.6a The same invariants for a file list we did not gather
+
+Spark's `remove_orphan_files` accepts `file_list_view` — a dataset of candidate paths, typically
+built from a cloud storage-inventory report, used *instead of* listing. Zamboni does not offer
+this, and §6.6 is why the question needed answering rather than assuming: every invariant above
+is stated over a listing **we** performed, at a time **we** chose. An inventory report is stale
+by construction, so none of them carries over unexamined.
+
+**1. Completeness survives, restated.** "Every referenced file must be present in the listing"
+becomes "every referenced file *committed before the report's timestamp* must be present". The
+restatement keeps the original's power rather than softening it — a wrong root, a partial
+listing or a keying bug still makes old referenced files absent, which is what the check exists
+to catch. It is also computable: a file's commit time is the timestamp of the snapshot that
+added it, which is in table metadata, so "older than the report" is a fact about the table and
+not a guess about storage.
+
+**2. The ordering invariant cannot be restored, and does not need to be.** §6.6 depends on
+listing storage *before* computing reachability. With an inventory the listing happened hours or
+days ago and that order is unrecoverable — but the direction of the staleness is the safe one.
+Orphan removal deletes `listing − reachable`. A file committed after the report is absent from
+the listing, so it cannot enter that difference whatever reachability says. **Staleness can only
+under-report candidates, never over-report**, which is the failure direction the ordering rule
+exists to prevent. What replaces the rule is therefore the argument in this paragraph, not the
+age-guard widening below.
+
+**3. The age guard widens by the report's own age.** `older_than` is measured from the file
+list's clock, not today's: a report generated N days ago makes the guard `N + older_than_days`.
+This is conservative rather than load-bearing — by (2) the hazard it would catch cannot arise —
+and it is kept because an inventory is not an instantaneous snapshot of its own timestamp
+either. S3 Inventory is generated over a window and is explicitly eventually consistent, so
+"everything that existed at T0" is an approximation, and the guard is where that approximation
+is absorbed.
+
+**4. An empty report is already caught.** Treating an empty file list as "no files exist" makes
+every live file an orphan — the same failure invariant 1 exists to catch, arriving by a
+different route. It needs no new rule: completeness, restated as in (1), fails immediately on
+any table with referenced files older than the report. The fallback to a directory listing is
+then an operational nicety rather than a safety requirement.
+
+**The decision: not built, and the reason is not safety.** The restatement above shows it
+*could* be made safe. It is not worth building here, because the premise it rests on does not
+hold for this tool. Measured against the dev stack, one table, 631 files:
+
+| | |
+|---|---|
+| `list_storage` — the recursive listing an inventory would replace | **~50 ms** |
+| `reachable_files` — reading metadata, manifest lists and manifests | **~2035 ms** |
+
+The listing is **2% of the operation**, and the reachable set is the other 98% — 159 snapshots
+here, each with a manifest list to read. An inventory report replaces the cheap half and leaves
+the expensive half untouched, while adding the cost of fetching and filtering a **bucket-wide**
+manifest to one table's prefix. Zamboni lists per table, scoped to `storage_roots(tbl)` and
+never warehouse-wide, so there is no warehouse-scale listing here to avoid.
+
+The condition under which this becomes worth revisiting is therefore specific: **a fleet-wide
+reclaim that reads one inventory once and serves every table from it**. That is a different
+operation from the per-table one this package performs, and the economics only work at that
+shape. Until then the honest optimisation target is the reachable set, not the listing.
+
 ---
 
 ## 7. Responsibilities

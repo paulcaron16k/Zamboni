@@ -108,15 +108,20 @@ class LocalMaintainer(Maintainer):
                     # has them (ZMBNI-30, `CredentialUse`), and a signing
                     # catalog cannot stop that because it is not the storage
                     # owner. What remains is that it needs *a* listing, so a
-                    # signing warehouse with no credentials configured refuses,
-                    # and there is still no inventory-report path (ZMBNI-1602).
+                    # signing warehouse with no credentials configured refuses.
+                    # An inventory-report file list was considered as the way to
+                    # need no listing at all and declined -- not on safety, which
+                    # design.md 6.6a works through, but on economics: the listing
+                    # is ~2% of the operation and the reachable set is the rest
+                    # (ZMBNI-94).
                     limitations=(
                         (
                             "needs a bucket listing, so a remote-signing warehouse refuses "
                             "unless Zamboni has the object store's own credentials "
                             "(ZAMBONI_S3_ACCESS_KEY_ID, ZAMBONI_GCS_TOKEN or "
                             "ZAMBONI_AZURE_ACCOUNT_NAME for the store the table is in; see "
-                            "ZAMBONI_CREDENTIAL_USE). No inventory-report path yet (ZMBNI-94)"
+                            "ZAMBONI_CREDENTIAL_USE). An inventory-report file list was "
+                            "considered and declined -- see design.md 6.6a (ZMBNI-94)"
                         ),
                     ),
                     invariants=RECLAIM_INVARIANTS,
