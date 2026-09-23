@@ -295,10 +295,10 @@ class SparkMaintainer(Maintainer):
                         ),
                         (
                             "the procedure also accepts `file_list_view`, which would "
-                            "replace the directory listing entirely -- the answer to a "
-                            "remote-signing warehouse. Zamboni does not expose it yet, so "
-                            "this is a property of Spark, not a capability you can reach "
-                            "from here (ZMBNI-1602)"
+                            "replace the directory listing entirely. Zamboni does not "
+                            "expose it -- considered and declined on cost rather than "
+                            "safety, see design.md 6.6a -- so this is a property of Spark, "
+                            "not a capability you can reach from here (ZMBNI-94)"
                         ),
                     ),
                 ),
