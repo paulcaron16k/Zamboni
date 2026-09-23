@@ -7,22 +7,27 @@
 #
 # Versions are pinned here for the same reason .env pins the others: a rebuild
 # has to produce the same thing.
-ARG SPARK_VERSION=4.0.4
+ARG SPARK_VERSION=4.1.3
 FROM apache/spark:${SPARK_VERSION}-scala2.13-java17-ubuntu
 
 ARG ICEBERG_VERSION=1.11.0
 # hadoop-aws must match the Hadoop the Spark image ships, and the AWS SDK must
-# match what that hadoop-aws declares -- 3.4.1 names software.amazon.awssdk:bundle
-# 2.24.6 in hadoop-project's pom. Mismatch here fails at class-load time with a
-# NoSuchMethod deep inside the S3A client, which is a poor way to learn it.
-ARG HADOOP_AWS_VERSION=3.4.1
-ARG AWS_SDK_VERSION=2.24.6
+# match what that hadoop-aws declares. Mismatch here fails at class-load time
+# with a NoSuchMethod deep inside the S3A client, which is a poor way to learn
+# it -- so both are read off the image and the pom rather than carried forward.
+#
+# Spark 4.1.3 ships hadoop-client-api 3.4.2 (4.0.4 shipped 3.4.1), and
+# hadoop-project 3.4.2 declares aws-java-sdk-v2 2.29.52 (3.4.1 declared 2.24.6).
+# Both verified by reading the image and the pom, not by assuming the pair moved
+# together.
+ARG HADOOP_AWS_VERSION=3.4.2
+ARG AWS_SDK_VERSION=2.29.52
 
 USER root
 RUN set -eux; \
     repo=https://repo1.maven.org/maven2; \
     curl -fsSL -o /opt/spark/jars/iceberg-spark-runtime.jar \
-      "$repo/org/apache/iceberg/iceberg-spark-runtime-4.0_2.13/${ICEBERG_VERSION}/iceberg-spark-runtime-4.0_2.13-${ICEBERG_VERSION}.jar"; \
+      "$repo/org/apache/iceberg/iceberg-spark-runtime-4.1_2.13/${ICEBERG_VERSION}/iceberg-spark-runtime-4.1_2.13-${ICEBERG_VERSION}.jar"; \
     curl -fsSL -o /opt/spark/jars/hadoop-aws.jar \
       "$repo/org/apache/hadoop/hadoop-aws/${HADOOP_AWS_VERSION}/hadoop-aws-${HADOOP_AWS_VERSION}.jar"; \
     curl -fsSL -o /opt/spark/jars/aws-sdk-bundle.jar \

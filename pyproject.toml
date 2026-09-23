@@ -154,12 +154,18 @@ dev = [
     # check a file most runs never validate.
     "jsonschema>=4.20",
     "iceberg-zamboni[sql,s3,trino]",
-    # Matched to the dev stack's server, not to the extra's range. Iceberg 1.11
-    # ships a Spark runtime for 4.0 and no later minor, so the server is 4.0.x;
-    # pinning the client to the same minor means the dev-stack tests exercise a
-    # matched pair rather than Connect's cross-version skew, which is Spark's
-    # promise to keep and not a thing this suite should be proving.
-    "pyspark-client>=4.0.4,<4.1",
+    # Matched to the dev stack's server, not to the extra's range: pinning the
+    # client to the server's minor means the dev-stack tests exercise a matched
+    # pair rather than Connect's cross-version skew, which is Spark's promise to
+    # keep and not a thing this suite should be proving.
+    #
+    # **What sets the minor is Iceberg, not Spark.** The server can only be a
+    # version Iceberg publishes a `iceberg-spark-runtime-<minor>_2.13` for.
+    # Iceberg 1.11.0 publishes 4.0 and 4.1 and nothing later -- so 4.1 is
+    # adoptable and **4.2 is not**, however many pyspark-client 4.2 releases
+    # PyPI carries. ZMBNI-45's watch will keep reporting 4.2 as above this cap,
+    # correctly: the cap is not waiting on a test, it is waiting on Iceberg.
+    "pyspark-client>=4.1.3,<4.2",
 ]
 
 [tool.uv.sources]
