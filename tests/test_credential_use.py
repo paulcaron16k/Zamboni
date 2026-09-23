@@ -406,3 +406,20 @@ def test_no_usable_credentials_is_a_refusal_rather_than_a_traceback():
 
     assert outcome.exit_code == 2, "a configuration refusal is exit 2, not an exception"
     assert "storage credentials" in outcome.detail
+
+
+def test_azure_connection_string_maps_and_redacts():
+    """connection_string is the fourth Azure shape (ZMBNI-104 / ELT-1016).
+
+    It maps to `adls.connection-string` (what adlfs/PyIceberg read) and, being a secret, never
+    reaches a repr — the parity target-iceberg and tap-any-file already expose.
+    """
+    from zamboni.session import AzureSettings
+
+    az = AzureSettings(connection_string="DefaultEndpointsProtocol=https;AccountKey=SEKRIT;")
+    assert az.as_properties()["adls.connection-string"] == (
+        "DefaultEndpointsProtocol=https;AccountKey=SEKRIT;"
+    )
+    assert "SEKRIT" not in repr(az)
+    # unset stays absent, not an empty string
+    assert "adls.connection-string" not in AzureSettings(account_name="a").as_properties()
