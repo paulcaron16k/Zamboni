@@ -1174,7 +1174,7 @@ dev = [
     { name = "jsonschema", specifier = ">=4.20" },
     { name = "mypy", specifier = ">=1.14" },
     { name = "pre-commit", specifier = ">=4.6.1" },
-    { name = "pyspark-client", specifier = ">=4.0.4,<4.1" },
+    { name = "pyspark-client", specifier = ">=4.1.3,<4.2" },
     { name = "pytest", specifier = ">=8" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "ruff", specifier = ">=0.6" },
@@ -2537,7 +2537,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/c3/33/c987434f5d50aa802
 
 [[package]]
 name = "pyspark-client"
-version = "4.0.4"
+version = "4.1.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "googleapis-common-protos" },
@@ -2547,8 +2547,10 @@ dependencies = [
     { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pandas" },
     { name = "pyarrow" },
+    { name = "pyyaml" },
+    { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a4/c7/92da19eddfae9d88259387c32f5bffe509531ece8ecd78fd6c185e65d51c/pyspark_client-4.0.4.tar.gz", hash = "sha256:88f2bf867db6d3a9b7b88672cf27a0f796e42928956a74621f01da211d2af72f", size = 1504956, upload-time = "2026-07-15T11:15:30.447Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/98/4b/01b9f697a65e7534200a879d384123c7cb397c97bfe65b28a1197ec716be/pyspark_client-4.1.3.tar.gz", hash = "sha256:ff687ddd8176f3f96e5f53eb4184d6b5052af38d6bebf313c860e5062962351b", size = 1607680, upload-time = "2026-07-15T10:39:20.992Z" }
 
 [[package]]
 name = "pytest"
