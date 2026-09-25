@@ -683,6 +683,10 @@ engine with, secrets handling, and the local engine's measured memory ceiling.
   which shipped. Mostly a record now: what each was for, the evidence it was chosen on, and
   the one place the sequencing was wrong. The remaining item is PyIceberg 0.12, blocked
   upstream.
+- **[docs/event-driven-maintenance.md](docs/event-driven-maintenance.md)** — designed,
+  not built. Zamboni decides *when* to maintain rather than being told: a health check
+  from metadata Iceberg already publishes, an optional long-running service with its own
+  scheduler and a NATS consumer, and telemetry in Iceberg's own defined vocabulary.
 - **[docs/reclaiming-storage.md](docs/reclaiming-storage.md)** — the two operations
   that delete files are the two a catalog's storage policy can take away. What still
   works under a restrictive catalog, the settings that fix it on Lakekeeper and

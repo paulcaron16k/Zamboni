@@ -779,6 +779,7 @@ pip install "iceberg-zamboni[s3,sql]"
 ```bash
 cd /srv/zamboni
 zamboni doctor                                     # is this PyIceberg build usable?
+zamboni health db.events                           # is this table due, and why?
 zamboni table-config generate -o table-config.json # describe the catalog as it is
 $EDITOR table-config.json                          # say what you want instead
 zamboni table-config summary table-config.json     # confirm what that means

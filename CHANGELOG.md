@@ -21,6 +21,33 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### Added
+
+- **`zamboni health`, and the API behind it: is this table due for maintenance,
+  and why.** `table_health()` and `maintenance_watermark()` read a table's
+  layout signals and its last-maintenance mark from **one metadata load** — no
+  manifests, no storage listing. Measured on the dev stack: 20–38 ms against
+  ~400 ms to profile and ~2,035 ms for a full orphan scan, and 0.018 ms once the
+  table is loaded. Cheap enough to ask about every table in a fleet before doing
+  any work, which is the point.
+
+  The watermark comes from the `zamboni.operation` stamp Zamboni already writes
+  into every snapshot it commits, so maintenance history lives **in the table** —
+  no sidecar store to lose on a redeploy, and a fleet can be maintained tomorrow
+  by a different host than maintained it today.
+
+  **It says what it cannot see.** Three of the six signals in the runbook need
+  the manifests and one needs a storage listing, so `TableHealth.unseen` names
+  them and which tier answers them — "no problems found" and "no problems
+  visible from here" are different claims. Metadata also supplies two signals the
+  runbook did not have, snapshots retained and metadata-log entries, both expiry
+  pressure; they are now runbook rows.
+
+  `--exit-code` makes the verb exit 0 when due and 1 when not, for scripting.
+  Opt-in, following `git diff --exit-code` and for its reason: a diagnostic that
+  exits non-zero by default fails a CI job for reporting good news.
+  (ZMBNI-113, ZMBNI-114, ZMBNI-115)
+
 ## [0.5.1] - 2026-09-25
 
 ### Changed

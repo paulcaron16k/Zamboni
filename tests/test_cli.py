@@ -738,3 +738,71 @@ def test_maintenance_still_runs_it_when_the_fulfilling_operation_did_not(
 
     out = capsys.readouterr().out
     assert "already done by" not in out
+
+
+# -- the health verb (ZMBNI-115) ------------------------------------------
+
+
+def test_health_reports_a_verdict_with_its_reason(warehouse, unpartitioned, capsys):
+    """The first line is the answer; the rest is why.
+
+    An operator reading this is deciding whether to act, so a verdict buried
+    under ten counters is a verdict they have to derive themselves.
+    """
+    from zamboni.cli import main
+
+    assert main(["health", "db.unpartitioned", "--local-warehouse", warehouse]) == 0
+
+    out = capsys.readouterr().out
+    assert out.splitlines()[0].startswith("db.unpartitioned: due --")
+    assert "snapshot(s) written since maintenance" in out
+    # All three blocks, because each answers a different question and a mutation
+    # dropping any one of them left the other two looking complete.
+    assert "last maintenance" in out, "the watermark block is missing"
+    assert "written since" in out
+    assert "average file size" in out, "the signals block is missing"
+
+
+def test_health_names_what_it_could_not_see(warehouse, unpartitioned, capsys):
+    """Otherwise a clean report reads as a full assessment."""
+    from zamboni.cli import main
+
+    main(["health", "db.unpartitioned", "--local-warehouse", warehouse])
+
+    out = capsys.readouterr().out
+    assert "not visible from here" in out
+    assert "needs a storage listing" in out
+
+
+def test_health_changes_nothing(warehouse, session, unpartitioned, capsys):
+    """Read-only, so it takes no `--yes` and must leave the table where it was."""
+    before = session.catalog.load_table("db.unpartitioned").metadata.current_snapshot_id
+
+    from zamboni.cli import main
+
+    main(["health", "db.unpartitioned", "--local-warehouse", warehouse])
+
+    after = session.catalog.load_table("db.unpartitioned").metadata.current_snapshot_id
+    assert after == before
+
+
+def test_the_exit_code_is_opt_in(warehouse, session, unpartitioned, capsys):
+    """`git diff --exit-code`'s pattern, for its reason.
+
+    A diagnostic that exits non-zero by default fails a CI job for reporting
+    good news. Without the flag this is a report that succeeded; with it, a
+    condition a script can branch on without parsing prose.
+    """
+    from zamboni.cli import main
+    from zamboni.compactor import TableCompactor
+    from zamboni.config import CompactionConfig
+
+    args = ["health", "db.unpartitioned", "--local-warehouse", warehouse]
+    assert main(args) == 0, "due, and without the flag that is still a 0"
+    assert main([*args, "--exit-code"]) == 0, "due, so 0 with the flag"
+
+    TableCompactor(session, "db.unpartitioned", CompactionConfig(min_input_files=2)).execute()
+
+    assert main(args) == 0, "not due, but the default is still a successful report"
+    assert main([*args, "--exit-code"]) == 1, "not due, so 1 with the flag"
+    capsys.readouterr()
