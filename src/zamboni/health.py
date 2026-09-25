@@ -46,6 +46,14 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from pyiceberg.table import Table
 
+#: The summary key every snapshot-producing operation stamps. Three of the six
+#: operations produce a snapshot at all -- compaction, `rewrite-manifests` and
+#: `remove-dangling-deletes` -- and all three stamp it. `expire` removes
+#: snapshots rather than adding one, and `remove-orphans` and `apply-properties`
+#: produce none, so there is nothing for them to mark and the watermark is
+#: silent about them by construction.
+OPERATION_STAMP = "zamboni.operation"
+
 #: Iceberg's own summary keys. Spelled here rather than inlined so a rename
 #: upstream is one edit and a grep finds every use.
 TOTAL_DATA_FILES = "total-data-files"
@@ -169,4 +177,81 @@ def table_health(tbl: Table) -> TableHealth:
         records=_counter(summary, TOTAL_RECORDS),
         snapshots=len(tbl.metadata.snapshots),
         metadata_log_entries=len(tbl.metadata.metadata_log),
+    )
+
+
+@dataclass(frozen=True)
+class Watermark:
+    """When Zamboni last committed to this table, and what has happened since.
+
+    **The table is the store.** Every snapshot Zamboni commits stamps
+    :data:`OPERATION_STAMP` into its summary, so "when did maintenance last run"
+    is answerable from metadata already in hand -- no sidecar database, nothing
+    to lose on a redeploy, and a fleet that can be maintained by a different host
+    than the one that maintained it yesterday.
+
+    **A stamp can age out, and that fails the safe way.** `expire` deletes
+    snapshots, including ones carrying this stamp, so a table compacted once and
+    then left long enough loses its watermark and reads as never maintained. The
+    consequence is that it is considered again -- more work, not less -- which is
+    the right direction for a check whose job is deciding whether to work.
+    """
+
+    identifier: str
+    #: The newest snapshot Zamboni stamped, and what it was doing.
+    snapshot_id: int | None = None
+    operation: str | None = None
+    timestamp_ms: int | None = None
+    #: Snapshots committed after that one. They are writers by construction:
+    #: anything Zamboni committed later would itself be the newest stamp.
+    snapshots_since: int = 0
+
+    @property
+    def maintained(self) -> bool:
+        """Has Zamboni ever left a stamp on this table that still survives?"""
+        return self.snapshot_id is not None
+
+    @property
+    def written_since(self) -> bool:
+        """Has anyone written since Zamboni last committed?
+
+        This is the due-check in one property. False means the table is exactly
+        as maintenance left it, and every operation would find nothing to do.
+        """
+        return self.snapshots_since > 0
+
+
+def maintenance_watermark(tbl: Table) -> Watermark:
+    """Read the last-maintenance mark, and the writes after it, from metadata.
+
+    Ordered by position in `metadata.snapshots` rather than by `timestamp_ms`,
+    deliberately: that list is append order, while timestamps come from whichever
+    client committed and a writer with a skewed clock could otherwise reorder
+    history. The same concern is why `maintainers/spark.py` documents its
+    `older_than` literal as the *client's* clock.
+    """
+    snapshots = list(tbl.metadata.snapshots)
+
+    newest_stamped: tuple[int, int, int, str] | None = None
+    for position, snapshot in enumerate(snapshots):
+        summary = snapshot.summary
+        if summary is None:
+            continue
+        operation = summary.additional_properties.get(OPERATION_STAMP)
+        if operation is not None:
+            newest_stamped = (position, snapshot.snapshot_id, snapshot.timestamp_ms, operation)
+
+    identifier = ".".join(tbl.name())
+    if newest_stamped is None:
+        # Never maintained, or the stamp has been expired away. Either way every
+        # snapshot present counts as unreviewed work.
+        return Watermark(identifier=identifier, snapshots_since=len(snapshots))
+
+    position, snapshot_id, timestamp_ms, operation = newest_stamped
+    return Watermark(
+        identifier=identifier,
+        snapshot_id=snapshot_id,
+        operation=operation,
+        timestamp_ms=timestamp_ms,
+        snapshots_since=len(snapshots) - position - 1,
     )

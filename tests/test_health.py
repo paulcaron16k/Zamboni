@@ -108,3 +108,90 @@ def test_a_table_with_no_snapshots_reports_rather_than_raises(session):
     assert health.snapshot_id is None
     assert health.data_files is None
     assert health.snapshots == 0
+
+
+# -- the watermark (ZMBNI-114) --------------------------------------------
+
+
+def test_a_table_nobody_maintained_is_entirely_unreviewed(unpartitioned):
+    """Never maintained reads as six unreviewed snapshots, not as "up to date".
+
+    The `None` watermark and a zero count would be indistinguishable to a caller
+    deciding whether to work, and they mean opposite things.
+    """
+    from zamboni.health import maintenance_watermark
+
+    mark = maintenance_watermark(unpartitioned)
+
+    assert mark.maintained is False
+    assert mark.snapshots_since == 6, "every snapshot is unreviewed"
+    assert mark.written_since is True
+
+
+def test_a_real_compaction_leaves_a_readable_watermark(session, unpartitioned):
+    """End to end: compact, then read the mark back out of the table.
+
+    This is the property the whole design rests on -- that maintenance history
+    lives in the table rather than in a store the service has to keep. Asserted
+    against a real commit rather than a hand-built summary, because what is
+    being tested is that the stamp Zamboni writes is the stamp this reads.
+    """
+    from zamboni.compactor import TableCompactor
+    from zamboni.config import CompactionConfig
+    from zamboni.health import maintenance_watermark
+
+    TableCompactor(session, "db.unpartitioned", CompactionConfig(min_input_files=2)).execute()
+    tbl = session.catalog.load_table("db.unpartitioned")
+
+    mark = maintenance_watermark(tbl)
+
+    assert mark.maintained is True
+    assert mark.operation == "compaction"
+    assert mark.snapshot_id == tbl.metadata.current_snapshot_id
+    assert mark.written_since is False, "nothing has written since we compacted"
+
+
+def test_a_write_after_maintenance_makes_the_table_due_again(session, unpartitioned):
+    """The due-check in one property: compact, append, and the table is due."""
+    from zamboni.compactor import TableCompactor
+    from zamboni.config import CompactionConfig
+    from zamboni.health import maintenance_watermark
+
+    from .conftest import batch
+
+    TableCompactor(session, "db.unpartitioned", CompactionConfig(min_input_files=2)).execute()
+    tbl = session.catalog.load_table("db.unpartitioned")
+    tbl.append(batch(900, 5))
+
+    mark = maintenance_watermark(session.catalog.load_table("db.unpartitioned"))
+
+    assert mark.maintained is True
+    assert mark.snapshots_since == 1, "one append since the compaction"
+    assert mark.written_since is True
+
+
+def test_the_newest_stamp_wins_not_the_first(session, unpartitioned):
+    """Two maintenance runs, and the watermark is the later one.
+
+    Taking the first would make a table look stale for as long as its oldest
+    maintenance snapshot survived.
+    """
+    from zamboni.compactor import TableCompactor
+    from zamboni.config import CompactionConfig
+    from zamboni.health import maintenance_watermark
+    from zamboni.manifests import ManifestRewriter
+
+    from .conftest import batch
+
+    config = CompactionConfig(min_input_files=2)
+    TableCompactor(session, "db.unpartitioned", config).execute()
+    first = maintenance_watermark(session.catalog.load_table("db.unpartitioned"))
+
+    tbl = session.catalog.load_table("db.unpartitioned")
+    tbl.append(batch(900, 5))
+    ManifestRewriter(min_input_manifests=2).run(session.catalog.load_table("db.unpartitioned"))
+
+    later = maintenance_watermark(session.catalog.load_table("db.unpartitioned"))
+
+    assert later.snapshot_id != first.snapshot_id, "the watermark did not advance"
+    assert later.written_since is False, "the rewrite is the newest snapshot"

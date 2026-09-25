@@ -21,7 +21,7 @@ from .compactor import CompactionBlocked, CompactionResult, TableCompactor
 from .config import CompactionConfig, MemoryMode, config_from_table_settings
 from .deletes import DanglingDeleteCleaner
 from .expire import RetentionPolicy, SnapshotExpirer
-from .health import TableHealth, table_health
+from .health import TableHealth, Watermark, maintenance_watermark, table_health
 from .maintainers import (
     EngineConfigProblem,
     LayoutFeature,
@@ -148,6 +148,7 @@ __all__ = [
     "TableSettings",
     "UnsupportedOperation",
     "UnsupportedPyIceberg",
+    "Watermark",
     "__version__",
     "available_engines",
     "config_from_table_settings",
@@ -156,6 +157,7 @@ __all__ = [
     "get_maintainer",
     "get_table_config_spec",
     "maintain",
+    "maintenance_watermark",
     "profile_table",
     "reachable_files",
     "resolve_settings",
