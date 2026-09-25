@@ -48,6 +48,38 @@ Two categories beyond the usual set, because this tool deletes files:
   exits non-zero by default fails a CI job for reporting good news.
   (ZMBNI-113, ZMBNI-114, ZMBNI-115)
 
+- **Every run reports how much of it had anything to act on.**
+  `MaintenanceReport.counters` carries `considered`, `skipped`, `maintained`,
+  `failed` and `skip_rate`, they reconcile, and `zamboni maintenance` prints the
+  line unconditionally — including on a run where nothing was skipped, because a
+  number that only appears on the nights something happened cannot be compared
+  with anything.
+
+  The unit is one **operation on one table**, not one table. A per-table count of
+  "did nothing" would read zero forever: `expire` and `remove-orphans` answer to
+  the clock and `apply-properties` to the config file, so all three run on every
+  table every time. A blocked or aborted operation counts as `failed`, never as
+  `skipped`, so a broken table cannot inflate the figure. `report.warehouse`
+  labels the aggregate for a fleet collecting counters from many runs.
+  (ZMBNI-117)
+
+### Changed
+
+- **The write-driven operations are skipped on a table nothing has written to.**
+  `compact`, `rewrite-manifests` and `remove-dangling-deletes` have no input when
+  no snapshot has landed since maintenance last ran, so they report "nothing to
+  do" and exit 0 — a fourth shape of not-a-failure beside disabled, unsupported
+  and fulfilled. One metadata load per table decides it, and **any doubt runs the
+  table**: an unreadable watermark means the operations decide for themselves,
+  exactly as before.
+
+  The other three are deliberately untouched, and that is correctness rather than
+  caution. A table nobody writes still ages past its retention window, so
+  skipping `expire` on "no writes" would leave low-traffic tables accumulating
+  snapshots forever — the unbounded metadata growth this tool exists to prevent.
+  `remove-orphans` has the same shape, and `apply-properties` answers to a config
+  file the watermark cannot see. (ZMBNI-116)
+
 ## [0.5.1] - 2026-09-25
 
 ### Changed

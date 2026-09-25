@@ -610,6 +610,25 @@ def test_maintenance_finds_its_profile_and_per_warehouse_config(devops_dir, sess
     assert "db.events" in capsys.readouterr().out
 
 
+def test_maintenance_prints_what_it_had_to_do(devops_dir, session, capsys):
+    """The run's economics, in one line an operator can compare between nights.
+
+    Printed unconditionally -- including the first run, where nothing is skipped
+    -- because a number that appears only on the nights something was skipped
+    cannot be compared with anything (ZMBNI-117).
+    """
+    assert main(["maintenance", "--yes"]) == 0
+    first = capsys.readouterr().out
+    assert "operation(s) on 1 table(s)" in first
+    assert "0 skipped, 0 failed -- 0% of the work had no input" in first
+
+    assert main(["maintenance", "--yes"]) == 0
+    second = capsys.readouterr().out
+    assert "3 skipped, 0 failed -- 50% of the work had no input" in second, (
+        "the write-driven three had no input the second time, and the share says so"
+    )
+
+
 def test_maintenance_previews_without_yes(devops_dir, session, capsys):
     """The one rule holds here too, and this is the verb most likely to be run
     by someone who has not read the docs."""

@@ -412,3 +412,136 @@ def test_a_table_never_written_to_is_not_reported_as_unchanged(warehouse, tmp_pa
     assert not any("since None" in d for d in details), (
         f"an empty table reported a watermark it does not have: {details}"
     )
+
+
+# -- counting what the run had to do (ZMBNI-117) --------------------------
+
+
+def test_the_counters_partition_the_run(warehouse, tmp_path, monkeypatch):
+    """The reconciliation, over a run containing all three shapes at once.
+
+    Derived from the outcomes rather than compared to literals, so it stays true
+    when the runbook grows an operation.
+    """
+    from zamboni.compactor import CompactionBlocked
+    from zamboni.maintainers.local import LocalMaintainer
+
+    original = LocalMaintainer.execute
+
+    def block_compact(self, operation, table, *, request, dry_run):
+        if operation is Operation.COMPACT:
+            raise CompactionBlocked("equality deletes")
+        return original(self, operation, table, request=request, dry_run=dry_run)
+
+    monkeypatch.setattr(LocalMaintainer, "execute", block_compact)
+    warehouse.catalog.create_table("db.quiet", schema=SCHEMA, properties={"format-version": "2"})
+    path = config(tmp_path, namespaces={"db": {"tables": {"events": {}, "quiet": {}}}})
+
+    report = maintain(warehouse, table_config=path, commit=True)
+
+    counters = report.counters
+    assert counters.considered == counters.skipped + counters.maintained + counters.failed
+    assert counters.tables == len(report.tables)
+    assert counters.failed, "the blocked table must land somewhere other than skipped"
+    assert counters.maintained, "the operations that ran must be counted"
+
+
+def test_every_outcome_is_counted_exactly_once(warehouse, tmp_path):
+    """`considered` is the number of units of work, so it must match the
+    outcomes -- one per (table, operation) pair, with no pair counted twice."""
+    report = maintain(warehouse, table_config=config(tmp_path), commit=True)
+
+    pairs = {(o.table, o.operation) for o in report.outcomes}
+    assert report.counters.considered == len(pairs)
+    assert report.counters.considered == len(report.outcomes), "no duplicate pairs in a clean run"
+
+
+def test_an_abort_counts_its_operation_once_and_not_as_a_skip(warehouse, tmp_path, monkeypatch):
+    """A safety abort records a follow-on note under the aborted operation's own
+    name. Counting that second outcome as another, skipped unit of work would
+    break the reconciliation *and* inflate the skip share with the aftermath of
+    a failure -- the exact direction that would argue for building event
+    plumbing out of a broken warehouse."""
+    from zamboni.maintainers.local import LocalMaintainer
+    from zamboni.orphans import OrphanCleanupAborted
+
+    original = LocalMaintainer.execute
+
+    def abort(self, operation, table, *, request, dry_run):
+        if operation is Operation.EXPIRE:
+            raise OrphanCleanupAborted("a referenced file is missing")
+        return original(self, operation, table, request=request, dry_run=dry_run)
+
+    monkeypatch.setattr(LocalMaintainer, "execute", abort)
+
+    report = maintain(warehouse, table_config=config(tmp_path), commit=True)
+    counters = report.counters
+
+    assert len(report.outcomes) > counters.considered, "the run did record the follow-on note"
+    assert counters.considered == counters.skipped + counters.maintained + counters.failed
+    assert counters.failed == 1
+    expire = [o for o in report.outcomes if o.operation is Operation.EXPIRE]
+    assert len(expire) == 2, "the abort and its note share the operation name"
+
+
+def test_the_skip_share_is_the_number_the_gate_rests_on(warehouse, tmp_path):
+    """A run over a table nothing wrote to reports the write-driven three as
+    skipped, and the share says so. This is the measurement the initiative's
+    gate is decided on, so it is asserted against the declaration rather than
+    against a literal fraction."""
+    path = config(tmp_path)
+    first = maintain(warehouse, table_config=path, commit=True)
+    second = maintain(warehouse, table_config=path, commit=True)
+
+    assert first.counters.skipped == 0, "everything had work to do the first time"
+    assert first.counters.skip_rate == 0.0
+    assert second.counters.skipped == len(WRITE_DRIVEN)
+    assert second.counters.skip_rate == len(WRITE_DRIVEN) / second.counters.considered
+
+
+def test_an_empty_run_has_no_rate_rather_than_a_zero(warehouse, tmp_path):
+    """0.0 would read as "nothing was skipped", which is a different claim and a
+    misleading one to average across a fleet."""
+    report = maintain(warehouse, table_config=config(tmp_path), operations=[], commit=True)
+
+    assert report.counters.considered == 0
+    assert report.counters.skip_rate is None
+    assert "%" not in report.counters.describe()
+
+
+def test_the_counters_reach_a_library_caller_structurally(warehouse, tmp_path):
+    """`as_dict` is the covered surface -- a dashboard keys on these names."""
+    report = maintain(warehouse, table_config=config(tmp_path), commit=True)
+
+    doc = report.as_dict()
+    assert doc["counters"] == report.counters.as_dict()
+    assert set(doc["counters"]) == {
+        "tables",
+        "considered",
+        "skipped",
+        "maintained",
+        "failed",
+        "skip_rate",
+    }
+    assert json.loads(json.dumps(doc)) == doc, "a report must serialise"
+
+
+def test_the_run_names_the_warehouse_it_maintained(warehouse, tmp_path):
+    """A fleet collecting counters from many runs needs each aggregate labelled."""
+    report = maintain(warehouse, table_config=config(tmp_path), commit=True)
+
+    assert report.warehouse == "local"
+    assert report.as_dict()["warehouse"] == "local"
+
+
+def test_the_counters_are_derived_not_stored(warehouse, tmp_path):
+    """Two sources of truth for one fact means a report whose counters disagree
+    with its own outcomes -- worse than no counters, because a dashboard would
+    believe them."""
+    from zamboni.maintenance import MaintenanceReport
+
+    report = maintain(warehouse, table_config=config(tmp_path), commit=True)
+    trimmed = MaintenanceReport(report.outcomes[:1], warehouse=report.warehouse)
+
+    assert trimmed.counters.considered == 1
+    assert trimmed.counters != report.counters

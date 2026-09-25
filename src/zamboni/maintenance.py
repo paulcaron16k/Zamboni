@@ -130,9 +130,100 @@ class Outcome:
         }
 
 
+#: The three states of one unit of work, least to most severe. The order is the
+#: precedence used when a pair produced more than one outcome.
+_WORK_STATES = ("skipped", "maintained", "failed")
+
+
+@dataclass(frozen=True)
+class RunCounters:
+    """What a run had to do, and what it found there was no point doing.
+
+    **The unit of work is one operation on one table, not one table.** Building
+    it per table would have produced a counter that is structurally always
+    zero, and ZMBNI-116 is what makes it so: `expire` and `remove-orphans`
+    answer to the clock and `apply-properties` to the config file, so all three
+    execute on every table on every run. No table is ever entirely without work,
+    a per-table `skipped` would read 0 on every run that will ever happen, and
+    the gate this exists to answer would be reading an artefact of where we drew
+    that line rather than a measurement.
+
+    Per pair, an untouched table reports 3 of 6 skipped and a written one 0 of
+    6 -- the share of the scheduled work that had no input, which is the
+    question, and it moves when reality moves.
+
+    :attr:`tables` is counted too, because "half the work on two hundred tables"
+    and "half the work on two" are different situations and the rate alone
+    cannot tell them apart.
+
+    The buckets partition: ``considered == skipped + maintained + failed``, one
+    per pair. `test_the_counters_partition_the_run` proves it rather than this
+    docstring asserting it.
+
+    * **maintained** -- the operation executed and produced a result.
+    * **failed** -- a non-zero exit code: blocked, aborted, or a config refusal.
+      It beats `skipped`, and that is the one that matters. A blocked table also
+      ran nothing, so the naive test "no result" would file it under `skipped`,
+      inflating the very number the gate rests on and arguing for event plumbing
+      out of tables that were simply broken.
+    * **skipped** -- ran nothing, and that was right: disabled, unsupported,
+      fulfilled by another operation, or unchanged since the last maintenance.
+
+    What this does **not** measure: a table that *was* written to, where
+    compaction then reads every manifest and rewrites nothing, counts as
+    `maintained`. :class:`~zamboni.maintainers.Reportable` carries no uniform
+    "did anything change" signal, and inventing one is a change to six result
+    contracts rather than a counter. That is not a gap in the gate, though: it
+    is waste no event plumbing removes, because a write did happen and an event
+    would have fired too. The gate asks about work with *no* input, which is
+    exactly `skipped`.
+    """
+
+    tables: int = 0
+    considered: int = 0
+    skipped: int = 0
+    maintained: int = 0
+    failed: int = 0
+
+    @property
+    def skip_rate(self) -> float | None:
+        """The gate number: the share of the work that had nothing to act on.
+
+        ``None`` rather than a division when nothing was considered. An empty
+        run has no rate, and 0.0 would read as "nothing was skipped" -- a
+        different claim, and a misleading one to average across a fleet.
+        """
+        if not self.considered:
+            return None
+        return self.skipped / self.considered
+
+    def describe(self) -> str:
+        rate = self.skip_rate
+        share = "" if rate is None else f" -- {rate:.0%} of the work had no input"
+        return (
+            f"{self.considered} operation(s) on {self.tables} table(s): "
+            f"{self.maintained} maintained, {self.skipped} skipped, "
+            f"{self.failed} failed{share}"
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "tables": self.tables,
+            "considered": self.considered,
+            "skipped": self.skipped,
+            "maintained": self.maintained,
+            "failed": self.failed,
+            "skip_rate": self.skip_rate,
+        }
+
+
 @dataclass(frozen=True)
 class MaintenanceReport:
     outcomes: tuple[Outcome, ...] = ()
+    #: The warehouse this run maintained, from the table config. Carried so that
+    #: a fleet collecting :attr:`counters` from many runs can label each
+    #: aggregate without having to remember which run produced it.
+    warehouse: str | None = None
 
     @property
     def exit_code(self) -> int:
@@ -155,20 +246,76 @@ class MaintenanceReport:
             seen.setdefault(outcome.table, None)
         return tuple(seen)
 
+    @property
+    def counters(self) -> RunCounters:
+        """What the run had to do, and what it found no point doing.
+
+        See :class:`RunCounters` for why the unit is the (table, operation) pair.
+
+        **Derived, never stored.** The alternative -- incrementing counters in
+        the run loop -- gives the report two sources of truth for the same fact,
+        and the failure mode is a report whose counters disagree with its own
+        outcomes, which is worse than no counters at all because a dashboard
+        would believe them. Derivation costs one pass over a list.
+
+        A pair only counts once it has produced an outcome, so a run asked for
+        no operations considers nothing -- the truthful answer -- and the
+        operations after a safety abort are not counted either, because they
+        genuinely were not considered.
+
+        A pair is counted **once** even where it produced two outcomes. It can:
+        an abort records a follow-on note under the aborted operation's own
+        name, and counting that as a second, skipped unit of work would both
+        break the reconciliation and inflate the skip share with the aftermath
+        of a failure. The worst of the two wins.
+        """
+        worst: dict[tuple[str, Operation], str] = {}
+        for outcome in self.outcomes:
+            key = (outcome.table, outcome.operation)
+            state = _work_state(outcome)
+            if _WORK_STATES.index(state) >= _WORK_STATES.index(worst.get(key, "skipped")):
+                worst[key] = state
+
+        tally = dict.fromkeys(_WORK_STATES, 0)
+        for state in worst.values():
+            tally[state] += 1
+        return RunCounters(
+            tables=len(self.tables),
+            considered=len(worst),
+            **tally,
+        )
+
     def as_dict(self) -> dict[str, Any]:
         """A whole run, serialisable in one call. ZMBNI-32."""
         return {
             "exit_code": self.exit_code,
+            "warehouse": self.warehouse,
             "tables": list(self.tables),
             "failures": len(self.failures),
+            "counters": self.counters.as_dict(),
             "outcomes": [o.as_dict() for o in self.outcomes],
         }
 
     def describe(self) -> str:
         lines = [o.describe() for o in self.outcomes]
+        lines.append(self.counters.describe())
         if self.failures:
             lines.append(f"{len(self.failures)} operation(s) failed")
         return "\n".join(lines)
+
+
+def _work_state(outcome: Outcome) -> str:
+    """Which of :class:`RunCounters`\' three buckets one outcome belongs in.
+
+    Exhaustive and exclusive by construction: `result` is only ever set on the
+    one return that also carries exit code 0, so "executed" and "failed" cannot
+    both be true and everything else ran nothing.
+    """
+    if outcome.exit_code:
+        return "failed"
+    if outcome.result is not None:
+        return "maintained"
+    return "skipped"
 
 
 def maintain(
@@ -203,6 +350,10 @@ def maintain(
             file describing a different warehouse stops the run.
         observer: Called with each :class:`Outcome` as it happens, for progress
             on a long run. The report is returned either way.
+
+    The report carries :attr:`~MaintenanceReport.counters` -- how many tables
+    were considered, and how many of them had nothing to do -- which is the
+    number to alert or size a schedule on. See :class:`RunCounters`.
 
     Failures do not stop the run. Each table is attempted, and the report
     carries the worst exit code -- except after a safety abort (exit 4), where
@@ -255,7 +406,7 @@ def maintain(
                 )
                 break
 
-    return MaintenanceReport(tuple(outcomes))
+    return MaintenanceReport(tuple(outcomes), warehouse=config.warehouse)
 
 
 #: Operations whose input is *new data*, and which therefore have nothing to do
@@ -438,7 +589,14 @@ def _resolve_config(
     return config
 
 
-__all__ = ["RUNBOOK_ORDER", "MaintenanceReport", "Outcome", "maintain", "validate_policy"]
+__all__ = [
+    "RUNBOOK_ORDER",
+    "MaintenanceReport",
+    "Outcome",
+    "RunCounters",
+    "maintain",
+    "validate_policy",
+]
 
 
 def validate_policy(

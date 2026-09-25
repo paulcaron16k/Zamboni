@@ -558,7 +558,8 @@ internal and may move in a patch release. The entry points you need:
 |---|---|
 | `CatalogSession` | connecting: `for_lakekeeper`, `for_local`, `from_catalog` |
 | **`maintain(session, ...)`** | **the whole run — every operation, every table, one call. The CLI's `maintenance` verb is a printing adapter over it** |
-| `MaintenanceReport` / `Outcome` | what it returns: per-operation results, `failures`, and `exit_code` — the same number the CLI would exit with |
+| `MaintenanceReport` / `Outcome` | what it returns: per-operation results, `failures`, `counters`, and `exit_code` — the same number the CLI would exit with |
+| `RunCounters` | how much of the run had anything to act on: `considered`, `skipped`, `maintained`, `failed`, `skip_rate` |
 | `get_maintainer(name)` | one engine, when you need a single operation: `"local"`, `"trino"`, `"spark"` |
 | `Operation` | the six operations, as an enum |
 | `MaintenanceRequest` | engine-neutral inputs — retention plus overrides |
@@ -743,6 +744,36 @@ Four things that used to be the caller's problem and are not any more:
 `test_the_cli_and_the_api_agree_on_the_exit_code` pins that, because two paths
 that disagree about an exit code are two paths one of which is lying to a cron
 line.
+
+**`report.counters` is how much of the run had anything to act on**, and it is
+the number to size a schedule on. The unit is one operation on one table, not
+one table: `expire` and `remove-orphans` answer to the clock and
+`apply-properties` to the config file, so all three run on every table every
+time and a per-table count of "did nothing" would read zero forever.
+
+```python
+c = report.counters
+log.info("%s: %s", warehouse, c.describe())
+# acme: 24 operation(s) on 4 table(s): 12 maintained, 12 skipped, 0 failed
+#       -- 50% of the work had no input
+```
+
+`considered == skipped + maintained + failed`, so the three reconcile and can be
+summed across a fleet; `skip_rate` is `None` rather than `0.0` for a run that
+considered nothing, because an empty run has no rate and averaging a zero in
+would understate the fleet. `report.warehouse` labels the aggregate, so counters
+collected from many runs do not have to be matched back up by hand.
+
+A `skipped` operation is one that ran nothing and was right to: disabled in the
+config, unsupported by the engine, fulfilled by another operation, or *unchanged
+since the last maintenance* — nothing has written to the table, so the
+write-driven operations have no input. A **blocked or aborted** operation also
+ran nothing and is counted as `failed`, not `skipped`, so a broken table cannot
+inflate the figure.
+
+What the counters do not say is whether anything changed: compaction that reads
+every manifest and rewrites nothing still counts as `maintained`. Use the
+per-operation `result` for that.
 
 **Per-customer sessions and per-customer secrets.** One session per warehouse,
 closed in `finally` — a session holds a DuckDB connection and a catalog client.
