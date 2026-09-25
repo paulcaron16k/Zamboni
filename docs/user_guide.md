@@ -327,7 +327,7 @@ this rule and were written to it, so they are environment-only from the start:
 | Provider | Secret | Not a secret |
 |---|---|---|
 | GCS | `ZAMBONI_GCS_TOKEN`, when it holds a raw token | the same variable holding a key-file *path* or `google_default`, and `ZAMBONI_GCS_PROJECT_ID` / `ZAMBONI_GCS_SERVICE_HOST` |
-| Azure | `ZAMBONI_AZURE_ACCOUNT_KEY`, `ZAMBONI_AZURE_SAS_TOKEN`, `ZAMBONI_AZURE_CLIENT_SECRET` | `ZAMBONI_AZURE_ACCOUNT_NAME`, `ZAMBONI_AZURE_CLIENT_ID`, `ZAMBONI_AZURE_TENANT_ID` |
+| Azure | `ZAMBONI_AZURE_CONNECTION_STRING`, `ZAMBONI_AZURE_ACCOUNT_KEY`, `ZAMBONI_AZURE_SAS_TOKEN`, `ZAMBONI_AZURE_CLIENT_SECRET` | `ZAMBONI_AZURE_ACCOUNT_NAME`, `ZAMBONI_AZURE_CLIENT_ID`, `ZAMBONI_AZURE_TENANT_ID` |
 
 `ZAMBONI_GCS_TOKEN` is the one variable that is a secret or not depending on its
 value, which is why it is treated as one throughout: `GCSSettings.__repr__`

@@ -21,6 +21,24 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### Added
+
+- **An Azure connection string is a fourth credential shape.**
+  `ZAMBONI_AZURE_CONNECTION_STRING`, `storage.azure.connection_string` in
+  `zamboni.yml`, and `AzureSettings(connection_string=...)`, mapped to
+  `adls.connection-string` which is what `adlfs` and PyIceberg read.
+
+  It is the form `target-iceberg` and `tap-any-file` already expose, so the
+  ecosystem shares one Azure credential vocabulary (ELT-1016). Unlike the other
+  three it is self-contained — account and credential in one value — so it needs
+  no account name beside it, and the validation that used to demand one was
+  relaxed accordingly.
+
+  It counts as a secret everywhere secrets are counted: redacted in `__repr__`,
+  and in `SECRET_PROFILE_KEYS`, so a profile carrying one is held to `.env`'s
+  mode rule. It carries the account key inline, which makes it the most complete
+  credential of the four rather than the least. (ZMBNI-104)
+
 ## [0.5.0] - 2026-09-22
 
 The release security review (docs/releasing.md §3a) found one item: `Profile`

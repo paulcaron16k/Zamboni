@@ -612,7 +612,8 @@ def _add_catalog_args(p: argparse.ArgumentParser) -> None:
         "object storage",
         "GCS and Azure credentials are environment-only: ZAMBONI_GCS_TOKEN (a "
         "service-account key file path, or `google_default` for ambient "
-        "credentials), or ZAMBONI_AZURE_ACCOUNT_NAME with one of "
+        "credentials), ZAMBONI_AZURE_CONNECTION_STRING, or "
+        "ZAMBONI_AZURE_ACCOUNT_NAME with one of "
         "ZAMBONI_AZURE_ACCOUNT_KEY / _SAS_TOKEN / _CLIENT_SECRET. Configure the "
         "one your warehouse lives in; see docs/reclaiming-storage.md.",
     )
@@ -854,8 +855,11 @@ def _storage_from(args: argparse.Namespace) -> S3Settings | GCSSettings | AzureS
             )
         )
 
-    if account := setting("azure", "account_name", "ZAMBONI_AZURE_ACCOUNT_NAME"):
+    connection_string = setting("azure", "connection_string", "ZAMBONI_AZURE_CONNECTION_STRING")
+    account = setting("azure", "account_name", "ZAMBONI_AZURE_ACCOUNT_NAME")
+    if connection_string or account:
         azure = AzureSettings(
+            connection_string=connection_string,
             account_name=account,
             account_key=setting("azure", "account_key", "ZAMBONI_AZURE_ACCOUNT_KEY"),
             sas_token=setting("azure", "sas_token", "ZAMBONI_AZURE_SAS_TOKEN"),
@@ -863,12 +867,18 @@ def _storage_from(args: argparse.Namespace) -> S3Settings | GCSSettings | AzureS
             client_secret=setting("azure", "client_secret", "ZAMBONI_AZURE_CLIENT_SECRET"),
             tenant_id=setting("azure", "tenant_id", "ZAMBONI_AZURE_TENANT_ID"),
         )
-        if not (azure.account_key or azure.sas_token or azure.client_secret):
+        # A connection string is self-contained -- account and credential in one
+        # value -- so it satisfies this on its own. The other shapes still need an
+        # account name paired with something that authenticates.
+        if not (
+            azure.connection_string or azure.account_key or azure.sas_token or azure.client_secret
+        ):
             raise ValueError(
                 "ZAMBONI_AZURE_ACCOUNT_NAME needs one of ZAMBONI_AZURE_ACCOUNT_KEY, "
                 "ZAMBONI_AZURE_SAS_TOKEN, or ZAMBONI_AZURE_CLIENT_SECRET (with "
                 "ZAMBONI_AZURE_CLIENT_ID and ZAMBONI_AZURE_TENANT_ID). An account name "
-                "alone authenticates nothing."
+                "alone authenticates nothing. ZAMBONI_AZURE_CONNECTION_STRING is the "
+                "fourth shape and needs nothing beside it."
             )
         configured.append(("Azure", azure))
 

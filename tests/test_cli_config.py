@@ -845,3 +845,73 @@ def test_the_profile_repr_hides_every_secret_it_now_holds():
     assert "https://catalog" in rendered
     assert "acme" in rendered
     assert "azure" in rendered
+
+
+# -- the Azure connection string reaches every path (ZMBNI-104) -----------
+
+
+def test_a_connection_string_alone_configures_azure(monkeypatch):
+    """It is self-contained -- account and credential in one value -- so unlike
+    the other three shapes it needs no account name beside it.
+
+    The validation used to demand an account name plus one of key/SAS/secret,
+    which would have rejected the only shape that carries both.
+    """
+    from zamboni.cli import _storage_from
+
+    monkeypatch.setenv("ZAMBONI_AZURE_CONNECTION_STRING", "AccountName=a;AccountKey=k;")
+    for absent in ("ZAMBONI_AZURE_ACCOUNT_NAME", "ZAMBONI_AZURE_ACCOUNT_KEY"):
+        monkeypatch.delenv(absent, raising=False)
+
+    settings = _storage_from(
+        argparse.Namespace(
+            s3_endpoint=None, s3_access_key_id=None, s3_region=None, zamboni_profile=None
+        )
+    )
+
+    assert settings.as_properties()["adls.connection-string"] == "AccountName=a;AccountKey=k;"
+
+
+def test_a_connection_string_may_live_in_the_profile(tmp_path):
+    """The dataclass accepting a field is not the same as the profile accepting it.
+
+    `STORAGE_SETTINGS` is an allow-list, so a key the dataclass knows and the
+    allow-list does not fails at load -- which is the right behaviour for a typo
+    and the wrong one for a supported credential.
+    """
+    from zamboni.settings import load_profile
+
+    path = _profile(tmp_path, "storage:\n  azure:\n    connection_string: AccountKey=k;\n")
+
+    assert load_profile(path).storage["azure"]["connection_string"] == "AccountKey=k;"
+
+
+def test_a_connection_string_makes_the_profile_a_credential_file(tmp_path):
+    """It carries the account key inline, so it is the whole credential in one
+    value -- the most secret of the four shapes, not the least."""
+    from zamboni.settings import ProfileError, load_profile
+
+    path = _profile(
+        tmp_path, "storage:\n  azure:\n    connection_string: AccountKey=k;\n", mode=0o644
+    )
+
+    with pytest.raises(ProfileError, match="readable by group or other"):
+        load_profile(path)
+
+
+def test_the_azure_field_order_is_stable_for_positional_callers():
+    """`AzureSettings` is public API, exported from `zamboni` and released in 0.5.0.
+
+    Inserting a field ahead of the others would silently change what
+    `AzureSettings("acme")` means -- it set `account_name` then, and a reorder
+    would make it set something else. Asserted rather than left to review.
+    """
+    import dataclasses
+
+    from zamboni.session import AzureSettings
+
+    first = next(f.name for f in dataclasses.fields(AzureSettings))
+    assert first == "account_name", (
+        f"the first field is now {first!r}; a positional AzureSettings(...) call "
+        "written against 0.5.0 would silently set a different credential"
+    )

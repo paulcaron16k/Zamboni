@@ -478,9 +478,13 @@ class AzureSettings:
     pyarrow as the fallback. So unlike :class:`GCSSettings` this is not a
     divergence; it is the documented order.
 
-    Three credential shapes, and exactly one should be set. All three are static,
-    so none has GCS's expiry problem: an account key, a SAS token, or a service
-    principal (`client_id` + `client_secret` + `tenant_id`).
+    Four credential shapes, and exactly one should be set. All are static, so none
+    has GCS's expiry problem: a connection string (account name + key or SAS in one
+    value), an account key, a SAS token, or a service principal (`client_id` +
+    `client_secret` + `tenant_id`). `connection_string` (ZMBNI-104) is the form
+    target-iceberg and tap-any-file already expose, added for one Azure credential
+    vocabulary across the ecosystem (ELT-1016); `adlfs` and PyIceberg accept it as
+    `adls.connection-string`.
     """
 
     account_name: str | None = None
@@ -489,6 +493,12 @@ class AzureSettings:
     client_id: str | None = None
     client_secret: str | None = None
     tenant_id: str | None = None
+    #: Appended rather than placed first, though it reads as the primary form:
+    #: this is a public class exported from `zamboni`, and inserting a field
+    #: ahead of the others silently changes what `AzureSettings("acme")` means --
+    #: it set `account_name` in 0.5.0 and would set this. The docstring can lead
+    #: with it; the field order cannot.
+    connection_string: str | None = None
     extra: dict[str, str] = field(default_factory=dict)
 
     #: `wasb`/`wasbs` are deliberately absent: PyIceberg maps them in
@@ -500,7 +510,8 @@ class AzureSettings:
     def __repr__(self) -> str:
         """Redacted, for the reason :meth:`S3Settings.__repr__` gives."""
         return (
-            f"AzureSettings(account_name={self.account_name!r}, "
+            f"AzureSettings(connection_string={'***' if self.connection_string else None!r}, "
+            f"account_name={self.account_name!r}, "
             f"account_key={'***' if self.account_key else None!r}, "
             f"sas_token={'***' if self.sas_token else None!r}, "
             f"client_id={self.client_id!r}, "
@@ -510,6 +521,7 @@ class AzureSettings:
 
     def as_properties(self) -> dict[str, str]:
         named = {
+            "adls.connection-string": self.connection_string,
             "adls.account-name": self.account_name,
             "adls.account-key": self.account_key,
             "adls.sas-token": self.sas_token,

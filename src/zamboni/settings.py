@@ -84,7 +84,15 @@ STORAGE_SETTINGS = {
     ),
     "gcs": frozenset({"token", "project_id", "service_host", "default_location"}),
     "azure": frozenset(
-        {"account_name", "account_key", "sas_token", "client_id", "client_secret", "tenant_id"}
+        {
+            "account_name",
+            "account_key",
+            "sas_token",
+            "client_id",
+            "client_secret",
+            "tenant_id",
+            "connection_string",
+        }
     ),
 }
 
@@ -103,7 +111,17 @@ SSL_SETTINGS = frozenset({"ca_bundle", "insecure"})
 #:   mean a file that is a credential file on Tuesday and not on Wednesday, and
 #:   the cost of being wrong the safe way is one `chmod`.
 SECRET_PROFILE_KEYS = frozenset(
-    {"credential", "token", "secret_access_key", "account_key", "sas_token", "client_secret"}
+    {
+        "credential",
+        "token",
+        "secret_access_key",
+        "account_key",
+        "sas_token",
+        "client_secret",
+        # An Azure connection string carries the account key inline -- it is the
+        # whole credential in one value, so it is the most secret of the lot.
+        "connection_string",
+    }
 )
 
 
