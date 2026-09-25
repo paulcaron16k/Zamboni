@@ -487,13 +487,18 @@ class AzureSettings:
     `adls.connection-string`.
     """
 
-    connection_string: str | None = None
     account_name: str | None = None
     account_key: str | None = None
     sas_token: str | None = None
     client_id: str | None = None
     client_secret: str | None = None
     tenant_id: str | None = None
+    #: Appended rather than placed first, though it reads as the primary form:
+    #: this is a public class exported from `zamboni`, and inserting a field
+    #: ahead of the others silently changes what `AzureSettings("acme")` means --
+    #: it set `account_name` in 0.5.0 and would set this. The docstring can lead
+    #: with it; the field order cannot.
+    connection_string: str | None = None
     extra: dict[str, str] = field(default_factory=dict)
 
     #: `wasb`/`wasbs` are deliberately absent: PyIceberg maps them in
