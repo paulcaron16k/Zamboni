@@ -21,6 +21,7 @@ what makes the two genuinely equivalent rather than merely similar.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +47,8 @@ from .orphans import OrphanCleanupAborted
 from .session import CatalogSession, StorageCredentialsRequired
 from .tableconfig import TableConfig, TableConfigError
 from .workdir import WorkspaceUnavailable
+
+logger = logging.getLogger(__name__)
 
 #: Runbook order. Three of the five gaps between these are load-bearing -- see
 #: docs/runbook-dev.md. Shared with `settings.DEFAULT_OPERATIONS`, which is the
@@ -225,9 +228,19 @@ def maintain(
             compaction=config_from_table_settings(settings, base_config),
             table_config=config,
         )
+        unchanged = _unchanged_since_maintenance(session, table)
         done: set[Operation] = set()
         for operation in order:
-            outcome = _run(maintainer, table, operation, request, settings, done, commit=commit)
+            outcome = _run(
+                maintainer,
+                table,
+                operation,
+                request,
+                settings,
+                done,
+                commit=commit,
+                unchanged=unchanged,
+            )
             record(outcome)
             if outcome.result is not None:
                 done.add(operation)
@@ -245,6 +258,50 @@ def maintain(
     return MaintenanceReport(tuple(outcomes))
 
 
+#: Operations whose input is *new data*, and which therefore have nothing to do
+#: when nothing has written since maintenance last ran.
+#:
+#: The other three are deliberately absent, and the reason is correctness rather
+#: than caution. `expire` is a function of snapshots **and the clock**: a table
+#: nobody writes still ages past its retention window, so skipping it on "no
+#: writes" would leave low-traffic tables accumulating snapshots forever --
+#: a defect that surfaces months later as unbounded metadata growth, which is
+#: precisely the thing this tool exists to prevent. `remove-orphans` is the same
+#: shape: its age guard makes files *eligible* with time, and a previous run may
+#: have left some. `apply-properties` answers to the config file, and a config
+#: change is invisible to the watermark.
+WRITE_DRIVEN = frozenset(
+    {Operation.COMPACT, Operation.REWRITE_MANIFESTS, Operation.REMOVE_DANGLING_DELETES}
+)
+
+
+def _unchanged_since_maintenance(session: CatalogSession, table: str) -> str | None:
+    """Why this table is untouched since maintenance last ran, or ``None``.
+
+    One metadata load per table, ~20-38 ms measured -- against ~400 ms to profile
+    a table and ~2,035 ms for a full orphan scan, so asking is around 2% of the
+    cost of the cheapest thing it can save.
+
+    **Any doubt answers ``None``.** A catalog that will not load the table, a
+    watermark that cannot be read: the run proceeds and the operations decide for
+    themselves, exactly as before. A skip is an optimisation and must never be
+    the thing that stops a table being maintained -- and this function sits in
+    front of every operation in the run, so the safe direction is the one where
+    it is wrong.
+    """
+    from .health import maintenance_watermark
+
+    try:
+        mark = maintenance_watermark(session.catalog.load_table(table))
+    except Exception:  # pragma: no cover - any catalog trouble means "just run"
+        logger.debug("could not read the watermark for %s; running anyway", table, exc_info=True)
+        return None
+
+    if mark.written_since or not mark.maintained:
+        return None
+    return f"nothing written since {mark.operation}"
+
+
 def _run(
     maintainer: Maintainer,
     table: str,
@@ -254,17 +311,32 @@ def _run(
     done: set[Operation],
     *,
     commit: bool,
+    unchanged: str | None = None,
 ) -> Outcome:
     """One operation, with every "this is not a failure" case named.
 
-    The three shapes of not-a-failure are easy to conflate and expensive to get
+    The four shapes of not-a-failure are easy to conflate and expensive to get
     wrong: *disabled* means the config said no, *unsupported* means the engine
-    said no, and *fulfilled* means another operation already did it. All three
-    exit 0 and none of them ran anything.
+    said no, *fulfilled* means another operation already did it, and *unchanged*
+    means nothing has written since maintenance last ran. All four exit 0 and
+    none of them ran anything.
+
+    Args:
+        unchanged: Why this table is untouched since the last maintenance, or
+            ``None`` if it is not. Only :data:`WRITE_DRIVEN` operations are
+            skipped for it.
     """
     flag = _ENABLED_BY.get(operation)
     if flag is not None and not getattr(request.retention, flag).enabled:
         return Outcome(table, operation, 0, f"disabled in the config ({flag})")
+
+    if unchanged is not None and operation in WRITE_DRIVEN:
+        # A fourth shape of not-a-failure, and the cheapest: nothing has written,
+        # so there is nothing for this operation to act on. Reported rather than
+        # passed over silently -- an operator comparing two nightly runs needs to
+        # see that a table was considered and found to need nothing, which reads
+        # very differently from a table that was never reached.
+        return Outcome(table, operation, 0, f"nothing to do -- {unchanged}")
 
     support = maintainer.capabilities().of(operation)
     if support.fulfilled_by and support.fulfilled_by in done:

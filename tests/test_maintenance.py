@@ -20,7 +20,7 @@ from pyiceberg.types import IntegerType, NestedField
 from zamboni import CatalogSession, maintain
 from zamboni.committer import ConcurrentModification
 from zamboni.maintainers import Operation
-from zamboni.maintenance import RUNBOOK_ORDER, Outcome
+from zamboni.maintenance import RUNBOOK_ORDER, WRITE_DRIVEN, Outcome
 from zamboni.tableconfig import TableConfigError
 
 SCHEMA = Schema(NestedField(1, "id", IntegerType(), required=False))
@@ -210,6 +210,15 @@ def test_the_cli_and_the_api_agree_on_the_exit_code(warehouse, tmp_path, monkeyp
 
     api = maintain(warehouse, table_config=path, commit=True).exit_code
 
+    # A write between the two runs, because the second is no longer a repeat of
+    # the first: since ZMBNI-116 a table nothing has written to skips the
+    # write-driven operations, so without this the CLI run would skip compaction
+    # and never reach the block this test installs. Both runs now start from the
+    # same state, which is what the parity claim needs.
+    warehouse.catalog.load_table("db.events").append(
+        pa.table({"id": pa.array([99], type=pa.int32())}, schema=ARROW)
+    )
+
     monkeypatch.setenv("ZAMBONI_LOCAL_WAREHOUSE", str(tmp_path / "wh"))
     monkeypatch.chdir(tmp_path)
     cli = main(["maintenance", "--table-config", str(path), "--yes"])
@@ -297,3 +306,109 @@ def test_no_writable_spill_directory_is_a_config_refusal_not_a_dead_run(
     assert "temp_directory" in compact[0].detail
     later = [o for o in report.outcomes if o.operation is not Operation.COMPACT]
     assert any(o.exit_code == 0 for o in later), "the run stopped instead of continuing"
+
+
+# -- skipping tables nothing has written to (ZMBNI-116) -------------------
+
+
+def test_a_second_run_skips_the_write_driven_operations(warehouse, tmp_path):
+    """The point of the phase: a table nothing wrote to is not compacted again.
+
+    Asserted by running maintenance twice rather than by constructing a
+    watermark, because what needs proving is that the stamp the first run leaves
+    is the stamp the second run reads.
+    """
+    path = config(tmp_path)
+
+    maintain(warehouse, table_config=path, commit=True)
+    second = maintain(warehouse, table_config=path, commit=True)
+
+    skipped = {o.operation for o in second.outcomes if "nothing written since" in (o.detail or "")}
+    assert skipped == WRITE_DRIVEN, f"expected the write-driven three to skip, got {skipped}"
+
+
+def test_expire_and_orphans_still_run_on_an_untouched_table(warehouse, tmp_path):
+    """Correctness, not caution: both answer to the clock, not to writes.
+
+    A table nobody writes still ages past its retention window, so skipping
+    expiry on "no writes" would leave low-traffic tables accumulating snapshots
+    forever -- the unbounded metadata growth this tool exists to prevent. The
+    age guard makes orphan files eligible with time in the same way.
+    """
+    path = config(tmp_path)
+
+    maintain(warehouse, table_config=path, commit=True)
+    second = maintain(warehouse, table_config=path, commit=True)
+
+    for operation in (Operation.EXPIRE, Operation.REMOVE_ORPHANS, Operation.APPLY_PROPERTIES):
+        outcome = next(o for o in second.outcomes if o.operation is operation)
+        assert "nothing written since" not in (outcome.detail or ""), (
+            f"{operation.value} answers to the clock or the config, and must not be "
+            "skipped for want of writes"
+        )
+
+
+def test_a_write_makes_the_table_due_again(warehouse, tmp_path):
+    path = config(tmp_path)
+    maintain(warehouse, table_config=path, commit=True)
+
+    warehouse.catalog.load_table("db.events").append(
+        pa.table({"id": pa.array([42], type=pa.int32())}, schema=ARROW)
+    )
+    third = maintain(warehouse, table_config=path, commit=True)
+
+    assert not any("nothing written since" in (o.detail or "") for o in third.outcomes)
+
+
+def test_the_skip_is_reported_rather_than_silent(warehouse, tmp_path):
+    """An operator comparing two nightly runs has to be able to tell "considered
+    and found to need nothing" from "never reached"."""
+    path = config(tmp_path)
+    maintain(warehouse, table_config=path, commit=True)
+
+    second = maintain(warehouse, table_config=path, commit=True)
+
+    compact = next(o for o in second.outcomes if o.operation is Operation.COMPACT)
+    assert compact.exit_code == 0, "a skip is not a failure"
+    assert compact.detail and "nothing to do" in compact.detail
+    assert second.exit_code == 0
+
+
+def test_an_unreadable_watermark_runs_the_table_anyway(warehouse, tmp_path, monkeypatch):
+    """A skip is an optimisation and must never be what stops a table being
+    maintained. This check sits in front of every operation in the run, so the
+    safe direction is the one where it is wrong."""
+    from zamboni import maintenance as maintenance_module
+
+    maintain(warehouse, table_config=config(tmp_path), commit=True)
+
+    def unreadable(*args, **kwargs):
+        raise RuntimeError("catalog is having a day")
+
+    monkeypatch.setattr(maintenance_module, "_unchanged_since_maintenance", lambda *a: None)
+    monkeypatch.setattr("zamboni.health.maintenance_watermark", unreadable)
+
+    report = maintain(warehouse, table_config=config(tmp_path), commit=True)
+
+    assert not any("nothing written since" in (o.detail or "") for o in report.outcomes)
+
+
+def test_a_table_never_written_to_is_not_reported_as_unchanged(warehouse, tmp_path):
+    """The `maintained` half of the guard, which only bites on an empty table.
+
+    A table with no snapshots has `written_since` False *and* no watermark, so
+    without that half it would be skipped with the detail "nothing written since
+    None" -- true in spirit, nonsense on the page, and it would teach an operator
+    that the message cannot be trusted. Found by mutation: dropping the check
+    passed every other test here, because on any table with snapshots
+    `written_since` short-circuits first.
+    """
+    warehouse.catalog.create_table("db.empty", schema=SCHEMA, properties={"format-version": "2"})
+    path = config(tmp_path, namespaces={"db": {"tables": {"empty": {}}}})
+
+    report = maintain(warehouse, table_config=path, commit=True)
+
+    details = [o.detail or "" for o in report.outcomes]
+    assert not any("since None" in d for d in details), (
+        f"an empty table reported a watermark it does not have: {details}"
+    )
