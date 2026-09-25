@@ -11,6 +11,11 @@
     {
       "name": "Backlog",
       "type": "backlog"
+    },
+    {
+      "filter": "-status:Done",
+      "name": "Roadmap",
+      "type": "roadmap"
     }
   ],
   "keys": [
