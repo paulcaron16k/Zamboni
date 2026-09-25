@@ -10,7 +10,7 @@ of what other Iceberg maintenance systems do, is in the
 [architecture document](https://claude.ai/code/artifact/45390568-1735-4c6c-ae7b-b9269008718a);
 this file records the decisions so they survive in the repository.
 
-**Status: designed, not built.** Tracked as ZMBNI-104.
+**Status: designed, not built.** Tracked as ZMBNI-106.
 
 ---
 
