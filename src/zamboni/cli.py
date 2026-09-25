@@ -1285,6 +1285,12 @@ def _maintenance(session: CatalogSession, args: argparse.Namespace) -> int:
     if before is not None:
         _print_status_delta(session, tables, before)
 
+    # The economics of the run, in one line. Printed unconditionally, including
+    # when it is all zeroes: an operator comparing two nightly runs needs the
+    # skip share to be a number that is always there, not one that appears only
+    # on the nights something was skipped (ZMBNI-117).
+    print(f"\n{report.counters.describe()}")
+
     if not args.yes:
         # Unconditional, by ZMBNI-911: three verbs used to print this only when
         # they found work, so the one rule -- nothing commits without --yes --
