@@ -18,10 +18,18 @@ this file records the decisions so they survive in the repository.
 
 Nothing here needs new instrumentation. Three layers are already present and unused.
 
-**The health model is written down.** [runbook.md](runbook.md) §3 defines six signals
-with "concerning when" thresholds — data files per partition, average file size
-against target, metadata bytes against data bytes, manifests per data file,
-unreferenced files, dangling deletes.
+**The health model is written down.** [runbook.md](runbook.md) §3 defines the signals
+with "concerning when" thresholds. **Three of them come from metadata alone** —
+average file size against target, delete-file pressure, and records per file —
+and metadata adds two the runbook did not have: snapshots retained and
+metadata-log entries, both expiry pressure. The rest need a deeper tier: files
+per partition, manifests per data file and metadata bytes against data bytes
+need the manifests, and unreferenced files needs a storage listing.
+
+That is a cost ladder rather than a shortfall, and the due-check only needs the
+cheapest rung. `TableHealth` reports which signals it could not see rather than
+omitting them, because "no problems found" and "no problems visible from here"
+are different claims.
 
 **Iceberg publishes the telemetry.** A metadata-only `load_table` returns snapshot
 summaries carrying `total-data-files`, `total-files-size`, `total-delete-files`,

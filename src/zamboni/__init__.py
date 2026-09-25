@@ -21,6 +21,7 @@ from .compactor import CompactionBlocked, CompactionResult, TableCompactor
 from .config import CompactionConfig, MemoryMode, config_from_table_settings
 from .deletes import DanglingDeleteCleaner
 from .expire import RetentionPolicy, SnapshotExpirer
+from .health import TableHealth, table_health
 from .maintainers import (
     EngineConfigProblem,
     LayoutFeature,
@@ -142,6 +143,7 @@ __all__ = [
     "TableCompactor",
     "TableConfig",
     "TableConfigError",
+    "TableHealth",
     "TableProfile",
     "TableSettings",
     "UnsupportedOperation",
@@ -157,6 +159,7 @@ __all__ = [
     "profile_table",
     "reachable_files",
     "resolve_settings",
+    "table_health",
     "validate_policy",
     "version_banner",
 ]

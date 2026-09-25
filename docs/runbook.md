@@ -183,6 +183,13 @@ reasoning so you can adapt them:
 | manifests per data file | approaching 1:1 | the metadata tier has stopped being an index and become a second copy of the file list — `rewrite-manifests` is the answer |
 | unreferenced files | growing across runs | either the guard is holding them (expected, and reported) or deletion is failing. Check `N file(s) could not be deleted` |
 | `! dangling-delete-files` | present after maintenance | `remove-dangling-deletes` is disabled or was skipped |
+| snapshots retained | growing without bound | `expire` is disabled, or its retention is longer than intended. Visible from metadata alone — `zamboni health` reports it |
+| metadata-log entries | growing without bound | the same, for the metadata files themselves: `write.metadata.previous-versions-max` governs it and `apply-properties` sets it |
+
+The first six need the manifests or a storage listing, and `zamboni describe`
+reads them. The last two come from table metadata alone, which is why
+`zamboni health` can report them for a whole fleet cheaply — see
+[event-driven-maintenance.md](event-driven-maintenance.md).
 
 ---
 
