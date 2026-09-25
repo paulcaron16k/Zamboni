@@ -233,6 +233,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "apply-properties":
             return _apply_properties(session, args)
 
+        if args.command == "health":
+            return _health(session, args)
+
         if args.command in ("describe", "plan"):
             # Still built directly: both are read-only profiling of the local
             # table state, not operations an engine performs.
@@ -356,6 +359,26 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     tcs.add_argument("config", help="path to table-config.json")
     tcs.add_argument("--table", help="only this table")
+
+    h = sub.add_parser(
+        "health",
+        help="is this table due for maintenance, and why",
+        description=(
+            "Read a table's layout signals from one metadata load -- no manifests, no "
+            "storage listing. Cheap enough to ask about every table in a fleet."
+        ),
+    )
+    h.add_argument("table", help="table identifier, e.g. default.events")
+    h.add_argument(
+        # `git diff --exit-code`'s pattern, and for its reason: a diagnostic that
+        # exits non-zero by default fails a CI job for reporting good news. Off,
+        # this is a report that succeeded; on, it is a condition a script branches
+        # on without parsing prose.
+        "--exit-code",
+        action="store_true",
+        help="exit 0 when the table is due and 1 when it is not, for scripting",
+    )
+    _add_catalog_args(h)
 
     for name, help_text in [
         ("describe", "profile a table without changing it"),
@@ -889,6 +912,32 @@ def _storage_from(args: argparse.Namespace) -> S3Settings | GCSSettings | AzureS
             + "). A run uses one object store; configure the one this warehouse lives in."
         )
     return configured[0][1] if configured else None
+
+
+def _health(session: CatalogSession, args: argparse.Namespace) -> int:
+    """Report whether a table is due, from metadata alone.
+
+    Read-only, so no consent flag: there is nothing here for `--yes` to gate.
+    """
+    from .health import maintenance_watermark, table_health
+
+    table = session.catalog.load_table(args.table)
+    health = table_health(table)
+    mark = maintenance_watermark(table)
+
+    verdict = "due" if mark.written_since else "not due"
+    reason = (
+        f"{mark.snapshots_since} snapshot(s) written since maintenance"
+        if mark.written_since
+        else "nothing has written since maintenance last ran"
+    )
+    print(f"{health.identifier}: {verdict} -- {reason}")
+    print(mark.describe())
+    print(health.describe())
+
+    if args.exit_code:
+        return 0 if mark.written_since else 1
+    return 0
 
 
 def _operational_config(args: argparse.Namespace) -> CompactionConfig:

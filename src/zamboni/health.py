@@ -40,8 +40,11 @@ really "no problems visible from here", which is the more dangerous of the two.
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+from .units import human_bytes
 
 if TYPE_CHECKING:
     from pyiceberg.table import Table
@@ -115,6 +118,51 @@ class TableHealth:
             return None
         return self.total_bytes / self.data_files
 
+    def describe(self) -> str:
+        """The signals, one per line, with what could not be seen named at the end."""
+        rows: list[tuple[str, str]] = [
+            ("data files", _count(self.data_files)),
+            ("total size", human_bytes(self.total_bytes) if self.total_bytes else "-"),
+            (
+                "average file size",
+                human_bytes(self.average_file_bytes) if self.average_file_bytes else "-",
+            ),
+            ("delete files", _count(self.delete_files)),
+            (
+                "delete ratio",
+                f"{self.delete_ratio:.2f}" if self.delete_ratio is not None else "-",
+            ),
+            ("snapshots retained", str(self.snapshots)),
+            ("metadata log entries", str(self.metadata_log_entries)),
+        ]
+        lines = [f"  {name:<24} {value}" for name, value in rows]
+        lines.append(f"  {'not visible from here':<24} {len(self.unseen)} signal(s):")
+        lines.extend(f"      {signal}" for signal in self.unseen)
+        return "\n".join(lines)
+
+    def as_dict(self) -> dict[str, object]:
+        """Counters an integrator can trend. See :class:`~zamboni.maintainers.Reportable`.
+
+        The derived ratios are included because they are what a threshold is
+        written against -- an integrator recomputing them from the counters would
+        have to rediscover that a table with no data files has no average.
+        """
+        return {
+            "table": self.identifier,
+            "snapshot_id": self.snapshot_id,
+            "data_files": self.data_files,
+            "total_bytes": self.total_bytes,
+            "delete_files": self.delete_files,
+            "position_deletes": self.position_deletes,
+            "equality_deletes": self.equality_deletes,
+            "records": self.records,
+            "snapshots_retained": self.snapshots,
+            "metadata_log_entries": self.metadata_log_entries,
+            "average_file_bytes": self.average_file_bytes,
+            "delete_ratio": self.delete_ratio,
+            "unseen_signals": len(self.unseen),
+        }
+
     @property
     def delete_ratio(self) -> float | None:
         """Delete files per data file. Rising means merge-on-read is accumulating.
@@ -125,6 +173,11 @@ class TableHealth:
         if not self.data_files or self.delete_files is None:
             return None
         return self.delete_files / self.data_files
+
+
+def _count(value: int | None) -> str:
+    """A counter for display. `-` means not reported, which is not zero."""
+    return "-" if value is None else str(value)
 
 
 def _counter(summary: dict[str, str], key: str) -> int | None:
@@ -210,6 +263,30 @@ class Watermark:
     def maintained(self) -> bool:
         """Has Zamboni ever left a stamp on this table that still survives?"""
         return self.snapshot_id is not None
+
+    def describe(self) -> str:
+        if not self.maintained:
+            return f"  {'last maintenance':<24} never, or its snapshot has been expired away"
+        when = ""
+        if self.timestamp_ms is not None:
+            at = dt.datetime.fromtimestamp(self.timestamp_ms / 1000, dt.UTC)
+            when = f", {at:%Y-%m-%d %H:%M} UTC"
+        return (
+            f"  {'last maintenance':<24} {self.operation}{when}\n"
+            f"  {'written since':<24} {self.snapshots_since} snapshot(s)"
+        )
+
+    def as_dict(self) -> dict[str, object]:
+        """Counters an integrator can trend. See :class:`~zamboni.maintainers.Reportable`."""
+        return {
+            "table": self.identifier,
+            "last_maintenance_snapshot_id": self.snapshot_id,
+            "last_maintenance_operation": self.operation,
+            "last_maintenance_timestamp_ms": self.timestamp_ms,
+            "snapshots_since": self.snapshots_since,
+            "maintained": self.maintained,
+            "written_since": self.written_since,
+        }
 
     @property
     def written_since(self) -> bool:
