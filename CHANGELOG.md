@@ -21,6 +21,34 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-25
+
+### Changed
+
+- **The dev stack and its client moved to Spark 4.1.3**, from 4.0.4. The `spark`
+  extra is untouched at `>=4.0,<5` — it is a client for a cluster someone else
+  operates, and their Iceberg runtime is their choice — so this affects
+  contributors and CI, not installs.
+
+  What made 4.1 adoptable was Iceberg, not Spark: 1.11.0, already pinned here,
+  now publishes `iceberg-spark-runtime-4.1_2.13`. **4.2 remains unadoptable** for
+  the same reason — Iceberg publishes no 4.2 runtime — so ZMBNI-45's watch will
+  keep reporting `pyspark-client` 4.2.0 above our cap, correctly.
+
+  Four versions move as a set: Spark 4.1.3 ships Hadoop 3.4.2 where 4.0.4 shipped
+  3.4.1, and `hadoop-project` 3.4.2 declares AWS SDK 2.29.52 where 3.4.1 declared
+  2.24.6. A mismatched pair fails at class-load with a `NoSuchMethod` inside the
+  S3A client, so both were read off the image and the pom rather than assumed to
+  have moved together. (ZMBNI-45)
+
+- **`remove-orphans` now says the inventory-report path was declined rather than
+  pending.** Its `limitations` string on the local and Spark engines pointed at a
+  historical id as though that were the open ticket. An inventory-report file
+  list was considered and declined — not on safety, which
+  [design.md §6.6a](docs/design.md) works through in full, but on cost: measured
+  on one table, the listing is ~50 ms against ~2,035 ms to compute the reachable
+  set, so an inventory optimises 2% of the operation. (ZMBNI-94)
+
 ### Added
 
 - **An Azure connection string is a fourth credential shape.**
