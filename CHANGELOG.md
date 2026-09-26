@@ -63,6 +63,42 @@ Two categories beyond the usual set, because this tool deletes files:
   labels the aggregate for a fleet collecting counters from many runs.
   (ZMBNI-117)
 
+- **The run's figures can leave the machine: `maintenance --json PATH`, and
+  `zamboni runs` to read them back.** One JSON object per run, appended, with
+  the counters, the per-operation outcomes, the exit code, the start and end
+  times in UTC and the three versions that produced it. `zamboni runs
+  /var/log/zamboni` aggregates a directory of them into the fleet view, broken
+  down per warehouse.
+
+  Phase 2 made every run report its economics; nothing carried that number off
+  the box. `MaintenanceReport.as_dict()` reached a *library* caller, so the
+  deployment DevOps actually uses — cron calling the CLI — could only be
+  collected by regexing sentences that `describe()` declares unstable. That is
+  why the phase-2 gate had no way to be answered.
+
+  **A telemetry fault is not a maintenance fault**: a bad path or a full disk is
+  reported on stderr and the exit code stays the maintenance exit code. A run
+  that did its work and exits non-zero over a missing log directory teaches an
+  operator to distrust the exit code. `zamboni runs` likewise exits 0 whatever
+  it finds, because a report that exits non-zero for telling you bad news gets
+  wrapped in `|| true`; the exception is finding no logs at all, which is exit 2
+  because a path matching nothing is usually a typo. Unreadable records — the
+  night the box rebooted mid-write — are counted and reported, never raised on.
+  (ZMBNI-133)
+
+- **`versions()`**, the three versions `version_banner()` prints, as a mapping.
+  Which operations Zamboni even attempts is decided by probing the installed
+  PyIceberg, so a figure that moved between two nights may be a library change
+  rather than a workload change; a series of runs cannot tell those apart
+  without it. One source, two renderings.
+
+### Fixed
+
+- **`RunCounters` was documented as public and exported from nowhere**, so a
+  reader following the user guide got an `ImportError` from a documented name.
+  Now in `zamboni.__all__`, and `test_the_public_surface_table_names_only_public_objects`
+  checks the guide's surface table against it so the two cannot drift again.
+
 ### Changed
 
 - **The write-driven operations are skipped on a table nothing has written to.**

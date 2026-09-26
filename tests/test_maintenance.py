@@ -10,6 +10,7 @@ mostly about the decisions a caller no longer has to make.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import pyarrow as pa
 import pytest
@@ -545,3 +546,52 @@ def test_the_counters_are_derived_not_stored(warehouse, tmp_path):
 
     assert trimmed.counters.considered == 1
     assert trimmed.counters != report.counters
+
+
+# -- what a series of runs needs to be readable later (ZMBNI-133) ---------
+
+
+def test_a_run_records_when_it_happened_and_how_long_it_took(warehouse, tmp_path):
+    """ "The skip share was 50%" means nothing without when it was measured."""
+    before = datetime.now(UTC)
+    report = maintain(warehouse, table_config=config(tmp_path), commit=True)
+    after = datetime.now(UTC)
+
+    assert report.started_at is not None and report.ended_at is not None
+    assert before <= report.started_at <= report.ended_at <= after
+    assert report.duration_seconds is not None
+    assert 0 <= report.duration_seconds <= (after - before).total_seconds()
+
+
+def test_the_timestamps_are_utc_with_an_explicit_marker(warehouse, tmp_path):
+    """A naive timestamp in a series collected from several hosts is a bug
+    waiting for the clocks to disagree."""
+    doc = maintain(warehouse, table_config=config(tmp_path), commit=True).as_dict()
+
+    for key in ("started_at", "ended_at"):
+        assert doc[key].endswith("Z"), doc[key]
+        assert datetime.strptime(doc[key], "%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_a_run_says_which_build_produced_it(warehouse, tmp_path):
+    """Which operations are even attempted is decided by probing the installed
+    PyIceberg, so a figure that moved between two nights may be a library
+    change rather than a workload change. All three versions, or the series
+    cannot tell those apart."""
+    from zamboni import versions
+
+    doc = maintain(warehouse, table_config=config(tmp_path), commit=True).as_dict()
+
+    assert doc["versions"] == versions()
+    assert set(doc["versions"]) == {"zamboni", "pyiceberg", "python"}
+
+
+def test_a_report_with_no_timestamps_still_serialises():
+    """`MaintenanceReport` is constructible by a caller assembling outcomes, and
+    a missing duration must be absent rather than a crash."""
+    from zamboni.maintenance import MaintenanceReport
+
+    doc = MaintenanceReport().as_dict()
+
+    assert doc["started_at"] is None and doc["duration_seconds"] is None
+    assert json.loads(json.dumps(doc)) == doc

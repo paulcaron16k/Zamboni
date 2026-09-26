@@ -532,3 +532,39 @@ def test_env_sample_declares_every_variable_the_code_reads():
         f"env.sample names {sorted(inert)}, which nothing in src/ reads -- setting one "
         "looks like configuration and does nothing. Check the spelling against the code"
     )
+
+
+def test_the_public_surface_table_names_only_public_objects():
+    """The guide's surface table says "everything in `zamboni.__all__` is
+    supported"; then it lists the objects. Nothing checked that the second half
+    kept that promise, and it had already drifted -- `RunCounters` was added to
+    the table by ZMBNI-117 and exported from nowhere, so a reader following the
+    guide got an ImportError from a documented name.
+
+    Reads the first column of the table under "### The public surface", which is
+    the one whose preamble makes the claim.
+    """
+    import zamboni
+
+    guide = (DOCS / "user_guide.md").read_text(encoding="utf-8")
+    section = guide.split("### The public surface", 1)[1].split("\n## ", 1)[0]
+
+    named: set[str] = set()
+    for line in section.splitlines():
+        if not line.startswith("|") or line.startswith("| ---") or "| Object |" in line:
+            continue
+        cell = line.split("|")[1]
+        for match in re.findall(r"`([^`]+)`", cell):
+            # `maintain(session, ...)` and `available_engines()` name the object
+            # and show how it is called; `A / B` and `A, B, …` list several.
+            for name in re.split(r"[/,]", match.split("(")[0]):
+                name = name.strip().strip("*")
+                if name and name != "…":
+                    named.add(name)
+
+    assert named, "the surface table was not found; has the heading changed?"
+    missing = sorted(name for name in named if name not in zamboni.__all__)
+    assert not missing, (
+        "the guide documents these as public, but they are not in zamboni.__all__: "
+        f"{missing}. Either export them or stop calling them supported."
+    )

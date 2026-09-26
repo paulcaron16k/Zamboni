@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -224,6 +225,17 @@ class MaintenanceReport:
     #: a fleet collecting :attr:`counters` from many runs can label each
     #: aggregate without having to remember which run produced it.
     warehouse: str | None = None
+    #: When the run started and finished, UTC. A series of run records is not
+    #: much use without them: "the skip share was 50%" only means something
+    #: beside when it was measured and how long the run took.
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+
+    @property
+    def duration_seconds(self) -> float | None:
+        if self.started_at is None or self.ended_at is None:
+            return None
+        return (self.ended_at - self.started_at).total_seconds()
 
     @property
     def exit_code(self) -> int:
@@ -287,9 +299,19 @@ class MaintenanceReport:
 
     def as_dict(self) -> dict[str, Any]:
         """A whole run, serialisable in one call. ZMBNI-32."""
+        # Imported here rather than at module scope: `zamboni/__init__` imports
+        # this module, so a top-level `from . import versions` is a circular
+        # import that fails outright. Same deferral as `maintenance_watermark`
+        # below, for the same reason.
+        from . import versions
+
         return {
+            "versions": versions(),
             "exit_code": self.exit_code,
             "warehouse": self.warehouse,
+            "started_at": _iso(self.started_at),
+            "ended_at": _iso(self.ended_at),
+            "duration_seconds": self.duration_seconds,
             "tables": list(self.tables),
             "failures": len(self.failures),
             "counters": self.counters.as_dict(),
@@ -302,6 +324,18 @@ class MaintenanceReport:
         if self.failures:
             lines.append(f"{len(self.failures)} operation(s) failed")
         return "\n".join(lines)
+
+
+def _iso(moment: datetime | None) -> str | None:
+    """UTC, to the second, with an explicit ``Z``.
+
+    Seconds because a maintenance run is minutes long and sub-second precision in
+    a nightly log is noise; explicit ``Z`` because a naive timestamp in a series
+    collected from several hosts is a bug waiting for the clocks to disagree.
+    """
+    if moment is None:
+        return None
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _work_state(outcome: Outcome) -> str:
@@ -365,6 +399,7 @@ def maintain(
     order = [Operation(o) for o in operations]
     maintainer = get_maintainer(engine)(session, engine_options or {})
 
+    started_at = datetime.now(UTC)
     outcomes: list[Outcome] = []
 
     def record(outcome: Outcome) -> None:
@@ -406,7 +441,12 @@ def maintain(
                 )
                 break
 
-    return MaintenanceReport(tuple(outcomes), warehouse=config.warehouse)
+    return MaintenanceReport(
+        tuple(outcomes),
+        warehouse=config.warehouse,
+        started_at=started_at,
+        ended_at=datetime.now(UTC),
+    )
 
 
 #: Operations whose input is *new data*, and which therefore have nothing to do

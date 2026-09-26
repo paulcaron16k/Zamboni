@@ -565,6 +565,7 @@ internal and may move in a patch release. The entry points you need:
 | `MaintenanceRequest` | engine-neutral inputs — retention plus overrides |
 | `TableConfig` | loading and reading `table-config.json` |
 | `get_table_config_spec()` | the JSON Schema for `table-config.json`, as a dict — for validating a file you generated, or driving editor completion. See [below](#validating-a-generated-table-configjson) |
+| `summarise_logs(paths)` / `FleetSummary` | reading a series of run summaries back — what the fleet did, per warehouse. Behind `zamboni runs`; see [devops.md](devops.md) |
 | `available_engines()` | what this install can drive |
 | `config_from_table_settings` | turning table-config layout into the compaction config `COMPACT` needs |
 | `TableCompactor`, `SnapshotExpirer`, `OrphanCleaner`, … | the local engine's own classes, when you want its richer results |
@@ -763,6 +764,11 @@ summed across a fleet; `skip_rate` is `None` rather than `0.0` for a run that
 considered nothing, because an empty run has no rate and averaging a zero in
 would understate the fleet. `report.warehouse` labels the aggregate, so counters
 collected from many runs do not have to be matched back up by hand.
+
+From the command line the same figures come out of `maintenance --json PATH`,
+one JSON object per run, and `zamboni runs /var/log/zamboni` aggregates a series
+of them into the fleet view. [devops.md §6](devops.md) is the operator procedure
+and what each number is for.
 
 A `skipped` operation is one that ran nothing and was right to: disabled in the
 config, unsupported by the engine, fulfilled by another operation, or *unchanged
