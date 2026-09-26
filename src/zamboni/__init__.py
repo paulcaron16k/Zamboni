@@ -46,6 +46,7 @@ from .maintenance import (
     validate_policy,
 )
 from .manifests import ManifestRewriter
+from .metrics import CommitReport, CounterResult, TimerResult, commit_reports, reclaim_metrics
 from .orphans import OrphanCleaner
 from .planner import CompactionPlan, CompactionPlanner, FileGroup
 from .profile import Finding, Severity, TableProfile, profile_table
@@ -132,12 +133,14 @@ __all__ = [
     "RUNBOOK_ORDER",
     "AzureSettings",
     "CatalogSession",
+    "CommitReport",
     "CompactionBlocked",
     "CompactionConfig",
     "CompactionPlan",
     "CompactionPlanner",
     "CompactionResult",
     "ConcurrentModification",
+    "CounterResult",
     "DanglingDeleteCleaner",
     "EngineConfigProblem",
     "FileGroup",
@@ -175,11 +178,13 @@ __all__ = [
     "TableHealth",
     "TableProfile",
     "TableSettings",
+    "TimerResult",
     "UnsupportedOperation",
     "UnsupportedPyIceberg",
     "Watermark",
     "__version__",
     "available_engines",
+    "commit_reports",
     "config_from_table_settings",
     "detect",
     "engines_lacking",
@@ -189,6 +194,7 @@ __all__ = [
     "maintenance_watermark",
     "profile_table",
     "reachable_files",
+    "reclaim_metrics",
     "resolve_settings",
     "summarise_logs",
     "table_health",

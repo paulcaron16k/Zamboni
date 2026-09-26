@@ -565,6 +565,8 @@ internal and may move in a patch release. The entry points you need:
 | `MaintenanceRequest` | engine-neutral inputs — retention plus overrides |
 | `TableConfig` | loading and reading `table-config.json` |
 | `get_table_config_spec()` | the JSON Schema for `table-config.json`, as a dict — for validating a file you generated, or driving editor completion. See [below](#validating-a-generated-table-configjson) |
+| `commit_reports(result, snapshots)` / `CommitReport` | Iceberg's own `CommitReport` for each snapshot an operation committed, built from the snapshot summary using Iceberg's defined counter names |
+| `CounterResult` / `TimerResult` / `reclaim_metrics(result)` | Iceberg's metric primitives, and the reclaim operations expressed in them — `remove-orphans` and `expire` commit no snapshot, so Iceberg defines no report for them |
 | `summarise_logs(paths)` / `FleetSummary` | reading a series of run summaries back — what the fleet did, per warehouse. Behind `zamboni runs`; see [devops.md](devops.md) |
 | `available_engines()` | what this install can drive |
 | `config_from_table_settings` | turning table-config layout into the compaction config `COMPACT` needs |

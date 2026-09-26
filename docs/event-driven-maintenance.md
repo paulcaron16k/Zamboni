@@ -318,23 +318,62 @@ with almost no slack:
 | `remove-dangling-deletes` | `removed-delete-files`, `removed-positional-delete-files`, `removed-equality-delete-files`, `removed-dvs` |
 | every operation | `total-duration` (timer), `attempts` (counter) |
 
-**Zamboni's existing names are non-standard spellings of defined ones.**
-`CompactionResult.as_dict()` emits `data_files_rewritten`, `data_files_added`,
-`bytes_rewritten`, `bytes_added` — which are `removed-data-files`,
-`added-data-files`, `removed-files-size-bytes` and `added-files-size-bytes`. The
-`zamboni.` prefix is right for a *snapshot summary* key, where the namespace is
-shared; in a `CommitReport` the defined name belongs unprefixed, and
-`zamboni.operation` belongs in the report's free-form `metadata` map.
+**Build the report from the snapshot summary, not from our own counters.**
+That is what Java does: `CommitMetricsResult.from(commitMetrics, snapshotSummary)`
+reads all but two of its counters straight out of the summary the commit wrote.
+Deriving them from `CompactionResult` instead would produce numbers that agree
+with Iceberg's by coincidence and drift the first time either side changed what
+it counted. Reading the summary means `removed-data-files` means exactly what it
+means on a Java Spark job against the same table.
 
-Two honest caveats:
+Verified against PyIceberg 0.12.0: **the summary keys it writes are Java's
+keys**, so the mapping is total. What is *not* total is the spelling —
+**nine of the twenty-four counters are renamed between the summary property and
+the metric name**:
 
-- **Manifests differ in shape.** `manifests_before` / `manifests_after` are totals;
-  Iceberg counts created / kept / replaced. A conversion, not a rename.
+| summary property | metric name |
+|---|---|
+| `deleted-data-files` | `removed-data-files` |
+| `deleted-records` | `removed-records` |
+| `added-files-size` | `added-files-size-bytes` |
+| `removed-files-size` | `removed-files-size-bytes` |
+| `total-files-size` | `total-files-size-bytes` |
+| `added-position-delete-files` | `added-**positional**-delete-files` |
+| `removed-position-delete-files` | `removed-**positional**-delete-files` |
+| `added-position-deletes` | `added-**positional**-deletes` |
+| `removed-position-deletes` | `removed-**positional**-deletes` |
+
+Copying the summary key through as the metric name looks right and is wrong on
+nine counters, which is why this is a declared table rather than a loop.
+
+Three consequences worth stating:
+
+- **`operation` is Iceberg's, not ours.** The `CommitReport` field carries
+  `replace` or `overwrite` — Iceberg's enumeration, which a consumer groups by.
+  Zamboni's verb goes in the report's free-form `metadata` under
+  `zamboni.operation`, and the metric names stay unprefixed and standard. The
+  `zamboni.` prefix remains right for a *snapshot summary* key, where the
+  namespace is shared.
+- **Manifest counts are the one real gap, and Zamboni fills it.**
+  `manifests-created` / `-kept` / `-replaced` and `manifest-entries-processed`
+  are defined metrics that Java fills from summary properties **PyIceberg does
+  not write**. Zamboni's rewriter counts them itself, so supplying them closes a
+  gap rather than duplicating the summary. `manifests_before` / `manifests_after`
+  are deliberately *not* mapped: they are totals, where Iceberg's three are a
+  partition of the manifests one commit touched. A conversion, not a rename.
 - **Reclaim has no Iceberg equivalent.** `remove-orphans` produces no snapshot and
   expiry's deletion half is outside the commit, so those keep their own names — but
-  should use Iceberg's **primitives**, `CounterResult {unit, value}` and
+  use Iceberg's **primitives**, `CounterResult {unit, value}` and
   `TimerResult {time-unit, count, total-duration}`, so a future reclaim report type
   is a mapping rather than a re-model.
+
+**One Zamboni operation can be several Iceberg commits.** Compaction commits one
+snapshot per rewrite group unless asked for a single commit, and Iceberg's unit
+is the commit — so an operation produces a *list* of reports. `total-duration` is
+the operation's, so it is attached only when there was exactly one commit;
+copying it onto three would treble it for anyone summing. `attempts` is never
+set: PyIceberg retries internally up to `commit.retry.num-retries` without
+surfacing a count, and a hardcoded `1` would be a measurement nobody took.
 
 ### The reporter seam
 

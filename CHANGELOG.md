@@ -86,6 +86,35 @@ Two categories beyond the usual set, because this tool deletes files:
   night the box rebooted mid-write — are counted and reported, never raised on.
   (ZMBNI-133)
 
+- **Iceberg's own `CommitReport`, built from the snapshots Zamboni commits.**
+  `commit_reports(result, snapshots)` returns one per snapshot, using the counter
+  names `CommitMetricsResult` defines — unprefixed, because they are Iceberg's.
+  `CounterResult` and `TimerResult` are the spec's primitives, and
+  `reclaim_metrics()` expresses `expire` / `remove-orphans` / `apply-properties`
+  in them, since those commit no snapshot and Iceberg defines no report for them.
+
+  Nothing is emitted anywhere yet: this is the report *currency*, and where the
+  reports go is the reporter seam. PyIceberg implements none of Iceberg's metrics
+  standard (verified against 0.12.0; upstream `iceberg-python#847`), so a Java
+  Spark job reports commit metrics through Lakekeeper by default and everything
+  on this stack is silent.
+
+  **Built from the snapshot summary, as Java does**, rather than from Zamboni's
+  own counters — otherwise the numbers would agree with Iceberg's only by
+  coincidence. PyIceberg writes Java's summary keys, so the mapping is total, but
+  **nine of the twenty-four counters are renamed** on the way to a metric name
+  (`deleted-data-files` → `removed-data-files`, three `-size` → `-size-bytes`,
+  and four that swap "position" for "positional"). The manifest counters are the
+  one real gap: Java fills them from summary properties PyIceberg does not write,
+  so Zamboni's rewriter supplies its own.
+
+  `operation` carries Iceberg's snapshot operation, not Zamboni's verb, which
+  goes in the report's free-form `metadata`. One Zamboni operation can be several
+  Iceberg commits — compaction commits one snapshot per rewrite group — so
+  `total-duration` is attached only when there was exactly one, and `attempts` is
+  never set, because PyIceberg retries internally without surfacing a count and a
+  hardcoded `1` would be a measurement nobody took. (ZMBNI-127)
+
 - **The production feedback loop is written down and owned** — a design section
   in [docs/event-driven-maintenance.md](docs/event-driven-maintenance.md) for
   how a figure gets from a run back to a decision under each of the three
