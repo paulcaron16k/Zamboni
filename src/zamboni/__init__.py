@@ -46,11 +46,28 @@ from .maintenance import (
     validate_policy,
 )
 from .manifests import ManifestRewriter
-from .metrics import CommitReport, CounterResult, TimerResult, commit_reports, reclaim_metrics
+from .metrics import (
+    CommitReport,
+    CounterResult,
+    ReclaimReport,
+    TimerResult,
+    commit_reports,
+    reclaim_metrics,
+    reclaim_report,
+)
 from .orphans import OrphanCleaner
 from .planner import CompactionPlan, CompactionPlanner, FileGroup
 from .profile import Finding, Severity, TableProfile, profile_table
 from .reachable import reachable_files
+from .reporters import (
+    CollectingReporter,
+    LoggingReporter,
+    MetricsReporter,
+    MultiReporter,
+    NoopReporter,
+    RestMetricsReporter,
+    reporter_for,
+)
 from .runlog import FleetSummary, summarise_logs
 from .session import AzureSettings, CatalogSession, GCSSettings, S3Settings
 from .settings import Profile
@@ -133,6 +150,7 @@ __all__ = [
     "RUNBOOK_ORDER",
     "AzureSettings",
     "CatalogSession",
+    "CollectingReporter",
     "CommitReport",
     "CompactionBlocked",
     "CompactionConfig",
@@ -148,12 +166,16 @@ __all__ = [
     "FleetSummary",
     "GCSSettings",
     "LayoutFeature",
+    "LoggingReporter",
     "Maintainer",
     "MaintainerCapabilities",
     "MaintenanceReport",
     "MaintenanceRequest",
     "ManifestRewriter",
     "MemoryMode",
+    "MetricsReporter",
+    "MultiReporter",
+    "NoopReporter",
     "Operation",
     "OperationSupport",
     "OrphanCleaner",
@@ -161,7 +183,9 @@ __all__ = [
     "PreviewUnavailable",
     "Profile",
     "PyIcebergCapabilities",
+    "ReclaimReport",
     "ReplaceCommitter",
+    "RestMetricsReporter",
     "Retention",
     "RetentionPolicy",
     "RewriteBackend",
@@ -195,6 +219,8 @@ __all__ = [
     "profile_table",
     "reachable_files",
     "reclaim_metrics",
+    "reclaim_report",
+    "reporter_for",
     "resolve_settings",
     "summarise_logs",
     "table_health",

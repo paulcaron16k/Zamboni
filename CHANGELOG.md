@@ -86,6 +86,31 @@ Two categories beyond the usual set, because this tool deletes files:
   night the box rebooted mid-write — are counted and reported, never raised on.
   (ZMBNI-133)
 
+- **A reporter seam, copying Iceberg's own: one method, `report(MetricsReport)`.**
+  `maintain(..., reporter=…)` emits an Iceberg `CommitReport` per snapshot
+  committed and a `ReclaimReport` for the three operations that commit none.
+  `NoopReporter` is the default, so telemetry is opt-in and a deployment that
+  wants none pays for none.
+
+  Destinations: `RestMetricsReporter` posts to the catalog's metrics endpoint —
+  what Java does by default, so a Lakekeeper already receiving commit metrics
+  from Java Spark jobs starts receiving them from Zamboni in the same shape —
+  plus `LoggingReporter` (one JSON line, for a cron box with a log shipper),
+  `CollectingReporter` (for an embedded integrator with its own pipeline) and
+  `MultiReporter`. `reporter_for(catalog)` picks what suits a catalog.
+
+  **A reporter can never fail a run.** Anything one raises is logged and
+  swallowed and the exit code stays the maintenance exit code; one failing
+  reporter does not cost you the others. A catalog answering 404/405/501
+  disables the REST reporter for the rest of the run rather than warning once
+  per table across a fleet — metrics reporting is optional in the REST spec.
+
+  Uses `RestCatalog._session`, now inventoried in
+  [docs/pyiceberg-private-api.md](docs/pyiceberg-private-api.md) §2.6: PyIceberg
+  has no metrics endpoint at all, so there is no public way to make an
+  authenticated request to a catalog it is already talking to. The whole class
+  deletes when upstream implements it. (ZMBNI-128)
+
 - **Iceberg's own `CommitReport`, built from the snapshots Zamboni commits.**
   `commit_reports(result, snapshots)` returns one per snapshot, using the counter
   names `CommitMetricsResult` defines — unprefixed, because they are Iceberg's.

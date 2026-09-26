@@ -566,7 +566,9 @@ internal and may move in a patch release. The entry points you need:
 | `TableConfig` | loading and reading `table-config.json` |
 | `get_table_config_spec()` | the JSON Schema for `table-config.json`, as a dict — for validating a file you generated, or driving editor completion. See [below](#validating-a-generated-table-configjson) |
 | `commit_reports(result, snapshots)` / `CommitReport` | Iceberg's own `CommitReport` for each snapshot an operation committed, built from the snapshot summary using Iceberg's defined counter names |
-| `CounterResult` / `TimerResult` / `reclaim_metrics(result)` | Iceberg's metric primitives, and the reclaim operations expressed in them — `remove-orphans` and `expire` commit no snapshot, so Iceberg defines no report for them |
+| `MetricsReporter` / `NoopReporter` / `CollectingReporter` / `LoggingReporter` / `MultiReporter` / `RestMetricsReporter` | where reports go: one method, `report(MetricsReport)`, copying Iceberg's own seam. Pass one as `maintain(reporter=…)`; the default emits nothing |
+| `reporter_for(catalog, extra)` | the reporter that suits a catalog — the metrics endpoint for a REST catalog, nothing to post to for a local one |
+| `ReclaimReport` / `reclaim_report(result)` / `CounterResult` / `TimerResult` / `reclaim_metrics(result)` | Iceberg's metric primitives, and the reclaim operations expressed in them — `remove-orphans` and `expire` commit no snapshot, so Iceberg defines no report for them |
 | `summarise_logs(paths)` / `FleetSummary` | reading a series of run summaries back — what the fleet did, per warehouse. Behind `zamboni runs`; see [devops.md](devops.md) |
 | `available_engines()` | what this install can drive |
 | `config_from_table_settings` | turning table-config layout into the compaction config `COMPACT` needs |
@@ -766,6 +768,37 @@ summed across a fleet; `skip_rate` is `None` rather than `0.0` for a run that
 considered nothing, because an empty run has no rate and averaging a zero in
 would understate the fleet. `report.warehouse` labels the aggregate, so counters
 collected from many runs do not have to be matched back up by hand.
+
+### Sending Iceberg-shaped metrics somewhere
+
+`maintain(..., reporter=…)` emits an Iceberg `CommitReport` for every snapshot an
+operation commits, and a `ReclaimReport` for the three that commit none. The
+default is to emit nothing:
+
+```python
+from zamboni import LoggingReporter, maintain, reporter_for
+
+report = maintain(
+    session,
+    table_config=...,
+    commit=True,
+    # the catalog's own metrics endpoint, plus a JSON line per report to the log
+    reporter=reporter_for(session.catalog, [LoggingReporter()]),
+)
+```
+
+`RESTMetricsReporter` is Java's default against a REST catalog, so a Lakekeeper
+already receiving commit metrics from Java Spark jobs starts receiving them from
+Zamboni in the same shape. A catalog that does not implement the endpoint
+answers 404/405/501 and the reporter disables itself for the rest of the run —
+metrics reporting is optional in the REST spec, and a fleet of five hundred
+tables must not produce five hundred warnings about it.
+
+**A reporter can never fail a run.** Anything one raises is logged and
+swallowed; the exit code stays the maintenance exit code. It costs one extra
+metadata load per *committing* operation, which is why it is opt-in: a
+`CommitReport` is built from the snapshot's own summary, and the run loop does
+not hold the table afterwards.
 
 From the command line the same figures come out of `maintenance --json PATH`,
 one JSON object per run, and `zamboni runs /var/log/zamboni` aggregates a series

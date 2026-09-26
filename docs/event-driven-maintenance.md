@@ -381,15 +381,25 @@ surfacing a count, and a hardcoded `1` would be a measurement nobody took.
 Iceberg's own architecture, a single-method `report(MetricsReport)`.
 
 ```
-  operation result ──▶ CommitReport ──┬──▶ REST reporter → catalog /metrics
-                       (Iceberg shape) ├──▶ OTel reporter
-                                       ├──▶ as_dict() → integrator counters
-                                       └──▶ noop (default)
+  committing op ──▶ CommitReport  ──┬──▶ REST reporter → catalog /metrics
+                    (Iceberg shape) ├──▶ OTel reporter
+  reclaim op ────▶ ReclaimReport ───┼──▶ Logging / Collecting reporters
+                    (our shape,     └──▶ noop (default)
+                     their primitives)
 ```
 
-`as_dict()` becomes a third reporter over the same report rather than a parallel
-hand-maintained dict, so the integrator-facing counters and the telemetry cannot
-drift.
+`ReclaimReport` is there because `expire`, `remove-orphans` and
+`apply-properties` commit no snapshot and Iceberg defines no report that fits —
+without it, half of Zamboni's operations would bypass the seam entirely.
+
+**`as_dict()` is deliberately *not* regenerated from the report.** The original
+plan was for it to become a third reporter, which would have renamed every key
+an integrator reads — a breaking change to the one surface added specifically so
+that an integrator need not track our wording (ZMBNI-32). The anti-drift
+property is obtained instead by *checking* that the two agree: Zamboni's count
+of what a compaction rewrote and PyIceberg's count from the `DataFile` objects
+it wrote are independent, so their agreeing is evidence, where a shared code
+path would have agreed with itself and proved nothing.
 
 | If upstream lands… | What changes here |
 |---|---|

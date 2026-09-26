@@ -337,3 +337,57 @@ def test_reclaim_counts_bytes_as_bytes():
     assert "dry-run" not in metrics, "a flag is not a metric"
     assert "roots" not in metrics, "a path is not a metric"
     assert "operation" not in metrics and "table" not in metrics
+
+
+# -- the two surfaces must not drift (ZMBNI-128) -------------------------
+
+#: `Reportable.as_dict()` key -> the Iceberg metric that means the same thing.
+#:
+#: The pairs exist because the two are counted **independently**: the left is
+#: Zamboni's own bookkeeping through the rewrite, the right is what PyIceberg
+#: computed from the `DataFile` objects the commit actually wrote. Agreement is
+#: therefore evidence; a shared code path would have been none.
+AGREEING_COUNTERS = {
+    "data_files_rewritten": REMOVED_DATA_FILES,
+    "data_files_added": "added-data-files",
+    "bytes_rewritten": REMOVED_FILES_SIZE_BYTES,
+    "bytes_added": ADDED_FILES_SIZE_BYTES,
+}
+
+
+def test_zamboni_and_iceberg_agree_on_what_the_commit_did(session, unpartitioned):
+    """The anti-drift guarantee, and the reason `as_dict()` was **not**
+    regenerated from the report.
+
+    Regenerating it would rename every key an integrator reads -- a breaking
+    change to the surface `Reportable` promises is stable for years -- and a
+    generated dict agrees with itself by construction, so it would catch
+    nothing. Two independent counts of one commit agreeing is the real check.
+    """
+    result = TableCompactor(session, "db.unpartitioned", CompactionConfig()).execute()
+    table = session.catalog.load_table("db.unpartitioned")
+
+    doc = result.as_dict()
+    report = commit_reports(result, table.metadata.snapshots)[0]
+
+    compared = 0
+    for key, metric in AGREEING_COUNTERS.items():
+        assert metric in report.metrics, f"{metric} missing; the mapping lost a counter"
+        assert doc[key] == report.metrics[metric].value, (
+            f"{key}={doc[key]} but {metric}={report.metrics[metric].value}: Zamboni and "
+            "Iceberg disagree about the same commit, so one of them is wrong"
+        )
+        compared += 1
+    assert compared == len(AGREEING_COUNTERS) == 4
+
+
+def test_every_agreeing_counter_is_still_a_key_on_both_sides(session, unpartitioned):
+    """Guards the guard. If a result renames a key or the mapping drops a
+    metric, the loop above would silently compare nothing."""
+    result = TableCompactor(session, "db.unpartitioned", CompactionConfig()).execute()
+
+    doc = result.as_dict()
+    metric_names = {name for _, name, _ in SUMMARY_TO_METRIC}
+
+    assert set(AGREEING_COUNTERS) <= set(doc), "a result key was renamed"
+    assert set(AGREEING_COUNTERS.values()) <= metric_names, "a metric left the mapping"

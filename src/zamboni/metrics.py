@@ -86,6 +86,16 @@ COUNT = "count"
 BYTES = "bytes"
 UNDEFINED = "undefined"
 
+#: `ReportMetricsRequest.report-type`, from
+#: `ReportMetricsRequestParser.fromReportType`: the enum name, underscores to
+#: hyphens, lower-cased. Not guessed -- "commit_report" and "commitReport" are
+#: both plausible and both wrong.
+COMMIT_REPORT = "commit-report"
+
+#: Ours. No upstream equivalent, and namespaced so it can never collide with a
+#: report type Iceberg later defines.
+RECLAIM_REPORT = "zamboni-reclaim-report"
+
 #: Free-form `metadata` keys. The report's `metadata` is a string map Iceberg
 #: leaves to the producer, which is where a tool-specific fact belongs -- the
 #: metric *names* stay unprefixed and standard, as Iceberg defines them.
@@ -240,6 +250,58 @@ class CommitReport:
             if isinstance(metric, CounterResult)
         )
         return f"{self.table_name} {verb} snapshot {self.snapshot_id}: {counters or 'no counters'}"
+
+
+@dataclass(frozen=True)
+class ReclaimReport:
+    """What `expire`, `remove-orphans` and `apply-properties` did.
+
+    **Not an Iceberg type, and deliberately shaped like one.** Those three
+    commit no snapshot -- expiry *removes* snapshots, the other two touch no
+    data -- so there is no `CommitReport` to carry them and Iceberg defines no
+    report that fits. Without this they would bypass the reporter seam
+    altogether and half of Zamboni's operations would be invisible to the
+    telemetry that exists for the other half.
+
+    The counters keep Zamboni's own names, because there is nothing upstream to
+    conform to, but are :class:`CounterResult` and :class:`TimerResult` so that
+    an Iceberg reclaim report, if one is ever defined, is a mapping rather than
+    a re-model.
+
+    `operation` is Zamboni's verb here, unlike :class:`CommitReport` where the
+    field is Iceberg's enumeration -- there being no Iceberg operation for "we
+    deleted some files nothing referenced".
+    """
+
+    table_name: str
+    operation: str
+    metrics: Mapping[str, MetricResult] = field(default_factory=dict)
+    metadata: Mapping[str, str] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        doc: dict[str, Any] = {
+            "report-type": RECLAIM_REPORT,
+            "table-name": self.table_name,
+            "operation": self.operation,
+            "metrics": {name: metric.as_dict() for name, metric in self.metrics.items()},
+        }
+        if self.metadata:
+            doc["metadata"] = dict(self.metadata)
+        return doc
+
+    def describe(self) -> str:
+        counters = ", ".join(
+            f"{name}={metric.value}"
+            for name, metric in sorted(self.metrics.items())
+            if isinstance(metric, CounterResult)
+        )
+        return f"{self.table_name} {self.operation}: {counters or 'no counters'}"
+
+
+#: Every report the seam carries. Iceberg's own `MetricsReport` is the supertype
+#: of `ScanReport` and `CommitReport`; Zamboni produces no scans, and adds the
+#: reclaim shape Iceberg has no type for.
+MetricsReport = CommitReport | ReclaimReport
 
 
 # -- building them -------------------------------------------------------
@@ -445,6 +507,28 @@ def commit_reports(
     return reports
 
 
+def reclaim_report(result: Any, *, duration_ns: int | None = None) -> ReclaimReport | None:
+    """A :class:`ReclaimReport` for an operation that commits no snapshot.
+
+    ``None`` for a dry run -- nothing happened, so there is nothing to report --
+    and for a result that is not one of the reclaim operations, so a caller can
+    hand any result to both builders and let each decide.
+    """
+    doc = result.as_dict() if hasattr(result, "as_dict") else {}
+    operation = str(doc.get("operation") or "")
+    if not operation or doc.get("dry_run"):
+        return None
+    if doc.get("snapshot_id") is not None or doc.get("snapshot_ids"):
+        # It committed. That is a CommitReport's business.
+        return None
+    return ReclaimReport(
+        table_name=str(doc.get("table") or ""),
+        operation=operation,
+        metrics=reclaim_metrics(result, duration_ns=duration_ns),
+        metadata={OPERATION_STAMP: operation},
+    )
+
+
 def reclaim_metrics(result: Any, *, duration_ns: int | None = None) -> dict[str, MetricResult]:
     """Iceberg's *primitives* for the operations Iceberg has no report type for.
 
@@ -479,8 +563,10 @@ def reclaim_metrics(result: Any, *, duration_ns: int | None = None) -> dict[str,
 __all__ = [
     "ATTEMPTS",
     "BYTES",
+    "COMMIT_REPORT",
     "COUNT",
     "OPERATION_STAMP",
+    "RECLAIM_REPORT",
     "SNAPSHOTS_IN_OPERATION",
     "SUMMARY_TO_METRIC",
     "TOTAL_DURATION",
@@ -488,10 +574,13 @@ __all__ = [
     "CommitReport",
     "CounterResult",
     "MetricResult",
+    "MetricsReport",
+    "ReclaimReport",
     "TimerResult",
     "commit_report",
     "commit_reports",
     "metrics_from_summary",
     "nanos",
     "reclaim_metrics",
+    "reclaim_report",
 ]
