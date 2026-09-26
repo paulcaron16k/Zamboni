@@ -310,3 +310,74 @@ last week's figures is not.
 A per-warehouse breakdown appears whenever the series covers more than one,
 sorted by name so two weeks' output can be diffed. "The fleet is at 50%" is not
 actionable; "globex is at 5% and everything else is at 60%" is.
+
+## 7. The monthly review
+
+Collecting the figures is §6. This section is the part that makes them matter:
+somebody looks, on a cadence, and writes down what they decided.
+
+**Owner: Paul. Cadence: monthly. Next review: 2026-10-26.**
+
+Nothing enforces that date — no test fails when it passes. That was a deliberate
+choice (ZMBNI-134) and it is the weak link in this section, so it is written
+here rather than left implicit: if the review is not held, the loop is a
+document and not a loop.
+
+### The procedure, in full
+
+```bash
+zamboni runs /var/log/zamboni
+```
+
+Then, for each of these, a row in the log below:
+
+1. **Skip share, per warehouse.** Not an alert. A high, stable figure means the
+   watermark check is doing its job. What matters is whether it is *stable* —
+   a warehouse that moved from 60% to 5% took on a new writer, and a warehouse
+   that moved the other way may have lost one.
+2. **Failed runs and the worst exit code.** This *is* the alert, and it should
+   normally be zero. Exit 4 means a safety check stopped before deleting
+   anything; [§5](#when-one-customer-fails) is the response.
+3. **Longest run against the cron gap.** If the longest sweep is approaching the
+   interval between firings, split the schedule *before* runs start overlapping
+   rather than after.
+4. **Unreadable records.** More than the occasional reboot means something is
+   truncating the file.
+5. **Whether the series spans Zamboni or PyIceberg versions.** If it does,
+   compare like with like before concluding that anything moved.
+
+### What each figure is *not* for
+
+A skip share is an economics figure, not a health figure. It is tempting to
+alert on it because it is the most eye-catching number in the report, and that
+would generate a page every night for a fleet that is working perfectly. The
+health figures are items 2 and 3.
+
+### Review log
+
+The first row is a **local baseline**, not production: eight runs over two
+synthetic warehouses, recorded so the first production figure has something to
+be surprising against rather than landing with no context. It is labelled as
+such, because a baseline quietly mistaken for production evidence is worse than
+no baseline.
+
+| Date | Window reviewed | Runs | Skip share | Failed runs | Longest run | Decided |
+|---|---|---|---|---|---|---|
+| 2026-09-26 | local, synthetic | 8 | 38% | 0 | 0.9s | Baseline only — **not production**. Recorded at the close of ZMBNI-133 so the first real reading has a comparison. No decision taken |
+| _next: 2026-10-26_ | | | | | | first review with production data; feeds the [ZMBNI-106 gate](https://github.com/paulcaron16k/Zamboni/issues/106) |
+
+### The one-off decision this feeds
+
+Separately from the standing health question, one decision is waiting on this
+data: whether to build phases 4–6 of event-driven maintenance (a scheduler, a
+NATS consumer, partition targeting) or close that initiative with phases 1–3
+shipped. The decision record — owner, evidence needed, and what would make the
+answer "build it" — is in
+[event-driven-maintenance.md §8](event-driven-maintenance.md).
+
+The short version, because it is easy to read the wrong conclusion out of a
+large number: **phases 1–2 already capture the whole "no input at all" saving
+without any event plumbing.** A large skip share on its own is therefore not an
+argument for building more. Phases 4–6 are a *latency* argument — they would
+reach the same saving sooner — and they need evidence that latency matters
+before they are worth it.

@@ -86,6 +86,20 @@ Two categories beyond the usual set, because this tool deletes files:
   night the box rebooted mid-write — are counted and reported, never raised on.
   (ZMBNI-133)
 
+- **The production feedback loop is written down and owned** — a design section
+  in [docs/event-driven-maintenance.md](docs/event-driven-maintenance.md) for
+  how a figure gets from a run back to a decision under each of the three
+  deployment models, and [docs/devops.md](docs/devops.md) §7 for the monthly
+  review that acts on it: owner, cadence, procedure, and a log with its first
+  (clearly-labelled, non-production) baseline row.
+
+  It also carries the decision record the event-driven initiative is waiting on,
+  including the thing easiest to get wrong about it: phases 1–2 already capture
+  the whole "no input at all" saving without event plumbing, so a large skip
+  share is **not** on its own an argument for building more. Nothing enforces
+  the cadence — that was a deliberate choice, and §7 says so where a reader will
+  see it. (ZMBNI-134)
+
 - **`versions()`**, the three versions `version_banner()` prints, as a mapping.
   Which operations Zamboni even attempts is decided by probing the installed
   PyIceberg, so a figure that moved between two nights may be a library change

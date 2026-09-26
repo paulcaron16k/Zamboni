@@ -396,6 +396,65 @@ OTel's naming rules apply throughout: durations in **seconds**, units in the
 instrument's unit field and **not** in the name, `{file}` and `{record}` as singular
 annotations.
 
+### The loop that closes this design
+
+Telemetry that nobody reads is a component to operate, not a capability. The
+plan this document proposes is **decided by a number that does not exist yet**,
+so the route from a production run back to that number is part of the design
+rather than an afterthought for whoever deploys it.
+
+```
+        run                      collect                    read              decide
+  ┌──────────────┐          ┌───────────────┐        ┌────────────────┐   ┌───────────┐
+  │ 1 cron + CLI │──json──▶ │ .jsonl on disk│──────▶ │  zamboni runs  │──▶│  monthly  │
+  └──────────────┘          └───────────────┘        │  (per warehouse│   │  review   │
+  ┌──────────────┐                                   │   breakdown)   │   │ devops §7 │
+  │ 2 service    │──OTel──▶ ┌───────────────┐   ┌───▶└────────────────┘   └─────┬─────┘
+  └──────────────┘          │  collector /  │───┘                               │
+  ┌──────────────┐          │  IWS telemetry│                                   ▼
+  │ 3 IWS embeds │─as_dict▶ └───────────────┘                          ┌────────────────┐
+  └──────────────┘                                                     │ ZMBNI-106 gate │
+                                                                       │ + standing     │
+                                                                       │   health       │
+                                                                       └────────────────┘
+```
+
+Deliberately, the **bottom rung needs no infrastructure at all**: a crontab
+line, a file, and one command that reads it. Model 1 is how this will first
+reach production, and a feedback loop that only works once a collector is
+deployed is a feedback loop that does not exist during the period the gate is
+being measured.
+
+Two distinct questions come out of the same data, and conflating them is how a
+monitoring plan turns into noise:
+
+| | question | horizon | what it feeds |
+|---|---|---|---|
+| **one-off** | what share of scheduled work has no input? | a few weeks | the gate below: is event-driven triggering worth building? |
+| **standing** | is maintenance keeping up? | forever | failures, exit codes, sweep duration. The reason the loop outlives the gate |
+
+The skip share is **not an alert**. A high, stable figure means the cheap
+watermark check is doing its job. What alerts is the standing column: failed
+runs, exit 4, and a sweep duration trending toward the gap between cron firings.
+
+### The decision record this initiative is waiting on
+
+| | |
+|---|---|
+| **Decision** | build phases 4-6 (scheduler, NATS consumer, partition targeting), or close the initiative with phases 1-3 shipped |
+| **Owner** | Paul |
+| **Evidence needed** | `zamboni runs` over a production fleet, several nightly cycles, per warehouse |
+| **Baseline** | 38% of scheduled work had no input, measured locally over 8 runs / 2 warehouses / 5 tables. **Not production**, and recorded only so the first production figure has something to be surprising against |
+| **Decide by** | first monthly review with production data — [devops.md §7](devops.md) |
+
+**What would make the answer "build it":** a large skip share *and* evidence
+that the latency between a write and its maintenance matters — streaming tables,
+or a warehouse where the nightly window is already too tight. The skip share
+alone does not justify it, because phases 1-2 already capture that saving
+without any event plumbing. **Phases 4-6 are a latency argument, not a waste
+argument**, and the evidence has to be read that way or the gate will be
+answered wrongly by a number that looks impressive.
+
 ---
 
 ## 9. Not a platform
@@ -421,8 +480,11 @@ capability the two config files do not already provide.
 
 ## 11. Open questions
 
-1. **What fraction of scheduled runs currently do nothing?** The due-check phase
-   measures it, and it sizes everything after.
+1. **What fraction of scheduled runs currently do nothing?** ~~The due-check phase
+   measures it~~ — the due-check phase *computes* it per run, which is not the
+   same thing as anyone knowing it. Collecting it is `maintenance --json` and
+   `zamboni runs`; deciding on it is the decision record in §8. Open until a
+   production fleet has reported.
 2. **How many tables per warehouse, realistically?** The ~25 ms/table figure is one
    dev-stack table. 50 tables makes polling free; 10,000 changes the case for events.
 3. **Is per-partition detail cheap enough?** Iceberg's

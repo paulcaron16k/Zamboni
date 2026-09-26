@@ -767,8 +767,8 @@ collected from many runs do not have to be matched back up by hand.
 
 From the command line the same figures come out of `maintenance --json PATH`,
 one JSON object per run, and `zamboni runs /var/log/zamboni` aggregates a series
-of them into the fleet view. [devops.md §6](devops.md) is the operator procedure
-and what each number is for.
+of them into the fleet view. [devops.md](devops.md) is the operator procedure:
+§6 for what each number means, §7 for the monthly review that acts on them.
 
 A `skipped` operation is one that ran nothing and was right to: disabled in the
 config, unsupported by the engine, fulfilled by another operation, or *unchanged
