@@ -1481,6 +1481,50 @@ a great deal.
   be this section. If you see it now, check whether `memory_mode` is pinned to
   `in_memory` or `rewrite_all` is set on a large partition.
 
+### Compacting only what changed (`only_changed_partitions`)
+
+The floor above subtracts partitions still being written. This one *selects*:
+restrict compaction's candidates to the partitions a writer has touched since
+maintenance last ran, so a large table of mostly-cold partitions is not rewalked
+every night.
+
+```bash
+zamboni maintenance --warehouse acme --yes --only-changed-partitions
+```
+
+**Off by default, and that is deliberate.** The saving is real but unmeasured on
+any production fleet, and a default that narrows what gets compacted is the kind
+of change that surfaces months later as a table nobody noticed going
+unmaintained.
+
+The two compose rather than replace: changed-since-watermark selects the
+candidates, the recency floor subtracts the ones still hot. **A partition that
+is both changed and inside the floor is correctly left alone** — and the reason
+reported is the floor's, because that is the more specific fact.
+
+The set is derived from metadata, never from a data file, by one of two routes:
+
+| Route | When | Cost |
+|---|---|---|
+| snapshot summaries | the table sets `write.summary.partition-limit` | no manifest is opened at all |
+| manifests | otherwise | the manifests *added by* the snapshots since the watermark — a small subset, not the whole-table walk `describe` does |
+
+Setting `write.summary.partition-limit` on an ingested table is worth doing:
+PyIceberg's default is `0`, so without it the partition paths are simply not
+recorded and the manifest route is the only one available.
+
+**Where the changed set cannot be derived, every candidate is considered, exactly
+as before.** That covers an unpartitioned table, a table never maintained, a
+watermark that has aged out, and any metadata this cannot read. Unknown is not
+the empty set: it means "compact whatever you would have compacted anyway", and
+being wrong in the other direction would leave a partition uncompacted.
+
+**Compaction only.** `remove-orphans` and `expire` are never partition-targeted,
+and both say so in the code. Orphan removal subtracts a reachable set from a
+storage listing and [design.md §6.6](design.md)'s completeness invariant needs
+that listing whole — it is the check that caught a real keying bug instead of
+deleting every live file. Expiry answers to the clock, not to writes.
+
 ### Other things to know
 
 - **The reachable-file set is proportional to file count.** Orphan removal and

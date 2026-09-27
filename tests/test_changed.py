@@ -223,3 +223,165 @@ def test_a_burst_of_writes_is_one_union(session, table):
 
     assert changed.paths == frozenset({"category=a", "category=b"})
     assert changed.snapshots == 3
+
+
+# -- restricting compaction to the changed set (ZMBNI-126) ---------------
+
+
+def plan_for(session, tbl, **config):
+    from zamboni.planner import CompactionPlanner
+    from zamboni.profile import profile_table
+
+    tbl = reload(session, tbl)
+    return CompactionPlanner(CompactionConfig(min_input_files=2, **config)).plan(
+        tbl, profile_table(tbl)
+    )
+
+
+def test_targeting_is_off_by_default(session, table):
+    """A default that narrows what gets compacted shows up months later as a
+    table nobody noticed going unmaintained. It stays opt-in until measured."""
+    assert CompactionConfig().only_changed_partitions is False
+
+    reload(session, table).append(rows("a"))
+    for _ in range(2):
+        reload(session, table).append(rows("abcd"))
+
+    plan = plan_for(session, table)
+
+    assert len({str(g.partition) for g in plan.groups}) == 4, "every partition considered"
+
+
+def test_nothing_is_derived_when_targeting_is_off(session, table, monkeypatch):
+    """Off by default must also mean *free* by default.
+
+    Deriving the set costs a watermark read and, on a table that does not record
+    partition summaries, the manifests of every snapshot since. Making the call
+    fail proves it is not made, rather than a timing being suggestive. Found by
+    mutation: computing it unconditionally passed every other test here.
+    """
+    import zamboni.planner as planner_module
+
+    def explode(*args, **kwargs):
+        raise AssertionError("the changed set was derived without being asked for")
+
+    monkeypatch.setattr(planner_module, "changed_partitions", explode)
+    for _ in range(2):
+        reload(session, table).append(rows("abcd"))
+
+    assert len(plan_for(session, table).groups) == 4
+
+
+def test_only_the_changed_partitions_are_compacted(session, table):
+    """The point of the story."""
+    for _ in range(2):
+        reload(session, table).append(rows("aac"))
+
+    plan = plan_for(session, table, only_changed_partitions=True)
+
+    compacted = {g.partition[0] for g in plan.groups}
+    assert compacted == {"a", "c"}
+    unchanged = [reason for _, reason in plan.skipped if "unchanged" in reason]
+    assert len(unchanged) == 2, "b and d were reported, not silently dropped"
+    assert table.expected_source in unchanged[0]
+
+
+def test_an_undecidable_changed_set_considers_everything(session):
+    """Fails wide. A table never maintained has no watermark, so "changed since
+    when" has no answer and every candidate stands."""
+    tbl = session.catalog.create_table(
+        "db.fresh", schema=SCHEMA, partition_spec=SPEC, properties={"format-version": "2"}
+    )
+    for _ in range(2):
+        session.catalog.load_table("db.fresh").append(rows("abcd"))
+
+    plan = plan_for(session, tbl, only_changed_partitions=True)
+
+    assert len(plan.groups) == 4
+    assert not [r for _, r in plan.skipped if "unchanged" in r]
+
+
+def test_a_changed_partition_inside_the_floor_is_still_held(session):
+    """The composition the story asks for: changed-since-watermark *selects*,
+    the recency floor *subtracts*. A partition that is both changed and still
+    being written to is correctly left alone, and the reported reason is the
+    floor's, because that is the more specific fact."""
+    import datetime as dt
+
+    from pyiceberg.partitioning import PartitionField, PartitionSpec
+    from pyiceberg.transforms import DayTransform
+    from pyiceberg.types import TimestamptzType
+
+    schema = Schema(NestedField(1, "ts", TimestamptzType(), required=False))
+    arrow = pa.schema([pa.field("ts", pa.timestamp("us", tz="UTC"))])
+    spec = PartitionSpec(
+        PartitionField(source_id=1, field_id=1000, transform=DayTransform(), name="ts_day")
+    )
+    tbl = session.catalog.create_table(
+        "db.daily", schema=schema, partition_spec=spec, properties={"format-version": "2"}
+    )
+    now = dt.datetime.now(dt.UTC)
+
+    def write(days_ago, times=2):
+        for _ in range(times):
+            session.catalog.load_table("db.daily").append(
+                pa.table({"ts": [now - dt.timedelta(days=days_ago)]}, schema=arrow)
+            )
+
+    write(0)  # today: hot
+    write(5)  # five days ago: cold
+    TableCompactor(session, "db.daily", CompactionConfig(min_input_files=2)).execute()
+    write(0)  # both partitions change after the watermark
+    write(5)
+
+    plan = plan_for(session, tbl, only_changed_partitions=True)
+
+    reasons = [reason for _, reason in plan.skipped]
+    assert any("window" in r and "floor" in r for r in reasons), (
+        f"today's partition changed and must still be held by the floor: {reasons}"
+    )
+    assert not [r for r in reasons if "unchanged" in r], "both partitions did change"
+    assert len(plan.groups) == 1, "only the cold, changed partition is compacted"
+
+
+def test_a_targeted_compaction_still_commits_correctly(session, table):
+    """Targeting decides *whether* and *what*, never how safely."""
+    before = reload(session, table).scan().to_arrow().num_rows
+    for _ in range(2):
+        reload(session, table).append(rows("aa"))
+    expected = reload(session, table).scan().to_arrow().num_rows
+
+    result = TableCompactor(
+        session,
+        ".".join(table.name()),
+        CompactionConfig(min_input_files=2, only_changed_partitions=True),
+    ).execute()
+
+    assert result.rewritten_data_files > 0
+    assert reload(session, table).scan().to_arrow().num_rows == expected > before
+
+
+def test_reclaim_is_never_partition_targeted(session, table):
+    """Non-goal, asserted behaviourally rather than by reading a comment.
+
+    `remove-orphans` subtracts a reachable set from a whole-storage listing, and
+    section 6.6's completeness invariant needs the listing entire. The setting
+    is compaction's; it must not reach the reclaim operations.
+    """
+    from zamboni.orphans import OrphanCleaner
+
+    for _ in range(2):
+        reload(session, table).append(rows("aa"))
+    TableCompactor(
+        session,
+        ".".join(table.name()),
+        CompactionConfig(min_input_files=2, only_changed_partitions=True),
+    ).execute()
+
+    result = OrphanCleaner(older_than_days=0, dry_run=True).run(reload(session, table))
+
+    scanned = result.as_dict()["files_scanned"]
+    assert scanned > 0
+    assert result.as_dict()["files_referenced"] == scanned, (
+        "the listing and the reachable set must both be whole"
+    )

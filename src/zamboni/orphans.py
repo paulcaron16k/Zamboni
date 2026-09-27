@@ -17,6 +17,18 @@ started. Iceberg's own guidance sizes it to "the time expected for any write to
 complete"; the longest write in this system is a large compaction, not the
 ingest. It does **not** protect long-running readers -- file mtime is the wrong
 clock for that, and snapshot retention is the right mechanism.
+
+**Never partition-targeted, and this is a correctness rule rather than a
+missing feature (ZMBNI-126).** Compaction may restrict itself to the partitions
+that changed since the last maintenance; orphan removal may not. It works by
+subtracting a *reachable set* from a storage *listing*, and design.md section
+6.6's completeness invariant requires every referenced file to be present in
+that listing. Listing one partition's prefix and subtracting the whole table's
+reachable set would be safe but pointless; listing one prefix and subtracting
+only that partition's references is the shape that deletes live data, and it is
+the shape a "target it like compaction" change would naturally take. The
+completeness check is what caught a real keying bug instead of deleting every
+live file, and it only works because the listing is whole.
 """
 
 from __future__ import annotations

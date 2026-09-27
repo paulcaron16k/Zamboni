@@ -722,6 +722,17 @@ def _add_config_args(p: argparse.ArgumentParser) -> None:
             "(default 1: today and yesterday, on a daily table)"
         ),
     )
+    g.add_argument(
+        "--only-changed-partitions",
+        action="store_true",
+        help=(
+            "consider only partitions written to since the last maintenance. Off "
+            "by default; where the changed set cannot be derived -- an "
+            "unpartitioned table, or one never maintained -- every candidate is "
+            "considered as before. Set write.summary.partition-limit on the table "
+            "to make deriving it free"
+        ),
+    )
     g.add_argument("--rewrite-all", action="store_true")
     g.add_argument(
         "--partial-progress",
@@ -989,6 +1000,7 @@ def _operational_config(args: argparse.Namespace) -> CompactionConfig:
     """How the run executes, with no layout opinions -- those come from the file."""
     return CompactionConfig(
         rewrite_all=args.rewrite_all,
+        only_changed_partitions=args.only_changed_partitions,
         partial_progress=args.partial_progress,
         memory_mode=MemoryMode(args.memory_mode),
         streaming_writes=args.streaming_writes,
@@ -1008,6 +1020,7 @@ def _config_from(args: argparse.Namespace) -> CompactionConfig:
         min_input_files=args.min_input_files,
         skip_partitions_newer_than_windows=args.skip_partitions_newer_than_windows,
         rewrite_all=args.rewrite_all,
+        only_changed_partitions=args.only_changed_partitions,
         partial_progress=args.partial_progress,
         memory_mode=MemoryMode(args.memory_mode),
         memory_budget_bytes=args.memory_budget_bytes,

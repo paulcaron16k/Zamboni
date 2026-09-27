@@ -23,6 +23,33 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **Compaction can restrict itself to the partitions that changed since the last
+  maintenance** — `--only-changed-partitions`, or
+  `CompactionConfig(only_changed_partitions=True)`. **Off by default**: the
+  saving is real but unmeasured on a production fleet, and a default that
+  narrows what gets compacted surfaces months later as a table nobody noticed
+  going unmaintained.
+
+  It composes with `skip_partitions_newer_than_windows` rather than replacing
+  it: changed-since-watermark selects, the recency floor subtracts, and a
+  partition that is both changed and still hot is correctly left alone.
+
+  The set comes from metadata, never a data file. Where the table sets
+  `write.summary.partition-limit` the partition paths are read straight out of
+  the snapshot summaries and no manifest is opened; otherwise it reads the
+  manifests *added by* the snapshots since the watermark — a small subset, not
+  a whole-table walk. PyIceberg's default for that property is `0`, so the cheap
+  path is real but opt-in.
+
+  **Where the set cannot be derived, every candidate is considered as before** —
+  an unpartitioned table, one never maintained, a watermark that aged out, or
+  any metadata trouble. Unknown is not the empty set.
+
+  **Compaction only, as a correctness rule.** `remove-orphans` subtracts a
+  reachable set from a storage listing and §6.6's completeness invariant needs
+  that listing whole; `expire` answers to the clock rather than to writes. Both
+  now say so in the code. (ZMBNI-125, ZMBNI-126)
+
 - **`zamboni health`, and the API behind it: is this table due for maintenance,
   and why.** `table_health()` and `maintenance_watermark()` read a table's
   layout signals and its last-maintenance mark from **one metadata load** — no

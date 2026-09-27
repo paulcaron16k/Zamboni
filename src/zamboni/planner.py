@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pyiceberg.table import Table
 from pyiceberg.typedef import Record
 
+from .changed import UNKNOWN, changed_partitions, partition_path
 from .config import CompactionConfig, resolve_target_file_size
 from .profile import LiveFile, TableProfile
 from .windows import is_temporal, transform_name, windows_since_close
@@ -114,9 +115,24 @@ class CompactionPlanner:
 
         floor = self._config.skip_partitions_newer_than_windows
         now = now or dt.datetime.now(dt.UTC)
+        # Derived once per plan and only when asked for: it costs a watermark
+        # read plus, on a table that does not record partition summaries, the
+        # manifests of the snapshots since. `UNKNOWN` covers everything, so an
+        # undecidable answer leaves the candidate set exactly as it was.
+        changed = changed_partitions(tbl) if self._config.only_changed_partitions else UNKNOWN
 
         for (spec_id, partition), files in sorted(buckets.items(), key=lambda kv: str(kv[0])):
             label = f"spec={spec_id} partition={_partition_label(partition)}"
+            # Before the floor, because it is the more fundamental reason and
+            # the cheaper fact: "nothing wrote here" beats "it is still being
+            # written to", and a partition that is *both* changed and hot still
+            # reaches the floor below and is held there, which is the intended
+            # composition rather than an accident of ordering.
+            if changed.known and not changed.covers(_path_for(tbl, spec_id, partition, label)):
+                plan.skipped.append(
+                    (label, f"unchanged since the last maintenance ({changed.source})")
+                )
+                continue
             # Checked before min_input_files so the reported reason is the
             # specific one: "we deliberately left this alone" reads very
             # differently from "not enough files yet".
@@ -144,6 +160,23 @@ class CompactionPlanner:
             )
 
         return plan
+
+
+def _path_for(tbl: Table, spec_id: int, partition: Record, label: str) -> str:
+    """This group's partition as the path a snapshot summary names it by.
+
+    A spec we cannot resolve returns the label, which matches nothing in the
+    changed set -- so the guard above is written to fail *open*: `covers()` is
+    only consulted when the set is known, and a partition whose path cannot be
+    computed is better compacted unnecessarily than skipped wrongly.
+    """
+    spec = tbl.specs().get(spec_id)
+    if spec is None:  # pragma: no cover - a group is built from a live file's spec
+        return label
+    try:
+        return partition_path(spec, partition, tbl.schema())
+    except Exception:  # pragma: no cover - defensive
+        return label
 
 
 def _partition_label(partition: Record) -> str:
