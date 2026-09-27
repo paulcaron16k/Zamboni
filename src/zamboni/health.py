@@ -57,6 +57,32 @@ if TYPE_CHECKING:
 #: silent about them by construction.
 OPERATION_STAMP = "zamboni.operation"
 
+#: What each committing operation writes as the value of :data:`OPERATION_STAMP`.
+#:
+#: One place, because there were three and one of them disagreed: the committer
+#: wrote ``"compaction"`` where the other two wrote their `Operation` enum value
+#: exactly (ZMBNI-135). A consumer grouping snapshots by this key got three
+#: values, one of which was not in the enum that named the other two -- and
+#: `zamboni health` printed "last maintenance compaction" beside "last
+#: maintenance rewrite-manifests".
+#:
+#: Declared here rather than derived by importing `maintainers.Operation`:
+#: `maintainers/__init__` loads the built-in engines at import time, which
+#: reaches `committer.py`, so importing the enum from there would be a cycle
+#: resolved only by definition order. `test_every_stamp_is_its_operations_enum_value`
+#: checks the agreement instead, which is the same guarantee without the
+#: fragility.
+COMPACT_STAMP = "compact"
+REWRITE_MANIFESTS_STAMP = "rewrite-manifests"
+REMOVE_DANGLING_DELETES_STAMP = "remove-dangling-deletes"
+
+#: What compaction stamped before ZMBNI-135. Snapshots carrying it are still out
+#: there in every table maintained by an earlier Zamboni, and nothing reads the
+#: stamp by comparing it to a literal -- :func:`maintenance_watermark` reports
+#: whatever it finds -- so they keep working and simply say the old word. Named
+#: so that a reader grouping a long history knows the two are the same thing.
+LEGACY_COMPACT_STAMP = "compaction"
+
 #: Iceberg's own summary keys. Spelled here rather than inlined so a rename
 #: upstream is one edit and a grep finds every use.
 TOTAL_DATA_FILES = "total-data-files"

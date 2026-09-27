@@ -50,6 +50,7 @@ from pyiceberg.table import Table
 from pyiceberg.table.snapshots import Operation
 
 from .committer import ConcurrentModification, _ReplaceFiles
+from .health import OPERATION_STAMP, REMOVE_DANGLING_DELETES_STAMP
 from .units import human_bytes
 
 logger = logging.getLogger(__name__)
@@ -306,7 +307,7 @@ class DanglingDeleteCleaner:
             )
 
         properties = {
-            "zamboni.operation": "remove-dangling-deletes",
+            OPERATION_STAMP: REMOVE_DANGLING_DELETES_STAMP,
             "zamboni.removed-delete-files": str(len(report.removable)),
         }
         with tbl.transaction() as txn:

@@ -493,14 +493,13 @@ def commit_reports(
         if snapshot is None:
             continue
 
-        # The snapshot's own stamp wins over the result's verb, because the two
-        # do not always agree and the report is derived from the snapshot. The
-        # committer writes "compaction" where `Operation.COMPACT.value` is
-        # "compact" (the other two stamps do match their enum value) -- a real
-        # inconsistency, filed separately rather than fixed here, because
-        # changing it rewrites a key in user tables and that is a decision of
-        # its own. Until then, a report that said "compact" while the snapshot
-        # it describes says "compaction" would make the two impossible to join.
+        # The snapshot's own stamp wins over the result's verb, and still does
+        # now that the three stamps agree with their `Operation` value
+        # (ZMBNI-135). Every table maintained by an earlier build carries
+        # "compaction" for what is now "compact", and a report describing one of
+        # those snapshots must say what the snapshot says or the two cannot be
+        # joined. Reading it from the snapshot means this needs no knowledge of
+        # which build wrote it.
         metadata = {OPERATION_STAMP: _summary_of(snapshot).get(OPERATION_STAMP) or verb}
         if len(wanted) > 1:
             metadata[SNAPSHOTS_IN_OPERATION] = str(len(wanted))

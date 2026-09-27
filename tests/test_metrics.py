@@ -196,9 +196,13 @@ def test_the_operation_is_icebergs_and_the_verb_is_metadata(session, unpartition
 
 
 def test_the_metadata_stamp_agrees_with_the_snapshot_it_describes(session, unpartitioned):
-    """The committer writes "compaction" where `Operation.COMPACT.value` is
-    "compact" (ZMBNI-135). Until that is settled the report must say what the
-    snapshot says, or the two cannot be joined."""
+    """A report describing a snapshot must carry that snapshot's own stamp.
+
+    The three stamps now agree with their `Operation` value (ZMBNI-135), but
+    every table maintained by an earlier build carries "compaction" for what is
+    now "compact" -- so reading the stamp from the snapshot rather than from the
+    result is what lets a report about an old snapshot still be joined to it.
+    """
     result = TableCompactor(session, "db.unpartitioned", CompactionConfig()).execute()
     table = session.catalog.load_table("db.unpartitioned")
 

@@ -77,7 +77,7 @@ COMMIT = CommitReport(
         ADDED_FILES_SIZE_BYTES: CounterResult(unit="bytes", value=584),
         TOTAL_DURATION: nanos(1_500_000_000),
     },
-    metadata={"zamboni.operation": "compaction"},
+    metadata={"zamboni.operation": "compact"},
 )
 RECLAIM = ReclaimReport(
     table_name="db.events",
@@ -195,7 +195,7 @@ def test_the_operation_attribute_is_the_same_name_as_the_snapshot_stamp():
 
     attributes = meter.counters["iceberg.removed_data_files"].points[0][1]
     assert OPERATION_ATTRIBUTE == OPERATION_STAMP
-    assert attributes[OPERATION_ATTRIBUTE] == "compaction"
+    assert attributes[OPERATION_ATTRIBUTE] == "compact"
     assert attributes[TABLE_ATTRIBUTE] == "db.events"
     assert attributes["iceberg.operation"] == "replace"
 

@@ -192,6 +192,24 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Changed
 
+- **Compaction now stamps snapshots `zamboni.operation: "compact"`**, not
+  `"compaction"`. The other two committing operations already wrote their
+  `Operation` enum value exactly, so a consumer grouping snapshots by that key
+  got three values, one of which was not in the enum that named the other two --
+  and `zamboni health` printed "last maintenance compaction" beside "last
+  maintenance rewrite-manifests".
+
+  All three now come from one place, and a test checks each against the enum so
+  a fourth committing operation cannot invent a fourth spelling.
+
+  **Snapshots written by an earlier Zamboni keep the old word and still read
+  correctly.** Nothing compares the stamp to a literal — `maintenance_watermark`
+  reports whatever it finds — so the watermark, the ZMBNI-116 skip and the
+  `CommitReport` metadata all keep working on a table maintained before this
+  release; they simply say "compaction" for those snapshots.
+  `health.LEGACY_COMPACT_STAMP` names the old value for anyone grouping a long
+  history. (ZMBNI-135)
+
 - **The write-driven operations are skipped on a table nothing has written to.**
   `compact`, `rewrite-manifests` and `remove-dangling-deletes` have no input when
   no snapshot has landed since maintenance last ran, so they report "nothing to

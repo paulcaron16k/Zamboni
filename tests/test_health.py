@@ -11,7 +11,15 @@ from __future__ import annotations
 
 import pytest
 
-from zamboni.health import UNSEEN_FROM_METADATA, TableHealth, table_health
+from zamboni.health import (
+    COMPACT_STAMP,
+    LEGACY_COMPACT_STAMP,
+    OPERATION_STAMP,
+    UNSEEN_FROM_METADATA,
+    TableHealth,
+    maintenance_watermark,
+    table_health,
+)
 
 
 def test_reads_the_signals_from_the_snapshot_summary(unpartitioned):
@@ -146,7 +154,7 @@ def test_a_real_compaction_leaves_a_readable_watermark(session, unpartitioned):
     mark = maintenance_watermark(tbl)
 
     assert mark.maintained is True
-    assert mark.operation == "compaction"
+    assert mark.operation == COMPACT_STAMP
     assert mark.snapshot_id == tbl.metadata.current_snapshot_id
     assert mark.written_since is False, "nothing has written since we compacted"
 
@@ -195,3 +203,83 @@ def test_the_newest_stamp_wins_not_the_first(session, unpartitioned):
 
     assert later.snapshot_id != first.snapshot_id, "the watermark did not advance"
     assert later.written_since is False, "the rewrite is the newest snapshot"
+
+
+# -- the stamp vocabulary (ZMBNI-135) ------------------------------------
+
+
+def test_every_stamp_is_its_operations_enum_value():
+    """The defect this closes: the committer wrote "compaction" where the other
+    two wrote their `Operation` value exactly, so a consumer grouping snapshots
+    by `zamboni.operation` got three values, one of which was not in the enum
+    that named the other two.
+
+    Checked rather than derived by import: `maintainers/__init__` loads the
+    built-in engines at import time, which reaches `committer.py`, so importing
+    the enum there would be a cycle resolved only by definition order.
+    """
+    from zamboni.health import REMOVE_DANGLING_DELETES_STAMP, REWRITE_MANIFESTS_STAMP
+    from zamboni.maintainers import Operation
+
+    assert Operation.COMPACT.value == COMPACT_STAMP
+    assert Operation.REWRITE_MANIFESTS.value == REWRITE_MANIFESTS_STAMP
+    assert Operation.REMOVE_DANGLING_DELETES.value == REMOVE_DANGLING_DELETES_STAMP
+
+
+def test_only_the_committing_operations_have_a_stamp():
+    """Guards the guard. If a fourth operation learns to commit, it must appear
+    here deliberately rather than inventing a fourth spelling -- which is how
+    the original three came to disagree."""
+    import zamboni.health as health_module
+    from zamboni.maintainers import Operation
+
+    stamped = {
+        value
+        for name, value in vars(health_module).items()
+        if name.endswith("_STAMP") and name != "OPERATION_STAMP" and isinstance(value, str)
+    }
+    legacy = {health_module.LEGACY_COMPACT_STAMP}
+
+    assert stamped - legacy == {
+        Operation.COMPACT.value,
+        Operation.REWRITE_MANIFESTS.value,
+        Operation.REMOVE_DANGLING_DELETES.value,
+    }
+
+
+def test_a_table_stamped_by_an_older_zamboni_still_reads(session, unpartitioned):
+    """Every table maintained before ZMBNI-135 carries "compaction". Nothing
+    compares the stamp to a literal -- the watermark reports whatever it finds --
+    and this is what holds that true.
+
+    Written the way an older build wrote it, through `snapshot_properties`,
+    rather than by editing metadata by hand: the point is that the *reader* is
+    unchanged, so the stamp has to arrive by the route it really arrived by.
+    """
+    from .conftest import batch
+
+    table = session.catalog.load_table("db.unpartitioned")
+    table.append(
+        batch(1000, 1),
+        snapshot_properties={OPERATION_STAMP: LEGACY_COMPACT_STAMP},
+    )
+
+    mark = maintenance_watermark(session.catalog.load_table("db.unpartitioned"))
+
+    assert mark.maintained is True, "an older stamp is still a maintenance mark"
+    assert mark.operation == LEGACY_COMPACT_STAMP
+    assert mark.written_since is False
+
+
+def test_a_compaction_now_stamps_the_enum_value(session, unpartitioned):
+    """The behaviour change, asserted end to end rather than on the constant."""
+    from zamboni.compactor import TableCompactor
+    from zamboni.config import CompactionConfig
+    from zamboni.maintainers import Operation
+
+    TableCompactor(session, "db.unpartitioned", CompactionConfig()).execute()
+
+    table = session.catalog.load_table("db.unpartitioned")
+    summary = table.current_snapshot().summary.additional_properties
+    assert summary[OPERATION_STAMP] == Operation.COMPACT.value == "compact"
+    assert maintenance_watermark(table).operation == "compact"
