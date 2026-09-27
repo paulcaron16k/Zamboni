@@ -383,14 +383,15 @@ Iceberg's own architecture, a single-method `report(MetricsReport)`.
 ```
   committing op ──▶ CommitReport  ──┬──▶ REST reporter → catalog /metrics
                     (Iceberg shape) ├──▶ OTel reporter
-  reclaim op ────▶ ReclaimReport ───┼──▶ Logging / Collecting reporters
+  no commit ─────▶ NoCommitReport ───┼──▶ Logging / Collecting reporters
                     (our shape,     └──▶ noop (default)
                      their primitives)
 ```
 
-`ReclaimReport` is there because `expire`, `remove-orphans` and
-`apply-properties` commit no snapshot and Iceberg defines no report that fits —
-without it, half of Zamboni's operations would bypass the seam entirely.
+`NoCommitReport` is there because Iceberg's report describes a *commit*, and
+`expire`, `remove-orphans` and `apply-properties` make none — nor do the other
+three when they find nothing to do. Without it those runs would bypass the seam
+entirely.
 
 **`as_dict()` is deliberately *not* regenerated from the report.** The original
 plan was for it to become a third reporter, which would have renamed every key

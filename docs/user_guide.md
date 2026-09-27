@@ -568,7 +568,7 @@ internal and may move in a patch release. The entry points you need:
 | `commit_reports(result, snapshots)` / `CommitReport` | Iceberg's own `CommitReport` for each snapshot an operation committed, built from the snapshot summary using Iceberg's defined counter names |
 | `MetricsReporter` / `NoopReporter` / `CollectingReporter` / `LoggingReporter` / `MultiReporter` / `RestMetricsReporter` | where reports go: one method, `report(MetricsReport)`, copying Iceberg's own seam. Pass one as `maintain(reporter=…)`; the default emits nothing |
 | `reporter_for(catalog, extra)` | the reporter that suits a catalog — the metrics endpoint for a REST catalog, nothing to post to for a local one |
-| `ReclaimReport` / `reclaim_report(result)` / `CounterResult` / `TimerResult` / `reclaim_metrics(result)` | Iceberg's metric primitives, and the reclaim operations expressed in them — `remove-orphans` and `expire` commit no snapshot, so Iceberg defines no report for them |
+| `NoCommitReport` / `no_commit_report(result)` / `CounterResult` / `TimerResult` / `no_commit_metrics(result)` | Iceberg's metric primitives, and the report for an operation that committed no snapshot — `expire`, `remove-orphans` and `apply-properties` never do, and the other three do not when they find nothing to do |
 | `summarise_logs(paths)` / `FleetSummary` | reading a series of run summaries back — what the fleet did, per warehouse. Behind `zamboni runs`; see [devops.md](devops.md) |
 | `available_engines()` | what this install can drive |
 | `config_from_table_settings` | turning table-config layout into the compaction config `COMPACT` needs |
@@ -772,7 +772,7 @@ collected from many runs do not have to be matched back up by hand.
 ### Sending Iceberg-shaped metrics somewhere
 
 `maintain(..., reporter=…)` emits an Iceberg `CommitReport` for every snapshot an
-operation commits, and a `ReclaimReport` for the three that commit none. The
+operation commits, and a `NoCommitReport` for the three that commit none. The
 default is to emit nothing:
 
 ```python

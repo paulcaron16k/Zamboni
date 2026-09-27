@@ -67,7 +67,7 @@ from .metrics import (
     CommitReport,
     CounterResult,
     MetricsReport,
-    ReclaimReport,
+    NoCommitReport,
     TimerResult,
 )
 
@@ -127,16 +127,16 @@ ICEBERG_UNITS: dict[str, str] = {
     MANIFEST_ENTRIES_PROCESSED: ENTRY,
 }
 
-#: Unit per reclaim counter. These names are Zamboni's -- Iceberg defines no
+#: Unit per no-commit counter. These names are Zamboni's -- Iceberg defines no
 #: report for an operation that commits no snapshot -- and come from each
 #: result's own `as_dict()` keys, hyphenated.
 #:
-#: `test_every_reclaim_counter_has_a_unit` runs a whole maintenance and checks
+#: `test_every_no_commit_counter_has_a_unit` runs a whole maintenance and checks
 #: that nothing it emits is missing here. That test is why this table is right:
 #: the first version of it was written from the result *dataclass fields* and
 #: was wrong on almost every entry, because `as_dict()` renames them
 #: (`expired_snapshots` is reported as `snapshots-expired`).
-RECLAIM_UNITS: dict[str, str] = {
+NO_COMMIT_UNITS: dict[str, str] = {
     # expire
     "snapshots-expired": SNAPSHOT,
     "snapshots-retained": SNAPSHOT,
@@ -200,7 +200,7 @@ OPERATION_ATTRIBUTE = OPERATION_STAMP
 #: rule for a duration is `<thing>.duration`, in seconds, with the unit in the
 #: unit field. OTel wins where the two have a rule about the same thing.
 COMMIT_DURATION = "iceberg.commit.duration"
-RECLAIM_DURATION = "zamboni.reclaim.duration"
+NO_COMMIT_DURATION = "zamboni.operation.duration"
 
 _NANOS_PER_SECOND = 1_000_000_000
 
@@ -235,12 +235,12 @@ class OTelReporter:
             }
             self._emit(report, attributes, namespace="iceberg.", duration=COMMIT_DURATION)
             return
-        if isinstance(report, ReclaimReport):
+        if isinstance(report, NoCommitReport):
             attributes = {
                 TABLE_ATTRIBUTE: report.table_name,
                 OPERATION_ATTRIBUTE: report.operation,
             }
-            self._emit(report, attributes, namespace="zamboni.", duration=RECLAIM_DURATION)
+            self._emit(report, attributes, namespace="zamboni.", duration=NO_COMMIT_DURATION)
             return
         logger.debug("no OTel mapping for %s", type(report).__name__)
 
@@ -252,7 +252,7 @@ class OTelReporter:
         namespace: str,
         duration: str,
     ) -> None:
-        units = ICEBERG_UNITS if namespace == "iceberg." else RECLAIM_UNITS
+        units = ICEBERG_UNITS if namespace == "iceberg." else NO_COMMIT_UNITS
         for metric, result in report.metrics.items():
             if isinstance(result, TimerResult):
                 # Seconds, always. Iceberg times commits in nanoseconds; OTel's
@@ -292,9 +292,9 @@ __all__ = [
     "COMMIT_DURATION",
     "ICEBERG_OPERATION_ATTRIBUTE",
     "ICEBERG_UNITS",
+    "NO_COMMIT_DURATION",
+    "NO_COMMIT_UNITS",
     "OPERATION_ATTRIBUTE",
-    "RECLAIM_DURATION",
-    "RECLAIM_UNITS",
     "TABLE_ATTRIBUTE",
     "OTelReporter",
     "sdk_configured",

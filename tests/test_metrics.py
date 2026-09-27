@@ -45,7 +45,7 @@ from zamboni.metrics import (
     commit_reports,
     metrics_from_summary,
     nanos,
-    reclaim_metrics,
+    no_commit_metrics,
 )
 
 # -- the wire shapes, which a plausible guess gets wrong ------------------
@@ -307,14 +307,14 @@ def test_one_operation_can_be_several_commits(session, partitioned):
 # -- the operations Iceberg has no report type for -----------------------
 
 
-def test_reclaim_uses_icebergs_primitives(session, unpartitioned):
+def test_a_no_commit_report_uses_icebergs_primitives(session, unpartitioned):
     """No `CommitReport` and no defined names -- but expressed as CounterResult
     so a reclaim report type, if Iceberg defines one, is a mapping."""
     from zamboni.expire import RetentionPolicy, SnapshotExpirer
 
     result = SnapshotExpirer(RetentionPolicy(), dry_run=True).run(unpartitioned)
 
-    metrics = reclaim_metrics(result, duration_ns=500)
+    metrics = no_commit_metrics(result, duration_ns=500)
 
     assert metrics, "something was counted"
     assert all(isinstance(m, CounterResult | TimerResult) for m in metrics.values())
@@ -322,7 +322,7 @@ def test_reclaim_uses_icebergs_primitives(session, unpartitioned):
     assert all("_" not in name for name in metrics), "hyphenated, like every Iceberg metric"
 
 
-def test_reclaim_counts_bytes_as_bytes():
+def test_no_commit_counters_label_bytes_as_bytes():
     class Result:
         def as_dict(self):
             return {
@@ -334,7 +334,7 @@ def test_reclaim_counts_bytes_as_bytes():
                 "roots": ["s3://x"],
             }
 
-    metrics = reclaim_metrics(Result())
+    metrics = no_commit_metrics(Result())
 
     assert metrics["deleted"].unit == COUNT
     assert metrics["deleted-bytes"].unit == BYTES

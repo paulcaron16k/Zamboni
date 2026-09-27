@@ -22,15 +22,15 @@ from zamboni.metrics import (
     TOTAL_DURATION,
     CommitReport,
     CounterResult,
-    ReclaimReport,
+    NoCommitReport,
     nanos,
 )
 from zamboni.otel import (
     COMMIT_DURATION,
     ICEBERG_UNITS,
+    NO_COMMIT_DURATION,
+    NO_COMMIT_UNITS,
     OPERATION_ATTRIBUTE,
-    RECLAIM_DURATION,
-    RECLAIM_UNITS,
     TABLE_ATTRIBUTE,
     OTelReporter,
     sdk_configured,
@@ -79,7 +79,7 @@ COMMIT = CommitReport(
     },
     metadata={"zamboni.operation": "compact"},
 )
-RECLAIM = ReclaimReport(
+NO_COMMIT = NoCommitReport(
     table_name="db.events",
     operation="remove-orphans",
     metrics={
@@ -128,16 +128,16 @@ def test_durations_are_seconds_in_a_histogram():
     assert TOTAL_DURATION not in meter.counters, "a timer is not a counter"
 
 
-def test_a_reclaim_report_uses_its_own_namespace_and_histogram():
+def test_a_no_commit_report_uses_its_own_namespace_and_histogram():
     """Those operations commit no snapshot, so the names are Zamboni's -- there
     is nothing upstream to conform to -- but the shape is still OTel's."""
     meter = FakeMeter()
 
-    OTelReporter(meter).report(RECLAIM)
+    OTelReporter(meter).report(NO_COMMIT)
 
     assert meter.counters["zamboni.files_deleted"].unit == "{file}"
     assert meter.counters["zamboni.bytes_deleted"].unit == "By"
-    assert meter.histograms[RECLAIM_DURATION].points[0][0] == pytest.approx(0.25)
+    assert meter.histograms[NO_COMMIT_DURATION].points[0][0] == pytest.approx(0.25)
 
 
 def test_every_iceberg_counter_has_a_unit():
@@ -152,7 +152,7 @@ def test_every_iceberg_counter_has_a_unit():
     assert not missing, f"no OTel unit declared for {missing}"
 
 
-def test_every_reclaim_counter_has_a_unit(session, unpartitioned, tmp_path):
+def test_every_no_commit_counter_has_a_unit(session, unpartitioned, tmp_path):
     """Runs a whole maintenance and checks every counter the three
     non-committing operations actually emit, rather than trusting a list
     written from memory. If one of them grows a counter, this fails.
@@ -177,11 +177,11 @@ def test_every_reclaim_counter_has_a_unit(session, unpartitioned, tmp_path):
 
     emitted: set[str] = set()
     for report in collecting.reports:
-        if isinstance(report, ReclaimReport):
+        if isinstance(report, NoCommitReport):
             emitted |= {name for name in report.metrics if name != TOTAL_DURATION}
 
-    assert emitted, "no reclaim report was produced; this test would prove nothing"
-    missing = sorted(emitted - set(RECLAIM_UNITS))
+    assert emitted, "no no-commit report was produced; this test would prove nothing"
+    missing = sorted(emitted - set(NO_COMMIT_UNITS))
     assert not missing, f"no OTel unit declared for {missing}"
 
 

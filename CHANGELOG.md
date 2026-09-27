@@ -109,9 +109,22 @@ Two categories beyond the usual set, because this tool deletes files:
   constructed. `OTelReporter` is deliberately absent from `zamboni.__all__` for
   the same reason. (ZMBNI-129)
 
+- **`ReclaimReport` is `NoCommitReport`** (and `reclaim_report` /
+  `reclaim_metrics` are `no_commit_report` / `no_commit_metrics`). The type was
+  named for the three operations that never commit a snapshot, but it carries
+  **any** operation that committed nothing — and the other three qualify
+  whenever they find nothing to do, so a `remove-dangling-deletes` run on a
+  table with none produced one. A name describing three of six cases reads fine
+  until somebody filters on it; the wire `report-type` was
+  `zamboni-reclaim-report` and is now `zamboni-no-commit-report`, and the OTel
+  duration histogram is `zamboni.operation.duration`.
+
+  Renamed rather than documented around because it is unreleased, so there is no
+  compatibility promise in the way. (ZMBNI-136)
+
 - **A reporter seam, copying Iceberg's own: one method, `report(MetricsReport)`.**
   `maintain(..., reporter=…)` emits an Iceberg `CommitReport` per snapshot
-  committed and a `ReclaimReport` for the three operations that commit none.
+  committed and a `NoCommitReport` for the three operations that commit none.
   `NoopReporter` is the default, so telemetry is opt-in and a deployment that
   wants none pays for none.
 
@@ -138,7 +151,7 @@ Two categories beyond the usual set, because this tool deletes files:
   `commit_reports(result, snapshots)` returns one per snapshot, using the counter
   names `CommitMetricsResult` defines — unprefixed, because they are Iceberg's.
   `CounterResult` and `TimerResult` are the spec's primitives, and
-  `reclaim_metrics()` expresses `expire` / `remove-orphans` / `apply-properties`
+  `no_commit_metrics()` expresses `expire` / `remove-orphans` / `apply-properties`
   in them, since those commit no snapshot and Iceberg defines no report for them.
 
   Nothing is emitted anywhere yet: this is the report *currency*, and where the

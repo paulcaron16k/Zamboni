@@ -359,12 +359,12 @@ def _report(
     summary, and the run loop does not hold the table after the operation
     returns.
     """
-    from .metrics import commit_reports, reclaim_report
+    from .metrics import commit_reports, no_commit_report
 
     try:
-        reclaim = reclaim_report(result, duration_ns=duration_ns)
-        if reclaim is not None:
-            emit(reporter, [reclaim])
+        uncommitted = no_commit_report(result, duration_ns=duration_ns)
+        if uncommitted is not None:
+            emit(reporter, [uncommitted])
             return
         snapshots = session.catalog.load_table(table).metadata.snapshots
         emit(reporter, commit_reports(result, snapshots, duration_ns=duration_ns))

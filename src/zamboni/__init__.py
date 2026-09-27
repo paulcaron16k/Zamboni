@@ -49,11 +49,11 @@ from .manifests import ManifestRewriter
 from .metrics import (
     CommitReport,
     CounterResult,
-    ReclaimReport,
+    NoCommitReport,
     TimerResult,
     commit_reports,
-    reclaim_metrics,
-    reclaim_report,
+    no_commit_metrics,
+    no_commit_report,
 )
 from .orphans import OrphanCleaner
 from .planner import CompactionPlan, CompactionPlanner, FileGroup
@@ -175,6 +175,7 @@ __all__ = [
     "MemoryMode",
     "MetricsReporter",
     "MultiReporter",
+    "NoCommitReport",
     "NoopReporter",
     "Operation",
     "OperationSupport",
@@ -183,7 +184,6 @@ __all__ = [
     "PreviewUnavailable",
     "Profile",
     "PyIcebergCapabilities",
-    "ReclaimReport",
     "ReplaceCommitter",
     "RestMetricsReporter",
     "Retention",
@@ -216,10 +216,10 @@ __all__ = [
     "get_table_config_spec",
     "maintain",
     "maintenance_watermark",
+    "no_commit_metrics",
+    "no_commit_report",
     "profile_table",
     "reachable_files",
-    "reclaim_metrics",
-    "reclaim_report",
     "reporter_for",
     "resolve_settings",
     "summarise_logs",

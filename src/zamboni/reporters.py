@@ -11,7 +11,7 @@ possibility collapses an implementation here rather than changing the shape:
   PyIceberg's and :class:`RestMetricsReporter` deletes.
 * The proposed Iceberg OTel reporter -- ours is replaced by it, or contributes
   its instrument names.
-* An Iceberg reclaim report type -- :class:`~zamboni.metrics.ReclaimReport` maps
+* An Iceberg reclaim report type -- :class:`~zamboni.metrics.NoCommitReport` maps
   onto it.
 
 In every row the seam survives and an implementation collapses, which is the
@@ -177,7 +177,7 @@ class RestMetricsReporter:
     other failure is logged once per occurrence and swallowed by
     :func:`_safely` above.
 
-    Reclaim reports are **not** sent. `ReclaimReport` is Zamboni's own shape;
+    No-commit reports are **not** sent. `NoCommitReport` is Zamboni's own shape;
     posting it to an endpoint whose schema is `anyOf(ScanReport, CommitReport)`
     would be sending a body the spec does not describe, and a catalog that
     happened to accept it would be storing something no other Iceberg client

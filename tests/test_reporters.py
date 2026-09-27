@@ -14,7 +14,7 @@ import logging
 
 import pytest
 
-from zamboni.metrics import COMMIT_REPORT, CommitReport, CounterResult, ReclaimReport
+from zamboni.metrics import COMMIT_REPORT, CommitReport, CounterResult, NoCommitReport
 from zamboni.reporters import (
     CollectingReporter,
     LoggingReporter,
@@ -33,7 +33,7 @@ COMMIT = CommitReport(
     operation="replace",
     metrics={"removed-data-files": CounterResult(unit="count", value=6)},
 )
-RECLAIM = ReclaimReport(
+NO_COMMIT = NoCommitReport(
     table_name="db.events",
     operation="remove-orphans",
     metrics={"deleted": CounterResult(unit="count", value=2)},
@@ -101,7 +101,7 @@ def test_the_default_emits_nothing(caplog):
 
 def test_no_reporter_is_the_same_as_the_noop_one():
     """So a caller that has not configured telemetry needs no branch of its own."""
-    emit(None, [COMMIT, RECLAIM])  # must not raise
+    emit(None, [COMMIT, NO_COMMIT])  # must not raise
 
 
 # -- a reporter can never fail a run -------------------------------------
@@ -141,9 +141,9 @@ def test_every_report_is_attempted_even_after_one_fails():
                 raise RuntimeError("nope")
             seen.report(report)
 
-    emit(FailsFirst(), [COMMIT, RECLAIM])
+    emit(FailsFirst(), [COMMIT, NO_COMMIT])
 
-    assert seen.reports == [RECLAIM]
+    assert seen.reports == [NO_COMMIT]
 
 
 # -- the destinations ----------------------------------------------------
@@ -155,12 +155,12 @@ def test_the_collecting_reporter_hands_back_serialisable_reports():
     collecting = CollectingReporter()
 
     collecting.report(COMMIT)
-    collecting.report(RECLAIM)
+    collecting.report(NO_COMMIT)
 
     docs = collecting.as_dicts()
     assert json.loads(json.dumps(docs)) == docs
     assert docs[0]["snapshot-id"] == 7
-    assert docs[1]["report-type"] == "zamboni-reclaim-report"
+    assert docs[1]["report-type"] == "zamboni-no-commit-report"
 
 
 def test_the_logging_reporter_writes_one_json_line(caplog):
@@ -215,13 +215,13 @@ def test_a_real_error_is_raised_for_emit_to_catch():
     assert reporter.supported is True, "a 500 is not 'unsupported'"
 
 
-def test_reclaim_reports_are_not_posted_to_the_catalog():
-    """`ReclaimReport` is Zamboni's own shape. The endpoint's schema is
+def test_no_commit_reports_are_not_posted_to_the_catalog():
+    """`NoCommitReport` is Zamboni's own shape. The endpoint's schema is
     `anyOf(ScanReport, CommitReport)`, so posting it would be sending a body the
     spec does not describe."""
     catalog = FakeRestCatalog()
 
-    RestMetricsReporter(catalog).report(RECLAIM)
+    RestMetricsReporter(catalog).report(NO_COMMIT)
 
     assert catalog._session_obj.posts == []
 
@@ -286,7 +286,7 @@ def test_a_run_reports_what_it_committed(session, unpartitioned, tmp_path):
     assert report.exit_code == 0
     kinds = {type(r).__name__ for r in collecting.reports}
     assert "CommitReport" in kinds, "compaction committed and was reported"
-    assert "ReclaimReport" in kinds, "the operations that commit nothing are on the seam too"
+    assert "NoCommitReport" in kinds, "the operations that commit nothing are on the seam too"
     assert all("total-duration" in r.metrics for r in collecting.reports), (
         "the run knows how long each operation took; nothing else does"
     )
