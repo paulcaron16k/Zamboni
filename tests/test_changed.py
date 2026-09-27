@@ -385,3 +385,35 @@ def test_reclaim_is_never_partition_targeted(session, table):
     assert result.as_dict()["files_referenced"] == scanned, (
         "the listing and the reachable set must both be whole"
     )
+
+
+def test_a_targeted_compaction_still_previews(session, table):
+    """Targeting decides whether and what; it never touches how safely.
+
+    The one rule that holds everywhere in this tool is that nothing commits
+    without being asked, and a new way to choose candidates is exactly the kind
+    of change that could quietly route around it.
+    """
+    before = reload(session, table).metadata.current_snapshot_id
+    for _ in range(2):
+        reload(session, table).append(rows("aa"))
+    after_writes = reload(session, table).metadata.current_snapshot_id
+
+    result = TableCompactor(
+        session,
+        ".".join(table.name()),
+        CompactionConfig(min_input_files=2, only_changed_partitions=True),
+    ).execute(dry_run=True)
+
+    assert result.dry_run is True
+    assert reload(session, table).metadata.current_snapshot_id == after_writes != before, (
+        "committed nothing"
+    )
+    # Targeting ran in the preview path too: the unchanged partitions were
+    # considered and reported, not silently absent.
+    assert [r for _, r in result.skipped if "unchanged" in r]
+    # `result.rewritten_data_files` is deliberately not asserted: a dry run
+    # reports zero for *every* compaction, targeted or not, because `execute`
+    # returns before the counters are filled. That is ZMBNI-138, found here and
+    # filed rather than fixed, since it predates targeting and is about how a
+    # preview reports rather than what it selects.
