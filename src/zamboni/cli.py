@@ -452,6 +452,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "'did it help' without a second tool",
     )
     mt.add_argument(
+        "--metrics",
+        action="append",
+        choices=("none", "log", "catalog", "otel"),
+        metavar="{none,log,catalog,otel}",
+        help="where to send Iceberg-shaped metrics; repeat for several. "
+        "'catalog' POSTs a CommitReport to the catalog's metrics endpoint, which "
+        "is what Java does by default; 'log' writes one JSON line per report; "
+        "'otel' records through OpenTelemetry, which is silent unless an SDK is "
+        "configured (install zamboni[otel]). Default: none.",
+    )
+    mt.add_argument(
         "--json",
         metavar="PATH",
         help="append this run's machine-readable summary to PATH as one JSON "
@@ -1314,6 +1325,7 @@ def _maintenance(session: CatalogSession, args: argparse.Namespace) -> int:
         commit=bool(args.yes),
         base_config=_operational_config(args),
         observer=show,
+        reporter=_reporter_from(session, args),
     )
 
     if before is not None:
@@ -1373,6 +1385,59 @@ def _runs(args: argparse.Namespace) -> int:
         )
         return 2
     return 0
+
+
+def _reporter_from(session: CatalogSession, args: argparse.Namespace):
+    """Build the reporter `--metrics` asked for, or ``None`` for no telemetry.
+
+    ``None`` rather than a `NoopReporter` because `maintain()` skips the extra
+    metadata load per committing operation when there is no reporter at all, and
+    building a report costs that load. A default that is free is what makes
+    telemetry opt-in rather than opt-out-if-you-notice.
+    """
+    from .reporters import LoggingReporter, MetricsReporter, MultiReporter, reporter_for
+
+    wanted = set(getattr(args, "metrics", None) or ())
+    if not wanted or wanted == {"none"}:
+        return None
+    if "none" in wanted:
+        print(
+            "--metrics none cannot be combined with another destination.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    extra: list[MetricsReporter] = []
+    if "log" in wanted:
+        extra.append(LoggingReporter())
+    if "otel" in wanted:
+        from .otel import OTelReporter, sdk_configured
+
+        if not sdk_configured():
+            # Not an error -- a library that is instrumented and silent is
+            # exactly what the OTel API is for -- but an operator who asked for
+            # metrics and gets none deserves to be told which half is missing.
+            print(
+                "--metrics otel: no OpenTelemetry SDK is configured in this "
+                "process, so these metrics are recorded and discarded. Install "
+                "zamboni[otel] and set OTEL_EXPORTER_OTLP_ENDPOINT, or embed "
+                "Zamboni in an application that configures one.",
+                file=sys.stderr,
+            )
+        extra.append(OTelReporter())
+
+    if "catalog" not in wanted:
+        return MultiReporter(*extra) if len(extra) > 1 else extra[0]
+
+    reporter = reporter_for(session.catalog, extra)
+    if not hasattr(session.catalog, "_session"):
+        print(
+            f"--metrics catalog: {type(session.catalog).__name__} has no metrics "
+            "endpoint, so nothing will be posted. The endpoint is a REST catalog "
+            "feature.",
+            file=sys.stderr,
+        )
+    return reporter
 
 
 def _write_run_summary(path: str, report) -> None:

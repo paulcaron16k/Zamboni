@@ -434,16 +434,32 @@ only, no router, no bodies, no path parameters.**
 
 ### Reuse published conventions elsewhere too
 
-| Concern | Use |
-|---|---|
-| NATS consumer | `messaging.client.consumed.messages` (`{message}`), `messaging.process.duration` (`s`), attributes `messaging.system=nats`, `messaging.operation.name`, `messaging.destination.name` |
-| service identity | `service.name`, `service.version`, `service.instance.id` |
-| commit-shaped facts | Iceberg's counter names mirrored under `iceberg.`, hyphens to underscores |
-| reclaim and decision facts | ours — nothing defined upstream |
+| Concern | Use | Status |
+|---|---|---|
+| commit-shaped facts | Iceberg's counter names mirrored under `iceberg.`, hyphens to underscores | **shipped** (ZMBNI-129) |
+| reclaim and decision facts | ours — nothing defined upstream | **shipped** |
+| NATS consumer | `messaging.client.consumed.messages` (Counter, `{message}`), `messaging.process.duration` (Histogram, `s`), attributes `messaging.system=nats`, `messaging.operation.name`, `messaging.destination.name` | phase 5 — researched, not implemented |
+| service identity | `service.name`, `service.version`, `service.instance.id` | phase 4 |
+
+The two messaging metrics were checked against
+`open-telemetry/semantic-conventions@main` so phase 5 has no research to redo.
+One caveat that the phrase "published convention" hides: both are marked
+**Development**, not Stable, so they may still move before anything here depends
+on them.
+
+Instrumenting a consumer that does not exist would be untestable code, so
+phases 4 and 5 carry their own instrumentation. What ships now is the part that
+has something to measure.
 
 OTel's naming rules apply throughout: durations in **seconds**, units in the
 instrument's unit field and **not** in the name, `{file}` and `{record}` as singular
-annotations.
+annotations, and UCUM for real units — bytes are `By`.
+
+**Where OTel and Iceberg both have a rule about the same thing, OTel wins.**
+Iceberg's `total-duration` is a field name; OTel's rule for a duration is
+`<thing>.duration` in seconds, so the commit timer is `iceberg.commit.duration`
+rather than `iceberg.total_duration`. The counters, where OTel has no opinion,
+keep Iceberg's names exactly.
 
 ### The loop that closes this design
 

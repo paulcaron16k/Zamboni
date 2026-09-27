@@ -260,6 +260,35 @@ because append is not atomic there and a lock would be no more dependable.
 The per-warehouse layout in §5 gives you one file per customer for free, which
 is also what makes `zamboni runs` able to break the fleet down by warehouse.
 
+### Iceberg-shaped metrics, if you have somewhere to put them
+
+`--metrics` is separate from `--json` and answers a different question: `--json`
+records what the *run* did, `--metrics` reports what each *commit* did, in
+Iceberg's own vocabulary.
+
+```bash
+zamboni maintenance --warehouse acme --yes --metrics catalog
+```
+
+- **`catalog`** POSTs a `CommitReport` to the catalog's metrics endpoint. This
+  is what Java does by default, so a Lakekeeper already collecting commit
+  metrics from Spark jobs starts collecting Zamboni's in the same shape. A
+  catalog that does not implement it answers 404/405/501 and the reporter stops
+  asking for the rest of the run.
+- **`log`** writes one JSON line per report to the `zamboni.metrics` logger —
+  the same zero-infrastructure route as `--json`.
+- **`otel`** records through OpenTelemetry. Without an SDK this is **silent by
+  design**, and the run says so on stderr rather than leaving you wondering;
+  install `iceberg-zamboni[otel]` and set `OTEL_EXPORTER_OTLP_ENDPOINT` to
+  export, or embed Zamboni in an application that configures one.
+
+Repeat the flag for several. It costs one extra metadata load per *committing*
+operation, which is why it is off by default.
+
+**None of this replaces §6.** The monthly review runs on `zamboni runs`, which
+needs no collector at all. Metrics are for a deployment that already has
+somewhere to send them.
+
 ### Reading the series back
 
 ```bash

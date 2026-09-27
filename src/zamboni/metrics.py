@@ -254,14 +254,21 @@ class CommitReport:
 
 @dataclass(frozen=True)
 class ReclaimReport:
-    """What `expire`, `remove-orphans` and `apply-properties` did.
+    """An operation that committed no snapshot.
 
-    **Not an Iceberg type, and deliberately shaped like one.** Those three
-    commit no snapshot -- expiry *removes* snapshots, the other two touch no
-    data -- so there is no `CommitReport` to carry them and Iceberg defines no
-    report that fits. Without this they would bypass the reporter seam
+    **Not an Iceberg type, and deliberately shaped like one.** Iceberg's
+    `CommitReport` describes a commit; an operation that makes none has no
+    report upstream that fits. Without this they would bypass the reporter seam
     altogether and half of Zamboni's operations would be invisible to the
     telemetry that exists for the other half.
+
+    **The name is narrower than what this covers**, which is recorded rather
+    than quietly lived with (ZMBNI-136). `expire`, `remove-orphans` and
+    `apply-properties` commit nothing *ever* -- expiry removes snapshots, the
+    other two touch no data -- but `compact`, `rewrite-manifests` and
+    `remove-dangling-deletes` also commit nothing when they find nothing to do,
+    and their counters arrive here too. Found by a test that ran a whole
+    maintenance and checked every counter it emitted.
 
     The counters keep Zamboni's own names, because there is nothing upstream to
     conform to, but are :class:`CounterResult` and :class:`TimerResult` so that

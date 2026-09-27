@@ -3,6 +3,7 @@ fire without consent."""
 
 from __future__ import annotations
 
+import argparse
 import json
 from dataclasses import replace
 
@@ -938,3 +939,72 @@ def test_concurrent_warehouses_each_append_one_parseable_line(tmp_path):
     assert len(lines) == 12, "every run appended; none replaced another"
     for line in lines:
         assert json.loads(line)["warehouse"] == "acme"
+
+
+# -- where metrics go, from the command line (ZMBNI-129) -----------------
+
+
+def test_metrics_default_to_none(devops_dir, session, capsys):
+    """Telemetry is opt-in, so a plain run builds no reporter at all -- which is
+    also what keeps it free: `maintain()` skips a metadata load per committing
+    operation when there is no reporter."""
+    from zamboni.cli import _reporter_from
+
+    args = argparse.Namespace()
+
+    assert _reporter_from(session, args) is None
+    assert main(["maintenance", "--yes"]) == 0
+
+
+def test_metrics_log_writes_a_json_line_per_report(devops_dir, session, caplog):
+    import logging as _logging
+
+    with caplog.at_level(_logging.INFO, logger="zamboni.metrics"):
+        assert main(["maintenance", "--yes", "--metrics", "log"]) == 0
+
+    payloads = [json.loads(r.getMessage()) for r in caplog.records]
+    assert payloads, "the run committed something and it was reported"
+    assert all("table-name" in p for p in payloads)
+
+
+def test_metrics_can_be_combined(devops_dir, session):
+    from zamboni.cli import _reporter_from
+    from zamboni.reporters import MultiReporter
+
+    args = argparse.Namespace(metrics=["log", "otel"])
+
+    assert isinstance(_reporter_from(session, args), MultiReporter)
+
+
+def test_none_cannot_be_combined_with_a_destination(devops_dir, session, capsys):
+    """Silently preferring one over the other would mean a cron line that asked
+    for both emits something its author thought they had turned off."""
+    from zamboni.cli import _reporter_from
+
+    with pytest.raises(SystemExit) as exit_info:
+        _reporter_from(session, argparse.Namespace(metrics=["none", "log"]))
+
+    assert exit_info.value.code == 2
+    assert "cannot be combined" in capsys.readouterr().err
+
+
+def test_otel_without_an_sdk_says_so_rather_than_failing(devops_dir, session, capsys):
+    """Instrumented and silent is OTel's intended behaviour for a library, not a
+    failure -- but an operator who asked for metrics and got none deserves to
+    be told which half is missing."""
+    assert main(["maintenance", "--yes", "--metrics", "otel"]) == 0
+
+    assert "no OpenTelemetry SDK is configured" in capsys.readouterr().err
+
+
+def test_catalog_metrics_on_a_catalog_without_the_endpoint_says_so(devops_dir, session, capsys):
+    assert main(["maintenance", "--yes", "--metrics", "catalog"]) == 0
+
+    assert "has no metrics endpoint" in capsys.readouterr().err
+
+
+def test_an_unknown_destination_is_a_usage_error(devops_dir, session):
+    with pytest.raises(SystemExit) as exit_info:
+        main(["maintenance", "--yes", "--metrics", "graphite"])
+
+    assert exit_info.value.code == 2

@@ -86,6 +86,29 @@ Two categories beyond the usual set, because this tool deletes files:
   night the box rebooted mid-write — are counted and reported, never raised on.
   (ZMBNI-133)
 
+- **OpenTelemetry, and `maintenance --metrics` to reach any of it from a cron
+  line.** `--metrics log|catalog|otel`, repeatable; default none.
+  `zamboni.otel.OTelReporter` mirrors Iceberg's counter names under `iceberg.`
+  with hyphens turned to underscores, because there is no OpenTelemetry
+  semantic convention for Iceberg. Where OTel has a rule it wins: durations are
+  seconds in a histogram, units are UCUM in the unit field and never in the name
+  (`By`, not `bytes`).
+
+  **`opentelemetry-api` is now a base dependency, and the SDK is not.** With no
+  SDK configured every instrument is a proxy and every add is a no-op, which is
+  what OTel prescribes for a library and means an integrator who has configured
+  an SDK gets Zamboni's telemetry with no adapter. `iceberg-zamboni[otel]` adds
+  an SDK and an OTLP exporter for a deployment that has none.
+
+  This is a deliberate exception to the rule stated beside the `cloud` extra —
+  a dependency belongs in the base install when its absence stops the tool doing
+  its job — and it was measured before being taken: 304 KB of pure Python, **no
+  new transitive dependency**, and 0.19 µs per counter add with no SDK. The
+  34–50 ms import is not paid either: `opentelemetry` is imported by
+  `zamboni.otel`, and nothing imports that module unless an OTel reporter is
+  constructed. `OTelReporter` is deliberately absent from `zamboni.__all__` for
+  the same reason. (ZMBNI-129)
+
 - **A reporter seam, copying Iceberg's own: one method, `report(MetricsReport)`.**
   `maintain(..., reporter=…)` emits an Iceberg `CommitReport` per snapshot
   committed and a `ReclaimReport` for the three operations that commit none.

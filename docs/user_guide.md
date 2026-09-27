@@ -787,12 +787,45 @@ report = maintain(
 )
 ```
 
+From a cron line the same thing is `--metrics`, repeatable:
+
+```bash
+zamboni maintenance --warehouse acme --yes --metrics catalog --metrics log
+```
+
 `RESTMetricsReporter` is Java's default against a REST catalog, so a Lakekeeper
 already receiving commit metrics from Java Spark jobs starts receiving them from
 Zamboni in the same shape. A catalog that does not implement the endpoint
 answers 404/405/501 and the reporter disables itself for the rest of the run —
 metrics reporting is optional in the REST spec, and a fleet of five hundred
 tables must not produce five hundred warnings about it.
+
+#### OpenTelemetry
+
+`--metrics otel`, or `from zamboni.otel import OTelReporter`. The base package
+depends on `opentelemetry-api` only — **exporter-free, and a no-op unless an
+application configures an SDK**, which is what OTel prescribes for a library.
+So:
+
+| | Dependency | Result |
+|---|---|---|
+| plain install | `opentelemetry-api` | instrumented, emits nothing on its own |
+| embedded in an app with its own SDK | theirs | telemetry appears in their pipeline |
+| standalone | `zamboni[otel]` → SDK + OTLP | exports on its own |
+| a run that does not ask for it | — | `opentelemetry` is never even imported |
+
+Counters mirror Iceberg's defined names under `iceberg.`, hyphens to
+underscores — `added-data-files` becomes `iceberg.added_data_files` — because
+**there is no OpenTelemetry semantic convention for Iceberg**. Where OTel does
+have a rule it wins: durations are seconds in a histogram, and units are UCUM in
+the instrument's unit field and never in the name (`By`, not `bytes`).
+Attributes are `iceberg.table`, `iceberg.operation` and `zamboni.operation` —
+the last being the same string as the snapshot-summary stamp, so a metric joins
+to the snapshot that produced it.
+
+`OTelReporter` is deliberately **not** exported from the `zamboni` package:
+importing it imports `opentelemetry`, and a run that wants no telemetry should
+not pay even that. Import it from `zamboni.otel`.
 
 **A reporter can never fail a run.** Anything one raises is logged and
 swallowed; the exit code stays the maintenance exit code. It costs one extra
