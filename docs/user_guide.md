@@ -565,6 +565,11 @@ internal and may move in a patch release. The entry points you need:
 | `MaintenanceRequest` | engine-neutral inputs — retention plus overrides |
 | `TableConfig` | loading and reading `table-config.json` |
 | `get_table_config_spec()` | the JSON Schema for `table-config.json`, as a dict — for validating a file you generated, or driving editor completion. See [below](#validating-a-generated-table-configjson) |
+| `commit_reports(result, snapshots)` / `CommitReport` | Iceberg's own `CommitReport` for each snapshot an operation committed, built from the snapshot summary using Iceberg's defined counter names |
+| `MetricsReporter` / `NoopReporter` / `CollectingReporter` / `LoggingReporter` / `MultiReporter` / `RestMetricsReporter` | where reports go: one method, `report(MetricsReport)`, copying Iceberg's own seam. Pass one as `maintain(reporter=…)`; the default emits nothing |
+| `reporter_for(catalog, extra)` | the reporter that suits a catalog — the metrics endpoint for a REST catalog, nothing to post to for a local one |
+| `NoCommitReport` / `no_commit_report(result)` / `CounterResult` / `TimerResult` / `no_commit_metrics(result)` | Iceberg's metric primitives, and the report for an operation that committed no snapshot — `expire`, `remove-orphans` and `apply-properties` never do, and the other three do not when they find nothing to do |
+| `summarise_logs(paths)` / `FleetSummary` | reading a series of run summaries back — what the fleet did, per warehouse. Behind `zamboni runs`; see [devops.md](devops.md) |
 | `available_engines()` | what this install can drive |
 | `config_from_table_settings` | turning table-config layout into the compaction config `COMPACT` needs |
 | `TableCompactor`, `SnapshotExpirer`, `OrphanCleaner`, … | the local engine's own classes, when you want its richer results |
@@ -763,6 +768,75 @@ summed across a fleet; `skip_rate` is `None` rather than `0.0` for a run that
 considered nothing, because an empty run has no rate and averaging a zero in
 would understate the fleet. `report.warehouse` labels the aggregate, so counters
 collected from many runs do not have to be matched back up by hand.
+
+### Sending Iceberg-shaped metrics somewhere
+
+`maintain(..., reporter=…)` emits an Iceberg `CommitReport` for every snapshot an
+operation commits, and a `NoCommitReport` for the three that commit none. The
+default is to emit nothing:
+
+```python
+from zamboni import LoggingReporter, maintain, reporter_for
+
+report = maintain(
+    session,
+    table_config=...,
+    commit=True,
+    # the catalog's own metrics endpoint, plus a JSON line per report to the log
+    reporter=reporter_for(session.catalog, [LoggingReporter()]),
+)
+```
+
+From a cron line the same thing is `--metrics`, repeatable:
+
+```bash
+zamboni maintenance --warehouse acme --yes --metrics catalog --metrics log
+```
+
+`RESTMetricsReporter` is Java's default against a REST catalog, so a Lakekeeper
+already receiving commit metrics from Java Spark jobs starts receiving them from
+Zamboni in the same shape. A catalog that does not implement the endpoint
+answers 404/405/501 and the reporter disables itself for the rest of the run —
+metrics reporting is optional in the REST spec, and a fleet of five hundred
+tables must not produce five hundred warnings about it.
+
+#### OpenTelemetry
+
+`--metrics otel`, or `from zamboni.otel import OTelReporter`. The base package
+depends on `opentelemetry-api` only — **exporter-free, and a no-op unless an
+application configures an SDK**, which is what OTel prescribes for a library.
+So:
+
+| | Dependency | Result |
+|---|---|---|
+| plain install | `opentelemetry-api` | instrumented, emits nothing on its own |
+| embedded in an app with its own SDK | theirs | telemetry appears in their pipeline |
+| standalone | `zamboni[otel]` → SDK + OTLP | exports on its own |
+| a run that does not ask for it | — | `opentelemetry` is never even imported |
+
+Counters mirror Iceberg's defined names under `iceberg.`, hyphens to
+underscores — `added-data-files` becomes `iceberg.added_data_files` — because
+**there is no OpenTelemetry semantic convention for Iceberg**. Where OTel does
+have a rule it wins: durations are seconds in a histogram, and units are UCUM in
+the instrument's unit field and never in the name (`By`, not `bytes`).
+Attributes are `iceberg.table`, `iceberg.operation` and `zamboni.operation` —
+the last being the same string as the snapshot-summary stamp, so a metric joins
+to the snapshot that produced it.
+
+`OTelReporter` is deliberately **not** exported from the `zamboni` package:
+importing it imports `opentelemetry`, and a run that wants no telemetry should
+not pay even that. Import it from `zamboni.otel`.
+
+**A reporter can never fail a run.** Anything one raises is logged and
+swallowed; the exit code stays the maintenance exit code. It costs one extra
+metadata load per *committing* operation, which is why it is opt-in: a
+`CommitReport` is built from the snapshot's own summary, and the run loop does
+not hold the table afterwards.
+
+From the command line the same figures come out of `maintenance --json PATH`,
+one JSON object per run, and `zamboni runs /var/log/zamboni` aggregates a series
+of them into the fleet view. [devops.md](devops.md) is the operator procedure:
+§6 for what each number means, §7 for the monthly review that acts on them.
 
 A `skipped` operation is one that ran nothing and was right to: disabled in the
 config, unsupported by the engine, fulfilled by another operation, or *unchanged

@@ -52,6 +52,7 @@ from pyiceberg.table.snapshots import Operation
 from pyiceberg.typedef import Record
 
 from .committer import ConcurrentModification, _ReplaceFiles
+from .health import OPERATION_STAMP, REWRITE_MANIFESTS_STAMP
 
 logger = logging.getLogger(__name__)
 
@@ -375,7 +376,7 @@ class ManifestRewriter:
             )
 
         properties = {
-            "zamboni.operation": "rewrite-manifests",
+            OPERATION_STAMP: REWRITE_MANIFESTS_STAMP,
             "zamboni.manifests-replaced": str(len(plan.replaced)),
             "zamboni.manifests-created": str(len(plan.bins)),
         }

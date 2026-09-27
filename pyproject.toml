@@ -68,6 +68,22 @@ dependencies = [
     # zamboni.yml and .env: the DevOps surface (docs/devops.md), not optional.
     "pyyaml>=6.0",
     "python-dotenv>=1.0",
+    # The **API only**, never the SDK. OTel splits them so that a library can be
+    # instrumented without choosing anyone's exporter: with no SDK configured
+    # `get_meter` returns a proxy and every `add()` is a no-op.
+    #
+    # A deliberate exception to the rule stated on `cloud` below, and recorded
+    # as one (ZMBNI-129). OTel's absence does not stop this tool doing its job,
+    # so that rule says "extra". It is here for the property an extra cannot
+    # give: an integrator who has configured an SDK gets Zamboni's telemetry
+    # with no adapter to write.
+    #
+    # Measured before taking the exception: 304 KB of pure Python, **no new
+    # transitive dependency** (`typing-extensions` is already in the lock), and
+    # 0.19 microseconds per counter add with no SDK. The 34-50 ms to import it
+    # is not paid either -- `zamboni/otel.py` imports it, and nothing imports
+    # that module unless an OTel reporter is constructed.
+    "opentelemetry-api>=1.30,<2",
 ]
 
 [project.urls]
@@ -102,6 +118,14 @@ gcs = ["gcsfs>=2024.6.0"]
 # that a dependency belongs in the base install when its absence stops the tool
 # doing its job -- not when it covers a case this install will never take.
 cloud = ["s3fs>=2024.6.0", "adlfs>=2024.7.0", "gcsfs>=2024.6.0"]
+# The SDK and an exporter, for a deployment that exports on its own rather than
+# being embedded in something that already has an SDK. The base package carries
+# only the API, so without this extra `--metrics otel` is instrumented and
+# silent -- which is OTel's intended behaviour, not a failure.
+otel = [
+    "opentelemetry-sdk>=1.30,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.30,<2",
+]
 # Local SQL catalog, used by the test suite and handy for dry runs.
 sql = ["pyiceberg[sql-sqlite]>=0.12,<0.13"]
 # A *client* for a Trino you already have -- the dev stack's `trino` compose

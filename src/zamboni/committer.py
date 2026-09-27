@@ -31,6 +31,8 @@ from pyiceberg.table.snapshots import Operation, Summary
 from pyiceberg.table.update.snapshot import _OverwriteFiles
 from pyiceberg.typedef import EMPTY_DICT
 
+from .health import COMPACT_STAMP, OPERATION_STAMP
+
 logger = logging.getLogger(__name__)
 
 
@@ -178,7 +180,7 @@ class ReplaceCommitter:
         assert_supported_pyiceberg()
 
         properties = {
-            "zamboni.operation": "compaction",
+            OPERATION_STAMP: COMPACT_STAMP,
             "zamboni.removed-data-files": str(len(removed)),
             "zamboni.added-data-files": str(len(added)),
             **self._snapshot_properties,

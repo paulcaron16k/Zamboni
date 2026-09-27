@@ -220,3 +220,193 @@ deleting: a referenced file missing from a listing, or another table sharing a
 location. Read the message, fix the cause, and re-run that one warehouse. The
 other 499 are unaffected, which is the argument for per-warehouse invocation in
 one sentence.
+
+## 6. Collecting what the runs report
+
+Every run reports its own economics on stdout — what it maintained, what it
+skipped, and what share of the scheduled work had no input:
+
+```
+18 operation(s) on 3 table(s): 9 maintained, 9 skipped, 0 failed -- 50% of the work had no input
+```
+
+That line is for whoever is watching. `--json` is for whoever is not:
+
+```bash
+zamboni maintenance --warehouse acme --yes --json /var/log/zamboni/acme.jsonl
+```
+
+One JSON object per run, **appended**, carrying the counters, the per-operation
+outcomes, the exit code, the start and end times in UTC, and the three versions
+that produced it. JSON Lines rather than a JSON array because a cron line has to
+append without reading what is already there — a series that needs a closing
+bracket is corrupt every time a run is killed.
+
+`-` writes the object to stdout instead, for a container that ships stdout and
+has nowhere to put a file.
+
+**A telemetry fault is not a maintenance fault.** A bad path, a full disk or an
+unserialisable result is reported on stderr and the exit code stays the
+maintenance exit code. A run that did its work and exits non-zero because a log
+directory was missing teaches an operator to distrust the exit code, which is
+the one thing here that has to stay trustworthy.
+
+**One file per warehouse, or one file for all of them?** Either, on a local
+filesystem: concurrent appends from separate `zamboni` processes do not
+interleave, measured at 32 processes appending 500 KB each. That guarantee is
+the local filesystem's, not Zamboni's — **on NFS, use one file per warehouse**,
+because append is not atomic there and a lock would be no more dependable.
+
+The per-warehouse layout in §5 gives you one file per customer for free, which
+is also what makes `zamboni runs` able to break the fleet down by warehouse.
+
+### Iceberg-shaped metrics, if you have somewhere to put them
+
+`--metrics` is separate from `--json` and answers a different question: `--json`
+records what the *run* did, `--metrics` reports what each *commit* did, in
+Iceberg's own vocabulary.
+
+```bash
+zamboni maintenance --warehouse acme --yes --metrics catalog
+```
+
+- **`catalog`** POSTs a `CommitReport` to the catalog's metrics endpoint. This
+  is what Java does by default, so a Lakekeeper already collecting commit
+  metrics from Spark jobs starts collecting Zamboni's in the same shape. A
+  catalog that does not implement it answers 404/405/501 and the reporter stops
+  asking for the rest of the run.
+- **`log`** writes one JSON line per report to the `zamboni.metrics` logger —
+  the same zero-infrastructure route as `--json`.
+- **`otel`** records through OpenTelemetry. Without an SDK this is **silent by
+  design**, and the run says so on stderr rather than leaving you wondering;
+  install `iceberg-zamboni[otel]` and set `OTEL_EXPORTER_OTLP_ENDPOINT` to
+  export, or embed Zamboni in an application that configures one.
+
+Repeat the flag for several. It costs one extra metadata load per *committing*
+operation, which is why it is off by default.
+
+**None of this replaces §6.** The monthly review runs on `zamboni runs`, which
+needs no collector at all. Metrics are for a deployment that already has
+somewhere to send them.
+
+### Reading the series back
+
+```bash
+zamboni runs /var/log/zamboni
+```
+
+```
+8 run(s), 2026-09-26T14:18:44Z to 2026-09-26T14:18:59Z
+  120 operation(s) on 5 table(s): 75 maintained, 45 skipped, 0 failed -- 38% of the work had no input
+  runs with failures       0 (worst exit 0)
+  longest run              0.9s
+
+  acme                        4 run(s)    38% skipped    0 failed run(s)
+  globex                      4 run(s)    38% skipped    0 failed run(s)
+```
+
+A directory argument reads the `.jsonl` files in it, so the command is the same
+whether you kept one file or five hundred. `--json` emits the aggregate for a
+dashboard instead of prose.
+
+It **exits 0 whatever it finds**, including a week of nothing but failures. This
+is a report: a verb that exits non-zero for successfully telling you bad news
+gets wrapped in `|| true` and then ignored. The one exception is finding no run
+logs at all, which is exit 2 — a path matching nothing is a mistyped path far
+more often than it is a fleet that did not run.
+
+A run log is written by a cron line on a machine nobody is watching, so it will
+eventually contain a half-written record from the night the box rebooted. Those
+are **counted and reported**, not raised on:
+
+```
+  unreadable records       1
+```
+
+A number beside that line is something you can judge. A traceback instead of
+last week's figures is not.
+
+### What the numbers are for
+
+| Figure | Question it answers | What to do about it |
+|---|---|---|
+| `% of the work had no input` | are we scheduling maintenance that has nothing to do? | high and stable is *fine* — the skip is cheap. It is the input to the [ZMBNI-106](https://github.com/paulcaron16k/Zamboni/issues/106) decision on event-driven triggering, not an alert |
+| `runs with failures`, `worst exit` | is maintenance actually completing? | **this is the alert.** Exit 4 means a safety check stopped before deleting: read the message, fix the cause, re-run that warehouse ([§5](#when-one-customer-fails)) |
+| `longest run` | will the window hold as the fleet grows? | trending toward the gap between cron firings is the signal to split the schedule, before runs start overlapping |
+| `unreadable records` | is the collection itself healthy? | more than the occasional reboot means something is truncating the file — check rotation |
+| `built by N version(s)` | did a figure move because the workload changed, or because the build did? | shown only when the series spans builds. Which operations Zamboni even attempts depends on the installed PyIceberg, so compare like with like before drawing a conclusion |
+
+A per-warehouse breakdown appears whenever the series covers more than one,
+sorted by name so two weeks' output can be diffed. "The fleet is at 50%" is not
+actionable; "globex is at 5% and everything else is at 60%" is.
+
+## 7. The monthly review
+
+Collecting the figures is §6. This section is the part that makes them matter:
+somebody looks, on a cadence, and writes down what they decided.
+
+**Owner: Paul. Cadence: monthly. Next review: 2026-10-26.**
+
+Nothing enforces that date — no test fails when it passes. That was a deliberate
+choice (ZMBNI-134) and it is the weak link in this section, so it is written
+here rather than left implicit: if the review is not held, the loop is a
+document and not a loop.
+
+### The procedure, in full
+
+```bash
+zamboni runs /var/log/zamboni
+```
+
+Then, for each of these, a row in the log below:
+
+1. **Skip share, per warehouse.** Not an alert. A high, stable figure means the
+   watermark check is doing its job. What matters is whether it is *stable* —
+   a warehouse that moved from 60% to 5% took on a new writer, and a warehouse
+   that moved the other way may have lost one.
+2. **Failed runs and the worst exit code.** This *is* the alert, and it should
+   normally be zero. Exit 4 means a safety check stopped before deleting
+   anything; [§5](#when-one-customer-fails) is the response.
+3. **Longest run against the cron gap.** If the longest sweep is approaching the
+   interval between firings, split the schedule *before* runs start overlapping
+   rather than after.
+4. **Unreadable records.** More than the occasional reboot means something is
+   truncating the file.
+5. **Whether the series spans Zamboni or PyIceberg versions.** If it does,
+   compare like with like before concluding that anything moved.
+
+### What each figure is *not* for
+
+A skip share is an economics figure, not a health figure. It is tempting to
+alert on it because it is the most eye-catching number in the report, and that
+would generate a page every night for a fleet that is working perfectly. The
+health figures are items 2 and 3.
+
+### Review log
+
+The first row is a **local baseline**, not production: eight runs over two
+synthetic warehouses, recorded so the first production figure has something to
+be surprising against rather than landing with no context. It is labelled as
+such, because a baseline quietly mistaken for production evidence is worse than
+no baseline.
+
+| Date | Window reviewed | Runs | Skip share | Failed runs | Longest run | Decided |
+|---|---|---|---|---|---|---|
+| 2026-09-26 | local, synthetic | 8 | 38% | 0 | 0.9s | Baseline only — **not production**. Recorded at the close of ZMBNI-133 so the first real reading has a comparison. No decision taken |
+| _next: 2026-10-26_ | | | | | | first review with production data; feeds the [ZMBNI-106 gate](https://github.com/paulcaron16k/Zamboni/issues/106) |
+
+### The one-off decision this feeds
+
+Separately from the standing health question, one decision is waiting on this
+data: whether to build phases 4–6 of event-driven maintenance (a scheduler, a
+NATS consumer, partition targeting) or close that initiative with phases 1–3
+shipped. The decision record — owner, evidence needed, and what would make the
+answer "build it" — is in
+[event-driven-maintenance.md §8](event-driven-maintenance.md).
+
+The short version, because it is easy to read the wrong conclusion out of a
+large number: **phases 1–2 already capture the whole "no input at all" saving
+without any event plumbing.** A large skip share on its own is therefore not an
+argument for building more. Phases 4–6 are a *latency* argument — they would
+reach the same saving sooner — and they need evidence that latency matters
+before they are worth it.

@@ -42,6 +42,7 @@ invocation works from a shell, a cron entry, or a container.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -190,6 +191,9 @@ def main(argv: list[str] | None = None) -> int:
             print()
         return 0
 
+    if args.command == "runs":
+        return _runs(args)
+
     # These two need no catalog connection: they operate on files.
     if args.command == "from-catalog":
         return _from_catalog(args)
@@ -302,6 +306,28 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=version_banner())
     sub = parser.add_subparsers(dest="command", required=True)
+
+    rs = sub.add_parser(
+        "runs",
+        help="aggregate the run summaries written by `maintenance --json`",
+        description=(
+            "Read a series of run summaries and report what the fleet is doing: what "
+            "share of scheduled work had no input, how many runs failed, and how long "
+            "a sweep takes -- per warehouse. This is the command the weekly review in "
+            "docs/devops.md runs. A directory argument reads the .jsonl files in it."
+        ),
+    )
+    rs.add_argument(
+        "paths",
+        nargs="+",
+        metavar="PATH",
+        help="run-log files, or a directory containing them",
+    )
+    rs.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the aggregate as JSON instead of prose, for a dashboard",
+    )
 
     sub.add_parser("doctor", help="report the installed PyIceberg's capabilities")
     sub.add_parser("engines", help="report what each engine supports, and what it refuses to do")
@@ -424,6 +450,25 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="report file counts and bytes before and after, so a nightly log answers "
         "'did it help' without a second tool",
+    )
+    mt.add_argument(
+        "--metrics",
+        action="append",
+        choices=("none", "log", "catalog", "otel"),
+        metavar="{none,log,catalog,otel}",
+        help="where to send Iceberg-shaped metrics; repeat for several. "
+        "'catalog' POSTs a CommitReport to the catalog's metrics endpoint, which "
+        "is what Java does by default; 'log' writes one JSON line per report; "
+        "'otel' records through OpenTelemetry, which is silent unless an SDK is "
+        "configured (install zamboni[otel]). Default: none.",
+    )
+    mt.add_argument(
+        "--json",
+        metavar="PATH",
+        help="append this run's machine-readable summary to PATH as one JSON "
+        "object per line, or '-' for stdout. The counters, the per-operation "
+        "results, the exit code and the versions -- what a fleet collects to "
+        "answer whether maintenance is keeping up. See docs/devops.md.",
     )
     mt.add_argument(
         "--yes",
@@ -1280,6 +1325,7 @@ def _maintenance(session: CatalogSession, args: argparse.Namespace) -> int:
         commit=bool(args.yes),
         base_config=_operational_config(args),
         observer=show,
+        reporter=_reporter_from(session, args),
     )
 
     if before is not None:
@@ -1304,7 +1350,141 @@ def _maintenance(session: CatalogSession, args: argparse.Namespace) -> int:
                 f"  {failure.table} {failure.operation.value} (exit {failure.exit_code})",
                 file=sys.stderr,
             )
+
+    if args.json:
+        _write_run_summary(args.json, report)
     return report.exit_code
+
+
+def _runs(args: argparse.Namespace) -> int:
+    """Aggregate the run summaries `maintenance --json` wrote.
+
+    Exit 0 whatever it finds, including a series full of failures. This is a
+    *report*: it says the fleet had thirty failed runs last week, and a verb
+    that exits non-zero for successfully telling you so is a verb that gets
+    wrapped in `|| true` and then ignored. `health --exit-code` settled the same
+    tension the same way.
+
+    The one exception is finding nothing at all, which is exit 2 -- a path that
+    matches no run log is a mistyped path far more often than it is a fleet that
+    did not run, and silently reporting "no runs" would hide it.
+    """
+    from .runlog import summarise_logs
+
+    summary = summarise_logs(args.paths)
+    if args.json:
+        print(json.dumps(summary.as_dict(), indent=2))
+    else:
+        print(summary.describe())
+
+    if not summary.runs:
+        print(
+            f"\nno run summaries found in: {', '.join(args.paths)}\n"
+            "`zamboni maintenance --json PATH` writes them; see docs/devops.md.",
+            file=sys.stderr,
+        )
+        return 2
+    return 0
+
+
+def _reporter_from(session: CatalogSession, args: argparse.Namespace):
+    """Build the reporter `--metrics` asked for, or ``None`` for no telemetry.
+
+    ``None`` rather than a `NoopReporter` because `maintain()` skips the extra
+    metadata load per committing operation when there is no reporter at all, and
+    building a report costs that load. A default that is free is what makes
+    telemetry opt-in rather than opt-out-if-you-notice.
+    """
+    from .reporters import LoggingReporter, MetricsReporter, MultiReporter, reporter_for
+
+    wanted = set(getattr(args, "metrics", None) or ())
+    if not wanted or wanted == {"none"}:
+        return None
+    if "none" in wanted:
+        print(
+            "--metrics none cannot be combined with another destination.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    extra: list[MetricsReporter] = []
+    if "log" in wanted:
+        extra.append(LoggingReporter())
+    if "otel" in wanted:
+        from .otel import OTelReporter, sdk_configured
+
+        if not sdk_configured():
+            # Not an error -- a library that is instrumented and silent is
+            # exactly what the OTel API is for -- but an operator who asked for
+            # metrics and gets none deserves to be told which half is missing.
+            print(
+                "--metrics otel: no OpenTelemetry SDK is configured in this "
+                "process, so these metrics are recorded and discarded. Install "
+                "zamboni[otel] and set OTEL_EXPORTER_OTLP_ENDPOINT, or embed "
+                "Zamboni in an application that configures one.",
+                file=sys.stderr,
+            )
+        extra.append(OTelReporter())
+
+    if "catalog" not in wanted:
+        return MultiReporter(*extra) if len(extra) > 1 else extra[0]
+
+    reporter = reporter_for(session.catalog, extra)
+    if not hasattr(session.catalog, "_session"):
+        print(
+            f"--metrics catalog: {type(session.catalog).__name__} has no metrics "
+            "endpoint, so nothing will be posted. The endpoint is a REST catalog "
+            "feature.",
+            file=sys.stderr,
+        )
+    return reporter
+
+
+def _write_run_summary(path: str, report) -> None:
+    """Append one JSON object for this run. **Never fails the run.**
+
+    JSON Lines rather than a JSON array, because a nightly cron has to be able
+    to append without reading what is already there, and a series that needs a
+    closing bracket is a series that is corrupt every time a run is killed.
+
+    **One `write` in append mode, and no lock.** The multi-tenant layout in
+    docs/devops.md is one invocation per warehouse, so twenty of them can fire
+    at 02:00 into one file. Measured before relying on it: 32 concurrent
+    processes appending a 500 KB line each, with and without `flock`, produced
+    32 parseable lines and no corruption either way. `PIPE_BUF` governs pipes,
+    not regular files -- Linux holds the inode lock for the whole append -- so a
+    lock here would have been ceremony, and a comment claiming it prevented
+    something would have been false.
+
+    That guarantee is the *local filesystem's*, not ours. A destination where
+    append is not atomic -- NFS is the one that turns up -- needs one file per
+    warehouse instead, because `flock` is no more dependable there than
+    `O_APPEND` is. docs/devops.md says so where an operator chooses the path.
+
+    **A telemetry fault is not a maintenance fault.** A bad path, a full disk or
+    an unserialisable result is reported on stderr and the exit code stays the
+    maintenance exit code. The alternative -- a run that deleted nothing and
+    exits non-zero because a log directory was missing -- teaches an operator to
+    distrust the exit code, which is the one thing here that has to stay
+    trustworthy.
+    """
+    try:
+        line = json.dumps(report.as_dict(), separators=(",", ":"))
+    except (TypeError, ValueError) as exc:  # pragma: no cover - guarded by
+        # test_every_result_serialises_to_json, but a report that cannot be
+        # serialised must still not fail a run that did its work.
+        print(f"could not serialise the run summary: {exc}", file=sys.stderr)
+        return
+
+    if path == "-":
+        print(line)
+        return
+
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except OSError as exc:
+        print(f"could not write the run summary to {path}: {exc}", file=sys.stderr)
 
 
 def _already_fulfilled(session: CatalogSession, args: argparse.Namespace, operation, done: set):

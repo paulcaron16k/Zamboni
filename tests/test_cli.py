@@ -3,12 +3,13 @@ fire without consent."""
 
 from __future__ import annotations
 
+import argparse
 import json
 from dataclasses import replace
 
 import pytest
 
-from zamboni.cli import main
+from zamboni.cli import _write_run_summary, main
 from zamboni.profile import profile_table
 
 from .conftest import SCHEMA, batch
@@ -825,3 +826,185 @@ def test_the_exit_code_is_opt_in(warehouse, session, unpartitioned, capsys):
     assert main(args) == 0, "not due, but the default is still a successful report"
     assert main([*args, "--exit-code"]) == 1, "not due, so 1 with the flag"
     capsys.readouterr()
+
+
+# -- collecting the run, for the feedback loop (ZMBNI-133) ----------------
+
+
+def test_the_run_summary_is_appended_one_object_per_line(devops_dir, session, tmp_path):
+    """JSON Lines, not a JSON array: a nightly cron has to append without
+    reading what is there, and a series needing a closing bracket is corrupt
+    every time a run is killed."""
+    log = tmp_path / "runs.jsonl"
+
+    assert main(["maintenance", "--yes", "--json", str(log)]) == 0
+    assert main(["maintenance", "--yes", "--json", str(log)]) == 0
+
+    records = [json.loads(line) for line in log.read_text().splitlines()]
+    assert len(records) == 2, "the second run appended rather than replacing"
+    assert records[0]["counters"]["skipped"] == 0
+    assert records[1]["counters"]["skipped"] == 3, "the second run had nothing to compact"
+
+
+def test_the_summary_carries_what_the_feedback_loop_reads(devops_dir, session, tmp_path):
+    """The whole point of the flag. Named explicitly, because these are the keys
+    a dashboard and a weekly review key on for years."""
+    log = tmp_path / "runs.jsonl"
+
+    assert main(["maintenance", "--yes", "--json", str(log)]) == 0
+
+    record = json.loads(log.read_text())
+    assert record["warehouse"] == "acme"
+    assert record["exit_code"] == 0
+    assert set(record["versions"]) == {"zamboni", "pyiceberg", "python"}
+    assert record["started_at"].endswith("Z") and record["ended_at"].endswith("Z")
+    assert record["duration_seconds"] >= 0
+    counters = record["counters"]
+    assert (
+        counters["considered"]
+        == counters["skipped"] + counters["maintained"] + (counters["failed"])
+    )
+    assert record["outcomes"], "the per-operation detail is there too, not just the totals"
+
+
+def test_collecting_the_run_leaves_the_human_output_alone(devops_dir, session, capsys, tmp_path):
+    """A run being collected is still a run somebody may be watching."""
+    assert main(["maintenance", "--yes", "--json", str(tmp_path / "runs.jsonl")]) == 0
+
+    out = capsys.readouterr().out
+    assert "db.events" in out
+    assert "operation(s) on 1 table(s)" in out
+    assert "{" not in out, "the JSON went to the file, not into the readable output"
+
+
+def test_a_dash_writes_the_summary_to_stdout(devops_dir, session, capsys):
+    """For a container that ships stdout and has nowhere to put a file."""
+    assert main(["maintenance", "--yes", "--json", "-"]) == 0
+
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("{")]
+    assert len(lines) == 1
+    assert json.loads(lines[0])["counters"]["considered"] > 0
+
+
+def test_a_telemetry_fault_is_not_a_maintenance_fault(devops_dir, session, capsys, tmp_path):
+    """A run that did its work and exits non-zero because a log directory was
+    missing teaches an operator to distrust the exit code -- the one thing here
+    that has to stay trustworthy."""
+    unwritable = tmp_path / "no" / "such" / "dir" / "runs.jsonl"
+
+    assert main(["maintenance", "--yes", "--json", str(unwritable)]) == 0, (
+        "the maintenance exit code survives a telemetry failure"
+    )
+
+    captured = capsys.readouterr()
+    assert "could not write the run summary" in captured.err, "and it is not silent"
+    assert "db.events" in captured.out, "the work still happened and was reported"
+
+
+def test_concurrent_warehouses_each_append_one_parseable_line(tmp_path):
+    """The multi-tenant layout is one invocation per warehouse, so twenty can
+    fire at 02:00 into one file.
+
+    Separate **processes**, because that is the deployment shape and threads
+    share too much to stand in for it. This does not test a lock -- there is
+    none, and measurement is why: 32 processes appending 500 KB each, with and
+    without `flock`, corrupted nothing either way, since `PIPE_BUF` governs
+    pipes rather than regular files. What it does hold is the property the lock
+    would have been protecting: one append per run, never a read-modify-write
+    and never a truncating open, which is what would actually lose a night's
+    telemetry.
+    """
+    import multiprocessing
+
+    from zamboni.maintainers import Operation
+    from zamboni.maintenance import MaintenanceReport, Outcome
+
+    big = MaintenanceReport(
+        tuple(Outcome(f"db.table_{i:03d}", Operation.COMPACT, 0, "x" * 120) for i in range(200)),
+        warehouse="acme",
+    )
+    assert len(json.dumps(big.as_dict())) > 4096, "small enough to pass trivially otherwise"
+
+    log = tmp_path / "runs.jsonl"
+    # "spawn", not "fork": pytest runs multi-threaded and forking from it is
+    # deprecated in 3.12+ for the deadlock it can cause.
+    context = multiprocessing.get_context("spawn")
+    workers = [context.Process(target=_write_run_summary, args=(str(log), big)) for _ in range(12)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=60)
+
+    lines = log.read_text().splitlines()
+    assert len(lines) == 12, "every run appended; none replaced another"
+    for line in lines:
+        assert json.loads(line)["warehouse"] == "acme"
+
+
+# -- where metrics go, from the command line (ZMBNI-129) -----------------
+
+
+def test_metrics_default_to_none(devops_dir, session, capsys):
+    """Telemetry is opt-in, so a plain run builds no reporter at all -- which is
+    also what keeps it free: `maintain()` skips a metadata load per committing
+    operation when there is no reporter."""
+    from zamboni.cli import _reporter_from
+
+    args = argparse.Namespace()
+
+    assert _reporter_from(session, args) is None
+    assert main(["maintenance", "--yes"]) == 0
+
+
+def test_metrics_log_writes_a_json_line_per_report(devops_dir, session, caplog):
+    import logging as _logging
+
+    with caplog.at_level(_logging.INFO, logger="zamboni.metrics"):
+        assert main(["maintenance", "--yes", "--metrics", "log"]) == 0
+
+    payloads = [json.loads(r.getMessage()) for r in caplog.records]
+    assert payloads, "the run committed something and it was reported"
+    assert all("table-name" in p for p in payloads)
+
+
+def test_metrics_can_be_combined(devops_dir, session):
+    from zamboni.cli import _reporter_from
+    from zamboni.reporters import MultiReporter
+
+    args = argparse.Namespace(metrics=["log", "otel"])
+
+    assert isinstance(_reporter_from(session, args), MultiReporter)
+
+
+def test_none_cannot_be_combined_with_a_destination(devops_dir, session, capsys):
+    """Silently preferring one over the other would mean a cron line that asked
+    for both emits something its author thought they had turned off."""
+    from zamboni.cli import _reporter_from
+
+    with pytest.raises(SystemExit) as exit_info:
+        _reporter_from(session, argparse.Namespace(metrics=["none", "log"]))
+
+    assert exit_info.value.code == 2
+    assert "cannot be combined" in capsys.readouterr().err
+
+
+def test_otel_without_an_sdk_says_so_rather_than_failing(devops_dir, session, capsys):
+    """Instrumented and silent is OTel's intended behaviour for a library, not a
+    failure -- but an operator who asked for metrics and got none deserves to
+    be told which half is missing."""
+    assert main(["maintenance", "--yes", "--metrics", "otel"]) == 0
+
+    assert "no OpenTelemetry SDK is configured" in capsys.readouterr().err
+
+
+def test_catalog_metrics_on_a_catalog_without_the_endpoint_says_so(devops_dir, session, capsys):
+    assert main(["maintenance", "--yes", "--metrics", "catalog"]) == 0
+
+    assert "has no metrics endpoint" in capsys.readouterr().err
+
+
+def test_an_unknown_destination_is_a_usage_error(devops_dir, session):
+    with pytest.raises(SystemExit) as exit_info:
+        main(["maintenance", "--yes", "--metrics", "graphite"])
+
+    assert exit_info.value.code == 2

@@ -118,6 +118,48 @@ from — six categories, because Iceberg points at files from six places. A
 category omitted there is live data destroyed; treat it as the most
 safety-critical module in the repo.
 
+**Deciding whether to work at all (`health.py`)** is the cheapest tier of a
+three-rung cost ladder, and the numbers are why it exists: one `load_table`
+answers "is this table due" in 20–38 ms, against ~400 ms to `profile_table` and
+~2,035 ms for a full orphan scan. `TableHealth` names, in `unseen`, the four
+signals it *cannot* answer from metadata — "no problems found" and "no problems
+visible from here" are different claims. `maintenance_watermark` reads the
+`zamboni.operation` stamp Zamboni writes into every snapshot it commits, so
+maintenance history lives in the table and no sidecar store can be lost. That
+module also owns the **stamp vocabulary**: three values, one per committing
+operation, each equal to its `Operation` enum value. Declared there rather than
+imported from `maintainers` because `maintainers/__init__` loads the built-in
+engines at import time and would cycle; a test checks the agreement instead.
+Snapshots written before ZMBNI-135 carry `"compaction"` for what is now
+`"compact"`, so nothing may compare the stamp to a literal.
+
+**Telemetry is a seam, not a sprinkling (`metrics.py`, `reporters.py`,
+`otel.py`).** One report type is the currency and every destination is a
+transform over it — Iceberg's own `MetricsReporter.report(MetricsReport)`.
+`metrics.py` builds a `CommitReport` **from the snapshot summary**, as Java's
+`CommitMetricsResult.from` does, not from our own result objects: nine of the
+twenty-four counters are *renamed* between the summary property and the metric
+name, so the mapping is a declared table with upstream named. Operations that
+commit no snapshot get a `NoCommitReport` — all six can, since the write-driven
+three commit nothing when they find nothing to do. Nothing is emitted unless a
+reporter is configured, and **a reporter can never fail a run**: every call is
+wrapped, because a run that did its work and then exited non-zero over a metrics
+endpoint teaches an operator to distrust the exit code. `otel.py` is imported
+only when an OTel reporter is constructed, which is what keeps the base
+`opentelemetry-api` dependency free at runtime.
+
+**`runlog.py`** is the other end of `maintenance --json`: it reads a series of
+run summaries back and aggregates them per warehouse, behind `zamboni runs`. It
+is deliberately tolerant — a log written by a cron line on a machine nobody
+watches will contain a half-written record, and refusing to read the series over
+one bad line makes the tool useless exactly when it is needed.
+
+**`probecache.py`** caches `capabilities.detect()` keyed on a hash of the
+*installed bytes* — version plus `direct_url.json` plus `RECORD` — never on a
+version number, because the maintenance fork and stock PyIceberg both declare
+`0.12.0` and answer `added_files_honour_spec` differently. An editable install
+never caches.
+
 **`settings.py`** resolves the operator config: flag > `ZAMBONI_*` env var >
 `./zamboni.yml` > `$ZAMBONI_ROOT/zamboni.yml` > built-in default. `zamboni.yml`
 is normally committable with credentials in `.env`, but it **may** hold them

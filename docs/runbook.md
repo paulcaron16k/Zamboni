@@ -112,6 +112,40 @@ and checking before they commit anything.
 
 ---
 
+### Reading a line that says nothing happened
+
+Four things in a nightly log mean *ran nothing, and that was right*. All four
+exit 0, and telling them apart is usually the whole of the triage:
+
+| Line | Means |
+|---|---|
+| `disabled in the config (expire_snapshots)` | the retention block turned it off |
+| `skipped -- <engine> cannot …` | the engine declares it cannot do this. Trino and dangling deletes, for instance |
+| `already done by compact` | another operation in this run fulfils it; running both would compact the table twice |
+| `nothing to do -- nothing written since compact` | **no snapshot has landed since maintenance last ran**, so `compact`, `rewrite-manifests` and `remove-dangling-deletes` have no input |
+
+The last one is the one that is new and the one that looks alarming the first
+time a whole fleet prints it. It is an optimisation, and deliberately narrow:
+`expire` and `remove-orphans` answer to the *clock* rather than to writes — a
+table nobody writes still ages past its retention window — and
+`apply-properties` answers to the config file, so those three run regardless.
+If the watermark cannot be read for any reason the table is maintained as
+before, because a skip must never be the thing that stops a table being
+maintained.
+
+The word after "since" is the operation that last stamped the table. Tables
+maintained by a Zamboni older than the stamp fix will say `compaction` where
+newer ones say `compact`; they are the same thing.
+
+### Is it keeping up? Ask the series, not one run
+
+One run tells you what happened last night. `maintenance --json` appends a
+machine-readable summary per run and `zamboni runs` aggregates a directory of
+them, per warehouse — failed runs, worst exit code, longest sweep, and what
+share of the scheduled work had no input. That is the trend view, and
+[devops.md §6–7](devops.md) is the procedure, including which of those figures
+is an alert and which is merely a datum.
+
 ## 3. Ask the table what state it is in
 
 `zamboni describe` is read-only and is the first thing to run against a table

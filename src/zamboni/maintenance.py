@@ -22,8 +22,10 @@ what makes the two genuinely equivalent rather than merely similar.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +46,7 @@ from .maintainers import (
 )
 from .maintainers import get as get_maintainer
 from .orphans import OrphanCleanupAborted
+from .reporters import MetricsReporter, emit
 from .session import CatalogSession, StorageCredentialsRequired
 from .tableconfig import TableConfig, TableConfigError
 from .workdir import WorkspaceUnavailable
@@ -224,6 +227,17 @@ class MaintenanceReport:
     #: a fleet collecting :attr:`counters` from many runs can label each
     #: aggregate without having to remember which run produced it.
     warehouse: str | None = None
+    #: When the run started and finished, UTC. A series of run records is not
+    #: much use without them: "the skip share was 50%" only means something
+    #: beside when it was measured and how long the run took.
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+
+    @property
+    def duration_seconds(self) -> float | None:
+        if self.started_at is None or self.ended_at is None:
+            return None
+        return (self.ended_at - self.started_at).total_seconds()
 
     @property
     def exit_code(self) -> int:
@@ -287,9 +301,19 @@ class MaintenanceReport:
 
     def as_dict(self) -> dict[str, Any]:
         """A whole run, serialisable in one call. ZMBNI-32."""
+        # Imported here rather than at module scope: `zamboni/__init__` imports
+        # this module, so a top-level `from . import versions` is a circular
+        # import that fails outright. Same deferral as `maintenance_watermark`
+        # below, for the same reason.
+        from . import versions
+
         return {
+            "versions": versions(),
             "exit_code": self.exit_code,
             "warehouse": self.warehouse,
+            "started_at": _iso(self.started_at),
+            "ended_at": _iso(self.ended_at),
+            "duration_seconds": self.duration_seconds,
             "tables": list(self.tables),
             "failures": len(self.failures),
             "counters": self.counters.as_dict(),
@@ -302,6 +326,52 @@ class MaintenanceReport:
         if self.failures:
             lines.append(f"{len(self.failures)} operation(s) failed")
         return "\n".join(lines)
+
+
+def _iso(moment: datetime | None) -> str | None:
+    """UTC, to the second, with an explicit ``Z``.
+
+    Seconds because a maintenance run is minutes long and sub-second precision in
+    a nightly log is noise; explicit ``Z`` because a naive timestamp in a series
+    collected from several hosts is a bug waiting for the clocks to disagree.
+    """
+    if moment is None:
+        return None
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _report(
+    reporter: MetricsReporter,
+    session: CatalogSession,
+    table: str,
+    result: Reportable,
+    duration_ns: int,
+) -> None:
+    """Build this operation's reports and send them. **Never fails the run.**
+
+    Two things here can fail that have nothing to do with maintenance: building
+    a report needs a metadata load, and a reporter talks to the network. Both
+    are wrapped, because a run that compacted a table correctly and then exited
+    non-zero over a metrics endpoint would teach an operator to distrust the
+    exit code -- the one thing here that has to stay trustworthy.
+
+    The load is why this is opt-in: a `CommitReport` is built from the snapshot
+    summary, and the run loop does not hold the table after the operation
+    returns.
+    """
+    from .metrics import commit_reports, no_commit_report
+
+    try:
+        uncommitted = no_commit_report(result, duration_ns=duration_ns)
+        if uncommitted is not None:
+            emit(reporter, [uncommitted])
+            return
+        snapshots = session.catalog.load_table(table).metadata.snapshots
+        emit(reporter, commit_reports(result, snapshots, duration_ns=duration_ns))
+    except Exception:
+        logger.warning(
+            "could not build metrics for %s; the run is unaffected", table, exc_info=True
+        )
 
 
 def _work_state(outcome: Outcome) -> str:
@@ -330,6 +400,7 @@ def maintain(
     base_config: CompactionConfig | None = None,
     warehouse: str | None = None,
     observer: Callable[[Outcome], None] | None = None,
+    reporter: MetricsReporter | None = None,
 ) -> MaintenanceReport:
     """Run every operation, in order, over every configured table.
 
@@ -350,6 +421,12 @@ def maintain(
             file describing a different warehouse stops the run.
         observer: Called with each :class:`Outcome` as it happens, for progress
             on a long run. The report is returned either way.
+        reporter: Where to send Iceberg-shaped metrics. ``None`` emits nothing,
+            which is the default: telemetry is opt-in, and a deployment that
+            wants none pays for none. See :mod:`zamboni.reporters`. Costs one
+            extra metadata load per *committing* operation, because a
+            `CommitReport` is built from the snapshot's own summary and the run
+            loop does not otherwise hold the table afterwards.
 
     The report carries :attr:`~MaintenanceReport.counters` -- how many tables
     were considered, and how many of them had nothing to do -- which is the
@@ -365,6 +442,7 @@ def maintain(
     order = [Operation(o) for o in operations]
     maintainer = get_maintainer(engine)(session, engine_options or {})
 
+    started_at = datetime.now(UTC)
     outcomes: list[Outcome] = []
 
     def record(outcome: Outcome) -> None:
@@ -382,6 +460,7 @@ def maintain(
         unchanged = _unchanged_since_maintenance(session, table)
         done: set[Operation] = set()
         for operation in order:
+            started_ns = time.perf_counter_ns()
             outcome = _run(
                 maintainer,
                 table,
@@ -393,6 +472,10 @@ def maintain(
                 unchanged=unchanged,
             )
             record(outcome)
+            if reporter is not None and outcome.result is not None:
+                _report(
+                    reporter, session, table, outcome.result, time.perf_counter_ns() - started_ns
+                )
             if outcome.result is not None:
                 done.add(operation)
             if outcome.exit_code == 4:
@@ -406,7 +489,12 @@ def maintain(
                 )
                 break
 
-    return MaintenanceReport(tuple(outcomes), warehouse=config.warehouse)
+    return MaintenanceReport(
+        tuple(outcomes),
+        warehouse=config.warehouse,
+        started_at=started_at,
+        ended_at=datetime.now(UTC),
+    )
 
 
 #: Operations whose input is *new data*, and which therefore have nothing to do

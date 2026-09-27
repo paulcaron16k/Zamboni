@@ -63,7 +63,165 @@ Two categories beyond the usual set, because this tool deletes files:
   labels the aggregate for a fleet collecting counters from many runs.
   (ZMBNI-117)
 
+- **The run's figures can leave the machine: `maintenance --json PATH`, and
+  `zamboni runs` to read them back.** One JSON object per run, appended, with
+  the counters, the per-operation outcomes, the exit code, the start and end
+  times in UTC and the three versions that produced it. `zamboni runs
+  /var/log/zamboni` aggregates a directory of them into the fleet view, broken
+  down per warehouse.
+
+  Phase 2 made every run report its economics; nothing carried that number off
+  the box. `MaintenanceReport.as_dict()` reached a *library* caller, so the
+  deployment DevOps actually uses — cron calling the CLI — could only be
+  collected by regexing sentences that `describe()` declares unstable. That is
+  why the phase-2 gate had no way to be answered.
+
+  **A telemetry fault is not a maintenance fault**: a bad path or a full disk is
+  reported on stderr and the exit code stays the maintenance exit code. A run
+  that did its work and exits non-zero over a missing log directory teaches an
+  operator to distrust the exit code. `zamboni runs` likewise exits 0 whatever
+  it finds, because a report that exits non-zero for telling you bad news gets
+  wrapped in `|| true`; the exception is finding no logs at all, which is exit 2
+  because a path matching nothing is usually a typo. Unreadable records — the
+  night the box rebooted mid-write — are counted and reported, never raised on.
+  (ZMBNI-133)
+
+- **OpenTelemetry, and `maintenance --metrics` to reach any of it from a cron
+  line.** `--metrics log|catalog|otel`, repeatable; default none.
+  `zamboni.otel.OTelReporter` mirrors Iceberg's counter names under `iceberg.`
+  with hyphens turned to underscores, because there is no OpenTelemetry
+  semantic convention for Iceberg. Where OTel has a rule it wins: durations are
+  seconds in a histogram, units are UCUM in the unit field and never in the name
+  (`By`, not `bytes`).
+
+  **`opentelemetry-api` is now a base dependency, and the SDK is not.** With no
+  SDK configured every instrument is a proxy and every add is a no-op, which is
+  what OTel prescribes for a library and means an integrator who has configured
+  an SDK gets Zamboni's telemetry with no adapter. `iceberg-zamboni[otel]` adds
+  an SDK and an OTLP exporter for a deployment that has none.
+
+  This is a deliberate exception to the rule stated beside the `cloud` extra —
+  a dependency belongs in the base install when its absence stops the tool doing
+  its job — and it was measured before being taken: 304 KB of pure Python, **no
+  new transitive dependency**, and 0.19 µs per counter add with no SDK. The
+  34–50 ms import is not paid either: `opentelemetry` is imported by
+  `zamboni.otel`, and nothing imports that module unless an OTel reporter is
+  constructed. `OTelReporter` is deliberately absent from `zamboni.__all__` for
+  the same reason. (ZMBNI-129)
+
+- **`ReclaimReport` is `NoCommitReport`** (and `reclaim_report` /
+  `reclaim_metrics` are `no_commit_report` / `no_commit_metrics`). The type was
+  named for the three operations that never commit a snapshot, but it carries
+  **any** operation that committed nothing — and the other three qualify
+  whenever they find nothing to do, so a `remove-dangling-deletes` run on a
+  table with none produced one. A name describing three of six cases reads fine
+  until somebody filters on it; the wire `report-type` was
+  `zamboni-reclaim-report` and is now `zamboni-no-commit-report`, and the OTel
+  duration histogram is `zamboni.operation.duration`.
+
+  Renamed rather than documented around because it is unreleased, so there is no
+  compatibility promise in the way. (ZMBNI-136)
+
+- **A reporter seam, copying Iceberg's own: one method, `report(MetricsReport)`.**
+  `maintain(..., reporter=…)` emits an Iceberg `CommitReport` per snapshot
+  committed and a `NoCommitReport` for the three operations that commit none.
+  `NoopReporter` is the default, so telemetry is opt-in and a deployment that
+  wants none pays for none.
+
+  Destinations: `RestMetricsReporter` posts to the catalog's metrics endpoint —
+  what Java does by default, so a Lakekeeper already receiving commit metrics
+  from Java Spark jobs starts receiving them from Zamboni in the same shape —
+  plus `LoggingReporter` (one JSON line, for a cron box with a log shipper),
+  `CollectingReporter` (for an embedded integrator with its own pipeline) and
+  `MultiReporter`. `reporter_for(catalog)` picks what suits a catalog.
+
+  **A reporter can never fail a run.** Anything one raises is logged and
+  swallowed and the exit code stays the maintenance exit code; one failing
+  reporter does not cost you the others. A catalog answering 404/405/501
+  disables the REST reporter for the rest of the run rather than warning once
+  per table across a fleet — metrics reporting is optional in the REST spec.
+
+  Uses `RestCatalog._session`, now inventoried in
+  [docs/pyiceberg-private-api.md](docs/pyiceberg-private-api.md) §2.6: PyIceberg
+  has no metrics endpoint at all, so there is no public way to make an
+  authenticated request to a catalog it is already talking to. The whole class
+  deletes when upstream implements it. (ZMBNI-128)
+
+- **Iceberg's own `CommitReport`, built from the snapshots Zamboni commits.**
+  `commit_reports(result, snapshots)` returns one per snapshot, using the counter
+  names `CommitMetricsResult` defines — unprefixed, because they are Iceberg's.
+  `CounterResult` and `TimerResult` are the spec's primitives, and
+  `no_commit_metrics()` expresses `expire` / `remove-orphans` / `apply-properties`
+  in them, since those commit no snapshot and Iceberg defines no report for them.
+
+  Nothing is emitted anywhere yet: this is the report *currency*, and where the
+  reports go is the reporter seam. PyIceberg implements none of Iceberg's metrics
+  standard (verified against 0.12.0; upstream `iceberg-python#847`), so a Java
+  Spark job reports commit metrics through Lakekeeper by default and everything
+  on this stack is silent.
+
+  **Built from the snapshot summary, as Java does**, rather than from Zamboni's
+  own counters — otherwise the numbers would agree with Iceberg's only by
+  coincidence. PyIceberg writes Java's summary keys, so the mapping is total, but
+  **nine of the twenty-four counters are renamed** on the way to a metric name
+  (`deleted-data-files` → `removed-data-files`, three `-size` → `-size-bytes`,
+  and four that swap "position" for "positional"). The manifest counters are the
+  one real gap: Java fills them from summary properties PyIceberg does not write,
+  so Zamboni's rewriter supplies its own.
+
+  `operation` carries Iceberg's snapshot operation, not Zamboni's verb, which
+  goes in the report's free-form `metadata`. One Zamboni operation can be several
+  Iceberg commits — compaction commits one snapshot per rewrite group — so
+  `total-duration` is attached only when there was exactly one, and `attempts` is
+  never set, because PyIceberg retries internally without surfacing a count and a
+  hardcoded `1` would be a measurement nobody took. (ZMBNI-127)
+
+- **The production feedback loop is written down and owned** — a design section
+  in [docs/event-driven-maintenance.md](docs/event-driven-maintenance.md) for
+  how a figure gets from a run back to a decision under each of the three
+  deployment models, and [docs/devops.md](docs/devops.md) §7 for the monthly
+  review that acts on it: owner, cadence, procedure, and a log with its first
+  (clearly-labelled, non-production) baseline row.
+
+  It also carries the decision record the event-driven initiative is waiting on,
+  including the thing easiest to get wrong about it: phases 1–2 already capture
+  the whole "no input at all" saving without event plumbing, so a large skip
+  share is **not** on its own an argument for building more. Nothing enforces
+  the cadence — that was a deliberate choice, and §7 says so where a reader will
+  see it. (ZMBNI-134)
+
+- **`versions()`**, the three versions `version_banner()` prints, as a mapping.
+  Which operations Zamboni even attempts is decided by probing the installed
+  PyIceberg, so a figure that moved between two nights may be a library change
+  rather than a workload change; a series of runs cannot tell those apart
+  without it. One source, two renderings.
+
+### Fixed
+
+- **`RunCounters` was documented as public and exported from nowhere**, so a
+  reader following the user guide got an `ImportError` from a documented name.
+  Now in `zamboni.__all__`, and `test_the_public_surface_table_names_only_public_objects`
+  checks the guide's surface table against it so the two cannot drift again.
+
 ### Changed
+
+- **Compaction now stamps snapshots `zamboni.operation: "compact"`**, not
+  `"compaction"`. The other two committing operations already wrote their
+  `Operation` enum value exactly, so a consumer grouping snapshots by that key
+  got three values, one of which was not in the enum that named the other two --
+  and `zamboni health` printed "last maintenance compaction" beside "last
+  maintenance rewrite-manifests".
+
+  All three now come from one place, and a test checks each against the enum so
+  a fourth committing operation cannot invent a fourth spelling.
+
+  **Snapshots written by an earlier Zamboni keep the old word and still read
+  correctly.** Nothing compares the stamp to a literal — `maintenance_watermark`
+  reports whatever it finds — so the watermark, the ZMBNI-116 skip and the
+  `CommitReport` metadata all keep working on a table maintained before this
+  release; they simply say "compaction" for those snapshots.
+  `health.LEGACY_COMPACT_STAMP` names the old value for anyone grouping a long
+  history. (ZMBNI-135)
 
 - **The write-driven operations are skipped on a table nothing has written to.**
   `compact`, `rewrite-manifests` and `remove-dangling-deletes` have no input when

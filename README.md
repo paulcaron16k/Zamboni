@@ -103,6 +103,7 @@ extensions or extras.
 | `azure` | **Required for Azure.** `abfs`/`abfss` *prefer* `FsspecFileIO`, and the fallback to `PyArrowFileIO` does not save you: PyIceberg falls through only on a `ModuleNotFoundError` at construction, and `FsspecFileIO` constructs fine without `adlfs`. The failure is deferred to first use | `adlfs` |
 | `gcs` | Not needed for ordinary GCS -- `gs` maps to `PyArrowFileIO` **only**, so fsspec is never chosen for it and pyarrow's `GcsFileSystem` does the work. This covers the narrow case where a catalog overrides `py-io-impl` to fsspec and takes that choice away | `gcsfs` |
 | `cloud` | All three of the above, for an image built before the tenant's cloud is known. Not the default: one deployment uses one cloud | `s3fs`, `adlfs`, `gcsfs` |
+| `otel` | The OpenTelemetry **SDK and an OTLP exporter**, for `--metrics otel` in a deployment that has no SDK of its own. The `opentelemetry-api` half is in the base install, so Zamboni is always instrumented and, without this extra, always silent -- which is OTel's intended behaviour for a library rather than a failure. Not needed when Zamboni is embedded in an application that configures its own SDK: it reports into theirs | `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` |
 | `sql` | A local SQLite catalog, with no catalog server to run. Enough to create and open a warehouse on a laptop; used by the test suite, the demo, and dry runs. Not needed against a REST catalog such as Lakekeeper or Polaris | `pyiceberg[sql-sqlite]` (`sqlalchemy`) |
 | `trino` | The client for `--engine trino`, which runs five of the six operations as `ALTER TABLE … EXECUTE`. **Requires a local Trino stand-alone instance via `dev-stack --profile trino`, or an Enterprise Trino cluster** -- this extra is a client and starts nothing. Not needed to *query* through Trino from a BI tool | `trino` |
 | `spark` | The Spark **Connect** client for `--engine spark --spark-remote sc://…`, which runs all six operations through the Iceberg Spark procedures, Z-order included. **Requires a local Spark stand-alone instance via `dev-stack --profile spark`, or an Enterprise Spark master/cluster.** ~13MB on disk, pure Python, and **no JVM on your machine** -- the driver runs on the server. Needs Spark 4 | `pyspark-client` |
@@ -683,10 +684,14 @@ engine with, secrets handling, and the local engine's measured memory ceiling.
   which shipped. Mostly a record now: what each was for, the evidence it was chosen on, and
   the one place the sequencing was wrong. The remaining item is PyIceberg 0.12, blocked
   upstream.
-- **[docs/event-driven-maintenance.md](docs/event-driven-maintenance.md)** — designed,
-  not built. Zamboni decides *when* to maintain rather than being told: a health check
-  from metadata Iceberg already publishes, an optional long-running service with its own
-  scheduler and a NATS consumer, and telemetry in Iceberg's own defined vocabulary.
+- **[docs/event-driven-maintenance.md](docs/event-driven-maintenance.md)** — Zamboni
+  deciding *when* to maintain rather than being told. **Phases 1–3 are built**: a health
+  check from metadata Iceberg already publishes (`zamboni health`), skipping the
+  write-driven operations on a table nothing wrote to, run summaries and the fleet
+  aggregate (`maintenance --json`, `zamboni runs`), and telemetry in Iceberg's own
+  defined vocabulary (`--metrics`). **Phases 4–6 — a long-running service with its own
+  scheduler, a NATS consumer, and partition-level targeting — are designed and behind a
+  decision gate**, which is waiting on production numbers the built half now produces.
 - **[docs/reclaiming-storage.md](docs/reclaiming-storage.md)** — the two operations
   that delete files are the two a catalog's storage policy can take away. What still
   works under a restrictive catalog, the settings that fix it on Lakekeeper and

@@ -7,6 +7,7 @@ from dataclasses import replace
 import pytest
 
 from zamboni import CompactionConfig, MemoryMode, TableCompactor
+from zamboni.health import COMPACT_STAMP, OPERATION_STAMP
 from zamboni.profile import profile_table
 
 
@@ -68,7 +69,7 @@ def test_commit_uses_replace_operation(session, unpartitioned):
     tbl = session.table("db.unpartitioned")
     snapshot = tbl.current_snapshot()
     assert snapshot.summary.operation.value == "replace"
-    assert snapshot.summary["zamboni.operation"] == "compaction"
+    assert snapshot.summary[OPERATION_STAMP] == COMPACT_STAMP == "compact"
 
 
 def test_partitioned_compaction_is_partition_scoped(session, partitioned):

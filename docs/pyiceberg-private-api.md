@@ -5,7 +5,7 @@ upstream rename from becoming a corrupted table.**
 
 | | |
 |---|---|
-| Audience | Anyone changing `committer.py`, `evolution.py`, `deletes.py`, `manifests.py` or `capabilities.py` |
+| Audience | Anyone changing `committer.py`, `evolution.py`, `deletes.py`, `manifests.py`, `reporters.py` or `capabilities.py` |
 | Companion | [design.md §6.2](design.md) — the upstream constraints · [../CONTRIBUTING.md](../CONTRIBUTING.md) rule 3 — testing across both PyIceberg lines |
 | Verified | Every row below re-probed against **0.11.1** and against the 0.12 line on 2026-08-29. The latter is `../iceberg-python` at `0bf4d13d` — `pyiceberg-0.12.0rc1-47-g0bf4d13d`, an unreleased post-rc1 tree that declares `version = "0.12.0"`. It is *not* a published release; PyPI's newest final is 0.11.1 |
 
@@ -155,6 +155,7 @@ everything else here.
 | `Transaction._apply(...)` | `evolution.py:422` | Apply an `AddPartitionSpecUpdate` plus its `AssertTableUUID` in one commit |
 | `hasattr(io, "_initialize_fs")` then `io._initialize_fs(...)` | `orphans.py:216-217` | The fsspec filesystem needed to **list** storage; `FileIO` exposes open/delete and no listing. Guarded — a non-PyArrow `FileIO` falls back rather than crashing |
 | `from pyiceberg.table.delete_file_index import DeleteFileIndex` | `deletes.py:180` | Answers "does this delete file still apply" with upstream's own index rather than a second implementation of the rule. No underscore, and no public-API promise either |
+| `RestCatalog._session` | `reporters.py` | The authenticated session for `POST .../tables/{table}/metrics`. PyIceberg has **no metrics endpoint at all** — its `Endpoints` class does not mention one and `RestCatalog` never posts one (`iceberg-python#847`, open) — so there is no public way to make an authenticated request to a catalog it is already talking to. The URL itself uses the public `RestCatalog.url()`. Building a second session from the same credentials was the alternative and would duplicate the OAuth2 client-credentials refresh for a second set of tokens. Guarded: absent means `TypeError` naming the cause, and the reporter only exists on a catalog that has both `url` and `_session`. **Deletes entirely** when PyIceberg implements metrics reporting |
 
 **And the most fragile reach in the repository, which has no row above because it
 is not attribute access at all:** three probes depend on upstream's *source text*.

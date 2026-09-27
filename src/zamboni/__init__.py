@@ -37,12 +37,38 @@ from .maintainers import (
 )
 from .maintainers import available as available_engines
 from .maintainers import get as get_maintainer
-from .maintenance import RUNBOOK_ORDER, MaintenanceReport, Outcome, maintain, validate_policy
+from .maintenance import (
+    RUNBOOK_ORDER,
+    MaintenanceReport,
+    Outcome,
+    RunCounters,
+    maintain,
+    validate_policy,
+)
 from .manifests import ManifestRewriter
+from .metrics import (
+    CommitReport,
+    CounterResult,
+    NoCommitReport,
+    TimerResult,
+    commit_reports,
+    no_commit_metrics,
+    no_commit_report,
+)
 from .orphans import OrphanCleaner
 from .planner import CompactionPlan, CompactionPlanner, FileGroup
 from .profile import Finding, Severity, TableProfile, profile_table
 from .reachable import reachable_files
+from .reporters import (
+    CollectingReporter,
+    LoggingReporter,
+    MetricsReporter,
+    MultiReporter,
+    NoopReporter,
+    RestMetricsReporter,
+    reporter_for,
+)
+from .runlog import FleetSummary, summarise_logs
 from .session import AzureSettings, CatalogSession, GCSSettings, S3Settings
 from .settings import Profile
 from .settings import resolve as resolve_settings
@@ -64,6 +90,30 @@ except PackageNotFoundError:  # pragma: no cover - importable but not installed
     __version__ = "0+unknown"
 
 
+def versions() -> dict[str, str]:
+    """The three versions that identify a run, machine-readable.
+
+    The same three :func:`version_banner` prints, and the reason is its
+    docstring: which operations this tool will even attempt is decided by
+    probing the installed PyIceberg, so "zamboni 0.5.1" alone does not identify
+    the behaviour being reported -- or, in a series of run records, explain why
+    a figure moved between two nights.
+
+    Two renderings of one fact, like every ``describe()``/``as_dict()`` pair in
+    this package: prose for a person, a mapping for whatever collects it.
+    """
+    try:
+        pyiceberg = _distribution_version("pyiceberg")
+    except PackageNotFoundError:  # pragma: no cover - a hard dependency
+        pyiceberg = "not installed"
+
+    return {
+        "zamboni": __version__,
+        "pyiceberg": pyiceberg,
+        "python": ".".join(str(part) for part in sys.version_info[:3]),
+    }
+
+
 def version_banner() -> str:
     """Three versions, because one of them does not explain a bug report.
 
@@ -80,13 +130,8 @@ def version_banner() -> str:
     ``importlib.metadata`` reads metadata without importing either package, so
     this is cheap enough for argparse to build on every invocation.
     """
-    try:
-        pyiceberg = _distribution_version("pyiceberg")
-    except PackageNotFoundError:  # pragma: no cover - a hard dependency
-        pyiceberg = "not installed"
-
-    python = ".".join(str(part) for part in sys.version_info[:3])
-    return f"zamboni {__version__} (pyiceberg {pyiceberg}, python {python})"
+    v = versions()
+    return f"zamboni {v['zamboni']} (pyiceberg {v['pyiceberg']}, python {v['python']})"
 
 
 #: The supported API. Everything here is covered by the compatibility promise in
@@ -105,24 +150,33 @@ __all__ = [
     "RUNBOOK_ORDER",
     "AzureSettings",
     "CatalogSession",
+    "CollectingReporter",
+    "CommitReport",
     "CompactionBlocked",
     "CompactionConfig",
     "CompactionPlan",
     "CompactionPlanner",
     "CompactionResult",
     "ConcurrentModification",
+    "CounterResult",
     "DanglingDeleteCleaner",
     "EngineConfigProblem",
     "FileGroup",
     "Finding",
+    "FleetSummary",
     "GCSSettings",
     "LayoutFeature",
+    "LoggingReporter",
     "Maintainer",
     "MaintainerCapabilities",
     "MaintenanceReport",
     "MaintenanceRequest",
     "ManifestRewriter",
     "MemoryMode",
+    "MetricsReporter",
+    "MultiReporter",
+    "NoCommitReport",
+    "NoopReporter",
     "Operation",
     "OperationSupport",
     "OrphanCleaner",
@@ -131,11 +185,13 @@ __all__ = [
     "Profile",
     "PyIcebergCapabilities",
     "ReplaceCommitter",
+    "RestMetricsReporter",
     "Retention",
     "RetentionPolicy",
     "RewriteBackend",
     "RewriteContext",
     "RewriteOutput",
+    "RunCounters",
     "S3Settings",
     "Severity",
     "SnapshotExpirer",
@@ -146,11 +202,13 @@ __all__ = [
     "TableHealth",
     "TableProfile",
     "TableSettings",
+    "TimerResult",
     "UnsupportedOperation",
     "UnsupportedPyIceberg",
     "Watermark",
     "__version__",
     "available_engines",
+    "commit_reports",
     "config_from_table_settings",
     "detect",
     "engines_lacking",
@@ -158,10 +216,15 @@ __all__ = [
     "get_table_config_spec",
     "maintain",
     "maintenance_watermark",
+    "no_commit_metrics",
+    "no_commit_report",
     "profile_table",
     "reachable_files",
+    "reporter_for",
     "resolve_settings",
+    "summarise_logs",
     "table_health",
     "validate_policy",
     "version_banner",
+    "versions",
 ]

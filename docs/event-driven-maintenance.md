@@ -318,23 +318,62 @@ with almost no slack:
 | `remove-dangling-deletes` | `removed-delete-files`, `removed-positional-delete-files`, `removed-equality-delete-files`, `removed-dvs` |
 | every operation | `total-duration` (timer), `attempts` (counter) |
 
-**Zamboni's existing names are non-standard spellings of defined ones.**
-`CompactionResult.as_dict()` emits `data_files_rewritten`, `data_files_added`,
-`bytes_rewritten`, `bytes_added` — which are `removed-data-files`,
-`added-data-files`, `removed-files-size-bytes` and `added-files-size-bytes`. The
-`zamboni.` prefix is right for a *snapshot summary* key, where the namespace is
-shared; in a `CommitReport` the defined name belongs unprefixed, and
-`zamboni.operation` belongs in the report's free-form `metadata` map.
+**Build the report from the snapshot summary, not from our own counters.**
+That is what Java does: `CommitMetricsResult.from(commitMetrics, snapshotSummary)`
+reads all but two of its counters straight out of the summary the commit wrote.
+Deriving them from `CompactionResult` instead would produce numbers that agree
+with Iceberg's by coincidence and drift the first time either side changed what
+it counted. Reading the summary means `removed-data-files` means exactly what it
+means on a Java Spark job against the same table.
 
-Two honest caveats:
+Verified against PyIceberg 0.12.0: **the summary keys it writes are Java's
+keys**, so the mapping is total. What is *not* total is the spelling —
+**nine of the twenty-four counters are renamed between the summary property and
+the metric name**:
 
-- **Manifests differ in shape.** `manifests_before` / `manifests_after` are totals;
-  Iceberg counts created / kept / replaced. A conversion, not a rename.
+| summary property | metric name |
+|---|---|
+| `deleted-data-files` | `removed-data-files` |
+| `deleted-records` | `removed-records` |
+| `added-files-size` | `added-files-size-bytes` |
+| `removed-files-size` | `removed-files-size-bytes` |
+| `total-files-size` | `total-files-size-bytes` |
+| `added-position-delete-files` | `added-**positional**-delete-files` |
+| `removed-position-delete-files` | `removed-**positional**-delete-files` |
+| `added-position-deletes` | `added-**positional**-deletes` |
+| `removed-position-deletes` | `removed-**positional**-deletes` |
+
+Copying the summary key through as the metric name looks right and is wrong on
+nine counters, which is why this is a declared table rather than a loop.
+
+Three consequences worth stating:
+
+- **`operation` is Iceberg's, not ours.** The `CommitReport` field carries
+  `replace` or `overwrite` — Iceberg's enumeration, which a consumer groups by.
+  Zamboni's verb goes in the report's free-form `metadata` under
+  `zamboni.operation`, and the metric names stay unprefixed and standard. The
+  `zamboni.` prefix remains right for a *snapshot summary* key, where the
+  namespace is shared.
+- **Manifest counts are the one real gap, and Zamboni fills it.**
+  `manifests-created` / `-kept` / `-replaced` and `manifest-entries-processed`
+  are defined metrics that Java fills from summary properties **PyIceberg does
+  not write**. Zamboni's rewriter counts them itself, so supplying them closes a
+  gap rather than duplicating the summary. `manifests_before` / `manifests_after`
+  are deliberately *not* mapped: they are totals, where Iceberg's three are a
+  partition of the manifests one commit touched. A conversion, not a rename.
 - **Reclaim has no Iceberg equivalent.** `remove-orphans` produces no snapshot and
   expiry's deletion half is outside the commit, so those keep their own names — but
-  should use Iceberg's **primitives**, `CounterResult {unit, value}` and
+  use Iceberg's **primitives**, `CounterResult {unit, value}` and
   `TimerResult {time-unit, count, total-duration}`, so a future reclaim report type
   is a mapping rather than a re-model.
+
+**One Zamboni operation can be several Iceberg commits.** Compaction commits one
+snapshot per rewrite group unless asked for a single commit, and Iceberg's unit
+is the commit — so an operation produces a *list* of reports. `total-duration` is
+the operation's, so it is attached only when there was exactly one commit;
+copying it onto three would treble it for anyone summing. `attempts` is never
+set: PyIceberg retries internally up to `commit.retry.num-retries` without
+surfacing a count, and a hardcoded `1` would be a measurement nobody took.
 
 ### The reporter seam
 
@@ -342,15 +381,26 @@ Two honest caveats:
 Iceberg's own architecture, a single-method `report(MetricsReport)`.
 
 ```
-  operation result ──▶ CommitReport ──┬──▶ REST reporter → catalog /metrics
-                       (Iceberg shape) ├──▶ OTel reporter
-                                       ├──▶ as_dict() → integrator counters
-                                       └──▶ noop (default)
+  committing op ──▶ CommitReport  ──┬──▶ REST reporter → catalog /metrics
+                    (Iceberg shape) ├──▶ OTel reporter
+  no commit ─────▶ NoCommitReport ───┼──▶ Logging / Collecting reporters
+                    (our shape,     └──▶ noop (default)
+                     their primitives)
 ```
 
-`as_dict()` becomes a third reporter over the same report rather than a parallel
-hand-maintained dict, so the integrator-facing counters and the telemetry cannot
-drift.
+`NoCommitReport` is there because Iceberg's report describes a *commit*, and
+`expire`, `remove-orphans` and `apply-properties` make none — nor do the other
+three when they find nothing to do. Without it those runs would bypass the seam
+entirely.
+
+**`as_dict()` is deliberately *not* regenerated from the report.** The original
+plan was for it to become a third reporter, which would have renamed every key
+an integrator reads — a breaking change to the one surface added specifically so
+that an integrator need not track our wording (ZMBNI-32). The anti-drift
+property is obtained instead by *checking* that the two agree: Zamboni's count
+of what a compaction rewrote and PyIceberg's count from the `DataFile` objects
+it wrote are independent, so their agreeing is evidence, where a shared code
+path would have agreed with itself and proved nothing.
 
 | If upstream lands… | What changes here |
 |---|---|
@@ -385,16 +435,91 @@ only, no router, no bodies, no path parameters.**
 
 ### Reuse published conventions elsewhere too
 
-| Concern | Use |
-|---|---|
-| NATS consumer | `messaging.client.consumed.messages` (`{message}`), `messaging.process.duration` (`s`), attributes `messaging.system=nats`, `messaging.operation.name`, `messaging.destination.name` |
-| service identity | `service.name`, `service.version`, `service.instance.id` |
-| commit-shaped facts | Iceberg's counter names mirrored under `iceberg.`, hyphens to underscores |
-| reclaim and decision facts | ours — nothing defined upstream |
+| Concern | Use | Status |
+|---|---|---|
+| commit-shaped facts | Iceberg's counter names mirrored under `iceberg.`, hyphens to underscores | **shipped** (ZMBNI-129) |
+| reclaim and decision facts | ours — nothing defined upstream | **shipped** |
+| NATS consumer | `messaging.client.consumed.messages` (Counter, `{message}`), `messaging.process.duration` (Histogram, `s`), attributes `messaging.system=nats`, `messaging.operation.name`, `messaging.destination.name` | phase 5 — researched, not implemented |
+| service identity | `service.name`, `service.version`, `service.instance.id` | phase 4 |
+
+The two messaging metrics were checked against
+`open-telemetry/semantic-conventions@main` so phase 5 has no research to redo.
+One caveat that the phrase "published convention" hides: both are marked
+**Development**, not Stable, so they may still move before anything here depends
+on them.
+
+Instrumenting a consumer that does not exist would be untestable code, so
+phases 4 and 5 carry their own instrumentation. What ships now is the part that
+has something to measure.
 
 OTel's naming rules apply throughout: durations in **seconds**, units in the
 instrument's unit field and **not** in the name, `{file}` and `{record}` as singular
-annotations.
+annotations, and UCUM for real units — bytes are `By`.
+
+**Where OTel and Iceberg both have a rule about the same thing, OTel wins.**
+Iceberg's `total-duration` is a field name; OTel's rule for a duration is
+`<thing>.duration` in seconds, so the commit timer is `iceberg.commit.duration`
+rather than `iceberg.total_duration`. The counters, where OTel has no opinion,
+keep Iceberg's names exactly.
+
+### The loop that closes this design
+
+Telemetry that nobody reads is a component to operate, not a capability. The
+plan this document proposes is **decided by a number that does not exist yet**,
+so the route from a production run back to that number is part of the design
+rather than an afterthought for whoever deploys it.
+
+```
+        run                      collect                    read              decide
+  ┌──────────────┐          ┌───────────────┐        ┌────────────────┐   ┌───────────┐
+  │ 1 cron + CLI │──json──▶ │ .jsonl on disk│──────▶ │  zamboni runs  │──▶│  monthly  │
+  └──────────────┘          └───────────────┘        │  (per warehouse│   │  review   │
+  ┌──────────────┐                                   │   breakdown)   │   │ devops §7 │
+  │ 2 service    │──OTel──▶ ┌───────────────┐   ┌───▶└────────────────┘   └─────┬─────┘
+  └──────────────┘          │  collector /  │───┘                               │
+  ┌──────────────┐          │  IWS telemetry│                                   ▼
+  │ 3 IWS embeds │─as_dict▶ └───────────────┘                          ┌────────────────┐
+  └──────────────┘                                                     │ ZMBNI-106 gate │
+                                                                       │ + standing     │
+                                                                       │   health       │
+                                                                       └────────────────┘
+```
+
+Deliberately, the **bottom rung needs no infrastructure at all**: a crontab
+line, a file, and one command that reads it. Model 1 is how this will first
+reach production, and a feedback loop that only works once a collector is
+deployed is a feedback loop that does not exist during the period the gate is
+being measured.
+
+Two distinct questions come out of the same data, and conflating them is how a
+monitoring plan turns into noise:
+
+| | question | horizon | what it feeds |
+|---|---|---|---|
+| **one-off** | what share of scheduled work has no input? | a few weeks | the gate below: is event-driven triggering worth building? |
+| **standing** | is maintenance keeping up? | forever | failures, exit codes, sweep duration. The reason the loop outlives the gate |
+
+The skip share is **not an alert**. A high, stable figure means the cheap
+watermark check is doing its job. What alerts is the standing column: failed
+runs, exit 4, and a sweep duration trending toward the gap between cron firings.
+
+### The decision record this initiative is waiting on
+
+| | |
+|---|---|
+| **Decision** | build phases 4-6 (scheduler, NATS consumer, partition targeting), or close the initiative with phases 1-3 shipped |
+| **Owner** | Paul |
+| **Evidence needed** | `zamboni runs` over a production fleet, several nightly cycles, per warehouse |
+| **Baseline** | 38% of scheduled work had no input, measured locally over 8 runs / 2 warehouses / 5 tables. **Not production**, and recorded only so the first production figure has something to be surprising against |
+| **Decide by** | first monthly review with production data — [devops.md §7](devops.md) |
+
+**What would make the answer "build it":** a large skip share *and* evidence
+that the latency between a write and its maintenance matters — streaming tables,
+or a warehouse where the nightly window is already too tight. The skip share
+alone does not justify it, because phases 1-2 already capture that saving
+without any event plumbing. **Phases 4-6 are a latency argument, not a waste
+argument**, and the evidence has to be read that way or the gate will be
+answered wrongly by a number that looks impressive.
 
 ---
 
@@ -421,8 +546,11 @@ capability the two config files do not already provide.
 
 ## 11. Open questions
 
-1. **What fraction of scheduled runs currently do nothing?** The due-check phase
-   measures it, and it sizes everything after.
+1. **What fraction of scheduled runs currently do nothing?** ~~The due-check phase
+   measures it~~ — the due-check phase *computes* it per run, which is not the
+   same thing as anyone knowing it. Collecting it is `maintenance --json` and
+   `zamboni runs`; deciding on it is the decision record in §8. Open until a
+   production fleet has reported.
 2. **How many tables per warehouse, realistically?** The ~25 ms/table figure is one
    dev-stack table. 50 tables makes polling free; 10,000 changes the case for events.
 3. **Is per-partition detail cheap enough?** Iceberg's
