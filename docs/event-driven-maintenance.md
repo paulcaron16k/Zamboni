@@ -553,9 +553,17 @@ capability the two config files do not already provide.
    production fleet has reported.
 2. **How many tables per warehouse, realistically?** The ~25 ms/table figure is one
    dev-stack table. 50 tables makes polling free; 10,000 changes the case for events.
-3. **Is per-partition detail cheap enough?** Iceberg's
-   `write.summary.partition-limit` puts partition values in the summary up to a
-   bound — worth testing whether setting it on ingested tables makes changed-set
-   targeting nearly free.
+3. ~~**Is per-partition detail cheap enough?**~~ **Answered** (ZMBNI-125).
+   `write.summary.partition-limit` works and writes `partitions.<path>` keys
+   beside `partition-summaries-included: true`, so the changed set comes
+   straight out of the summaries and no manifest is opened — measured against
+   PyIceberg 0.12.0 on 2026-09-27.
+
+   **But its default is `0`**, so a table that has not set it carries
+   `changed-partition-count` and nothing else. The cheap path is real and
+   **opt-in**, which is why both derivations exist: summaries where the table
+   records them, and otherwise the manifests *added by* the snapshots since the
+   watermark — still metadata, and a small subset rather than the whole-table
+   walk `profile_table` does.
 4. **Do streaming tables exist on this stack?** The latency case rests on them. If
    everything is batch, the event's value is the end-of-write signal alone.
