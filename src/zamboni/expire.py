@@ -20,6 +20,12 @@ a file that was never referenced by any snapshot cannot appear in the diff, so
 expiry structurally cannot delete a concurrent writer's in-flight output. That
 class of file is orphan removal's problem, and it needs an age guard precisely
 because it *does* look at raw storage.
+
+**Never partition-targeted (ZMBNI-126).** Retention is a function of *time*, not
+of writes: a snapshot ages past the window whether or not anything was written
+to the partitions it references. Restricting expiry to partitions that changed
+would leave a low-traffic table accumulating snapshots forever, which is the
+same reasoning that keeps `expire` out of ZMBNI-116's write-driven skip.
 """
 
 from __future__ import annotations

@@ -168,11 +168,23 @@ class CompactionConfig:
         dangling_delete_policy: What to do when a rewrite group's source files
             have delete files attached. ``"report"`` proceeds and counts them;
             ``"block"`` refuses the group.
+        only_changed_partitions: Consider only partitions written to since the
+            last maintenance. Off by default; where the changed set cannot be
+            derived, every candidate is considered as before.
     """
 
     target_file_size_bytes: int | None = None
     min_input_files: int = 2
     skip_partitions_newer_than_windows: int | None = 1
+    #: Restrict compaction's candidates to partitions written to since
+    #: maintenance last ran. **Off by default, deliberately**: the saving is
+    #: real but unmeasured on any production fleet, and a default that narrows
+    #: what gets compacted is the kind of change that shows up months later as
+    #: a table nobody noticed going unmaintained. Composes with
+    #: `skip_partitions_newer_than_windows` rather than replacing it -- that one
+    #: subtracts partitions still being written, this one selects the ones worth
+    #: considering at all. See :mod:`zamboni.changed`.
+    only_changed_partitions: bool = False
     rewrite_all: bool = False
     memory_mode: MemoryMode = MemoryMode.AUTO
     streaming_writes: bool = False
