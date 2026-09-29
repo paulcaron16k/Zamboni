@@ -184,6 +184,92 @@ commits cite hand-assigned `ZMBNI-` ids from when the backlog was a markdown
 file; [docs/tasks_historical.md](docs/tasks_historical.md) is that file, frozen,
 and its header maps every id that moved to the issue it became.
 
+## Issue management
+
+Work is tracked on [board #23](https://github.com/users/paulcaron16k/projects/23),
+driven from the command line by the `gh agile` extension. The board is the
+record of what was done and when — a board that lags is worse than no board,
+because it reads as current.
+
+### Installing and upgrading the extension
+
+```bash
+gh extension install paulcaron16k/gh-agile     # once
+gh extension upgrade agile                     # thereafter
+gh extension list                              # confirm: gh agile  paulcaron16k/gh-agile  <sha>
+```
+
+It needs a `gh` already authenticated against the repository and the project
+(`gh auth status`), and a token with `project` scope — `gh auth refresh -s project`
+if a command fails on permissions rather than on arguments.
+
+The board's own configuration lives in the profile the extension keeps; you do
+not need to create anything. `gh agile key` lists the repository keys, which is
+what makes `ZMBNI-123` work anywhere an issue number does.
+
+### Picking up an issue
+
+Choose from the backlog, then set three things — `move` does two of them:
+
+```bash
+gh agile board show backlog                                        # pick one
+gh agile set --issue <n> --field Sprint --value "ZMBNI Sprint 4"   # a) sprint
+gh agile move <n> --status "In Progress" --add-assignee            # b) + c) assignee, status
+```
+
+`--add-assignee` with no value means you, and moving to In Progress claims an
+unassigned issue anyway; pass it explicitly when the work belongs to someone
+else. There must be a *current* sprint for step (a) — `gh agile sprint list`
+shows them and `gh agile sprint ensure` creates the current one plus a few
+ahead.
+
+Optionally confirm the issue moved, which is worth doing after a batch:
+
+```bash
+gh agile board show backlog    # it should be gone from here
+gh agile board show sprint     # and present here
+```
+
+### Finishing an issue
+
+After the pull request is approved and the branch merged — **not when the code
+is written**:
+
+```bash
+gh agile move <n> --status Done --close --evidence "Delivered in PR #<pr>. ..."
+```
+
+`--evidence` is required for Done and is written into the issue's Evidence
+section. Say what shipped and how it was verified: the PR, what the tests cover,
+what was measured. It is *silently discarded* for any other status, so record a
+Blocked or In Review rationale with `gh issue comment` instead.
+
+Then re-read the board, because several of these commands report success
+whether or not anything changed:
+
+```bash
+gh agile board show backlog    # flags "closed, but Status is not Done", with the fix command
+gh agile validate              # missing sprint: labels, epics stamped into a sprint, and more
+```
+
+### Two things that catch everyone
+
+**Epics and initiatives are never in a sprint.** They span them, so they carry
+no Sprint value and no `sprint:` label. Strays clear with
+`gh agile sprint unstamp` (`--dry-run` first).
+
+**The board drifts on merge, and it is not your mistake.** Two GitHub project
+automations work against this flow:
+
+| Workflow | What it does | Consequence |
+|---|---|---|
+| Pull request linked to issue | sets a linked issue to *In Progress* when a PR naming `Closes #n` is opened | it runs after `Item closed` set Done, so an issue closed before its PR was raised finishes closed but not Done |
+| Auto-close issue | closes an issue when Status becomes Done | races `gh agile move --not-planned` and wins, closing as COMPLETED — and a close reason cannot be changed afterwards |
+
+Neither is reachable from the command line; both are switches in the project's
+settings. Until they change, do the finishing step *after* the merge and check
+`gh agile board show backlog` afterwards.
+
 ## Non-obvious workarounds carry their reason
 
 Several things in this codebase look like removable dead code and are not. The

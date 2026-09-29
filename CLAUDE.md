@@ -262,6 +262,10 @@ password key, because neither maintainer accepts one.
    hash-pinned, with an id map in its header for the `ZMBNI-` ids in older commits.
 8. The ruff rev in `.pre-commit-config.yaml` must equal the ruff version in
    `uv.lock` — CI checks it. Bump both together.
+9. **Every issue create or update — filing, starting, closing — follows
+   CONTRIBUTING.md "Issue Management".** Use `gh agile`, and read the section
+   before the first one in a session: the commands report success whether or
+   not anything changed.
 
 ## Docs worth reading before changing behaviour
 
