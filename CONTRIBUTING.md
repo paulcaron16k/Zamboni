@@ -213,7 +213,7 @@ Choose from the backlog, then set three things — `move` does two of them:
 
 ```bash
 gh agile board show backlog                                        # pick one
-gh agile set --issue <n> --field Sprint --value "ZMBNI Sprint 4"   # a) sprint
+gh agile set --issue <n> --field Sprint --value "<sprint title>"   # a) sprint
 gh agile move <n> --status "In Progress" --add-assignee            # b) + c) assignee, status
 ```
 
@@ -221,12 +221,17 @@ gh agile move <n> --status "In Progress" --add-assignee            # b) + c) ass
 unassigned issue anyway; pass it explicitly when the work belongs to someone
 else.
 
-**Step (a) needs a current sprint to exist.** `gh agile sprint list` shows them;
-`gh agile sprint ensure` creates the current one plus a few ahead. This is worth
-checking before starting rather than after finishing: `gh agile sprint backfill`
-derives the `sprint:` label from the Sprint *field*, so an issue that was worked
-while no sprint existed has nothing to backfill from and needs the field set by
-hand.
+**Step (a) needs a current sprint to exist, and its title is whatever
+`gh agile sprint list` says it is** — do not hardcode one, because the
+convention has already changed once, from `ZMBNI Sprint 3` to `0004 W40-2026`.
+`gh agile sprint ensure` creates the current one plus a few ahead.
+
+Check for it *before* starting rather than after finishing: `gh agile sprint
+backfill` derives the `sprint:` label from the Sprint *field*, so an issue
+worked while no sprint existed has nothing to backfill from and needs the label
+added by hand with `gh issue edit <n> --add-label "sprint:<start-date>"` —
+`gh agile set --field Sprint` reports success on a closed issue and changes
+nothing.
 
 Optionally confirm the issue moved, which is worth doing after a batch:
 
