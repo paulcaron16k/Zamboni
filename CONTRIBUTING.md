@@ -219,9 +219,14 @@ gh agile move <n> --status "In Progress" --add-assignee            # b) + c) ass
 
 `--add-assignee` with no value means you, and moving to In Progress claims an
 unassigned issue anyway; pass it explicitly when the work belongs to someone
-else. There must be a *current* sprint for step (a) — `gh agile sprint list`
-shows them and `gh agile sprint ensure` creates the current one plus a few
-ahead.
+else.
+
+**Step (a) needs a current sprint to exist.** `gh agile sprint list` shows them;
+`gh agile sprint ensure` creates the current one plus a few ahead. This is worth
+checking before starting rather than after finishing: `gh agile sprint backfill`
+derives the `sprint:` label from the Sprint *field*, so an issue that was worked
+while no sprint existed has nothing to backfill from and needs the field set by
+hand.
 
 Optionally confirm the issue moved, which is worth doing after a batch:
 
@@ -252,23 +257,44 @@ gh agile board show backlog    # flags "closed, but Status is not Done", with th
 gh agile validate              # missing sprint: labels, epics stamped into a sprint, and more
 ```
 
-### Two things that catch everyone
+**Let the hook remind you.** A merge is exactly when this is easiest to forget,
+so install the post-merge hook once per clone:
+
+```bash
+gh agile hooks                             # installs post-merge into this clone
+gh agile unfinished                        # what the hook runs: ORIG_HEAD..HEAD by default
+gh agile unfinished --range <a>..<b>       # or any range, after the fact
+```
+
+It names each issue the merge closed whose board state has not caught up, says
+what is missing, and prints the command to finish it. Run it against an older
+merge and it will find whatever was missed then, too.
+
+### Three things that catch everyone
 
 **Epics and initiatives are never in a sprint.** They span them, so they carry
 no Sprint value and no `sprint:` label. Strays clear with
 `gh agile sprint unstamp` (`--dry-run` first).
 
-**The board drifts on merge, and it is not your mistake.** Two GitHub project
-automations work against this flow:
+**Board state is written by hand here, and the project automations that used
+to write it have been turned off.** Two were doing damage and are now disabled:
 
-| Workflow | What it does | Consequence |
-|---|---|---|
-| Pull request linked to issue | sets a linked issue to *In Progress* when a PR naming `Closes #n` is opened | it runs after `Item closed` set Done, so an issue closed before its PR was raised finishes closed but not Done |
-| Auto-close issue | closes an issue when Status becomes Done | races `gh agile move --not-planned` and wins, closing as COMPLETED — and a close reason cannot be changed afterwards |
+| Workflow | Why it is off |
+|---|---|
+| `Pull request linked to issue` | set a linked issue to *In Progress* when a PR naming `Closes #n` was opened — after `Item closed` had set Done, so an issue closed before its PR was raised finished closed but **not** Done. Ten issues drifted that way in September |
+| `Auto-close issue` | closed an issue when its Status became Done, racing `gh agile move --not-planned` and winning: closed as COMPLETED, and a close reason cannot be changed afterwards, so a "won't do" was recorded permanently as done |
 
-Neither is reachable from the command line; both are switches in the project's
-settings. Until they change, do the finishing step *after* the merge and check
-`gh agile board show backlog` afterwards.
+`Item closed` is still on and is the one left to decide. It writes **Status and
+nothing else** — no Evidence, no closing `sprint:` label, no
+completed-or-not-planned — so an issue it touches reads Done while being
+unfinished, and the gap is invisible except to `gh agile validate`. With it off,
+a closed issue stays visibly unfinished on the backlog board until
+`gh agile move --status Done --evidence` writes all three. `gh agile validate`
+reports the current state of all of these, so check it rather than this table if
+they have moved again.
+
+None of these are reachable from the command line; they are switches in the
+project's settings.
 
 ## Non-obvious workarounds carry their reason
 
