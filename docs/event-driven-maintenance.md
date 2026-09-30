@@ -139,14 +139,42 @@ their tables; conceptually a dump of the provisioning system's database. Nothing
 it is a secret.
 
 ```yaml
+version: 1
 warehouses:
   - name: acme
-    uri: https://catalog.internal/catalog
-    schedule: "0 2 * * *"        # backstop; events drive the rest
-    tables:
-      events:   {compaction: {target_file_size_bytes: 134217728}}
-      sessions: {retention: {expire_snapshots: {older_than_days: 7}}}
+    uri: https://catalog.internal/catalog   # optional; zamboni.yml's otherwise
+    schedule: "0 2 * * *"                   # UTC; the backstop, events drive the rest
+    table_config:                           # a table-config.json body, inline
+      namespaces:
+        raw:
+          tables:
+            events:   {target_file_size_bytes: 134217728}
+            sessions: {retention: {expire_snapshots: {max_snapshot_age_days: 7}}}
+  - name: globex
+    schedule: "30 3 * * *"
+    table_config: globex/table-config.json  # or a path, relative to this file
 ```
+
+Implemented by `zamboni.fleet` (ZMBNI-118). The decisions it encodes, each
+tested in `tests/test_fleet.py`:
+
+- **The fleet file is the one source of which tables exist.** An integrator
+  holding the same state in a database constructs `FleetConfig` in code — the
+  same validated object, not a second store — and nothing writes the file back.
+  Decided on #106, 2026-09-30.
+- **It composes with `table-config.json`.** `table_config` is a path to an
+  existing file or the same body inline, parsed by `TableConfig` either way; the
+  tables maintained are that config's tables, not a second list. An inline body
+  takes its `warehouse` from the entry, and a referenced file must name the same
+  one.
+- **Validated at construction, and an empty fleet is refused.** The file is
+  generated, and a generator that fails open writes an empty list; accepting it
+  on reload would stop every warehouse by being wrong.
+- **`warehouses` is a list, not a mapping**, because PyYAML keeps the last of
+  two duplicate keys silently. A warehouse listed twice is refused.
+- **Schedules are crontab(5) five-field expressions in UTC**, with crontab's own
+  rule that a restricted day-of-month *or* day-of-week matches. A schedule that
+  can never fire (`0 0 30 2 *`) is refused rather than left to never run.
 
 **(b) `zamboni.yml` + `.env` — written by the operator.** Storage endpoints and
 credentials, catalog auth, engine choice, spill directory, the NATS address. Needs a

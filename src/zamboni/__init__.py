@@ -21,6 +21,7 @@ from .compactor import CompactionBlocked, CompactionResult, TableCompactor
 from .config import CompactionConfig, MemoryMode, config_from_table_settings
 from .deletes import DanglingDeleteCleaner
 from .expire import RetentionPolicy, SnapshotExpirer
+from .fleet import CronSchedule, FleetConfig, FleetConfigError, FleetWarehouse
 from .health import TableHealth, Watermark, maintenance_watermark, table_health
 from .maintainers import (
     EngineConfigProblem,
@@ -159,11 +160,15 @@ __all__ = [
     "CompactionResult",
     "ConcurrentModification",
     "CounterResult",
+    "CronSchedule",
     "DanglingDeleteCleaner",
     "EngineConfigProblem",
     "FileGroup",
     "Finding",
+    "FleetConfig",
+    "FleetConfigError",
     "FleetSummary",
+    "FleetWarehouse",
     "GCSSettings",
     "LayoutFeature",
     "LoggingReporter",
