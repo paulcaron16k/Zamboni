@@ -44,6 +44,16 @@ Two categories beyond the usual set, because this tool deletes files:
   work is still decided only by `maintain()`'s due-check, so no scheduling path
   can bypass it.
 
+- **`--threads`** on every catalog-connected verb: DuckDB's thread count for
+  the run, default 4 as before. The service sets it per worker so N workers
+  share the CPUs instead of each assuming the machine.
+
+- **The worker pool** behind the forthcoming `zamboni serve` (ZMBNI-121), in
+  `zamboni.pool`. Internal: not exported, and nothing runs it yet. Long-lived
+  spawned workers each run `zamboni maintenance <table>` in-process, so a worker
+  dying loses one table, not the pool. Sized from the cgroup's CPU quota and
+  memory limit rather than `os.cpu_count()`.
+
 - **Scheduled firings are spread across a window by default** (ZMBNI-144). A
   firing moves by up to ±`RANDOM_PCT` (5%) of the gap to the next, capped at
   ±`RANDOM_LIMIT_MINUTES` (30): a daily 02:00 lands between 01:30 and 02:30,

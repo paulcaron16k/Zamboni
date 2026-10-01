@@ -670,6 +670,14 @@ def _add_catalog_args(p: argparse.ArgumentParser) -> None:
         default=os.environ.get("ZAMBONI_LOCAL_WAREHOUSE"),
         help="path to a filesystem warehouse with a SQL catalog, instead of --uri",
     )
+    g.add_argument(
+        "--threads",
+        type=_positive_int,
+        default=None,
+        help=f"DuckDB threads for this run (default {_SESSION_THREADS}). The "
+        "service sets it per worker from the CPU quota, so N workers do not each "
+        "assume the whole machine.",
+    )
 
     # Named for the question rather than for one provider: `--credential-use`
     # governs GCS and Azure too, and an operator on either would read a group
@@ -817,9 +825,21 @@ def _add_removed_secret_flag(parser, flag: str, variable: str) -> None:
     parser.add_argument(flag, action=_RemovedSecretFlag, variable=variable, default=None)
 
 
+def _positive_int(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
+    return value
+
+
+#: Read from the dataclass rather than repeated, for the reason `_DEFAULTS` gives.
+_SESSION_THREADS: int = CatalogSession.threads
+
+
 def _session_from(args: argparse.Namespace) -> CatalogSession:
+    threads = getattr(args, "threads", None) or _SESSION_THREADS
     if args.local_warehouse:
-        return CatalogSession.for_local(warehouse_path=args.local_warehouse)
+        return CatalogSession.for_local(warehouse_path=args.local_warehouse, threads=threads)
 
     if not args.uri or not args.warehouse:
         raise ValueError(
@@ -832,6 +852,7 @@ def _session_from(args: argparse.Namespace) -> CatalogSession:
     return CatalogSession.for_lakekeeper(
         uri=args.uri,
         warehouse=args.warehouse,
+        threads=threads,
         # Environment only: the flags that used to set these were removed
         # because a command line is world-readable. `_RemovedSecretFlag` says so
         # if anyone passes the old ones.
