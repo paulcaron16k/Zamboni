@@ -36,9 +36,14 @@ def at(text: str) -> datetime:
 
 
 def warehouse(name: str, schedule: str = "0 2 * * *", tables=("events", "sessions"), uri=None):
+    """A warehouse that fires on the exact minute.
+
+    Spreading is on by default; these tests switch it off so they can state the
+    minute a firing happens. :func:`spread` builds one with it on.
+    """
     return FleetWarehouse(
         name=name,
-        schedule=CronSchedule(schedule),
+        schedule=CronSchedule(schedule, random=False),
         table_config=TableConfig(
             warehouse=name,
             namespaces={"raw": NamespaceSettings(tables={t: TableSettings() for t in tables})},
@@ -290,3 +295,98 @@ def test_the_loop_ticks_offers_and_stops():
     ticks, items = asyncio.run(scenario())
     assert ticks == [at("2026-10-01T01:58"), at("2026-10-01T01:59"), at("2026-10-01T02:00")]
     assert {i.table for i in items} == {"raw.events", "raw.sessions"}
+
+
+# -- spread firings (ZMBNI-144) ---------------------------------------------------
+
+
+def spread(name: str, schedule: str = "0 2 * * *", tables=("events",)) -> FleetWarehouse:
+    w = warehouse(name, schedule, tables)
+    return dataclasses.replace(w, schedule=CronSchedule(schedule, random=True))
+
+
+def named(sign: int) -> str:
+    """A warehouse name whose daily offset has the given sign."""
+    nominal = at("2026-10-01T02:00")
+    for i in range(100):
+        name = f"w{i}"
+        offset = CronSchedule("0 2 * * *", random=True).offset(nominal, name)
+        if offset * sign > timedelta(minutes=5):
+            return name
+    raise AssertionError("no seed found")
+
+
+def test_a_fleet_on_one_expression_no_longer_fires_in_one_minute():
+    names = [f"tenant-{i}" for i in range(100)]
+    together = Scheduler(fleet(*(warehouse(n) for n in names)), at("2026-10-01T00:00"))
+    apart = Scheduler(fleet(*(spread(n) for n in names)), at("2026-10-01T00:00"))
+
+    assert len(together.tick(at("2026-10-01T02:00"), CandidateQueue())) == 100
+
+    due = [apart.next_firing(n) for n in names]
+    assert all(at("2026-10-01T01:30") <= d <= at("2026-10-01T02:30") for d in due)
+    assert len({d.replace(second=0) for d in due}) > 30, "spread over many distinct minutes"
+    assert len(apart.tick(at("2026-10-01T02:00"), CandidateQueue())) < 100
+
+
+def test_a_firing_moved_early_does_not_fire_twice():
+    """Offered at e.g. 01:40 for a nominal 02:00, the next firing is tomorrow's --
+    not the 02:00 that is still ahead of it."""
+    name = named(-1)
+    scheduler = Scheduler(fleet(spread(name)), at("2026-10-01T00:00"))
+    due = scheduler.next_firing(name)
+    assert due < at("2026-10-01T02:00")
+
+    assert scheduler.tick(due, CandidateQueue()) == [name]
+    assert scheduler.tick(at("2026-10-01T02:00"), CandidateQueue()) == []
+    tomorrow = scheduler.next_firing(name)
+    assert at("2026-10-02T01:30") <= tomorrow <= at("2026-10-02T02:30")
+
+
+def test_a_firing_moved_late_waits_for_its_moment():
+    name = named(+1)
+    scheduler = Scheduler(fleet(spread(name)), at("2026-10-01T00:00"))
+    due = scheduler.next_firing(name)
+    assert due > at("2026-10-01T02:00")
+
+    assert scheduler.tick(at("2026-10-01T02:00"), CandidateQueue()) == []
+    assert scheduler.tick(due, CandidateQueue()) == [name]
+    tomorrow = scheduler.next_firing(name)
+    assert at("2026-10-02T01:30") <= tomorrow <= at("2026-10-02T02:30")
+
+
+def test_a_missed_spread_firing_still_fires_once():
+    name = named(-1)
+    scheduler = Scheduler(fleet(spread(name)), at("2026-10-01T00:00"))
+    assert scheduler.tick(at("2026-10-03T12:00"), CandidateQueue()) == [name]
+    assert scheduler.next_firing(name).date().isoformat() == "2026-10-04"
+
+
+def test_turning_random_on_rearms_only_that_warehouse():
+    early = named(-1)
+    scheduler = Scheduler(fleet(warehouse(early), warehouse("acme")), at("2026-10-01T00:00"))
+    before = scheduler.next_firing("acme")
+
+    scheduler.rearm(fleet(spread(early), warehouse("acme")), at("2026-10-01T00:10"))
+
+    assert scheduler.next_firing("acme") == before
+    assert scheduler.next_firing(early) < at("2026-10-01T02:00")
+
+
+def test_spreading_is_the_default():
+    """Worst-case-safe by default: a warehouse built with no opinion is spread."""
+    plain = FleetWarehouse(
+        name="acme",
+        schedule=CronSchedule("0 2 * * *"),
+        table_config=warehouse("acme").table_config,
+    )
+    assert plain.schedule.random is True
+
+
+def test_a_restart_does_not_re_roll_tonights_firing():
+    """The offset is derived from (warehouse, firing), so a service restarted
+    at 01:45 arms the same moment it was already waiting for."""
+    current = fleet(spread("acme"))
+    first = Scheduler(current, at("2026-10-01T00:00")).next_firing("acme")
+    again = Scheduler(current, at("2026-10-01T01:15")).next_firing("acme")
+    assert first == again

@@ -902,8 +902,14 @@ zamboni maintenance --table-config table-config.json
 ### The cron line
 
 ```cron
-17 3 * * * cd /srv/zamboni && /usr/local/bin/zamboni-nightly >> /var/log/zamboni/cron.log 2>&1
+47 2 * * * sleep $(shuf -i 0-3600 -n 1); cd /srv/zamboni && flock -n /var/lock/zamboni.lock /usr/local/bin/zamboni-nightly >> /var/log/zamboni/cron.log 2>&1
 ```
+
+Nominally 03:17, started 30 minutes early with a random sleep of up to an
+hour, so a fleet of these does not start in one minute; `flock -n` makes a run
+that is still going from last night win over tonight's. Both are explained in
+[devops.md §1](devops.md#spreading-the-load), with the systemd-timer
+equivalent. Keep the line on one line — cron has no continuation character.
 
 That points at a wrapper script rather than at `zamboni` directly, for exactly
 two reasons: a dated log file (`date +%F` is a quoting trap inside a crontab)
@@ -943,8 +949,8 @@ operations: [compact, apply-properties, remove-dangling-deletes, rewrite-manifes
 ```
 
 ```cron
-17 3 * * 1-6 cd /srv/zamboni && zamboni --profile nightly.yml maintenance --yes
-17 3 * * 0   cd /srv/zamboni && zamboni maintenance --yes
+47 2 * * 1-6 sleep $(shuf -i 0-3600 -n 1); cd /srv/zamboni && flock -n /var/lock/zamboni.lock zamboni --profile nightly.yml maintenance --yes
+47 2 * * 0   sleep $(shuf -i 0-3600 -n 1); cd /srv/zamboni && flock -n /var/lock/zamboni.lock zamboni maintenance --yes
 ```
 
 Or call the individual verbs, which is what `maintenance` does anyway:
@@ -975,9 +981,7 @@ schedule accordingly and talk to whoever owns it. Nothing needs starting or
 stopping.
 
 ```cron
-17 3 * * * cd /srv/zamboni && zamboni maintenance --table-config table-config.json \
-             --engine trino --trino-host trino.corp --trino-port 8080 \
-             --trino-user zamboni --trino-version 483 --yes
+47 2 * * * sleep $(shuf -i 0-3600 -n 1); cd /srv/zamboni && flock -n /var/lock/zamboni.lock zamboni maintenance --table-config table-config.json --engine trino --trino-host trino.corp --trino-port 8080 --trino-user zamboni --trino-version 483 --yes
 ```
 
 Set `--trino-version`. `retain_last` — our `min_snapshots_to_keep` — only
@@ -1793,7 +1797,7 @@ naturally partitioned. Compaction is doing the classic small-files job.
 ```
 
 ```cron
-17 3 * * * cd /srv/zamboni && zamboni maintenance --yes --verbose >> /var/log/zamboni/cron.log 2>&1
+47 2 * * * sleep $(shuf -i 0-3600 -n 1); cd /srv/zamboni && flock -n /var/lock/zamboni.lock zamboni maintenance --yes --verbose >> /var/log/zamboni/cron.log 2>&1
 ```
 
 Why these numbers:
@@ -1875,8 +1879,8 @@ are read rarely and should stop being thousands of small daily directories.
 
 ```cron
 # Nightly: compaction and expiry. Orphan removal lists storage, so weekly.
-17 3 * * 1-6 cd /srv/zamboni && zamboni --profile nightly.yml maintenance --yes
-17 3 * * 0   cd /srv/zamboni && zamboni maintenance --yes
+47 2 * * 1-6 sleep $(shuf -i 0-3600 -n 1); cd /srv/zamboni && flock -n /var/lock/zamboni.lock zamboni --profile nightly.yml maintenance --yes
+47 2 * * 0   sleep $(shuf -i 0-3600 -n 1); cd /srv/zamboni && flock -n /var/lock/zamboni.lock zamboni maintenance --yes
 ```
 
 ```yaml

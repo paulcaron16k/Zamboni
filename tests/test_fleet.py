@@ -19,7 +19,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from zamboni.fleet import CronSchedule, FleetConfig, FleetConfigError, FleetWarehouse
+from zamboni.fleet import (
+    RANDOM_LIMIT_MINUTES,
+    RANDOM_PCT,
+    CronSchedule,
+    FleetConfig,
+    FleetConfigError,
+    FleetWarehouse,
+)
 from zamboni.settings import SECRET_PROFILE_KEYS
 from zamboni.tableconfig import NamespaceSettings, TableConfig, TableSettings
 
@@ -365,3 +372,101 @@ def test_code_is_held_to_the_same_rules(build, message):
 def test_a_fleet_survives_pickling():
     fleet = FleetConfig(warehouses=[warehouse("acme"), warehouse("globex")])
     assert pickle.loads(pickle.dumps(fleet)) == fleet
+
+
+# -- spreading a fleet's firings (ZMBNI-144) ------------------------------------
+
+
+def daily_span() -> timedelta:
+    """What the constants promise for a daily schedule, derived rather than typed."""
+    return min(timedelta(hours=24) * RANDOM_PCT / 100, timedelta(minutes=RANDOM_LIMIT_MINUTES))
+
+
+def test_a_daily_firing_moves_within_the_documented_window():
+    """5% of 24 h is 72 min, capped at 30: a 02:00 lands between 01:30 and 02:30."""
+    assert daily_span() == timedelta(minutes=30)
+    schedule = CronSchedule("0 2 * * *", random=True)
+    nominal = at("2026-10-01T02:00")
+    offsets = [schedule.offset(nominal, f"warehouse-{i}") for i in range(500)]
+
+    assert all(-daily_span() <= o <= daily_span() for o in offsets)
+    # It actually spreads: both directions, and most of the window used.
+    assert min(offsets) < -daily_span() * 0.9
+    assert max(offsets) > daily_span() * 0.9
+
+
+def test_a_short_interval_moves_by_its_percentage_not_the_cap():
+    schedule = CronSchedule("*/5 * * * *", random=True)
+    bound = timedelta(minutes=5) * RANDOM_PCT / 100  # 15 s
+    nominal = at("2026-10-01T02:05")
+    offsets = [schedule.offset(nominal, f"w{i}") for i in range(200)]
+    assert all(abs(o) <= bound for o in offsets)
+    assert max(abs(o) for o in offsets) > bound * 0.9
+
+
+def test_without_random_nothing_moves():
+    exact = CronSchedule("0 2 * * *", random=False)
+    assert exact.offset(at("2026-10-01T02:00"), "acme") == timedelta(0)
+
+
+def test_the_offset_is_stable_across_processes():
+    """Python salts `hash()` per process; an offset built on it would move a
+    warehouse's run time on every restart. Run it under two hash seeds."""
+    import os
+    import subprocess
+    import sys
+
+    code = (
+        "from datetime import datetime, UTC;"
+        "from zamboni.fleet import CronSchedule;"
+        "print(CronSchedule('0 2 * * *', random=True)"
+        ".offset(datetime(2026, 10, 1, 2, tzinfo=UTC), 'acme'))"
+    )
+    answers = {
+        subprocess.run(
+            [sys.executable, "-c", code],
+            env={**os.environ, "PYTHONHASHSEED": seed},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for seed in ("1", "2")
+    }
+    assert len(answers) == 1, answers
+
+
+def test_each_night_gets_a_fresh_offset():
+    """Decided 2026-10-01: two warehouses that collide tonight should not be
+    stuck colliding every night, so the offset varies by firing."""
+    schedule = CronSchedule("0 2 * * *")
+    nights = [at("2026-10-01T02:00") + timedelta(days=d) for d in range(30)]
+    offsets = {schedule.offset(n, "acme") for n in nights}
+    assert len(offsets) > 25
+    # ...and asking twice about one night gives one answer.
+    assert schedule.offset(nights[0], "acme") == schedule.offset(nights[0], "acme")
+
+
+def test_random_is_a_change_to_the_schedule():
+    """So a reload that turns it on re-arms the warehouse."""
+    assert CronSchedule("0 2 * * *") != CronSchedule("0 2 * * *", random=False)
+    with pytest.raises(FleetConfigError, match="true or false"):
+        CronSchedule("0 2 * * *", random="yes")  # type: ignore[arg-type]
+
+
+def test_random_in_the_fleet_file_defaults_fleet_wide_and_a_warehouse_overrides(tmp_path):
+    default = FleetConfig.load(write_fleet(tmp_path, {"warehouses": [entry()]}))
+    assert default["acme"].schedule.random is True, "spreading is on unless switched off"
+
+    doc = {"random": False, "warehouses": [entry("acme"), entry("globex", random=True)]}
+    fleet = FleetConfig.load(write_fleet(tmp_path, doc))
+    assert fleet["acme"].schedule.random is False
+    assert fleet["globex"].schedule.random is True
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [{"random": "yes", "warehouses": [entry()]}, {"warehouses": [entry(random=1)]}],
+)
+def test_random_must_be_a_boolean(tmp_path, doc):
+    with pytest.raises(FleetConfigError, match="true or false"):
+        FleetConfig.load(write_fleet(tmp_path, doc))

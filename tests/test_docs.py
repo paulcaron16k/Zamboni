@@ -568,3 +568,44 @@ def test_the_public_surface_table_names_only_public_objects():
         "the guide documents these as public, but they are not in zamboni.__all__: "
         f"{missing}. Either export them or stop calling them supported."
     )
+
+
+def cron_lines() -> list[tuple[str, str]]:
+    """Every crontab entry in a ```cron block, skipping comments and blank lines.
+
+    The frozen backlog is excluded: its hash is pinned, so it cannot be corrected
+    and is not read as instructions.
+    """
+    found = []
+    for doc in all_docs():
+        if doc.name == "tasks_historical.md":
+            continue
+        for block in re.findall(r"```cron\n(.*?)```", doc.read_text(encoding="utf-8"), re.S):
+            for line in block.splitlines():
+                if line.strip() and not line.lstrip().startswith("#"):
+                    found.append((doc.name, line))
+    return found
+
+
+def test_every_documented_crontab_line_spreads_the_load_and_guards_overlap():
+    """A crontab example is copied whole, by many tenants, from one template --
+    which is the job-storm case (ZMBNI-144). So every one shows the spread and
+    the overlap guard devops.md §1 explains, rather than leaving the safe form
+    to the one section that argues for it.
+
+    And each is one line. Two examples ended a line with `\\`, which crontab(5)
+    says it does not support ("There is no way to split a single command line
+    onto multiple lines"). `%` is refused too: cron turns it into a newline.
+    """
+    lines = cron_lines()
+    assert lines, "no ```cron blocks found; has the fence changed?"
+    for doc, line in lines:
+        assert not line.rstrip().endswith("\\"), f"{doc}: a crontab line cannot continue: {line}"
+        assert "%" not in line, f"{doc}: cron turns % into a newline: {line}"
+        if "zamboni" not in line:
+            continue
+        assert "sleep $(shuf -i " in line, f"{doc}: no randomised start (devops.md §1): {line}"
+        assert "flock -n " in line, f"{doc}: no overlap guard (devops.md §1): {line}"
+        assert line.index("sleep") < line.index("flock"), (
+            f"{doc}: sleep before flock, so tonight's sleeping copy does not hold the lock: {line}"
+        )

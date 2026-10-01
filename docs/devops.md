@@ -7,10 +7,13 @@ configuration lives, and how it works when you have one warehouse per customer.
 **The short version.** One command, one line per warehouse:
 
 ```cron
-17 2 * * *  cd /srv/zamboni && zamboni maintenance --warehouse acme >> /var/log/zamboni/acme.log 2>&1
+47 1 * * *  sleep $(shuf -i 0-3600 -n 1); cd /srv/zamboni && flock -n /var/lock/zamboni-acme.lock zamboni maintenance --warehouse acme >> /var/log/zamboni/acme.log 2>&1
 ```
 
-Everything below is why that line is the whole interface.
+Everything below is why that line is the whole interface. The `sleep` spreads
+the fleet's start times and the `flock` stops a run starting while the last one
+is still going — [§1](#spreading-the-load) explains both, and why neither is
+optional at fleet scale.
 
 ---
 
@@ -42,15 +45,84 @@ What a wrapper usually adds, and where it actually belongs:
 That last one is the only genuine gap, and it is still not a wrapper:
 
 ```cron
-17 2 * * *  cd /srv/zamboni && /usr/bin/flock -n /var/lock/zamboni-acme.lock \
-              zamboni maintenance --warehouse acme >> /var/log/zamboni/acme.log 2>&1
+47 1 * * *  sleep $(shuf -i 0-3600 -n 1); cd /srv/zamboni && /usr/bin/flock -n /var/lock/zamboni-acme.lock zamboni maintenance --warehouse acme >> /var/log/zamboni/acme.log 2>&1
 ```
+
+One line, and it has to be: crontab(5) — "There is no way to split a single
+command line onto multiple lines, like the shell's trailing `\`". An earlier
+version of this example ended its first line with one.
 
 **Overlapping runs are worth preventing.** Orphan removal deletes files it finds
 unreferenced; a compaction running concurrently in another process has written
 output files it has not yet committed. The age guard is what protects those, and
 it is sized for *ingest*, not for a second copy of maintenance. `flock -n` makes
 a late-running job skip rather than pile up.
+
+**That lock is the whole in-progress guard for cron.** It is per host and per
+warehouse: it stops tonight's run starting while last night's is still going on
+the same machine, and nothing more. Two hosts with the same crontab, or a cron
+line and a `zamboni serve` against the same warehouse, are not excluded from
+each other — run maintenance for a warehouse from exactly one place.
+
+### Spreading the load
+
+**A fleet scheduled from one template starts in one minute.** Five hundred
+warehouses at `17 2 * * *` are five hundred processes listing and rewriting the
+same object store at 02:17, alongside everything else in the estate scheduled
+on the hour. Nothing in a cron deployment queues them — each line is its own
+process — so the spike is the fleet's whole width.
+
+`zamboni serve` spreads its firings by default (±5% of the interval, capped at
+±30 minutes — [event-driven-maintenance.md §4](event-driven-maintenance.md#4-configuration)).
+The crontab equivalent is to **start the line 30 minutes early and sleep a
+random 0–60 minutes**:
+
+```cron
+# acme, nominally 02:17: starts between 01:47 and 02:47, a fresh time each night.
+47 1 * * *  sleep $(shuf -i 0-3600 -n 1); cd /srv/zamboni && flock -n /var/lock/zamboni-acme.lock zamboni maintenance --warehouse acme >> /var/log/zamboni/acme.log 2>&1
+47 1 * * *  sleep $(shuf -i 0-3600 -n 1); cd /srv/zamboni && flock -n /var/lock/zamboni-globex.lock zamboni maintenance --warehouse globex >> /var/log/zamboni/globex.log 2>&1
+```
+
+Three details in that line are load-bearing:
+
+| | Why |
+|---|---|
+| `shuf -i 0-3600 -n 1`, not `$RANDOM % 3600` | crontab(5): "Percent-signs (%) in the command, unless escaped with backslash (\\), will be changed into newline characters", so `%` cuts the command short. And the line runs under `/bin/sh`, which need not have `$RANDOM` at all |
+| `sleep` **before** `flock` | the sleep does not hold the lock, so a run that is genuinely still going from last night is what `flock -n` sees — not tonight's own sleeping copy |
+| one line | see above: no trailing `\` |
+
+`shuf` is GNU coreutils. Cron runs in the **daemon's** time zone, not UTC
+(crontab(5): "It currently does not support per-user timezones"), so the same
+line on two hosts in different zones runs at different instants — the service
+evaluates schedules in UTC precisely to avoid that.
+
+**Under systemd, use a timer instead** — `RandomizedDelaySec=` is the same idea
+built in, drawn afresh "before each iteration" (systemd.timer(5)):
+
+```ini
+# /etc/systemd/system/zamboni-acme.timer
+[Timer]
+OnCalendar=*-*-* 01:47:00 UTC
+RandomizedDelaySec=1h
+# The default AccuracySec=1min coalesces timers and partly undoes the spread;
+# systemd.timer(5) says to set it to 1us "to optimally stretch timer events".
+AccuracySec=1us
+# Catch up once on a run missed while the host was down, as `serve` does.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+with the matching `zamboni-acme.service` running the same `flock -n … zamboni
+maintenance --warehouse acme` as the cron line, minus the `sleep`. Leave
+`FixedRandomDelay=` at its default, false: true reuses one offset for every
+firing, so two warehouses that collide collide every night.
+
+**Turning the spread off is a choice to make knowingly.** Fixed minutes per
+warehouse (`07 2`, `23 2`, `41 2`, …) are fine for a handful of warehouses that
+someone maintains by hand. They are not fine for a fleet that a provisioner
+templates, which is the case the default is for.
 
 ---
 
