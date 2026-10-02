@@ -49,6 +49,7 @@ import json
 import logging
 import math
 import os
+import signal
 import sys
 import time
 import traceback
@@ -341,6 +342,14 @@ def _worker_main(conn: connection.Connection, base_environ: dict[str, str], entr
     """A worker process: run jobs until told to stop or the parent goes away."""
     import importlib
 
+    # The parent coordinates shutdown. systemd's default KillMode=control-group
+    # sends SIGTERM to every process in the unit, and Ctrl-C sends SIGINT to the
+    # whole foreground process group -- either would kill a table mid-rewrite
+    # instead of letting the service drain. So a worker ignores both, and the
+    # parent retires it, or SIGKILLs it on a forced stop.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
     module, _, name = entry.partition(":")
     run = getattr(importlib.import_module(module), name)
     # Logging to whatever `sys.stderr` is *now*, so the per-table capture below
@@ -492,7 +501,8 @@ class WorkerPool:
             slot.conn.send(None)
         slot.process.join(timeout=30)
         if slot.process.is_alive():
-            slot.process.terminate()
+            # kill, not terminate: a worker ignores SIGTERM (see _worker_main).
+            slot.process.kill()
             slot.process.join()
         self._reset(slot)
 
@@ -501,6 +511,12 @@ class WorkerPool:
         if slot.conn is not None:
             slot.conn.close()
         slot.process, slot.conn, slot.tables = None, None, 0
+
+    def kill(self) -> None:
+        """SIGKILL every live worker: a forced stop. Their tables report as died."""
+        for slot in self._slots:
+            if slot.process is not None and slot.process.is_alive():
+                slot.process.kill()
 
     async def close(self) -> None:
         """Retire every worker. Call when nothing is in flight."""
