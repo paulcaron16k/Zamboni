@@ -194,6 +194,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "runs":
         return _runs(args)
 
+    if args.command == "config-reload":
+        from .reload import PidFileError, send_reload
+
+        try:
+            pid = send_reload(args.pid_file)
+        except PidFileError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(f"sent SIGHUP to zamboni pid {pid}; the service log reports the reload")
+        return 0
+
     # These two need no catalog connection: they operate on files.
     if args.command == "from-catalog":
         return _from_catalog(args)
@@ -328,6 +339,21 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="emit the aggregate as JSON instead of prose, for a dashboard",
     )
+
+    cr = sub.add_parser(
+        "config-reload",
+        help="tell a running `zamboni serve` to reload its fleet file now",
+        description=(
+            "Send SIGHUP to the service named by its pid file. The service polls "
+            "the fleet file anyway; this is for deployments that are not "
+            "containers, and loads at once rather than at the next poll. An "
+            "invalid file leaves the running config in place -- check the "
+            "service's log for the result. Refuses to signal a pid that is not "
+            "a zamboni process, because a stale pid file and SIGHUP's default "
+            "action would otherwise terminate an unrelated process."
+        ),
+    )
+    cr.add_argument("--pid-file", required=True, help="the pid file `zamboni serve` writes")
 
     sub.add_parser("doctor", help="report the installed PyIceberg's capabilities")
     sub.add_parser("engines", help="report what each engine supports, and what it refuses to do")
