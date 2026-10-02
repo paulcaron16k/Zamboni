@@ -82,6 +82,11 @@ WORKER_BASELINE_BYTES = 256 * 1024 * 1024
 #: own working set -- because the kernel answers an overrun with SIGKILL.
 MEMORY_HEADROOM = 0.8
 
+#: The least DuckDB is given when the plan does not fit -- one worker forced
+#: onto a limit smaller than its own baseline. **Chosen, not measured**: enough
+#: for DuckDB to start and spill, and a warning says the plan did not fit.
+DUCKDB_MIN_MEMORY_BYTES = 64 * 1024 * 1024
+
 #: Where cgroups are mounted, and where a process finds its own.
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 PROC_CGROUP = Path("/proc/self/cgroup")
@@ -176,6 +181,12 @@ class PoolSize:
     threads_per_worker: int
     #: Which constraint decided ``workers``, for the startup log.
     reason: str
+    #: DuckDB's ``memory_limit`` per worker: the worker's share of the planned
+    #: memory, less what the process holds before DuckDB allocates anything.
+    #: ``None`` when no memory figure was known, which leaves DuckDB its own
+    #: default (see ``CatalogSession.memory_limit_bytes`` for why that is not
+    #: safe with several workers).
+    duckdb_memory_bytes: int | None = None
 
 
 def size_pool(
@@ -192,6 +203,10 @@ def size_pool(
     footprint is ``workers x (WORKER_BASELINE_BYTES + memory_budget_bytes)``,
     planned against ``MEMORY_HEADROOM`` of the limit. ``requested`` can lower
     the answer and never raise it past what fits.
+
+    The same arithmetic gives each worker's DuckDB limit (ZMBNI-147), so the
+    plan is enforced where the memory is actually allocated rather than only
+    assumed: ``MEMORY_HEADROOM x memory_limit / workers - WORKER_BASELINE_BYTES``.
     """
     per_worker = WORKER_BASELINE_BYTES + memory_budget_bytes
     by_cpu = max(1, cpus)
@@ -210,7 +225,45 @@ def size_pool(
         logger.warning(
             "%d workers requested; %d fit (%s). Using %d.", requested, workers, reason, workers
         )
-    return PoolSize(workers, max(1, cpus // workers), reason)
+    duckdb = None
+    if memory_limit is not None:
+        duckdb = int(memory_limit * MEMORY_HEADROOM) // workers - WORKER_BASELINE_BYTES
+        if duckdb < DUCKDB_MIN_MEMORY_BYTES:
+            logger.warning(
+                "the memory plan does not fit: %d bytes x %s over %d worker(s) leaves "
+                "%d bytes for DuckDB after a %d-byte baseline; giving it %d",
+                memory_limit,
+                MEMORY_HEADROOM,
+                workers,
+                duckdb,
+                WORKER_BASELINE_BYTES,
+                DUCKDB_MIN_MEMORY_BYTES,
+            )
+            duckdb = DUCKDB_MIN_MEMORY_BYTES
+    return PoolSize(workers, max(1, cpus // workers), reason, duckdb)
+
+
+def physical_memory() -> int | None:
+    """Host RAM, where the platform says."""
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError, AttributeError):
+        return None
+
+
+def plan_pool(*, memory_budget_bytes: int, requested: int | None = None) -> PoolSize:
+    """Size the pool for *this* process: its CPUs, and the memory it may use.
+
+    Memory is the cgroup's limit where there is one, else host RAM. Planning
+    against host RAM rather than declining to plan is the safe direction: with
+    no figure, every worker's DuckDB would assume 80% of the host for itself.
+    """
+    return size_pool(
+        cpus=available_cpus(),
+        memory_limit=cgroup_memory_limit() or physical_memory(),
+        memory_budget_bytes=memory_budget_bytes,
+        requested=requested,
+    )
 
 
 # -- the worker -----------------------------------------------------------------
@@ -227,6 +280,8 @@ class WorkerConfig:
     #: The service's ``--yes``. **False previews**, as everywhere else.
     commit: bool = False
     threads: int = 1
+    #: DuckDB's memory limit per worker; ``None`` leaves DuckDB's default.
+    duckdb_memory_bytes: int | None = None
     #: The environment a worker restores before every table. Must be taken
     #: *before* anything loads ``.env`` into ``os.environ``: ``load_env`` lets
     #: the real environment win, so a worker inheriting already-loaded keys
@@ -238,6 +293,19 @@ class WorkerConfig:
     entry: str = "zamboni.cli:main"
     #: Where per-table config and run-record files go.
     workdir: Path = field(default_factory=lambda: Path.cwd())
+
+    @classmethod
+    def from_pool(cls, size: PoolSize, **settings: Any) -> WorkerConfig:
+        """A config carrying ``size``'s per-worker threads and DuckDB memory.
+
+        The way to build one for a sized pool, so the numbers the sizing chose
+        are the numbers the workers get -- not restated beside it.
+        """
+        return cls(
+            threads=size.threads_per_worker,
+            duckdb_memory_bytes=size.duckdb_memory_bytes,
+            **settings,
+        )
 
 
 def worker_argv(
@@ -256,6 +324,8 @@ def worker_argv(
         "--threads",
         str(config.threads),
     ]
+    if config.duckdb_memory_bytes is not None:
+        argv += ["--duckdb-memory-limit-bytes", str(config.duckdb_memory_bytes)]
     if item.uri:
         argv += ["--uri", item.uri]
     if config.profile_path:

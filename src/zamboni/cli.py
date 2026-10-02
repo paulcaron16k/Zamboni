@@ -704,6 +704,15 @@ def _add_catalog_args(p: argparse.ArgumentParser) -> None:
         "service sets it per worker from the CPU quota, so N workers do not each "
         "assume the whole machine.",
     )
+    g.add_argument(
+        "--duckdb-memory-limit-bytes",
+        type=_positive_int,
+        default=None,
+        help="DuckDB's memory limit for this run. Default: DuckDB's own, 80%% of "
+        "the memory it detects -- which is the process's own cgroup limit if it "
+        "has one, and host RAM if the limit is only on a parent cgroup. The "
+        "service sets it per worker from the pool's memory plan.",
+    )
 
     # Named for the question rather than for one provider: `--credential-use`
     # governs GCS and Azure too, and an operator on either would read a group
@@ -864,8 +873,11 @@ _SESSION_THREADS: int = CatalogSession.threads
 
 def _session_from(args: argparse.Namespace) -> CatalogSession:
     threads = getattr(args, "threads", None) or _SESSION_THREADS
+    memory = getattr(args, "duckdb_memory_limit_bytes", None)
     if args.local_warehouse:
-        return CatalogSession.for_local(warehouse_path=args.local_warehouse, threads=threads)
+        return CatalogSession.for_local(
+            warehouse_path=args.local_warehouse, threads=threads, memory_limit_bytes=memory
+        )
 
     if not args.uri or not args.warehouse:
         raise ValueError(
@@ -879,6 +891,7 @@ def _session_from(args: argparse.Namespace) -> CatalogSession:
         uri=args.uri,
         warehouse=args.warehouse,
         threads=threads,
+        memory_limit_bytes=memory,
         # Environment only: the flags that used to set these were removed
         # because a command line is world-readable. `_RemovedSecretFlag` says so
         # if anyone passes the old ones.

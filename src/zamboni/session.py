@@ -88,6 +88,15 @@ class CatalogSession:
     #: Threads DuckDB may use. Kept low by default because a maintenance job
     #: usually runs beside something more important.
     threads: int = 4
+    #: DuckDB's ``memory_limit``, in bytes. ``None`` leaves DuckDB's own
+    #: default, which is 80% of what it believes the memory is -- measured with
+    #: DuckDB 1.5.5 (2026-10-01): 819.1 MiB under a 1 GiB cgroup v2
+    #: ``memory.max`` on the process's own cgroup, but 24.9 GiB of a 31.2 GiB
+    #: host when the 1 GiB limit sat on a *parent* cgroup only. It reads the
+    #: leaf, not the tree. And where it does read it, N processes sharing one
+    #: limit each plan for 80% of the whole. The worker pool sets this so they
+    #: do not (ZMBNI-147).
+    memory_limit_bytes: int | None = None
     #: Zamboni's own object-store credentials, when it has been given any --
     #: for whichever provider the warehouse lives in.
     storage: StorageSettings | None = None
@@ -245,6 +254,7 @@ class CatalogSession:
         s3: S3Settings | None = None,
         storage: StorageSettings | None = None,
         threads: int = 4,
+        memory_limit_bytes: int | None = None,
         credential_use: CredentialUse = CredentialUse.ALWAYS,
         extra: dict[str, Any] | None = None,
     ) -> CatalogSession:
@@ -270,6 +280,7 @@ class CatalogSession:
                 one or the other, not both.
             credential_use: When to prefer them over the catalog's. Defaults to
                 ``always``.
+            memory_limit_bytes: DuckDB's memory limit; see the field.
         """
         if s3 and storage:
             raise ValueError("pass `s3` or `storage`, not both -- they set the same thing")
@@ -292,8 +303,9 @@ class CatalogSession:
         # override a signing one, which PyIceberg offers no way to ask for.
         return cls(
             catalog=catalog,
-            con=_new_duckdb(threads),
+            con=_new_duckdb(threads, memory_limit_bytes),
             threads=threads,
+            memory_limit_bytes=memory_limit_bytes,
             storage=storage,
             credential_use=credential_use,
         )
@@ -306,6 +318,7 @@ class CatalogSession:
         uri: str | None = None,
         name: str = "local",
         threads: int = 4,
+        memory_limit_bytes: int | None = None,
     ) -> CatalogSession:
         """Build a session against a local SQL catalog on a filesystem warehouse.
 
@@ -318,12 +331,24 @@ class CatalogSession:
             uri=uri or f"sqlite:///{warehouse_path.rstrip('/')}/catalog.db",
             warehouse=f"file://{warehouse_path.rstrip('/')}",
         )
-        return cls(catalog=catalog, con=_new_duckdb(threads), threads=threads)
+        return cls(
+            catalog=catalog,
+            con=_new_duckdb(threads, memory_limit_bytes),
+            threads=threads,
+            memory_limit_bytes=memory_limit_bytes,
+        )
 
     @classmethod
-    def from_catalog(cls, catalog: Catalog, *, threads: int = 4) -> CatalogSession:
+    def from_catalog(
+        cls, catalog: Catalog, *, threads: int = 4, memory_limit_bytes: int | None = None
+    ) -> CatalogSession:
         """Wrap an already-configured PyIceberg catalog."""
-        return cls(catalog=catalog, con=_new_duckdb(threads), threads=threads)
+        return cls(
+            catalog=catalog,
+            con=_new_duckdb(threads, memory_limit_bytes),
+            threads=threads,
+            memory_limit_bytes=memory_limit_bytes,
+        )
 
 
 @dataclass(frozen=True)
@@ -681,7 +706,13 @@ def _with_storage_owner_io(table: Table, storage: StorageSettings) -> Table:
     return table
 
 
-def _new_duckdb(threads: int) -> duckdb.DuckDBPyConnection:
+def _new_duckdb(threads: int, memory_limit_bytes: int | None = None) -> duckdb.DuckDBPyConnection:
     con = duckdb.connect()
     con.execute(f"SET threads = {int(threads)}")
+    if memory_limit_bytes is not None:
+        if memory_limit_bytes < 1:
+            raise ValueError(f"memory_limit_bytes must be positive, got {memory_limit_bytes}")
+        # A bare number is a parser error ("Unknown unit for memory"); `B` is
+        # bytes. Checked against DuckDB 1.5.5.
+        con.execute(f"SET memory_limit = '{int(memory_limit_bytes)}B'")
     return con

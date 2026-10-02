@@ -1218,6 +1218,16 @@ nothing, so it was set high to avoid paying for a slower path. Now the trade is
 real — `IN_MEMORY` on a 1 GiB group was measured at ~2.3 GiB of growth, more
 than a small host has, while CHUNKED stays flat.
 
+**DuckDB's own memory limit is a separate setting**, and it decides where a
+sort spills. Left alone it is DuckDB's default — 80% of the memory DuckDB
+detects. Measured with DuckDB 1.5.5 (2026-10-01): **819.1 MiB** under a 1 GiB
+cgroup v2 limit on the process's own cgroup, but **24.9 GiB** of a 31.2 GiB
+host when the same 1 GiB limit sat on a *parent* cgroup only — DuckDB reads its
+own cgroup, not the tree, and a pod's limit can sit above the container's.
+`--duckdb-memory-limit-bytes` sets it explicitly for one run. `zamboni serve`
+sets it per worker from its pool plan, because several workers sharing one
+limit would otherwise each plan for 80% of the whole.
+
 ### Who bin-packs a chunked rewrite (`streaming_writes`)
 
 For an **unpartitioned** CHUNKED rewrite there are two ways to turn the record

@@ -466,3 +466,132 @@ def test_the_worker_thread_budget_reaches_duckdb(tmp_path):
         assert session.con.execute("select current_setting('threads')").fetchone()[0] == 2
     finally:
         session.close()
+
+
+# -- DuckDB's memory, per worker (ZMBNI-147) -----------------------------------------
+
+
+def test_each_workers_duckdb_gets_its_share_of_the_plan():
+    """The plan is enforced where memory is allocated: N workers' DuckDB limits
+    plus their baselines fit inside the headroom of the limit."""
+    limit, budget = 8192 * MiB, 256 * MiB
+    size = size_pool(cpus=16, memory_limit=limit, memory_budget_bytes=budget)
+    assert size.duckdb_memory_bytes is not None
+    total = size.workers * (size.duckdb_memory_bytes + WORKER_BASELINE_BYTES)
+    assert total <= limit * MEMORY_HEADROOM
+    # ...and uses it: no worker's share is left more than a byte per worker unused.
+    assert limit * MEMORY_HEADROOM - total < size.workers
+    assert size.duckdb_memory_bytes >= budget, "room for the group the budget allows"
+
+
+def test_fewer_workers_get_more_each():
+    one = size_pool(cpus=8, memory_limit=4096 * MiB, memory_budget_bytes=0, requested=1)
+    four = size_pool(cpus=8, memory_limit=4096 * MiB, memory_budget_bytes=0, requested=4)
+    assert one.duckdb_memory_bytes > four.duckdb_memory_bytes
+
+
+def test_no_memory_figure_leaves_duckdb_its_default():
+    size = size_pool(cpus=4, memory_limit=None, memory_budget_bytes=256 * MiB)
+    assert size.duckdb_memory_bytes is None
+
+
+def test_a_plan_that_does_not_fit_floors_duckdb_and_says_so(caplog):
+    from zamboni.pool import DUCKDB_MIN_MEMORY_BYTES
+
+    with caplog.at_level("WARNING", logger="zamboni.pool"):
+        size = size_pool(cpus=1, memory_limit=128 * MiB, memory_budget_bytes=256 * MiB)
+    assert size.workers == 1
+    assert size.duckdb_memory_bytes == DUCKDB_MIN_MEMORY_BYTES
+    assert "does not fit" in caplog.text
+
+
+def test_with_no_cgroup_the_plan_uses_host_memory(monkeypatch):
+    """Declining to plan would leave every worker's DuckDB assuming 80% of the host."""
+    from zamboni import pool
+
+    monkeypatch.setattr(pool, "cgroup_memory_limit", lambda: None)
+    monkeypatch.setattr(pool, "physical_memory", lambda: 16384 * MiB)
+    monkeypatch.setattr(pool, "available_cpus", lambda: 4)
+    size = pool.plan_pool(memory_budget_bytes=256 * MiB)
+    assert size.duckdb_memory_bytes is not None
+    assert size.workers * size.duckdb_memory_bytes < 16384 * MiB * MEMORY_HEADROOM
+
+
+def test_the_cgroup_limit_wins_over_host_memory(monkeypatch):
+    from zamboni import pool
+
+    monkeypatch.setattr(pool, "cgroup_memory_limit", lambda: 2048 * MiB)
+    monkeypatch.setattr(pool, "physical_memory", lambda: 65536 * MiB)
+    monkeypatch.setattr(pool, "available_cpus", lambda: 4)
+    size = pool.plan_pool(memory_budget_bytes=256 * MiB)
+    assert size.workers * (size.duckdb_memory_bytes + WORKER_BASELINE_BYTES) <= (
+        2048 * MiB * MEMORY_HEADROOM
+    )
+
+
+def test_a_worker_config_carries_the_plan_and_the_worker_passes_it(tmp_path):
+    """No second literal: the numbers the sizing chose are the numbers on the
+    worker's command line, and the CLI's own parser reads them back."""
+    from zamboni.cli import _build_parser
+
+    size = size_pool(cpus=8, memory_limit=4096 * MiB, memory_budget_bytes=256 * MiB)
+    config = WorkerConfig.from_pool(size, workdir=tmp_path)
+    assert (config.threads, config.duckdb_memory_bytes) == (
+        size.threads_per_worker,
+        size.duckdb_memory_bytes,
+    )
+    args = _build_parser().parse_args(
+        worker_argv(item(), config, tmp_path / "t.json", tmp_path / "r.jsonl")
+    )
+    assert args.duckdb_memory_limit_bytes == size.duckdb_memory_bytes
+    assert args.threads == size.threads_per_worker
+
+
+def test_without_a_plan_a_worker_passes_no_memory_flag(tmp_path):
+    argv = worker_argv(item(), WorkerConfig(workdir=tmp_path), tmp_path / "t", tmp_path / "r")
+    assert "--duckdb-memory-limit-bytes" not in argv
+
+
+def session_from(tmp_path, *flags: str):
+    from zamboni.cli import _apply_profile, _build_parser, _session_from
+    from zamboni.settings import Profile
+
+    (tmp_path / "wh").mkdir(exist_ok=True)
+    args = _build_parser().parse_args(
+        ["maintenance", "--local-warehouse", str(tmp_path / "wh"), *flags]
+    )
+    _apply_profile(args, Profile())
+    return _session_from(args)
+
+
+def duckdb_setting(session, name: str):
+    return session.con.execute(f"select current_setting('{name}')").fetchone()[0]
+
+
+def test_the_memory_flag_reaches_duckdb(tmp_path):
+    session = session_from(tmp_path, "--duckdb-memory-limit-bytes", str(512 * MiB))
+    try:
+        assert duckdb_setting(session, "memory_limit") == "512.0 MiB"
+        assert session.memory_limit_bytes == 512 * MiB
+    finally:
+        session.close()
+
+
+def test_without_the_flag_duckdb_keeps_its_own_default(tmp_path):
+    """A cron or CLI run is unchanged: what DuckDB picks for itself."""
+    import duckdb
+
+    session = session_from(tmp_path)
+    try:
+        expected = duckdb.connect().execute("select current_setting('memory_limit')").fetchone()[0]
+        assert duckdb_setting(session, "memory_limit") == expected
+        assert session.memory_limit_bytes is None
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_a_non_positive_memory_limit_is_a_usage_error(tmp_path, value):
+    with pytest.raises(SystemExit) as exc:
+        session_from(tmp_path, "--duckdb-memory-limit-bytes", value)
+    assert exc.value.code == 2

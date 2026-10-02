@@ -44,6 +44,14 @@ Two categories beyond the usual set, because this tool deletes files:
   work is still decided only by `maintain()`'s due-check, so no scheduling path
   can bypass it.
 
+- **`--duckdb-memory-limit-bytes`** on every catalog-connected verb: DuckDB's
+  memory limit for the run (ZMBNI-147). Unset, DuckDB keeps its own default
+  exactly as before — 80% of what it detects, which is the process's own cgroup
+  limit if it has one and host RAM if the limit is only on a parent cgroup
+  (measured, DuckDB 1.5.5; see the user guide's memory section). The worker
+  pool now sets it per worker from the same plan that sizes the pool, so N
+  workers no longer each plan for most of the machine.
+
 - **`zamboni config-reload --pid-file PATH`** — send SIGHUP to a running
   `zamboni serve` so it reloads its fleet file now (ZMBNI-119). Exit 2, and no
   signal sent, when the pid file is missing, stale, or names a process that is

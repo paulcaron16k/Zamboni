@@ -177,9 +177,15 @@ Implemented by `zamboni.pool` (ZMBNI-121). What it settles, each tested in
   of the container's cgroup), v2 and v1. Workers are
   `min(CPUs, 0.8 × memory / (256 MiB baseline + memory_budget_bytes))`, and each
   gets `CPUs / workers` DuckDB threads through the new `--threads` flag.
-  **DuckDB's own memory limit is not yet set per worker** — it defaults to 80%
-  of RAM (24.9 GiB of 31.2 GiB, DuckDB 1.5.5), so the plan is not enforced
-  below Zamboni's own budget. That is ZMBNI-147.
+  **Each worker's DuckDB gets its share of the plan** (ZMBNI-147):
+  `0.8 × memory / workers − 256 MiB baseline`, through
+  `--duckdb-memory-limit-bytes`, built by `WorkerConfig.from_pool` from the
+  same `PoolSize` that chose the worker count. Left to its default, DuckDB
+  plans for 80% of the memory it detects — and measured with DuckDB 1.5.5, it
+  detects the process's *own* cgroup limit (819.1 MiB of a 1 GiB `memory.max`)
+  but not a parent's (24.9 GiB of a 31.2 GiB host with the 1 GiB limit one level
+  up). Either way N workers would each plan for most of the whole. With no
+  cgroup limit the plan uses host RAM rather than declining to plan.
 - **The feed takes from the queue only when a worker is free**, so a waiting
   table still coalesces and is still resolved against the newest config.
   Waiting for a worker is raced against stop: an earlier draft, blocked there,
