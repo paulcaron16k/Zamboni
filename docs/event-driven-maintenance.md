@@ -146,6 +146,45 @@ and spilling is slower than waiting for a free worker.
 and a catalog client and cannot cross a process boundary, so a worker receives
 config — warehouse, table, table-config — and builds its own session.
 
+Implemented by `zamboni.pool` (ZMBNI-121). What it settles, each tested in
+`tests/test_pool.py`:
+
+- **A worker runs the CLI's own `maintenance` path** for one table, in-process,
+  rather than a second implementation of it. Resolution order, session, engine,
+  reporter, exit codes and the `--json` record are the code a cron line runs.
+  What crosses the boundary is an argv of strings, the item's table config as a
+  file, and the run record back — never a `CatalogSession`, and never a secret
+  on a command line.
+- **Long-lived workers, not a process per table.** Importing what a worker needs
+  measured 1.7–2.1 s and ~174 MB (`/usr/bin/time`, three runs, 2026-10-01): for
+  1,000 tables on 4 workers that is ~8 minutes of every sweep spent importing,
+  for tables whose due-check takes ~25 ms. Workers are recycled after
+  `RECYCLE_AFTER_TABLES` (50 — chosen, not measured).
+- **Spawned, not forked.** A forkserver with the imports preloaded forks in
+  ~17 ms (measured), but `pyarrow` and `duckdb` start native threads at import —
+  1 OS thread before, 8 after — and forking a threaded process can leave a lock
+  held by a thread that no longer exists.
+- **A worker dying takes one table.** Not `ProcessPoolExecutor`, which breaks
+  the whole pool when any worker dies. The table reports exit 1 — Python's own
+  code for an uncaught crash, so it reads like a crashed CLI run — and a
+  replacement worker takes the next one.
+- **Every table starts from the environment the worker was given**, so a
+  credential rotated in `.env` reaches the next table rather than the next
+  worker; `load_env` lets the real environment win, and keys a previous table
+  loaded would otherwise stay.
+- **Sized from the cgroup, not `os.cpu_count()`.** The CPU quota and the memory
+  limit are each the smallest up the cgroup tree (a pod's limit sits on a parent
+  of the container's cgroup), v2 and v1. Workers are
+  `min(CPUs, 0.8 × memory / (256 MiB baseline + memory_budget_bytes))`, and each
+  gets `CPUs / workers` DuckDB threads through the new `--threads` flag.
+  **DuckDB's own memory limit is not yet set per worker** — it defaults to 80%
+  of RAM (24.9 GiB of 31.2 GiB, DuckDB 1.5.5), so the plan is not enforced
+  below Zamboni's own budget. That is ZMBNI-147.
+- **The feed takes from the queue only when a worker is free**, so a waiting
+  table still coalesces and is still resolved against the newest config.
+  Waiting for a worker is raced against stop: an earlier draft, blocked there,
+  took and dropped a table after stop, and the test that caught it stays.
+
 **Free-threaded Python would change this** and is worth watching rather than
 depending on. Keeping the parallel unit at the table maps onto either model.
 
