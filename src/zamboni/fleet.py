@@ -35,6 +35,7 @@ means that holds for the programmatic path too: there is no unvalidated
 from __future__ import annotations
 
 import calendar
+import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -46,8 +47,8 @@ from .tableconfig import TableConfig, TableConfigError
 #: The fleet file's own format version, independent of table-config's.
 FLEET_VERSION = 1
 
-_ROOT_KEYS = frozenset({"version", "warehouses"})
-_WAREHOUSE_KEYS = frozenset({"name", "uri", "schedule", "table_config"})
+_ROOT_KEYS = frozenset({"version", "warehouses", "random"})
+_WAREHOUSE_KEYS = frozenset({"name", "uri", "schedule", "table_config", "random"})
 
 
 class FleetConfigError(ValueError):
@@ -92,6 +93,14 @@ _MACROS = {
 #: construction has already proved will find a match.
 _SEARCH_HORIZON = timedelta(days=366 * 9)
 
+#: With ``random=True`` (the default), how far a firing may move, as a percentage of the gap
+#: to the following firing -- either way. Kept under 50 so a moved firing can
+#: never pass its neighbour.
+RANDOM_PCT = 5
+#: ...and the cap on that, either way. A daily 02:00 is 5% of 24 h = 72 min,
+#: capped to 30: it lands between 01:30 and 02:30.
+RANDOM_LIMIT_MINUTES = 30
+
 
 @dataclass(frozen=True)
 class CronSchedule:
@@ -117,9 +126,21 @@ class CronSchedule:
     day-of-week 7 is Sunday. ``n/s`` is refused: some crons read it as
     ``n-max/s`` and others reject it, and a schedule that means different
     things in different places is not one to accept silently.
+
+    **Firings are spread by default** (``random=True``, ZMBNI-144), so
+    warehouses that share an expression do not all start in the same minute.
+    Each firing moves by up to ±:data:`RANDOM_PCT` percent of the gap to the
+    next one, capped at ±:data:`RANDOM_LIMIT_MINUTES`. See :meth:`offset`.
+
+    On by default because the default is the mode the system is designed to
+    survive the worst case in: a fleet provisioned from one template, every
+    warehouse at ``0 2 * * *``, against one object store shared with everything
+    else scheduled on the hour. ``random=False`` fires on the exact minute, and
+    is the operator's choice to make knowingly.
     """
 
     expression: str
+    random: bool = True
     minutes: frozenset[int] = field(init=False, repr=False, compare=False)
     hours: frozenset[int] = field(init=False, repr=False, compare=False)
     days_of_month: frozenset[int] = field(init=False, repr=False, compare=False)
@@ -131,6 +152,11 @@ class CronSchedule:
     dow_star: bool = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.random, bool):
+            raise FleetConfigError(
+                f"schedule {self.expression!r}: random must be true or false, "
+                f"not {type(self.random).__name__}"
+            )
         if not isinstance(self.expression, str):
             raise FleetConfigError(
                 f"a schedule is a cron expression string, not {type(self.expression).__name__}"
@@ -202,6 +228,39 @@ class CronSchedule:
         # Unreachable: construction refused every schedule that cannot fire,
         # and every one that can fires within the horizon.
         raise AssertionError(f"schedule {self.expression!r} found no firing after {moment}")
+
+    def offset(self, nominal: datetime, seed: str) -> timedelta:
+        """How far the firing at ``nominal`` moves; zero unless ``random``.
+
+        ``min(RANDOM_PCT% of the gap to the next firing, RANDOM_LIMIT_MINUTES)``,
+        scaled by a fraction in [-1, 1) derived from ``seed`` -- the warehouse's
+        name, in the scheduler -- *and* ``nominal``.
+
+        **A fresh offset for every firing** (decided 2026-10-01), as systemd's
+        ``RandomizedDelaySec`` draws one per iteration: two large warehouses
+        that land together tonight are unlikely to land together tomorrow, so
+        no pair is stuck colliding every night.
+
+        **Derived, not drawn.** A SHA-256 of seed and firing rather than a
+        random number generator, so asking twice gives one answer: a restart or
+        a reload at 01:45 does not re-roll tonight's 02:00 and move it past a
+        window that has already opened. Not ``hash()``, which Python salts per
+        process -- that would re-roll on every restart, which is the property
+        this exists to avoid.
+
+        The gap is measured forward, so an irregular schedule (``0 2,3 * * *``)
+        moves each firing by its own share.
+        """
+        if not self.random:
+            return timedelta(0)
+        gap = self.next_after(nominal) - _as_utc(nominal)
+        span = min(gap * RANDOM_PCT / 100, timedelta(minutes=RANDOM_LIMIT_MINUTES))
+        firing = _as_utc(nominal).isoformat()
+        digest = hashlib.sha256(f"{seed}@{firing}".encode()).digest()
+        fraction = int.from_bytes(digest[:8], "big") / 2**63 - 1  # [-1, 1)
+        # Whole seconds: nothing downstream is finer, and it keeps a due time
+        # readable in a log or a state file.
+        return timedelta(seconds=round(span.total_seconds() * fraction))
 
     def _day_matches(self, t: datetime) -> bool:
         dom = t.day in self.days_of_month
@@ -409,6 +468,14 @@ class FleetConfig:
             raise FleetConfigError(
                 f"<root>.warehouses: expected a list of warehouses, found {_json_name(entries)}"
             )
+        # The fleet-wide default for `random`, which a warehouse may override.
+        # On unless switched off -- see CronSchedule for why the default is the
+        # worst-case mode -- and switching it off is one line, at DevOps' risk.
+        spread = raw.get("random", True)
+        if not isinstance(spread, bool):
+            raise FleetConfigError(
+                f"<root>.random: expected true or false, found {_json_name(spread)}"
+            )
         version = raw.get("version", FLEET_VERSION)
         if not isinstance(version, int) or isinstance(version, bool):
             raise FleetConfigError(
@@ -418,14 +485,14 @@ class FleetConfig:
         sources = [source] if source is not None else []
         warehouses = []
         for index, entry in enumerate(entries):
-            warehouse, read = _warehouse_from_dict(entry, f"warehouses[{index}]", base)
+            warehouse, read = _warehouse_from_dict(entry, f"warehouses[{index}]", base, spread)
             warehouses.append(warehouse)
             sources.extend(read)
         return cls(warehouses=tuple(warehouses), version=version, sources=tuple(sources))
 
 
 def _warehouse_from_dict(
-    raw: Any, where: str, base: Path | None
+    raw: Any, where: str, base: Path | None, spread: bool = False
 ) -> tuple[FleetWarehouse, list[Path]]:
     _check_block(raw, _WAREHOUSE_KEYS, where)
     for key in ("name", "schedule", "table_config"):
@@ -465,7 +532,7 @@ def _warehouse_from_dict(
     try:
         warehouse = FleetWarehouse(
             name=name,
-            schedule=CronSchedule(raw["schedule"]),
+            schedule=CronSchedule(raw["schedule"], random=raw.get("random", spread)),
             table_config=table_config,
             uri=raw.get("uri"),
         )

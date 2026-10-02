@@ -173,6 +173,7 @@ warehouses:
             sessions: {retention: {expire_snapshots: {max_snapshot_age_days: 7}}}
   - name: globex
     schedule: "30 3 * * *"
+    random: false                           # exactly 03:30; spreading is on otherwise
     table_config: globex/table-config.json  # or a path, relative to this file
 ```
 
@@ -196,6 +197,32 @@ tested in `tests/test_fleet.py`:
 - **Schedules are crontab(5) five-field expressions in UTC**, with crontab's own
   rule that a restricted day-of-month *or* day-of-week matches. A schedule that
   can never fire (`0 0 30 2 *`) is refused rather than left to never run.
+- **Firings are spread by default** (ZMBNI-144). A firing moves by up to
+  ±`RANDOM_PCT` (5) percent of the gap to the next one, capped at
+  ±`RANDOM_LIMIT_MINUTES` (30): a daily 02:00 lands between 01:30 and 02:30, a
+  `*/5` moves by at most 15 s. `random: false` — fleet-wide at the top level, or
+  per warehouse — fires on the exact minute, at DevOps' own risk.
+
+  **On by default because the default is the worst-case mode.** The case to
+  survive is a fleet provisioned from one template, every warehouse at
+  `0 2 * * *`, against an object store shared with everything else scheduled
+  on the hour. A default that is safe only when someone remembered to stagger
+  the schedules is not safe under that case.
+
+  **A fresh offset every night**, as systemd's `RandomizedDelaySec` draws one
+  per iteration, so no pair of large warehouses is stuck colliding nightly. It
+  is *derived* — a SHA-256 of the warehouse name and the nominal firing — not
+  drawn, so a restart or reload at 01:45 does not re-roll tonight's 02:00; and
+  it is not Python's `hash()`, which is salted per process and would. A firing
+  moved early is still that firing: the next is armed from the nominal time,
+  so it never fires twice.
+
+  **Why it is needed even with a bounded pool:** the pool (#121) caps what *one*
+  `zamboni serve` runs at once, so a fleet firing together becomes a backlog
+  rather than a storm against that process. It does nothing for several
+  deployments sharing one object store, for cron deployments
+  ([devops.md §1](devops.md) shows the crontab equivalent), or for everything
+  else in the estate scheduled on the hour.
 
 **(b) `zamboni.yml` + `.env` — written by the operator.** Storage endpoints and
 credentials, catalog auth, engine choice, spill directory, the NATS address. Needs a

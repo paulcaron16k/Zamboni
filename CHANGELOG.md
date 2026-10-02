@@ -44,6 +44,14 @@ Two categories beyond the usual set, because this tool deletes files:
   work is still decided only by `maintain()`'s due-check, so no scheduling path
   can bypass it.
 
+- **Scheduled firings are spread across a window by default** (ZMBNI-144). A
+  firing moves by up to ±`RANDOM_PCT` (5%) of the gap to the next, capped at
+  ±`RANDOM_LIMIT_MINUTES` (30): a daily 02:00 lands between 01:30 and 02:30,
+  with a fresh offset each night. `random: false` in the fleet file, fleet-wide
+  or per warehouse, or `CronSchedule(expression, random=False)`, fires on the
+  exact minute. Nothing has shipped that fired on the exact minute, so this
+  changes no existing schedule. `devops.md` §1 shows the crontab equivalent.
+
 - **Compaction can restrict itself to the partitions that changed since the last
   maintenance** — `--only-changed-partitions`, or
   `CompactionConfig(only_changed_partitions=True)`. **Off by default**: the

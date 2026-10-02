@@ -40,7 +40,7 @@ narrower scope.
 **Capture stderr.** That is the whole requirement, and a cron line can do it:
 
 ```cron
-17 3 * * * cd /srv/zamboni && zamboni maintenance --yes --verbose >> /var/log/zamboni/cron.log 2>&1
+47 2 * * * sleep $(shuf -i 0-3600 -n 1); cd /srv/zamboni && flock -n /var/lock/zamboni.lock zamboni maintenance --yes --verbose >> /var/log/zamboni/cron.log 2>&1
 ```
 
 `2>&1` is the load-bearing part. Redirecting only stdout captures the summary

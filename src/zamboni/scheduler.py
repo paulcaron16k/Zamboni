@@ -38,7 +38,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from .fleet import FleetConfig
+from .fleet import FleetConfig, FleetWarehouse
 from .tableconfig import TableConfig
 
 logger = logging.getLogger(__name__)
@@ -171,6 +171,20 @@ def _resolve(candidate: Candidate, fleet: FleetConfig) -> WorkItem | None:
     )
 
 
+@dataclass(frozen=True)
+class _Armed:
+    #: The firing the cron expression names.
+    nominal: datetime
+    #: When it is actually offered: ``nominal`` plus the schedule's offset,
+    #: which is zero unless the schedule is ``random``.
+    due: datetime
+
+
+def _arm(warehouse: FleetWarehouse, after: datetime) -> _Armed:
+    nominal = warehouse.schedule.next_after(after)
+    return _Armed(nominal, nominal + warehouse.schedule.offset(nominal, warehouse.name))
+
+
 class Scheduler:
     """Per-warehouse cron firings, as pure functions of the time it is given.
 
@@ -183,34 +197,41 @@ class Scheduler:
     **A new warehouse, and a fresh start, arm from now.** A service started at
     02:01 does not run the 02:00 schedule it just missed; it waits for the next
     one, as cron would. Running everything at startup would make every restart
-    -- a rollout, a reschedule by Kubernetes -- a full fleet sweep.
+    -- a rollout, a reschedule by Kubernetes -- a full fleet sweep. (With
+    ``random``, a firing whose window has already opened -- started at 01:45,
+    due at 01:35 for a nominal 02:00 -- is offered on the first tick: it is
+    this firing, not a missed one.)
+
+    **A firing moved early is still that firing.** The next one is armed from
+    after the *nominal* time, so a 02:00 offered at 01:40 does not find 02:00
+    still ahead of it and fire twice.
     """
 
     def __init__(self, fleet: FleetConfig, now: datetime) -> None:
         self._fleet = fleet
-        self._next: dict[str, datetime] = {
-            w.name: w.schedule.next_after(now) for w in fleet.warehouses
-        }
+        self._armed: dict[str, _Armed] = {w.name: _arm(w, now) for w in fleet.warehouses}
 
     @property
     def fleet(self) -> FleetConfig:
         return self._fleet
 
     def next_firing(self, warehouse: str) -> datetime:
-        return self._next[warehouse]
+        """When ``warehouse`` is next offered, offset included."""
+        return self._armed[warehouse].due
 
     def wake_at(self) -> datetime:
         """When the earliest warehouse is next due."""
-        return min(self._next.values())
+        return min(armed.due for armed in self._armed.values())
 
     def tick(self, now: datetime, queue: CandidateQueue) -> list[str]:
         """Offer every table of every due warehouse; the warehouses that fired."""
         fired = []
         for warehouse in self._fleet.warehouses:
-            if self._next[warehouse.name] > now:
+            armed = self._armed[warehouse.name]
+            if armed.due > now:
                 continue
             fired.append(warehouse.name)
-            self._next[warehouse.name] = warehouse.schedule.next_after(now)
+            self._armed[warehouse.name] = _arm(warehouse, max(now, armed.nominal))
             for table in sorted(warehouse.table_config.tables):
                 queue.offer(Candidate(warehouse.name, table, SCHEDULE))
         return fired
@@ -221,7 +242,8 @@ class Scheduler:
         A warehouse whose schedule is unchanged keeps the firing it was already
         waiting for -- re-arming it from now would silently push a 02:00 run to
         tomorrow whenever an unrelated tenant was provisioned at 01:59. A changed
-        or new schedule arms from now; a removed warehouse is forgotten.
+        or new schedule arms from now -- and turning ``random`` on or off is a
+        change -- while a removed warehouse is forgotten.
 
         Seen by :func:`run_scheduler` at its next step, so a reload that brings
         a firing forward takes effect at most :data:`MAX_SLEEP` late.
@@ -233,9 +255,9 @@ class Scheduler:
                 unchanged = self._fleet[name].schedule == warehouse.schedule
             except KeyError:
                 unchanged = False
-            armed[name] = self._next[name] if unchanged else warehouse.schedule.next_after(now)
+            armed[name] = self._armed[name] if unchanged else _arm(warehouse, now)
         self._fleet = fleet
-        self._next = armed
+        self._armed = armed
 
 
 async def run_scheduler(
