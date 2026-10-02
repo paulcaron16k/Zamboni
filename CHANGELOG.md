@@ -23,6 +23,20 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **The fleet file** — `zamboni.fleet.FleetConfig`, the configuration the
+  forthcoming `zamboni serve` reads (ZMBNI-118): warehouses, a cron schedule
+  each, and each warehouse's `table-config.json` either by path or inline. YAML
+  or JSON. Nothing reads it yet; it lands first so the scheduler has a validated
+  object to be built against.
+
+  Keys are allow-listed, a credential is refused by name (the file is defined as
+  holding none), and validation runs on construction so a fleet built in code is
+  held to the same rules as one loaded from disk. **An empty fleet is refused**,
+  because the file is generated and a generator that fails open would otherwise
+  stop every warehouse's maintenance on reload. Schedules are crontab(5)
+  five-field expressions evaluated in **UTC**; one that can never fire, such as
+  `0 0 30 2 *`, is refused.
+
 - **Compaction can restrict itself to the partitions that changed since the last
   maintenance** — `--only-changed-partitions`, or
   `CompactionConfig(only_changed_partitions=True)`. **Off by default**: the

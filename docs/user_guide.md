@@ -569,6 +569,7 @@ internal and may move in a patch release. The entry points you need:
 | `MetricsReporter` / `NoopReporter` / `CollectingReporter` / `LoggingReporter` / `MultiReporter` / `RestMetricsReporter` | where reports go: one method, `report(MetricsReport)`, copying Iceberg's own seam. Pass one as `maintain(reporter=…)`; the default emits nothing |
 | `reporter_for(catalog, extra)` | the reporter that suits a catalog — the metrics endpoint for a REST catalog, nothing to post to for a local one |
 | `NoCommitReport` / `no_commit_report(result)` / `CounterResult` / `TimerResult` / `no_commit_metrics(result)` | Iceberg's metric primitives, and the report for an operation that committed no snapshot — `expire`, `remove-orphans` and `apply-properties` never do, and the other three do not when they find nothing to do |
+| `FleetConfig` / `FleetWarehouse` / `CronSchedule` | the fleet file `zamboni serve` will read — warehouses, a UTC cron schedule each, and their table config inline or by path. `FleetConfig.load(path)` for the file; construct it directly to hold the same state in code. Validated on construction, raising `FleetConfigError`. See [event-driven-maintenance.md §4](event-driven-maintenance.md#4-configuration) |
 | `summarise_logs(paths)` / `FleetSummary` | reading a series of run summaries back — what the fleet did, per warehouse. Behind `zamboni runs`; see [devops.md](devops.md) |
 | `available_engines()` | what this install can drive |
 | `config_from_table_settings` | turning table-config layout into the compaction config `COMPACT` needs |
