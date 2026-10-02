@@ -44,6 +44,14 @@ Two categories beyond the usual set, because this tool deletes files:
   work is still decided only by `maintain()`'s due-check, so no scheduling path
   can bypass it.
 
+- **`zamboni config-reload --pid-file PATH`** — send SIGHUP to a running
+  `zamboni serve` so it reloads its fleet file now (ZMBNI-119). Exit 2, and no
+  signal sent, when the pid file is missing, stale, or names a process that is
+  not zamboni. The reload itself (`zamboni.reload`, internal) polls the fleet
+  file and its table configs every 30 s, adopts a change only once it has
+  settled across two polls, and keeps the running config when the new file is
+  invalid.
+
 - **`--threads`** on every catalog-connected verb: DuckDB's thread count for
   the run, default 4 as before. The service sets it per worker so N workers
   share the CPUs instead of each assuming the machine.

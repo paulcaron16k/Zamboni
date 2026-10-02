@@ -287,6 +287,28 @@ an admin message over NATS (couples config reload to the event bus being up).
 reported.** A reload must never be able to stop maintenance by being wrong — a real
 risk when the file is machine-generated from another system's database.
 
+Implemented by `zamboni.reload` and `zamboni config-reload` (ZMBNI-119). What it
+settles, each tested in `tests/test_reload.py`:
+
+- **A change is detected through the symlinks** — the inode, mtime and size of
+  what the path resolves to — over the fleet file *and* every table config it
+  references. A test swaps a ConfigMap-style `..data` link with an identical
+  mtime, so only the inode and resolved path can tell.
+- **A change must settle across two polls before it is loaded.** A writer caught
+  rewriting the file in place can leave a *valid* file — a list of warehouses
+  cut short — and adopting it would stop maintaining every warehouse after the
+  cut. ConfigMap projection is atomic, so there this costs one 30 s poll inside
+  the kubelet's own ~1 minute sync; anywhere else, write a temporary file and
+  rename it. **SIGHUP loads at once**, because sending it says the file is done.
+- **An invalid file keeps the running config**, is logged once, and is not
+  re-parsed until it changes again. Its error is kept for the state file (#122).
+- **`config-reload` refuses to signal a pid that is not zamboni.** A pid file
+  outlives its process, pids are reused, and SIGHUP's default action is to
+  terminate — so a stale pid file would otherwise kill an unrelated process.
+  The check reads `/proc/<pid>/cmdline`; where `/proc` is absent it refuses.
+- **The event subscription** (#119's last acceptance line) has nothing to
+  re-subscribe until the NATS consumer exists; it is #124's to honour.
+
 ---
 
 ## 5. The event contract
