@@ -37,6 +37,13 @@ Two categories beyond the usual set, because this tool deletes files:
   five-field expressions evaluated in **UTC**; one that can never fire, such as
   `0 0 30 2 *`, is refused.
 
+- **The scheduler and candidate queue** behind the forthcoming `zamboni serve`
+  (ZMBNI-120), in `zamboni.scheduler`. Internal: not exported, and nothing runs
+  it yet. A per-warehouse cron tick offers every table to a queue that
+  coalesces per table and refuses one already in flight; whether a table needs
+  work is still decided only by `maintain()`'s due-check, so no scheduling path
+  can bypass it.
+
 - **Compaction can restrict itself to the partitions that changed since the last
   maintenance** — `--only-changed-partitions`, or
   `CompactionConfig(only_changed_partitions=True)`. **Off by default**: the

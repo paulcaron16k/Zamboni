@@ -95,6 +95,27 @@ not eventually have done.
 candidate; a debounce window lets a burst settle. A table already being maintained
 is not re-enqueued.
 
+Implemented by `zamboni.scheduler` (ZMBNI-120). What it settles, each tested in
+`tests/test_scheduler.py`:
+
+- **The queue holds `(warehouse, table)` keys, not config.** The `WorkItem` a
+  worker receives is built from the fleet when it is *taken*, so a reload changes
+  every decision not yet started and none in flight, and a warehouse a reload
+  removed drops out of the queue without being cancelled. The key includes the
+  warehouse because a table identifier is not unique across a fleet.
+- **A table in flight is not re-enqueued**, by a tick or an event. For a tick the
+  run in flight *is* the work asked for. For an event it can miss a write that
+  landed after the run read its watermark; the next scheduled tick bounds that,
+  and #110 revisits it if the bound is too loose.
+- **A missed firing fires once, late** — a suspended host does not lose the
+  night's run, nor replay six of them. **A fresh start waits for the next
+  firing**, as cron does, so a rollout is not a fleet-wide sweep.
+- **A reload keeps an unchanged warehouse's pending firing.** Re-arming everything
+  from now would push acme's 02:00 run to tomorrow whenever globex was
+  provisioned at 01:59.
+- **The loop sleeps at most 60 s**, which bounds how late a firing can be after a
+  wall-clock jump and how stale the liveness tick (#122) can get.
+
 ### Threads or processes
 
 **asyncio for the front half, a bounded process pool over tables for the back half.**
