@@ -152,6 +152,7 @@ async def watch(
     stop: asyncio.Event,
     *,
     on_reload: Callable[[FleetConfig], None],
+    on_error: Callable[[str], None] | None = None,
     hangup: asyncio.Event | None = None,
     interval: float = POLL_SECONDS,
 ) -> None:
@@ -159,7 +160,8 @@ async def watch(
 
     ``on_reload`` receives each adopted fleet -- the service passes one that
     calls ``Scheduler.rearm``. It runs between ticks on the same loop, so a
-    reload is never observed half-applied.
+    reload is never observed half-applied. ``on_error`` receives a refused
+    reload's reason, on every poll that still sees the bad file.
     """
     hangup = hangup or asyncio.Event()
     while not stop.is_set():
@@ -174,6 +176,8 @@ async def watch(
         forced = hangup.is_set()
         hangup.clear()
         outcome = watcher.check(force=forced)
+        if outcome.error is not None and on_error is not None:
+            on_error(outcome.error)
         if outcome.fleet is not None:
             try:
                 on_reload(outcome.fleet)

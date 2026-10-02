@@ -314,9 +314,14 @@ def test_the_real_cli_maintains_a_table_in_a_worker(tmp_path, monkeypatch, unpar
 class FakePool:
     """The pool's interface without processes, recording concurrency."""
 
-    def __init__(self, workers: int, fail: set[str] = frozenset()) -> None:
+    def __init__(
+        self, workers: int, fail: set[str] = frozenset(), hold: asyncio.Event | None = None
+    ) -> None:
         self.size = PoolSize(workers, 1, "fake")
         self.fail = fail
+        #: When given, every table waits on it: a test that needs tables to be
+        #: *in flight* holds them there instead of racing a sleep against them.
+        self.hold = hold
         self.running = 0
         self.peak = 0
         self.started: list[str] = []
@@ -326,6 +331,8 @@ class FakePool:
         self.peak = max(self.peak, self.running)
         self.started.append(work.table)
         try:
+            if self.hold is not None:
+                await self.hold.wait()
             await asyncio.sleep(0.01)
             if work.table in self.fail:
                 raise RuntimeError("pool trouble")
@@ -398,19 +405,22 @@ def test_a_failing_result_hook_does_not_stop_maintenance():
 def test_items_wait_in_the_queue_until_a_worker_is_free():
     """Taken eagerly, they would stop coalescing. With one worker busy, the rest
     stay queued, and a re-offer of one of them still coalesces."""
-    pool = FakePool(1)
     current = fleet_of("a", "b", "c")
     queue = CandidateQueue()
     for t in ("a", "b", "c"):
         queue.offer(Candidate("acme", f"raw.{t}"))
 
     async def scenario():
+        hold = asyncio.Event()
+        pool = FakePool(1, hold=hold)
         stop = asyncio.Event()
         task = asyncio.create_task(run_workers(queue, lambda: current, pool, stop))
-        await asyncio.sleep(0.001)
+        while not pool.started:
+            await asyncio.sleep(0)
         queued_while_busy = len(queue)
         coalesced = not queue.offer(Candidate("acme", "raw.c"))
         stop.set()
+        hold.set()
         await asyncio.wait_for(task, 5)
         return queued_while_busy, coalesced
 
@@ -420,7 +430,9 @@ def test_items_wait_in_the_queue_until_a_worker_is_free():
 
 
 def test_stop_lets_in_flight_tables_finish_and_starts_no_more():
-    pool = FakePool(2)
+    """The two in flight are *held* there while stop arrives -- an earlier
+    version slept 1 ms and hoped they had not finished, and under a loaded test
+    run they sometimes had, so two more started."""
     current = fleet_of(*(f"t{i}" for i in range(6)))
     queue = CandidateQueue()
     for i in range(6):
@@ -428,15 +440,22 @@ def test_stop_lets_in_flight_tables_finish_and_starts_no_more():
     done: list[ItemResult] = []
 
     async def scenario():
+        hold = asyncio.Event()
+        pool = FakePool(2, hold=hold)
         stop = asyncio.Event()
         task = asyncio.create_task(
             run_workers(queue, lambda: current, pool, stop, on_result=done.append)
         )
-        await asyncio.sleep(0.001)
+        while len(pool.started) < 2:
+            await asyncio.sleep(0)
         stop.set()
+        await asyncio.sleep(0.01)
+        assert not done, "in flight, not finished, when stop arrived"
+        hold.set()
         await asyncio.wait_for(task, 5)
+        return pool
 
-    asyncio.run(scenario())
+    pool = asyncio.run(scenario())
     assert len(done) == len(pool.started) == 2, "the two in flight finished; none started after"
     assert len(queue) == 4
     assert queue.in_flight == frozenset()

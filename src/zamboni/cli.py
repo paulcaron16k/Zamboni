@@ -159,6 +159,9 @@ def main(argv: list[str] | None = None) -> int:
     # Before anything reads an environment variable or a flag default: the
     # dotenv file has to be in os.environ first, and the profile supplies what
     # neither a flag nor the environment did.
+    # Taken before `.env` is loaded into os.environ, for `serve`'s workers: each
+    # restores this before a table, so every table reads `.env` fresh.
+    args.zamboni_base_environ = dict(os.environ)
     try:
         args.zamboni_profile, env_file = settings.resolve(
             profile_path=args.profile, env_path=args.env
@@ -166,6 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     except settings.ProfileError as exc:
         parser.error(str(exc))
         return 2
+    args.zamboni_env_file = env_file
     _apply_profile(args, args.zamboni_profile)
     if args.verbose:
         logging.getLogger(__name__).debug(
@@ -194,11 +198,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "runs":
         return _runs(args)
 
+    if args.command == "serve":
+        return _serve(args)
+
+    if args.command == "service-status":
+        return _service_status(args)
+
     if args.command == "config-reload":
         from .reload import PidFileError, send_reload
 
         try:
-            pid = send_reload(args.pid_file)
+            pid = send_reload(args.pid_file or _run_dir(args) / "serve.pid")
         except PidFileError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
@@ -353,7 +363,76 @@ def _build_parser() -> argparse.ArgumentParser:
             "action would otherwise terminate an unrelated process."
         ),
     )
-    cr.add_argument("--pid-file", required=True, help="the pid file `zamboni serve` writes")
+    cr.add_argument(
+        "--pid-file",
+        help="the pid file `zamboni serve` writes. Default: $ZAMBONI_ROOT/run/serve.pid",
+    )
+
+    sv = sub.add_parser(
+        "serve",
+        help="run a fleet from a fleet file, on its own schedule, with no crontab",
+        description=(
+            "A long-running service: per-warehouse cron schedules from the fleet "
+            "file, a bounded pool of worker processes sized from the cgroup, and "
+            "the fleet file reloaded when it changes. Each table runs exactly what "
+            "`zamboni maintenance <table>` would. Without --yes every table "
+            "previews, as everywhere else. SIGTERM stops intake and lets tables in "
+            "flight finish; a second SIGTERM stops them too. See "
+            "docs/event-driven-maintenance.md and docs/devops.md."
+        ),
+    )
+    sv.add_argument("--fleet", required=True, help="the fleet file, YAML or JSON")
+    sv.add_argument(
+        "--yes",
+        action="store_true",
+        help="actually commit. Without it every table previews, forever.",
+    )
+    sv.add_argument(
+        "--workers",
+        type=_positive_int,
+        help="at most this many worker processes. Default: what the CPU quota and "
+        "memory limit allow; a larger number is lowered to that",
+    )
+    sv.add_argument(
+        "--json",
+        metavar="PATH",
+        help="append one run record per table to PATH, in the format "
+        "`maintenance --json` writes, so `zamboni runs` reads the service too",
+    )
+    sv.add_argument(
+        "--state-file",
+        help="where the service writes its state for `service-status`. "
+        "Default: $ZAMBONI_ROOT/run/serve.state.json",
+    )
+    sv.add_argument(
+        "--pid-file",
+        help="where the service writes its pid, for `config-reload`. "
+        "Default: $ZAMBONI_ROOT/run/serve.pid",
+    )
+    sv.add_argument(
+        "--poll-seconds",
+        type=_positive_int,
+        default=None,
+        help="how often to check the fleet file for changes (default 30)",
+    )
+
+    ss = sub.add_parser(
+        "service-status",
+        help="report a running `zamboni serve`'s state, or answer a Kubernetes probe",
+        description=(
+            "Reads the state file `zamboni serve` writes. With --probe, exits 0 or "
+            "1 for an exec probe: liveness asserts only that the scheduler loop "
+            "ticked recently; readiness that it is running on a valid config; "
+            "startup that the first config load and capability probe finished. "
+            "None of them checks a catalog -- an outage there is not fixed by a "
+            "restart."
+        ),
+    )
+    ss.add_argument(
+        "--state-file",
+        help="the state file `zamboni serve` writes. Default: $ZAMBONI_ROOT/run/serve.state.json",
+    )
+    ss.add_argument("--probe", choices=("liveness", "readiness", "startup"))
 
     sub.add_parser("doctor", help="report the installed PyIceberg's capabilities")
     sub.add_parser("engines", help="report what each engine supports, and what it refuses to do")
@@ -1427,6 +1506,87 @@ def _maintenance(session: CatalogSession, args: argparse.Namespace) -> int:
     if args.json:
         _write_run_summary(args.json, report)
     return report.exit_code
+
+
+def _run_dir(args: argparse.Namespace) -> Path:
+    """Where `serve` keeps its pid file, state file and per-table scratch files."""
+    return Path(args.zamboni_profile.root) / "run"
+
+
+def _serve(args: argparse.Namespace) -> int:
+    """`zamboni serve`. 0 on a clean stop; 2 if it could not start."""
+    import asyncio
+    import signal
+
+    from .fleet import FleetConfigError
+    from .pool import WorkerConfig, plan_pool
+    from .reload import POLL_SECONDS, install_hangup
+    from .service import AlreadyRunning, Service, single_instance
+
+    run_dir = _run_dir(args)
+    state_path = Path(args.state_file) if args.state_file else run_dir / "serve.state.json"
+    pid_path = Path(args.pid_file) if args.pid_file else run_dir / "serve.pid"
+    for directory in {state_path.parent, pid_path.parent}:
+        directory.mkdir(parents=True, exist_ok=True)
+
+    size = plan_pool(memory_budget_bytes=_DEFAULTS.memory_budget_bytes, requested=args.workers)
+    profile = args.zamboni_profile
+    config = WorkerConfig.from_pool(
+        size,
+        profile_path=str(profile.source) if profile.source else None,
+        env_path=str(args.zamboni_env_file) if args.zamboni_env_file else None,
+        commit=bool(args.yes),
+        base_environ=args.zamboni_base_environ,
+        workdir=state_path.parent,
+    )
+    logging.getLogger(__name__).info(
+        "serving %s: %d worker(s) (%s), %d DuckDB thread(s) and %s bytes each",
+        args.fleet,
+        size.workers,
+        size.reason,
+        size.threads_per_worker,
+        size.duckdb_memory_bytes,
+    )
+    service = Service(
+        args.fleet,
+        size=size,
+        worker_config=config,
+        state_path=state_path,
+        run_log=args.json,
+        poll_seconds=args.poll_seconds or POLL_SECONDS,
+    )
+
+    async def until_signalled() -> int:
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, service.request_stop)
+        install_hangup(loop, service.hangup)
+        return await service.run()
+
+    try:
+        with single_instance(pid_path):
+            return asyncio.run(until_signalled())
+    except (AlreadyRunning, FleetConfigError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
+def _service_status(args: argparse.Namespace) -> int:
+    """Print the service's state, or answer one probe with 0 or 1."""
+    from .service import probe, read_state
+
+    path = Path(args.state_file) if args.state_file else _run_dir(args) / "serve.state.json"
+    try:
+        state = read_state(path)
+    except (OSError, ValueError) as exc:
+        print(f"no readable service state at {path}: {exc}", file=sys.stderr)
+        return 1 if args.probe else 2
+    if args.probe:
+        ok, why = probe(state, args.probe)
+        print(f"{args.probe}: {'ok' if ok else 'FAIL'} -- {why}")
+        return 0 if ok else 1
+    print(json.dumps(state, indent=2, sort_keys=True))
+    return 0
 
 
 def _runs(args: argparse.Namespace) -> int:

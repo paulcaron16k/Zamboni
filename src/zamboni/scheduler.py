@@ -267,6 +267,7 @@ async def run_scheduler(
     *,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     on_tick: Callable[[datetime], None] | None = None,
+    on_fired: Callable[[datetime, list[str]], None] | None = None,
     wait: Callable[[asyncio.Event, float], Awaitable[None]] | None = None,
 ) -> None:
     """Tick until ``stop`` is set.
@@ -274,7 +275,9 @@ async def run_scheduler(
     ``on_tick`` is called after every tick, fired or not -- the liveness signal
     #122 writes to the state file. Liveness asserts that this loop runs, and
     nothing else, so it is called here rather than from anything that touches
-    a catalog. ``wait`` replaces the sleep, for a test driving ``clock``.
+    a catalog. ``on_fired`` receives the warehouses each tick fired, for the
+    service's sweep tracking. ``wait`` replaces the sleep, for a test driving
+    ``clock``.
     """
     wait = wait or _wait
     while not stop.is_set():
@@ -282,6 +285,8 @@ async def run_scheduler(
         fired = scheduler.tick(now, queue)
         if fired:
             logger.info("schedule fired for %s; %d table(s) queued", fired, len(queue))
+            if on_fired is not None:
+                on_fired(now, fired)
         if on_tick is not None:
             on_tick(now)
         delay = min(scheduler.wake_at() - clock(), MAX_SLEEP).total_seconds()

@@ -414,6 +414,31 @@ is what the limit must cover.
 **A writable spill directory** — an `emptyDir` at `/tmp` on a read-only root
 filesystem, or `temp_directory` pointed somewhere mounted.
 
+Implemented by `zamboni serve`, `zamboni service-status` and `zamboni.service`
+(ZMBNI-122); the deployment procedure is [devops.md §8](devops.md). What it
+settles, each tested in `tests/test_service.py`:
+
+- **The state file** is written atomically on every tick, result and reload:
+  pid, phase (`starting` → `running` → `stopping` → `stopped`), last tick,
+  config generation, workers and busy, `nats_connected` (`null` until #110),
+  last error, the last refused reload, and per warehouse the last firing, the
+  last result and the **last completed sweep**.
+- **A sweep is the tables one firing actually asked for.** A table already in
+  flight when the schedule fires is not in it — the queue refused that offer,
+  so no result would ever close it. A first version merged a firing into the
+  open sweep, and under a schedule faster than a sweep the sweep never closed;
+  a test runs that schedule.
+- **Probes check the pid is alive first**, then: startup — phase is running;
+  readiness — running on a config (a refused reload leaves it valid; busy is
+  not unready); liveness — a tick within 180 s, three missed 60 s ticks, and
+  nothing external.
+- **Workers ignore SIGTERM and SIGINT.** systemd's default
+  `KillMode=control-group` and a terminal's Ctrl-C both reach the workers, and
+  would kill tables mid-rewrite instead of letting the parent drain. So a worker
+  is retired, or on a second signal SIGKILLed — never terminated.
+- **`zamboni service-status` takes 1.4–1.5 s** (measured, 2026-10-02), above the
+  1 s exec-probe default, so the documented manifest sets `timeoutSeconds`.
+
 ### One deployment detail that will bite
 
 Kubernetes projects Secret and ConfigMap volumes at mode `0644`, and Zamboni refuses

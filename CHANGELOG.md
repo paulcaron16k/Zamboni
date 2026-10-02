@@ -44,6 +44,24 @@ Two categories beyond the usual set, because this tool deletes files:
   work is still decided only by `maintain()`'s due-check, so no scheduling path
   can bypass it.
 
+- **`zamboni serve`** — maintain a fleet from a fleet file on its own schedule,
+  with no crontab (ZMBNI-122, completing phase 4 of event-driven maintenance).
+  Per-warehouse cron schedules, spread by default; a bounded pool of worker
+  processes sized from the cgroup; the fleet file reloaded on change or SIGHUP.
+  Each table runs what `zamboni maintenance <table>` would. **Previews unless
+  `--yes`**, as everywhere else. SIGTERM stops intake and lets tables in flight
+  finish; a second SIGTERM stops them too. `--json` writes per-table run records
+  `zamboni runs` reads. Single replica: there is no claim protocol, and the
+  documented manifest says `replicas: 1` and `strategy: Recreate`.
+
+- **`zamboni service-status [--probe liveness|readiness|startup]`** — the
+  service's state file, or an exit 0/1 answer for a Kubernetes exec probe.
+  Liveness checks only that the scheduler loop ticked. It takes ~1.5 s to
+  answer, so **set `timeoutSeconds` above the 1 s default** (devops.md §8).
+
+- `config-reload`'s `--pid-file` now defaults to the path `serve` writes,
+  `$ZAMBONI_ROOT/run/serve.pid`.
+
 - **`--duckdb-memory-limit-bytes`** on every catalog-connected verb: DuckDB's
   memory limit for the run (ZMBNI-147). Unset, DuckDB keeps its own default
   exactly as before — 80% of what it detects, which is the process's own cgroup
