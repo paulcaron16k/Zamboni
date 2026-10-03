@@ -159,6 +159,9 @@ def main(argv: list[str] | None = None) -> int:
     # Before anything reads an environment variable or a flag default: the
     # dotenv file has to be in os.environ first, and the profile supplies what
     # neither a flag nor the environment did.
+    # Taken before `.env` is loaded into os.environ, for `serve`'s workers: each
+    # restores this before a table, so every table reads `.env` fresh.
+    args.zamboni_base_environ = dict(os.environ)
     try:
         args.zamboni_profile, env_file = settings.resolve(
             profile_path=args.profile, env_path=args.env
@@ -166,6 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     except settings.ProfileError as exc:
         parser.error(str(exc))
         return 2
+    args.zamboni_env_file = env_file
     _apply_profile(args, args.zamboni_profile)
     if args.verbose:
         logging.getLogger(__name__).debug(
@@ -193,6 +197,23 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "runs":
         return _runs(args)
+
+    if args.command == "serve":
+        return _serve(args)
+
+    if args.command == "service-status":
+        return _service_status(args)
+
+    if args.command == "config-reload":
+        from .reload import PidFileError, send_reload
+
+        try:
+            pid = send_reload(args.pid_file or _run_dir(args) / "serve.pid")
+        except PidFileError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(f"sent SIGHUP to zamboni pid {pid}; the service log reports the reload")
+        return 0
 
     # These two need no catalog connection: they operate on files.
     if args.command == "from-catalog":
@@ -328,6 +349,90 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="emit the aggregate as JSON instead of prose, for a dashboard",
     )
+
+    cr = sub.add_parser(
+        "config-reload",
+        help="tell a running `zamboni serve` to reload its fleet file now",
+        description=(
+            "Send SIGHUP to the service named by its pid file. The service polls "
+            "the fleet file anyway; this is for deployments that are not "
+            "containers, and loads at once rather than at the next poll. An "
+            "invalid file leaves the running config in place -- check the "
+            "service's log for the result. Refuses to signal a pid that is not "
+            "a zamboni process, because a stale pid file and SIGHUP's default "
+            "action would otherwise terminate an unrelated process."
+        ),
+    )
+    cr.add_argument(
+        "--pid-file",
+        help="the pid file `zamboni serve` writes. Default: $ZAMBONI_ROOT/run/serve.pid",
+    )
+
+    sv = sub.add_parser(
+        "serve",
+        help="run a fleet from a fleet file, on its own schedule, with no crontab",
+        description=(
+            "A long-running service: per-warehouse cron schedules from the fleet "
+            "file, a bounded pool of worker processes sized from the cgroup, and "
+            "the fleet file reloaded when it changes. Each table runs exactly what "
+            "`zamboni maintenance <table>` would. Without --yes every table "
+            "previews, as everywhere else. SIGTERM stops intake and lets tables in "
+            "flight finish; a second SIGTERM stops them too. See "
+            "docs/event-driven-maintenance.md and docs/devops.md."
+        ),
+    )
+    sv.add_argument("--fleet", required=True, help="the fleet file, YAML or JSON")
+    sv.add_argument(
+        "--yes",
+        action="store_true",
+        help="actually commit. Without it every table previews, forever.",
+    )
+    sv.add_argument(
+        "--workers",
+        type=_positive_int,
+        help="at most this many worker processes. Default: what the CPU quota and "
+        "memory limit allow; a larger number is lowered to that",
+    )
+    sv.add_argument(
+        "--json",
+        metavar="PATH",
+        help="append one run record per table to PATH, in the format "
+        "`maintenance --json` writes, so `zamboni runs` reads the service too",
+    )
+    sv.add_argument(
+        "--state-file",
+        help="where the service writes its state for `service-status`. "
+        "Default: $ZAMBONI_ROOT/run/serve.state.json",
+    )
+    sv.add_argument(
+        "--pid-file",
+        help="where the service writes its pid, for `config-reload`. "
+        "Default: $ZAMBONI_ROOT/run/serve.pid",
+    )
+    sv.add_argument(
+        "--poll-seconds",
+        type=_positive_int,
+        default=None,
+        help="how often to check the fleet file for changes (default 30)",
+    )
+
+    ss = sub.add_parser(
+        "service-status",
+        help="report a running `zamboni serve`'s state, or answer a Kubernetes probe",
+        description=(
+            "Reads the state file `zamboni serve` writes. With --probe, exits 0 or "
+            "1 for an exec probe: liveness asserts only that the scheduler loop "
+            "ticked recently; readiness that it is running on a valid config; "
+            "startup that the first config load and capability probe finished. "
+            "None of them checks a catalog -- an outage there is not fixed by a "
+            "restart."
+        ),
+    )
+    ss.add_argument(
+        "--state-file",
+        help="the state file `zamboni serve` writes. Default: $ZAMBONI_ROOT/run/serve.state.json",
+    )
+    ss.add_argument("--probe", choices=("liveness", "readiness", "startup"))
 
     sub.add_parser("doctor", help="report the installed PyIceberg's capabilities")
     sub.add_parser("engines", help="report what each engine supports, and what it refuses to do")
@@ -670,6 +775,23 @@ def _add_catalog_args(p: argparse.ArgumentParser) -> None:
         default=os.environ.get("ZAMBONI_LOCAL_WAREHOUSE"),
         help="path to a filesystem warehouse with a SQL catalog, instead of --uri",
     )
+    g.add_argument(
+        "--threads",
+        type=_positive_int,
+        default=None,
+        help=f"DuckDB threads for this run (default {_SESSION_THREADS}). The "
+        "service sets it per worker from the CPU quota, so N workers do not each "
+        "assume the whole machine.",
+    )
+    g.add_argument(
+        "--duckdb-memory-limit-bytes",
+        type=_positive_int,
+        default=None,
+        help="DuckDB's memory limit for this run. Default: DuckDB's own, 80%% of "
+        "the memory it detects -- which is the process's own cgroup limit if it "
+        "has one, and host RAM if the limit is only on a parent cgroup. The "
+        "service sets it per worker from the pool's memory plan.",
+    )
 
     # Named for the question rather than for one provider: `--credential-use`
     # governs GCS and Azure too, and an operator on either would read a group
@@ -817,9 +939,24 @@ def _add_removed_secret_flag(parser, flag: str, variable: str) -> None:
     parser.add_argument(flag, action=_RemovedSecretFlag, variable=variable, default=None)
 
 
+def _positive_int(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
+    return value
+
+
+#: Read from the dataclass rather than repeated, for the reason `_DEFAULTS` gives.
+_SESSION_THREADS: int = CatalogSession.threads
+
+
 def _session_from(args: argparse.Namespace) -> CatalogSession:
+    threads = getattr(args, "threads", None) or _SESSION_THREADS
+    memory = getattr(args, "duckdb_memory_limit_bytes", None)
     if args.local_warehouse:
-        return CatalogSession.for_local(warehouse_path=args.local_warehouse)
+        return CatalogSession.for_local(
+            warehouse_path=args.local_warehouse, threads=threads, memory_limit_bytes=memory
+        )
 
     if not args.uri or not args.warehouse:
         raise ValueError(
@@ -832,6 +969,8 @@ def _session_from(args: argparse.Namespace) -> CatalogSession:
     return CatalogSession.for_lakekeeper(
         uri=args.uri,
         warehouse=args.warehouse,
+        threads=threads,
+        memory_limit_bytes=memory,
         # Environment only: the flags that used to set these were removed
         # because a command line is world-readable. `_RemovedSecretFlag` says so
         # if anyone passes the old ones.
@@ -1367,6 +1506,87 @@ def _maintenance(session: CatalogSession, args: argparse.Namespace) -> int:
     if args.json:
         _write_run_summary(args.json, report)
     return report.exit_code
+
+
+def _run_dir(args: argparse.Namespace) -> Path:
+    """Where `serve` keeps its pid file, state file and per-table scratch files."""
+    return Path(args.zamboni_profile.root) / "run"
+
+
+def _serve(args: argparse.Namespace) -> int:
+    """`zamboni serve`. 0 on a clean stop; 2 if it could not start."""
+    import asyncio
+    import signal
+
+    from .fleet import FleetConfigError
+    from .pool import WorkerConfig, plan_pool
+    from .reload import POLL_SECONDS, install_hangup
+    from .service import AlreadyRunning, Service, single_instance
+
+    run_dir = _run_dir(args)
+    state_path = Path(args.state_file) if args.state_file else run_dir / "serve.state.json"
+    pid_path = Path(args.pid_file) if args.pid_file else run_dir / "serve.pid"
+    for directory in {state_path.parent, pid_path.parent}:
+        directory.mkdir(parents=True, exist_ok=True)
+
+    size = plan_pool(memory_budget_bytes=_DEFAULTS.memory_budget_bytes, requested=args.workers)
+    profile = args.zamboni_profile
+    config = WorkerConfig.from_pool(
+        size,
+        profile_path=str(profile.source) if profile.source else None,
+        env_path=str(args.zamboni_env_file) if args.zamboni_env_file else None,
+        commit=bool(args.yes),
+        base_environ=args.zamboni_base_environ,
+        workdir=state_path.parent,
+    )
+    logging.getLogger(__name__).info(
+        "serving %s: %d worker(s) (%s), %d DuckDB thread(s) and %s bytes each",
+        args.fleet,
+        size.workers,
+        size.reason,
+        size.threads_per_worker,
+        size.duckdb_memory_bytes,
+    )
+    service = Service(
+        args.fleet,
+        size=size,
+        worker_config=config,
+        state_path=state_path,
+        run_log=args.json,
+        poll_seconds=args.poll_seconds or POLL_SECONDS,
+    )
+
+    async def until_signalled() -> int:
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, service.request_stop)
+        install_hangup(loop, service.hangup)
+        return await service.run()
+
+    try:
+        with single_instance(pid_path):
+            return asyncio.run(until_signalled())
+    except (AlreadyRunning, FleetConfigError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
+def _service_status(args: argparse.Namespace) -> int:
+    """Print the service's state, or answer one probe with 0 or 1."""
+    from .service import probe, read_state
+
+    path = Path(args.state_file) if args.state_file else _run_dir(args) / "serve.state.json"
+    try:
+        state = read_state(path)
+    except (OSError, ValueError) as exc:
+        print(f"no readable service state at {path}: {exc}", file=sys.stderr)
+        return 1 if args.probe else 2
+    if args.probe:
+        ok, why = probe(state, args.probe)
+        print(f"{args.probe}: {'ok' if ok else 'FAIL'} -- {why}")
+        return 0 if ok else 1
+    print(json.dumps(state, indent=2, sort_keys=True))
+    return 0
 
 
 def _runs(args: argparse.Namespace) -> int:

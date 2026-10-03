@@ -569,6 +569,7 @@ internal and may move in a patch release. The entry points you need:
 | `MetricsReporter` / `NoopReporter` / `CollectingReporter` / `LoggingReporter` / `MultiReporter` / `RestMetricsReporter` | where reports go: one method, `report(MetricsReport)`, copying Iceberg's own seam. Pass one as `maintain(reporter=…)`; the default emits nothing |
 | `reporter_for(catalog, extra)` | the reporter that suits a catalog — the metrics endpoint for a REST catalog, nothing to post to for a local one |
 | `NoCommitReport` / `no_commit_report(result)` / `CounterResult` / `TimerResult` / `no_commit_metrics(result)` | Iceberg's metric primitives, and the report for an operation that committed no snapshot — `expire`, `remove-orphans` and `apply-properties` never do, and the other three do not when they find nothing to do |
+| `FleetConfig` / `FleetWarehouse` / `CronSchedule` | the fleet file `zamboni serve` will read — warehouses, a UTC cron schedule each, and their table config inline or by path. `FleetConfig.load(path)` for the file; construct it directly to hold the same state in code. Validated on construction, raising `FleetConfigError`. See [event-driven-maintenance.md §4](event-driven-maintenance.md#4-configuration) |
 | `summarise_logs(paths)` / `FleetSummary` | reading a series of run summaries back — what the fleet did, per warehouse. Behind `zamboni runs`; see [devops.md](devops.md) |
 | `available_engines()` | what this install can drive |
 | `config_from_table_settings` | turning table-config layout into the compaction config `COMPACT` needs |
@@ -901,8 +902,14 @@ zamboni maintenance --table-config table-config.json
 ### The cron line
 
 ```cron
-17 3 * * * cd /srv/zamboni && /usr/local/bin/zamboni-nightly >> /var/log/zamboni/cron.log 2>&1
+47 2 * * * sleep $(shuf -i 0-3600 -n 1); cd /srv/zamboni && flock -n /var/lock/zamboni.lock /usr/local/bin/zamboni-nightly >> /var/log/zamboni/cron.log 2>&1
 ```
+
+Nominally 03:17, started 30 minutes early with a random sleep of up to an
+hour, so a fleet of these does not start in one minute; `flock -n` makes a run
+that is still going from last night win over tonight's. Both are explained in
+[devops.md §1](devops.md#spreading-the-load), with the systemd-timer
+equivalent. Keep the line on one line — cron has no continuation character.
 
 That points at a wrapper script rather than at `zamboni` directly, for exactly
 two reasons: a dated log file (`date +%F` is a quoting trap inside a crontab)
@@ -942,8 +949,8 @@ operations: [compact, apply-properties, remove-dangling-deletes, rewrite-manifes
 ```
 
 ```cron
-17 3 * * 1-6 cd /srv/zamboni && zamboni --profile nightly.yml maintenance --yes
-17 3 * * 0   cd /srv/zamboni && zamboni maintenance --yes
+47 2 * * 1-6 sleep $(shuf -i 0-3600 -n 1); cd /srv/zamboni && flock -n /var/lock/zamboni.lock zamboni --profile nightly.yml maintenance --yes
+47 2 * * 0   sleep $(shuf -i 0-3600 -n 1); cd /srv/zamboni && flock -n /var/lock/zamboni.lock zamboni maintenance --yes
 ```
 
 Or call the individual verbs, which is what `maintenance` does anyway:
@@ -974,9 +981,7 @@ schedule accordingly and talk to whoever owns it. Nothing needs starting or
 stopping.
 
 ```cron
-17 3 * * * cd /srv/zamboni && zamboni maintenance --table-config table-config.json \
-             --engine trino --trino-host trino.corp --trino-port 8080 \
-             --trino-user zamboni --trino-version 483 --yes
+47 2 * * * sleep $(shuf -i 0-3600 -n 1); cd /srv/zamboni && flock -n /var/lock/zamboni.lock zamboni maintenance --table-config table-config.json --engine trino --trino-host trino.corp --trino-port 8080 --trino-user zamboni --trino-version 483 --yes
 ```
 
 Set `--trino-version`. `retain_last` — our `min_snapshots_to_keep` — only
@@ -1212,6 +1217,16 @@ threshold was 1 GiB until the bounded path started working: crossing it bought
 nothing, so it was set high to avoid paying for a slower path. Now the trade is
 real — `IN_MEMORY` on a 1 GiB group was measured at ~2.3 GiB of growth, more
 than a small host has, while CHUNKED stays flat.
+
+**DuckDB's own memory limit is a separate setting**, and it decides where a
+sort spills. Left alone it is DuckDB's default — 80% of the memory DuckDB
+detects. Measured with DuckDB 1.5.5 (2026-10-01): **819.1 MiB** under a 1 GiB
+cgroup v2 limit on the process's own cgroup, but **24.9 GiB** of a 31.2 GiB
+host when the same 1 GiB limit sat on a *parent* cgroup only — DuckDB reads its
+own cgroup, not the tree, and a pod's limit can sit above the container's.
+`--duckdb-memory-limit-bytes` sets it explicitly for one run. `zamboni serve`
+sets it per worker from its pool plan, because several workers sharing one
+limit would otherwise each plan for 80% of the whole.
 
 ### Who bin-packs a chunked rewrite (`streaming_writes`)
 
@@ -1792,7 +1807,7 @@ naturally partitioned. Compaction is doing the classic small-files job.
 ```
 
 ```cron
-17 3 * * * cd /srv/zamboni && zamboni maintenance --yes --verbose >> /var/log/zamboni/cron.log 2>&1
+47 2 * * * sleep $(shuf -i 0-3600 -n 1); cd /srv/zamboni && flock -n /var/lock/zamboni.lock zamboni maintenance --yes --verbose >> /var/log/zamboni/cron.log 2>&1
 ```
 
 Why these numbers:
@@ -1874,8 +1889,8 @@ are read rarely and should stop being thousands of small daily directories.
 
 ```cron
 # Nightly: compaction and expiry. Orphan removal lists storage, so weekly.
-17 3 * * 1-6 cd /srv/zamboni && zamboni --profile nightly.yml maintenance --yes
-17 3 * * 0   cd /srv/zamboni && zamboni maintenance --yes
+47 2 * * 1-6 sleep $(shuf -i 0-3600 -n 1); cd /srv/zamboni && flock -n /var/lock/zamboni.lock zamboni --profile nightly.yml maintenance --yes
+47 2 * * 0   sleep $(shuf -i 0-3600 -n 1); cd /srv/zamboni && flock -n /var/lock/zamboni.lock zamboni maintenance --yes
 ```
 
 ```yaml

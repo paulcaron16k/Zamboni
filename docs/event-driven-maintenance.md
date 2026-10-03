@@ -95,6 +95,27 @@ not eventually have done.
 candidate; a debounce window lets a burst settle. A table already being maintained
 is not re-enqueued.
 
+Implemented by `zamboni.scheduler` (ZMBNI-120). What it settles, each tested in
+`tests/test_scheduler.py`:
+
+- **The queue holds `(warehouse, table)` keys, not config.** The `WorkItem` a
+  worker receives is built from the fleet when it is *taken*, so a reload changes
+  every decision not yet started and none in flight, and a warehouse a reload
+  removed drops out of the queue without being cancelled. The key includes the
+  warehouse because a table identifier is not unique across a fleet.
+- **A table in flight is not re-enqueued**, by a tick or an event. For a tick the
+  run in flight *is* the work asked for. For an event it can miss a write that
+  landed after the run read its watermark; the next scheduled tick bounds that,
+  and #110 revisits it if the bound is too loose.
+- **A missed firing fires once, late** — a suspended host does not lose the
+  night's run, nor replay six of them. **A fresh start waits for the next
+  firing**, as cron does, so a rollout is not a fleet-wide sweep.
+- **A reload keeps an unchanged warehouse's pending firing.** Re-arming everything
+  from now would push acme's 02:00 run to tomorrow whenever globex was
+  provisioned at 01:59.
+- **The loop sleeps at most 60 s**, which bounds how late a firing can be after a
+  wall-clock jump and how stale the liveness tick (#122) can get.
+
 ### Threads or processes
 
 **asyncio for the front half, a bounded process pool over tables for the back half.**
@@ -125,6 +146,51 @@ and spilling is slower than waiting for a free worker.
 and a catalog client and cannot cross a process boundary, so a worker receives
 config — warehouse, table, table-config — and builds its own session.
 
+Implemented by `zamboni.pool` (ZMBNI-121). What it settles, each tested in
+`tests/test_pool.py`:
+
+- **A worker runs the CLI's own `maintenance` path** for one table, in-process,
+  rather than a second implementation of it. Resolution order, session, engine,
+  reporter, exit codes and the `--json` record are the code a cron line runs.
+  What crosses the boundary is an argv of strings, the item's table config as a
+  file, and the run record back — never a `CatalogSession`, and never a secret
+  on a command line.
+- **Long-lived workers, not a process per table.** Importing what a worker needs
+  measured 1.7–2.1 s and ~174 MB (`/usr/bin/time`, three runs, 2026-10-01): for
+  1,000 tables on 4 workers that is ~8 minutes of every sweep spent importing,
+  for tables whose due-check takes ~25 ms. Workers are recycled after
+  `RECYCLE_AFTER_TABLES` (50 — chosen, not measured).
+- **Spawned, not forked.** A forkserver with the imports preloaded forks in
+  ~17 ms (measured), but `pyarrow` and `duckdb` start native threads at import —
+  1 OS thread before, 8 after — and forking a threaded process can leave a lock
+  held by a thread that no longer exists.
+- **A worker dying takes one table.** Not `ProcessPoolExecutor`, which breaks
+  the whole pool when any worker dies. The table reports exit 1 — Python's own
+  code for an uncaught crash, so it reads like a crashed CLI run — and a
+  replacement worker takes the next one.
+- **Every table starts from the environment the worker was given**, so a
+  credential rotated in `.env` reaches the next table rather than the next
+  worker; `load_env` lets the real environment win, and keys a previous table
+  loaded would otherwise stay.
+- **Sized from the cgroup, not `os.cpu_count()`.** The CPU quota and the memory
+  limit are each the smallest up the cgroup tree (a pod's limit sits on a parent
+  of the container's cgroup), v2 and v1. Workers are
+  `min(CPUs, 0.8 × memory / (256 MiB baseline + memory_budget_bytes))`, and each
+  gets `CPUs / workers` DuckDB threads through the new `--threads` flag.
+  **Each worker's DuckDB gets its share of the plan** (ZMBNI-147):
+  `0.8 × memory / workers − 256 MiB baseline`, through
+  `--duckdb-memory-limit-bytes`, built by `WorkerConfig.from_pool` from the
+  same `PoolSize` that chose the worker count. Left to its default, DuckDB
+  plans for 80% of the memory it detects — and measured with DuckDB 1.5.5, it
+  detects the process's *own* cgroup limit (819.1 MiB of a 1 GiB `memory.max`)
+  but not a parent's (24.9 GiB of a 31.2 GiB host with the 1 GiB limit one level
+  up). Either way N workers would each plan for most of the whole. With no
+  cgroup limit the plan uses host RAM rather than declining to plan.
+- **The feed takes from the queue only when a worker is free**, so a waiting
+  table still coalesces and is still resolved against the newest config.
+  Waiting for a worker is raced against stop: an earlier draft, blocked there,
+  took and dropped a table after stop, and the test that caught it stays.
+
 **Free-threaded Python would change this** and is worth watching rather than
 depending on. Keeping the parallel unit at the table maps onto either model.
 
@@ -139,14 +205,69 @@ their tables; conceptually a dump of the provisioning system's database. Nothing
 it is a secret.
 
 ```yaml
+version: 1
 warehouses:
   - name: acme
-    uri: https://catalog.internal/catalog
-    schedule: "0 2 * * *"        # backstop; events drive the rest
-    tables:
-      events:   {compaction: {target_file_size_bytes: 134217728}}
-      sessions: {retention: {expire_snapshots: {older_than_days: 7}}}
+    uri: https://catalog.internal/catalog   # optional; zamboni.yml's otherwise
+    schedule: "0 2 * * *"                   # UTC; the backstop, events drive the rest
+    table_config:                           # a table-config.json body, inline
+      namespaces:
+        raw:
+          tables:
+            events:   {target_file_size_bytes: 134217728}
+            sessions: {retention: {expire_snapshots: {max_snapshot_age_days: 7}}}
+  - name: globex
+    schedule: "30 3 * * *"
+    random: false                           # exactly 03:30; spreading is on otherwise
+    table_config: globex/table-config.json  # or a path, relative to this file
 ```
+
+Implemented by `zamboni.fleet` (ZMBNI-118). The decisions it encodes, each
+tested in `tests/test_fleet.py`:
+
+- **The fleet file is the one source of which tables exist.** An integrator
+  holding the same state in a database constructs `FleetConfig` in code — the
+  same validated object, not a second store — and nothing writes the file back.
+  Decided on #106, 2026-09-30.
+- **It composes with `table-config.json`.** `table_config` is a path to an
+  existing file or the same body inline, parsed by `TableConfig` either way; the
+  tables maintained are that config's tables, not a second list. An inline body
+  takes its `warehouse` from the entry, and a referenced file must name the same
+  one.
+- **Validated at construction, and an empty fleet is refused.** The file is
+  generated, and a generator that fails open writes an empty list; accepting it
+  on reload would stop every warehouse by being wrong.
+- **`warehouses` is a list, not a mapping**, because PyYAML keeps the last of
+  two duplicate keys silently. A warehouse listed twice is refused.
+- **Schedules are crontab(5) five-field expressions in UTC**, with crontab's own
+  rule that a restricted day-of-month *or* day-of-week matches. A schedule that
+  can never fire (`0 0 30 2 *`) is refused rather than left to never run.
+- **Firings are spread by default** (ZMBNI-144). A firing moves by up to
+  ±`RANDOM_PCT` (5) percent of the gap to the next one, capped at
+  ±`RANDOM_LIMIT_MINUTES` (30): a daily 02:00 lands between 01:30 and 02:30, a
+  `*/5` moves by at most 15 s. `random: false` — fleet-wide at the top level, or
+  per warehouse — fires on the exact minute, at DevOps' own risk.
+
+  **On by default because the default is the worst-case mode.** The case to
+  survive is a fleet provisioned from one template, every warehouse at
+  `0 2 * * *`, against an object store shared with everything else scheduled
+  on the hour. A default that is safe only when someone remembered to stagger
+  the schedules is not safe under that case.
+
+  **A fresh offset every night**, as systemd's `RandomizedDelaySec` draws one
+  per iteration, so no pair of large warehouses is stuck colliding nightly. It
+  is *derived* — a SHA-256 of the warehouse name and the nominal firing — not
+  drawn, so a restart or reload at 01:45 does not re-roll tonight's 02:00; and
+  it is not Python's `hash()`, which is salted per process and would. A firing
+  moved early is still that firing: the next is armed from the nominal time,
+  so it never fires twice.
+
+  **Why it is needed even with a bounded pool:** the pool (#121) caps what *one*
+  `zamboni serve` runs at once, so a fleet firing together becomes a backlog
+  rather than a storm against that process. It does nothing for several
+  deployments sharing one object store, for cron deployments
+  ([devops.md §1](devops.md) shows the crontab equivalent), or for everything
+  else in the estate scheduled on the hour.
 
 **(b) `zamboni.yml` + `.env` — written by the operator.** Storage endpoints and
 credentials, catalog auth, engine choice, spill directory, the NATS address. Needs a
@@ -171,6 +292,28 @@ an admin message over NATS (couples config reload to the event bus being up).
 **A config that fails validation leaves the running config in place and is
 reported.** A reload must never be able to stop maintenance by being wrong — a real
 risk when the file is machine-generated from another system's database.
+
+Implemented by `zamboni.reload` and `zamboni config-reload` (ZMBNI-119). What it
+settles, each tested in `tests/test_reload.py`:
+
+- **A change is detected through the symlinks** — the inode, mtime and size of
+  what the path resolves to — over the fleet file *and* every table config it
+  references. A test swaps a ConfigMap-style `..data` link with an identical
+  mtime, so only the inode and resolved path can tell.
+- **A change must settle across two polls before it is loaded.** A writer caught
+  rewriting the file in place can leave a *valid* file — a list of warehouses
+  cut short — and adopting it would stop maintaining every warehouse after the
+  cut. ConfigMap projection is atomic, so there this costs one 30 s poll inside
+  the kubelet's own ~1 minute sync; anywhere else, write a temporary file and
+  rename it. **SIGHUP loads at once**, because sending it says the file is done.
+- **An invalid file keeps the running config**, is logged once, and is not
+  re-parsed until it changes again. Its error is kept for the state file (#122).
+- **`config-reload` refuses to signal a pid that is not zamboni.** A pid file
+  outlives its process, pids are reused, and SIGHUP's default action is to
+  terminate — so a stale pid file would otherwise kill an unrelated process.
+  The check reads `/proc/<pid>/cmdline`; where `/proc` is absent it refuses.
+- **The event subscription** (#119's last acceptance line) has nothing to
+  re-subscribe until the NATS consumer exists; it is #124's to honour.
 
 ---
 
@@ -270,6 +413,31 @@ is what the limit must cover.
 
 **A writable spill directory** — an `emptyDir` at `/tmp` on a read-only root
 filesystem, or `temp_directory` pointed somewhere mounted.
+
+Implemented by `zamboni serve`, `zamboni service-status` and `zamboni.service`
+(ZMBNI-122); the deployment procedure is [devops.md §8](devops.md). What it
+settles, each tested in `tests/test_service.py`:
+
+- **The state file** is written atomically on every tick, result and reload:
+  pid, phase (`starting` → `running` → `stopping` → `stopped`), last tick,
+  config generation, workers and busy, `nats_connected` (`null` until #110),
+  last error, the last refused reload, and per warehouse the last firing, the
+  last result and the **last completed sweep**.
+- **A sweep is the tables one firing actually asked for.** A table already in
+  flight when the schedule fires is not in it — the queue refused that offer,
+  so no result would ever close it. A first version merged a firing into the
+  open sweep, and under a schedule faster than a sweep the sweep never closed;
+  a test runs that schedule.
+- **Probes check the pid is alive first**, then: startup — phase is running;
+  readiness — running on a config (a refused reload leaves it valid; busy is
+  not unready); liveness — a tick within 180 s, three missed 60 s ticks, and
+  nothing external.
+- **Workers ignore SIGTERM and SIGINT.** systemd's default
+  `KillMode=control-group` and a terminal's Ctrl-C both reach the workers, and
+  would kill tables mid-rewrite instead of letting the parent drain. So a worker
+  is retired, or on a second signal SIGKILLed — never terminated.
+- **`zamboni service-status` takes 1.4–1.5 s** (measured, 2026-10-02), above the
+  1 s exec-probe default, so the documented manifest sets `timeoutSeconds`.
 
 ### One deployment detail that will bite
 

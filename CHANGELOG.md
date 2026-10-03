@@ -23,6 +23,79 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **The fleet file** — `zamboni.fleet.FleetConfig`, the configuration the
+  forthcoming `zamboni serve` reads (ZMBNI-118): warehouses, a cron schedule
+  each, and each warehouse's `table-config.json` either by path or inline. YAML
+  or JSON. Nothing reads it yet; it lands first so the scheduler has a validated
+  object to be built against.
+
+  Keys are allow-listed, a credential is refused by name (the file is defined as
+  holding none), and validation runs on construction so a fleet built in code is
+  held to the same rules as one loaded from disk. **An empty fleet is refused**,
+  because the file is generated and a generator that fails open would otherwise
+  stop every warehouse's maintenance on reload. Schedules are crontab(5)
+  five-field expressions evaluated in **UTC**; one that can never fire, such as
+  `0 0 30 2 *`, is refused.
+
+- **The scheduler and candidate queue** behind the forthcoming `zamboni serve`
+  (ZMBNI-120), in `zamboni.scheduler`. Internal: not exported, and nothing runs
+  it yet. A per-warehouse cron tick offers every table to a queue that
+  coalesces per table and refuses one already in flight; whether a table needs
+  work is still decided only by `maintain()`'s due-check, so no scheduling path
+  can bypass it.
+
+- **`zamboni serve`** — maintain a fleet from a fleet file on its own schedule,
+  with no crontab (ZMBNI-122, completing phase 4 of event-driven maintenance).
+  Per-warehouse cron schedules, spread by default; a bounded pool of worker
+  processes sized from the cgroup; the fleet file reloaded on change or SIGHUP.
+  Each table runs what `zamboni maintenance <table>` would. **Previews unless
+  `--yes`**, as everywhere else. SIGTERM stops intake and lets tables in flight
+  finish; a second SIGTERM stops them too. `--json` writes per-table run records
+  `zamboni runs` reads. Single replica: there is no claim protocol, and the
+  documented manifest says `replicas: 1` and `strategy: Recreate`.
+
+- **`zamboni service-status [--probe liveness|readiness|startup]`** — the
+  service's state file, or an exit 0/1 answer for a Kubernetes exec probe.
+  Liveness checks only that the scheduler loop ticked. It takes ~1.5 s to
+  answer, so **set `timeoutSeconds` above the 1 s default** (devops.md §8).
+
+- `config-reload`'s `--pid-file` now defaults to the path `serve` writes,
+  `$ZAMBONI_ROOT/run/serve.pid`.
+
+- **`--duckdb-memory-limit-bytes`** on every catalog-connected verb: DuckDB's
+  memory limit for the run (ZMBNI-147). Unset, DuckDB keeps its own default
+  exactly as before — 80% of what it detects, which is the process's own cgroup
+  limit if it has one and host RAM if the limit is only on a parent cgroup
+  (measured, DuckDB 1.5.5; see the user guide's memory section). The worker
+  pool now sets it per worker from the same plan that sizes the pool, so N
+  workers no longer each plan for most of the machine.
+
+- **`zamboni config-reload --pid-file PATH`** — send SIGHUP to a running
+  `zamboni serve` so it reloads its fleet file now (ZMBNI-119). Exit 2, and no
+  signal sent, when the pid file is missing, stale, or names a process that is
+  not zamboni. The reload itself (`zamboni.reload`, internal) polls the fleet
+  file and its table configs every 30 s, adopts a change only once it has
+  settled across two polls, and keeps the running config when the new file is
+  invalid.
+
+- **`--threads`** on every catalog-connected verb: DuckDB's thread count for
+  the run, default 4 as before. The service sets it per worker so N workers
+  share the CPUs instead of each assuming the machine.
+
+- **The worker pool** behind the forthcoming `zamboni serve` (ZMBNI-121), in
+  `zamboni.pool`. Internal: not exported, and nothing runs it yet. Long-lived
+  spawned workers each run `zamboni maintenance <table>` in-process, so a worker
+  dying loses one table, not the pool. Sized from the cgroup's CPU quota and
+  memory limit rather than `os.cpu_count()`.
+
+- **Scheduled firings are spread across a window by default** (ZMBNI-144). A
+  firing moves by up to ±`RANDOM_PCT` (5%) of the gap to the next, capped at
+  ±`RANDOM_LIMIT_MINUTES` (30): a daily 02:00 lands between 01:30 and 02:30,
+  with a fresh offset each night. `random: false` in the fleet file, fleet-wide
+  or per warehouse, or `CronSchedule(expression, random=False)`, fires on the
+  exact minute. Nothing has shipped that fired on the exact minute, so this
+  changes no existing schedule. `devops.md` §1 shows the crontab equivalent.
+
 - **Compaction can restrict itself to the partitions that changed since the last
   maintenance** — `--only-changed-partitions`, or
   `CompactionConfig(only_changed_partitions=True)`. **Off by default**: the
