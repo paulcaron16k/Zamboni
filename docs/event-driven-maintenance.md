@@ -60,20 +60,27 @@ the phases are ordered as they are — events buy latency, not information.
 ## 2. Three deployment models
 
 ```
-  1 · crontab ──┐
-  2 · service ──┼──▶ maintain() ──▶ six operations
-  3 · embedded ─┘     one run loop      unchanged
+  A · crontab ─────────────┐
+  B · zamboni serve ───────┼──▶ maintain() ──▶ six operations
+  C · the Lakehouse App ───┘     one run loop      unchanged
 ```
 
 | | Who decides when | Config from | Process model |
 |---|---|---|---|
-| **1 · cron** | crontab | files on disk | one short-lived process per run |
-| **2 · service** | Zamboni's scheduler and events | files on disk, reloaded | long-running + worker pool |
-| **3 · embedded** | the integrator | the integrator's own state | the integrator's process |
+| **A · cron** | crontab | files on disk | one short-lived process per run |
+| **B · `zamboni serve`** | the runtime: schedules and events | files on disk, reloaded | long-running + worker pool |
+| **C · the Lakehouse App** | the same runtime, embedded | the application's own database | the application's process + worker pool |
 
 All three reach the same `maintain()`, so the exit-code contract, the consent rule
 and the [§6.6 invariants](design.md) are inherited rather than reimplemented. The
 service is an addition, not a replacement.
+
+**Model C used to mean "the integrator decides when".** As of the
+[maintenance runtime design](maintenance-runtime.md) it means an application
+that embeds the *same* runtime `zamboni serve` uses, so scheduled and triggered
+maintenance behave identically whether a fleet is driven by a config file or by
+an application's database. That document is the contract such an application
+implements.
 
 ---
 
@@ -640,13 +647,13 @@ rather than an afterthought for whoever deploys it.
 ```
         run                      collect                    read              decide
   ┌──────────────┐          ┌───────────────┐        ┌────────────────┐   ┌───────────┐
-  │ 1 cron + CLI │──json──▶ │ .jsonl on disk│──────▶ │  zamboni runs  │──▶│  monthly  │
+  │ A cron + CLI │──json──▶ │ .jsonl on disk│──────▶ │  zamboni runs  │──▶│  monthly  │
   └──────────────┘          └───────────────┘        │  (per warehouse│   │  review   │
   ┌──────────────┐                                   │   breakdown)   │   │ devops §7 │
-  │ 2 service    │──OTel──▶ ┌───────────────┐   ┌───▶└────────────────┘   └─────┬─────┘
+  │ B serve      │──OTel──▶ ┌───────────────┐   ┌───▶└────────────────┘   └─────┬─────┘
   └──────────────┘          │  collector /  │───┘                               │
-  ┌──────────────┐          │  IWS telemetry│                                   ▼
-  │ 3 IWS embeds │─as_dict▶ └───────────────┘                          ┌────────────────┐
+  ┌──────────────┐          │  app telemetry│                                   ▼
+  │ C app embeds │─as_dict▶ └───────────────┘                          ┌────────────────┐
   └──────────────┘                                                     │ ZMBNI-106 gate │
                                                                        │ + standing     │
                                                                        │   health       │
@@ -654,7 +661,7 @@ rather than an afterthought for whoever deploys it.
 ```
 
 Deliberately, the **bottom rung needs no infrastructure at all**: a crontab
-line, a file, and one command that reads it. Model 1 is how this will first
+line, a file, and one command that reads it. Model A is how this will first
 reach production, and a feedback loop that only works once a collector is
 deployed is a feedback loop that does not exist during the period the gate is
 being measured.

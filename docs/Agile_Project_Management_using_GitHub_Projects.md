@@ -376,4 +376,4 @@ Concrete consequences for this repository, which is **user-owned and public**:
 - **Sprints are a poor fit today.** Every open story is blocked on an upstream
   release, so an iteration field would measure waiting rather than work. The
   backlog and epic views earn their keep first; add `Sprints` when
-  IWS starts producing findings that flow.
+  a downstream consumer starts producing findings that flow.

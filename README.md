@@ -129,7 +129,7 @@ names where the others are verified instead of implying they are not:
 |---|---|
 | **Silo** (maintained MinIO fork) | **Verified, every push.** The `dev-stack` and `spark` CI jobs run a real Lakekeeper against it, in both postures — a credential-vending warehouse and a remote-signing one |
 | **MinIO** | Previously verified, on the same jobs, until MinIO ended community distribution and the images stopped resolving. Silo is the same lineage under maintenance and keeps the S3 API, so the coverage carried over rather than lapsed |
-| **Garage** | Verified **elsewhere**: ExperienceFlow's end-to-end ELT testing runs IWS + Zamboni against it. Deliberately not duplicated here — it would re-test the same two postures against a second implementation of the same API |
+| **Garage** | Verified **elsewhere**: a downstream consumer's end-to-end testing runs Zamboni against it. Deliberately not duplicated here — it would re-test the same two postures against a second implementation of the same API |
 | **AWS S3** | Not run against. Nothing is known to be wrong; nothing has been measured either |
 | **GCS** | Not run against. On the *delegated* path `gs` maps to `PyArrowFileIO` and no extra is required. On the **own-credentials** path Zamboni uses `gcsfs` instead, so the `gcs` extra *is* required — see below |
 | **Azure Blob** | Not run against, and it needs a package on both paths: see the `azure` extra above |
