@@ -1008,3 +1008,43 @@ def test_an_unknown_destination_is_a_usage_error(devops_dir, session):
         main(["maintenance", "--yes", "--metrics", "graphite"])
 
     assert exit_info.value.code == 2
+
+
+def test_maintenance_preview_names_the_compaction_it_would_do(tmp_path, capsys, monkeypatch):
+    """#138 at the surface an operator reads: `maintenance` without --yes."""
+    import json
+
+    from tests.conftest import SCHEMA, batch
+    from zamboni import CatalogSession
+
+    warehouse = tmp_path / "wh"
+    warehouse.mkdir()
+    session = CatalogSession.for_local(warehouse_path=str(warehouse))
+    session.catalog.create_namespace_if_not_exists("db")
+    tbl = session.catalog.create_table("db.t", schema=SCHEMA, properties={"format-version": "2"})
+    for i in range(6):
+        tbl.append(batch(i * 10, 10))
+    session.close()
+    config = tmp_path / "table-config.json"
+    config.write_text(
+        json.dumps({"warehouse": "acme", "namespaces": {"db": {"tables": {"t": {}}}}})
+    )
+    monkeypatch.chdir(tmp_path)
+
+    code = main(
+        [
+            "maintenance",
+            "db.t",
+            "--warehouse",
+            "acme",
+            "--local-warehouse",
+            str(warehouse),
+            "--table-config",
+            str(config),
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "db.t: would rewrite 6 file(s)" in out
+    assert "rewrote 0 file(s)" not in out

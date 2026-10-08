@@ -48,7 +48,11 @@ def test_dry_run_changes_nothing(session, unpartitioned):
     before = profile_table(unpartitioned).snapshot_id
     result = TableCompactor(session, "db.unpartitioned", CompactionConfig()).execute(dry_run=True)
 
-    assert result.rewritten_data_files == 0
+    # The preview reports the plan -- six files it *would* rewrite -- and writes
+    # nothing. This line used to assert 0, which pinned the defect #138 fixed:
+    # a table with work pending read exactly like one with nothing to do.
+    assert result.rewritten_data_files == 6
+    assert (result.added_data_files, result.added_bytes) == (0, 0)
     assert profile_table(session.table("db.unpartitioned")).snapshot_id == before
 
 

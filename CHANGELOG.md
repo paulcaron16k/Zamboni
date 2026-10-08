@@ -298,6 +298,19 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **A compaction preview reported nothing to do when there was work pending**
+  (ZMBNI-138). `compact` without `--yes`, and every `maintenance` and `serve`
+  preview, printed `rewrote 0 file(s) ... across no groups` for a table with a
+  group ready to compact -- the same line a table with nothing to do prints, at
+  the moment an operator decides whether to commit. The plan was computed and
+  then discarded. A preview now reports it, in the future tense as
+  `rewrite-manifests` and `expire` already did: `would rewrite 8 file(s)
+  (N bytes) across 2 compaction group(s)`. In `as_dict()` the keys are
+  unchanged; on a preview `data_files_rewritten`, `bytes_rewritten` and
+  `groups_*` now carry the plan, and `data_files_added` / `bytes_added` stay 0,
+  since a rewrite's output is known only once written. Telemetry is unaffected:
+  metrics already skip previews.
+
 - **`RunCounters` was documented as public and exported from nowhere**, so a
   reader following the user guide got an `ImportError` from a documented name.
   Now in `zamboni.__all__`, and `test_the_public_surface_table_names_only_public_objects`
