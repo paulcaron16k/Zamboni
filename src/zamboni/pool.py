@@ -295,6 +295,14 @@ class WorkerConfig:
     #: Where per-table config and run-record files go.
     workdir: Path = field(default_factory=lambda: Path.cwd())
 
+    def __post_init__(self) -> None:
+        # Accept a str, refuse anything else, here rather than as a TypeError
+        # at the first table, which is where a str used to fail (#155).
+        if isinstance(self.workdir, str):
+            object.__setattr__(self, "workdir", Path(self.workdir))
+        if not isinstance(self.workdir, Path):
+            raise TypeError(f"workdir must be a path, not {type(self.workdir).__name__}")
+
     @classmethod
     def from_pool(cls, size: PoolSize, **settings: Any) -> WorkerConfig:
         """A config carrying ``size``'s per-worker threads and DuckDB memory.
@@ -456,21 +464,31 @@ class WorkerPool:
         # the file it came from cannot reach a table already in flight.
         item.table_config.dump(table_config)
         try:
+            if slot.process is not None and not slot.process.is_alive():
+                # Died between tables -- killed, OOM, crashed after its last
+                # reply. That is not this table's failure: replace the worker
+                # and run the table, rather than sending it into a dead pipe.
+                self._reset(slot)
             if slot.process is None:
                 self._spawn(slot)
             assert slot.conn is not None
-            slot.conn.send((worker_argv(item, self.config, table_config, record), str(record)))
-            ready = connection.wait([slot.conn, slot.process.sentinel])
-            if slot.conn in ready:
-                try:
-                    code, output, run_record = slot.conn.recv()
-                except EOFError:
+            # Any failure on the pipe is the worker dying, whichever call sees
+            # it. A worker that dies during startup surfaces as
+            # ConnectionResetError, not EOFError, because it exits with our job
+            # unread in its socket buffer; catching EOFError alone left the slot
+            # holding a dead process and failed every later table on it (#155).
+            try:
+                slot.conn.send((worker_argv(item, self.config, table_config, record), str(record)))
+                ready = connection.wait([slot.conn, slot.process.sentinel])
+                if slot.conn not in ready:
                     return self._died(slot, item, started)
-                slot.tables += 1
-                if slot.tables >= self.recycle_after:
-                    self._retire(slot)
-                return ItemResult(item, code, run_record, output, None, time.monotonic() - started)
-            return self._died(slot, item, started)
+                code, output, run_record = slot.conn.recv()
+            except (OSError, EOFError):
+                return self._died(slot, item, started)
+            slot.tables += 1
+            if slot.tables >= self.recycle_after:
+                self._retire(slot)
+            return ItemResult(item, code, run_record, output, None, time.monotonic() - started)
         finally:
             table_config.unlink(missing_ok=True)
             record.unlink(missing_ok=True)
@@ -489,6 +507,11 @@ class WorkerPool:
 
     def _died(self, slot: _Slot, item: WorkItem, started: float) -> ItemResult:
         slot.process.join(timeout=5)
+        if slot.process.is_alive():
+            # The pipe failed but the process did not exit: it can no longer be
+            # talked to, so it is dead to us. Kill it rather than leak it.
+            slot.process.kill()
+            slot.process.join()
         code = slot.process.exitcode
         why = f"killed by signal {-code}" if code is not None and code < 0 else f"exit {code}"
         logger.error("worker for %s/%s died (%s)", item.warehouse, item.table, why)
