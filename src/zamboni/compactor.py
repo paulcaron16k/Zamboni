@@ -77,13 +77,20 @@ class CompactionResult:
             work.append(f"{len(self.evolved)} evolution group(s)")
         across = " and ".join(work) if work else "no groups"
 
-        lines = [
-            (
+        if self.dry_run:
+            # Future tense, as `rewrite-manifests` and `expire` preview, and no
+            # "into": what a rewrite produces is known only once it is written.
+            head = (
+                f"{self.identifier}: would rewrite {self.rewritten_data_files} file(s) "
+                f"({self.rewritten_bytes} bytes) across {across}"
+            )
+        else:
+            head = (
                 f"{self.identifier}: rewrote {self.rewritten_data_files} file(s) "
                 f"({self.rewritten_bytes} bytes) into {self.added_data_files} "
                 f"({self.added_bytes} bytes) across {across}"
             )
-        ]
+        lines = [head]
         lines += [f"  {g.group}" for g in self.evolved]
         if self.dangling_delete_files:
             lines.append(
@@ -95,7 +102,13 @@ class CompactionResult:
         return "\n".join(lines)
 
     def as_dict(self) -> dict[str, object]:
-        """Counters an integrator can trend. See :class:`~zamboni.maintainers.Reportable`."""
+        """Counters an integrator can trend. See :class:`~zamboni.maintainers.Reportable`.
+
+        On a preview (`dry_run: true`) the `*_rewritten` counters and
+        `groups_*` are the plan's -- what a commit would rewrite -- and
+        `data_files_added` / `bytes_added` are 0, because a rewrite's output is
+        known only once it is written.
+        """
         return {
             "operation": "compact",
             "table": self.identifier,
@@ -225,6 +238,17 @@ class TableCompactor:
         result.skipped = list(plan.skipped) + list(evolution_plan.skipped)
         if dry_run:
             logger.info("dry run:\n%s\n%s", evolution_plan.describe(), plan.describe())
+            # Report what the plan would rewrite. Returning the empty result
+            # made a six-file group read "rewrote 0 file(s)", the same line a
+            # table with nothing to do prints -- at the one moment an operator
+            # decides whether to commit (#138).
+            for evolving in evolution_plan.groups:
+                result.evolved.append(_planned(f"evolution {evolving.label}", evolving.files))
+            for compacting in plan.groups:
+                result.groups.append(_planned(compacting.describe(), compacting.files))
+            for planned in (*result.evolved, *result.groups):
+                result.rewritten_data_files += planned.rewritten_data_files
+                result.rewritten_bytes += planned.rewritten_bytes
             return result
         if plan.is_empty and evolution_plan.is_empty:
             return result
@@ -423,6 +447,19 @@ def _group_result(
         rewritten_bytes=sum(f.size_bytes for f in files),
         added_bytes=sum(f.file_size_in_bytes for f in output.data_files),
         snapshot_id=snapshot_id,
+    )
+
+
+def _planned(label: str, files) -> GroupResult:
+    """A group a preview would rewrite. Its output is unknown until it is
+    written, so the `added_*` counters stay 0 and `describe()` does not name them."""
+    return GroupResult(
+        group=label,
+        rewritten_data_files=len(files),
+        added_data_files=0,
+        rewritten_bytes=sum(f.size_bytes for f in files),
+        added_bytes=0,
+        snapshot_id=None,
     )
 
 

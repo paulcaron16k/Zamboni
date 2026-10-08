@@ -783,3 +783,84 @@ def tmp_path_for(session):
     from pathlib import Path
 
     return Path(session.catalog.properties["warehouse"].replace("file://", "")).parent
+
+
+# -- a preview reports the plan (#138) --------------------------------------------------
+
+
+def single_file_table(session):
+    """A table with nothing to compact: one data file, below any group's minimum."""
+    from tests.conftest import SCHEMA, batch
+
+    tbl = session.catalog.create_table(
+        "db.single", schema=SCHEMA, properties={"format-version": "2"}
+    )
+    tbl.append(batch(0, 10))
+    return tbl
+
+
+def test_a_preview_reports_what_the_commit_would_rewrite(session, partitioned):
+    """The plan, not an empty result: before #138 a two-group, eight-file
+    preview read "rewrote 0 file(s) ... across no groups"."""
+    before = partitioned.current_snapshot().snapshot_id
+
+    preview = TableCompactor(session, "db.partitioned", CompactionConfig()).execute(dry_run=True)
+
+    assert preview.dry_run
+    assert preview.rewritten_data_files == 8
+    assert preview.rewritten_bytes == sum(
+        f.size_bytes for f in profile_table(partitioned).live_files
+    )
+    assert len(preview.groups) == 2
+    assert (preview.added_data_files, preview.added_bytes) == (0, 0), "unknown until written"
+    assert session.table("db.partitioned").current_snapshot().snapshot_id == before, (
+        "a preview commits nothing"
+    )
+
+
+def test_the_preview_predicts_the_commit(session, partitioned):
+    """What a preview says it would rewrite is what the commit then rewrites."""
+    preview = TableCompactor(session, "db.partitioned", CompactionConfig()).execute(dry_run=True)
+    done = TableCompactor(session, "db.partitioned", CompactionConfig()).execute()
+
+    assert preview.rewritten_data_files == done.rewritten_data_files
+    assert preview.rewritten_bytes == done.rewritten_bytes
+    assert [g.rewritten_data_files for g in preview.groups] == [
+        g.rewritten_data_files for g in done.groups
+    ]
+
+
+def test_a_preview_reads_in_the_future_tense(session, partitioned):
+    line = (
+        TableCompactor(session, "db.partitioned", CompactionConfig())
+        .execute(dry_run=True)
+        .describe()
+        .splitlines()[0]
+    )
+    assert line.startswith("db.partitioned: would rewrite 8 file(s)")
+    assert "rewrote" not in line
+    assert " into " not in line, "a preview cannot know what the rewrite produces"
+
+
+def test_nothing_to_do_and_work_pending_no_longer_read_the_same(session, partitioned):
+    """The defect in one assertion: the two cases an operator must tell apart
+    before committing produced identical lines."""
+    single_file_table(session)
+    idle = TableCompactor(session, "db.single", CompactionConfig()).execute(dry_run=True)
+    pending = TableCompactor(session, "db.partitioned", CompactionConfig()).execute(dry_run=True)
+
+    idle_line = idle.describe().splitlines()[0].split(": ", 1)[1]
+    pending_line = pending.describe().splitlines()[0].split(": ", 1)[1]
+    assert idle_line == "would rewrite 0 file(s) (0 bytes) across no groups"
+    assert idle_line != pending_line
+
+
+def test_as_dict_keeps_its_keys_on_a_preview(session, partitioned):
+    """A consumer trending these keeps working; only a preview's values change."""
+    preview = TableCompactor(session, "db.partitioned", CompactionConfig()).execute(dry_run=True)
+    done = TableCompactor(session, "db.partitioned", CompactionConfig()).execute()
+
+    assert preview.as_dict().keys() == done.as_dict().keys()
+    assert preview.as_dict()["dry_run"] is True
+    assert preview.as_dict()["data_files_rewritten"] == 8
+    assert preview.as_dict()["snapshot_ids"] == []
