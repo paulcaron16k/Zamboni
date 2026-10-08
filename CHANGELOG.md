@@ -23,6 +23,18 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **The `write.completed` contract, version 1.0** (ZMBNI-123):
+  [docs/write-completed.md](docs/write-completed.md), and its JSON Schema as
+  `zamboni.get_write_completed_spec()`. What an Iceberg writer emits once per
+  table when it has finished with it for a run -- CloudEvents 1.0,
+  structured-mode JSON, `type: writeCompleted`, a deterministic `id`, and a
+  payload identifying the table by warehouse name, namespace (a list) and table.
+  `zamboni.events` parses and validates it and maps it to a managed table.
+  Versioned `major.minor`; a minor version only adds optional fields, and a
+  consumer ignores fields it does not know. The schema is generated from the
+  code, and tests keep the schema, the parser and the document in agreement.
+  Nothing consumes events yet; that is ZMBNI-124.
+
 - **The fleet file** — `zamboni.fleet.FleetConfig`, the configuration the
   forthcoming `zamboni serve` reads (ZMBNI-118): warehouses, a cron schedule
   each, and each warehouse's `table-config.json` either by path or inline. YAML
