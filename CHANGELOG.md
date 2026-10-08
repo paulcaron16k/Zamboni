@@ -298,6 +298,16 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **A `zamboni serve` worker that died during startup broke its slot for good**
+  (ZMBNI-155). The parent saw `ConnectionResetError` rather than `EOFError` -- the
+  worker exited with its first job unread -- and only `EOFError` was handled, so
+  the slot kept a dead process and every later table sent to it failed. Any
+  failure on a worker's pipe is now that worker dying: the table reports `died`
+  and the next one gets a new worker. A worker found dead *between* tables is
+  replaced before the next table is sent, so that table runs instead of failing.
+  `WorkerConfig(workdir=...)` now accepts a string, and refuses a non-path at
+  construction rather than at the first table.
+
 - **A compaction preview reported nothing to do when there was work pending**
   (ZMBNI-138). `compact` without `--yes`, and every `maintenance` and `serve`
   preview, printed `rewrote 0 file(s) ... across no groups` for a table with a

@@ -614,3 +614,66 @@ def test_a_non_positive_memory_limit_is_a_usage_error(tmp_path, value):
     with pytest.raises(SystemExit) as exc:
         session_from(tmp_path, "--duckdb-memory-limit-bytes", value)
     assert exc.value.code == 2
+
+
+# -- a worker that dies at the wrong moment (#155) -------------------------------------
+
+
+def test_a_worker_dying_at_startup_costs_one_table_and_the_slot_recovers(tmp_path, monkeypatch):
+    """The worker exits while importing its entry, with the job already sent:
+    the parent sees ConnectionResetError, not EOFError. Before #155 that escaped,
+    the slot kept its dead process, and every later table on it failed."""
+    marker = tmp_path / "startup-marker"
+    # In the real environment, not base_environ: a worker imports its entry
+    # before it first restores base_environ, which happens per job.
+    monkeypatch.setenv("ZAMBONI_TEST_STARTUP_MARKER", str(marker))
+    config = WorkerConfig(
+        entry="tests.pool_entries_startup:record",
+        workdir=tmp_path,
+        base_environ={"PATH": "/usr/bin:/bin"},
+    )
+
+    async def scenario():
+        pool = WorkerPool(PoolSize(1, 1, "test"), config)
+        try:
+            return [await pool.run(item(t)) for t in ("raw.a", "raw.b", "raw.c")]
+        finally:
+            await pool.close()
+
+    first, second, third = asyncio.run(scenario())
+    assert marker.exists(), "the first worker really did die at startup"
+    assert first.exit_code == 1 and first.died is not None
+    assert (second.exit_code, second.died) == (0, None), "the slot recovered"
+    assert (third.exit_code, third.died) == (0, None)
+    assert second.record["pid"] == third.record["pid"], "one replacement, then reused"
+
+
+def test_a_worker_killed_between_tables_does_not_fail_the_next_one(tmp_path):
+    """Dead before the next table was sent -- an OOM kill while idle, say. That is
+    not the next table's failure, so it runs on a replacement."""
+    import os
+    import signal
+
+    config = WorkerConfig(
+        entry="tests.pool_entries:record", workdir=tmp_path, base_environ={"PATH": "/usr/bin:/bin"}
+    )
+
+    async def scenario():
+        pool = WorkerPool(PoolSize(1, 1, "test"), config)
+        try:
+            first = await pool.run(item("raw.a"))
+            os.kill(first.record["pid"], signal.SIGKILL)
+            await asyncio.sleep(0.2)
+            return first, await pool.run(item("raw.b"))
+        finally:
+            await pool.close()
+
+    first, second = asyncio.run(scenario())
+    assert (second.exit_code, second.died) == (0, None)
+    assert second.record["pid"] != first.record["pid"]
+
+
+def test_workdir_may_be_a_string_and_must_be_a_path():
+    assert WorkerConfig(workdir="/tmp").workdir == Path("/tmp")
+    with pytest.raises(TypeError, match="workdir must be a path"):
+        WorkerConfig(workdir=42)  # type: ignore[arg-type]
