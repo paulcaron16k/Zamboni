@@ -70,7 +70,7 @@ Pinned to uv.lock. Regenerate with `uv run scripts/build-executable.py`.
 
 import sys
 
-from zamboni.cli import main
+from zamboni.entry import main
 
 if __name__ == "__main__":
     sys.exit(main())

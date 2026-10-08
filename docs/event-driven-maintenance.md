@@ -443,8 +443,11 @@ settles, each tested in `tests/test_service.py`:
   `KillMode=control-group` and a terminal's Ctrl-C both reach the workers, and
   would kill tables mid-rewrite instead of letting the parent drain. So a worker
   is retired, or on a second signal SIGKILLed — never terminated.
-- **`zamboni service-status` takes 1.4–1.5 s** (measured, 2026-10-02), above the
-  1 s exec-probe default, so the documented manifest sets `timeoutSeconds`.
+- **`zamboni service-status` answers in 0.18 s** (measured, 2026-10-08), inside
+  the 1 s exec-probe default. It took 1.4–1.5 s until ZMBNI-154, because every
+  `zamboni` command imported PyIceberg, DuckDB and Arrow first; the console
+  script now answers the probe verbs without them, and a test pins it. The
+  manifest keeps `timeoutSeconds: 10` as margin.
 
 ### One deployment detail that will bite
 

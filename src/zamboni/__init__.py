@@ -13,68 +13,185 @@ when no signature moved -- so the contract is written down rather than implied.
 import sys
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _distribution_version
+from typing import TYPE_CHECKING
 
-from .backends.base import RewriteBackend, RewriteContext, RewriteOutput
-from .capabilities import PyIcebergCapabilities, detect
-from .committer import ConcurrentModification, ReplaceCommitter, UnsupportedPyIceberg
-from .compactor import CompactionBlocked, CompactionResult, TableCompactor
-from .config import CompactionConfig, MemoryMode, config_from_table_settings
-from .deletes import DanglingDeleteCleaner
-from .expire import RetentionPolicy, SnapshotExpirer
-from .fleet import CronSchedule, FleetConfig, FleetConfigError, FleetWarehouse
-from .health import TableHealth, Watermark, maintenance_watermark, table_health
-from .maintainers import (
-    EngineConfigProblem,
-    LayoutFeature,
-    Maintainer,
-    MaintainerCapabilities,
-    MaintenanceRequest,
-    Operation,
-    OperationSupport,
-    PreviewUnavailable,
-    Support,
-    UnsupportedOperation,
-    engines_lacking,
-)
-from .maintainers import available as available_engines
-from .maintainers import get as get_maintainer
-from .maintenance import (
-    RUNBOOK_ORDER,
-    MaintenanceReport,
-    Outcome,
-    RunCounters,
-    maintain,
-    validate_policy,
-)
-from .manifests import ManifestRewriter
-from .metrics import (
-    CommitReport,
-    CounterResult,
-    NoCommitReport,
-    TimerResult,
-    commit_reports,
-    no_commit_metrics,
-    no_commit_report,
-)
-from .orphans import OrphanCleaner
-from .planner import CompactionPlan, CompactionPlanner, FileGroup
-from .profile import Finding, Severity, TableProfile, profile_table
-from .reachable import reachable_files
-from .reporters import (
-    CollectingReporter,
-    LoggingReporter,
-    MetricsReporter,
-    MultiReporter,
-    NoopReporter,
-    RestMetricsReporter,
-    reporter_for,
-)
-from .runlog import FleetSummary, summarise_logs
-from .session import AzureSettings, CatalogSession, GCSSettings, S3Settings
-from .settings import Profile
-from .settings import resolve as resolve_settings
-from .tableconfig import Retention, TableConfig, TableConfigError, TableSettings
-from .tableconfig_schema import load_schema as get_table_config_spec
+if TYPE_CHECKING:  # pragma: no cover - for type checkers and editors only
+    from .backends.base import RewriteBackend, RewriteContext, RewriteOutput
+    from .capabilities import PyIcebergCapabilities, detect
+    from .committer import ConcurrentModification, ReplaceCommitter, UnsupportedPyIceberg
+    from .compactor import CompactionBlocked, CompactionResult, TableCompactor
+    from .config import CompactionConfig, MemoryMode, config_from_table_settings
+    from .deletes import DanglingDeleteCleaner
+    from .expire import RetentionPolicy, SnapshotExpirer
+    from .fleet import CronSchedule, FleetConfig, FleetConfigError, FleetWarehouse
+    from .health import TableHealth, Watermark, maintenance_watermark, table_health
+    from .maintainers import (
+        EngineConfigProblem,
+        LayoutFeature,
+        Maintainer,
+        MaintainerCapabilities,
+        MaintenanceRequest,
+        Operation,
+        OperationSupport,
+        PreviewUnavailable,
+        Support,
+        UnsupportedOperation,
+        engines_lacking,
+    )
+    from .maintainers import available as available_engines
+    from .maintainers import get as get_maintainer
+    from .maintenance import (
+        RUNBOOK_ORDER,
+        MaintenanceReport,
+        Outcome,
+        RunCounters,
+        maintain,
+        validate_policy,
+    )
+    from .manifests import ManifestRewriter
+    from .metrics import (
+        CommitReport,
+        CounterResult,
+        NoCommitReport,
+        TimerResult,
+        commit_reports,
+        no_commit_metrics,
+        no_commit_report,
+    )
+    from .orphans import OrphanCleaner
+    from .planner import CompactionPlan, CompactionPlanner, FileGroup
+    from .profile import Finding, Severity, TableProfile, profile_table
+    from .reachable import reachable_files
+    from .reporters import (
+        CollectingReporter,
+        LoggingReporter,
+        MetricsReporter,
+        MultiReporter,
+        NoopReporter,
+        RestMetricsReporter,
+        reporter_for,
+    )
+    from .runlog import FleetSummary, summarise_logs
+    from .session import AzureSettings, CatalogSession, GCSSettings, S3Settings
+    from .settings import Profile
+    from .settings import resolve as resolve_settings
+    from .tableconfig import Retention, TableConfig, TableConfigError, TableSettings
+    from .tableconfig_schema import load_schema as get_table_config_spec
+
+#: Every public name, and where it lives. Loaded on first use, not at import
+#: (ZMBNI-154): importing this package used to import the whole engine --
+#: PyIceberg, DuckDB, Arrow, the compaction backends -- which made every
+#: `zamboni` command, `service-status --probe` included, pay ~1.2 s before
+#: parsing an argument. `from zamboni import X` and `zamboni.X` work exactly as
+#: before; a name is imported the first time it is asked for.
+_LAZY: dict[str, tuple[str, str]] = {
+    "AzureSettings": (".session", "AzureSettings"),
+    "CatalogSession": (".session", "CatalogSession"),
+    "CollectingReporter": (".reporters", "CollectingReporter"),
+    "CommitReport": (".metrics", "CommitReport"),
+    "CompactionBlocked": (".compactor", "CompactionBlocked"),
+    "CompactionConfig": (".config", "CompactionConfig"),
+    "CompactionPlan": (".planner", "CompactionPlan"),
+    "CompactionPlanner": (".planner", "CompactionPlanner"),
+    "CompactionResult": (".compactor", "CompactionResult"),
+    "ConcurrentModification": (".committer", "ConcurrentModification"),
+    "CounterResult": (".metrics", "CounterResult"),
+    "CronSchedule": (".fleet", "CronSchedule"),
+    "DanglingDeleteCleaner": (".deletes", "DanglingDeleteCleaner"),
+    "EngineConfigProblem": (".maintainers", "EngineConfigProblem"),
+    "FileGroup": (".planner", "FileGroup"),
+    "Finding": (".profile", "Finding"),
+    "FleetConfig": (".fleet", "FleetConfig"),
+    "FleetConfigError": (".fleet", "FleetConfigError"),
+    "FleetSummary": (".runlog", "FleetSummary"),
+    "FleetWarehouse": (".fleet", "FleetWarehouse"),
+    "GCSSettings": (".session", "GCSSettings"),
+    "LayoutFeature": (".maintainers", "LayoutFeature"),
+    "LoggingReporter": (".reporters", "LoggingReporter"),
+    "Maintainer": (".maintainers", "Maintainer"),
+    "MaintainerCapabilities": (".maintainers", "MaintainerCapabilities"),
+    "MaintenanceReport": (".maintenance", "MaintenanceReport"),
+    "MaintenanceRequest": (".maintainers", "MaintenanceRequest"),
+    "ManifestRewriter": (".manifests", "ManifestRewriter"),
+    "MemoryMode": (".config", "MemoryMode"),
+    "MetricsReporter": (".reporters", "MetricsReporter"),
+    "MultiReporter": (".reporters", "MultiReporter"),
+    "NoCommitReport": (".metrics", "NoCommitReport"),
+    "NoopReporter": (".reporters", "NoopReporter"),
+    "Operation": (".maintainers", "Operation"),
+    "OperationSupport": (".maintainers", "OperationSupport"),
+    "OrphanCleaner": (".orphans", "OrphanCleaner"),
+    "Outcome": (".maintenance", "Outcome"),
+    "PreviewUnavailable": (".maintainers", "PreviewUnavailable"),
+    "Profile": (".settings", "Profile"),
+    "PyIcebergCapabilities": (".capabilities", "PyIcebergCapabilities"),
+    "RUNBOOK_ORDER": (".maintenance", "RUNBOOK_ORDER"),
+    "ReplaceCommitter": (".committer", "ReplaceCommitter"),
+    "RestMetricsReporter": (".reporters", "RestMetricsReporter"),
+    "Retention": (".tableconfig", "Retention"),
+    "RetentionPolicy": (".expire", "RetentionPolicy"),
+    "RewriteBackend": (".backends.base", "RewriteBackend"),
+    "RewriteContext": (".backends.base", "RewriteContext"),
+    "RewriteOutput": (".backends.base", "RewriteOutput"),
+    "RunCounters": (".maintenance", "RunCounters"),
+    "S3Settings": (".session", "S3Settings"),
+    "Severity": (".profile", "Severity"),
+    "SnapshotExpirer": (".expire", "SnapshotExpirer"),
+    "Support": (".maintainers", "Support"),
+    "TableCompactor": (".compactor", "TableCompactor"),
+    "TableConfig": (".tableconfig", "TableConfig"),
+    "TableConfigError": (".tableconfig", "TableConfigError"),
+    "TableHealth": (".health", "TableHealth"),
+    "TableProfile": (".profile", "TableProfile"),
+    "TableSettings": (".tableconfig", "TableSettings"),
+    "TimerResult": (".metrics", "TimerResult"),
+    "UnsupportedOperation": (".maintainers", "UnsupportedOperation"),
+    "UnsupportedPyIceberg": (".committer", "UnsupportedPyIceberg"),
+    "Watermark": (".health", "Watermark"),
+    "available_engines": (".maintainers", "available"),
+    "commit_reports": (".metrics", "commit_reports"),
+    "config_from_table_settings": (".config", "config_from_table_settings"),
+    "detect": (".capabilities", "detect"),
+    "engines_lacking": (".maintainers", "engines_lacking"),
+    "get_maintainer": (".maintainers", "get"),
+    "get_table_config_spec": (".tableconfig_schema", "load_schema"),
+    "maintain": (".maintenance", "maintain"),
+    "maintenance_watermark": (".health", "maintenance_watermark"),
+    "no_commit_metrics": (".metrics", "no_commit_metrics"),
+    "no_commit_report": (".metrics", "no_commit_report"),
+    "profile_table": (".profile", "profile_table"),
+    "reachable_files": (".reachable", "reachable_files"),
+    "reporter_for": (".reporters", "reporter_for"),
+    "resolve_settings": (".settings", "resolve"),
+    "summarise_logs": (".runlog", "summarise_logs"),
+    "table_health": (".health", "table_health"),
+    "validate_policy": (".maintenance", "validate_policy"),
+}
+
+
+def __getattr__(name: str) -> object:
+    """Load a public name, or a submodule, on first access (PEP 562)."""
+    import importlib
+
+    if name in _LAZY:
+        module, attribute = _LAZY[name]
+        value = getattr(importlib.import_module(module, __name__), attribute)
+    else:
+        # Submodules were attributes of the package as a side effect of the
+        # eager imports (`import zamboni; zamboni.session`); keep that working.
+        try:
+            value = importlib.import_module(f".{name}", __name__)
+        except ModuleNotFoundError as exc:
+            if exc.name != f"{__name__}.{name}":
+                raise
+            raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *_LAZY})
+
 
 # Read from the installed distribution rather than repeated as a literal here.
 # pyproject.toml is the single source of truth, so `zamboni --version` cannot

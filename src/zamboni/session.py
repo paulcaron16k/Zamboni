@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
@@ -30,44 +29,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class CredentialUse(StrEnum):
-    """Whether Zamboni talks to the object store on its **own** credentials.
-
-    The warehouse system owns the storage. An Iceberg REST catalog is a service
-    in front of it, not its owner -- and remote signing exists to constrain
-    *external* readers such as BI tools, which is a different trust question
-    from the one a maintenance job asks.
-
-    That distinction is load-bearing because the two credential paths a catalog
-    can offer are not equivalent (docs/user_guide.md, "Storage credentials"):
-
-    * **STS vending** hands over temporary credentials with a session token, and
-      the client signs locally. Every S3 verb works.
-    * **Remote signing** hands over nothing; the client POSTs each request to the
-      catalog and gets an ``Authorization`` header back. The catalog decides per
-      request, and Lakekeeper declines exactly the verbs maintenance is made of.
-      Measured against Lakekeeper 0.13.1: a ``ListObjectsV2`` is refused with
-      ``SignError ... 400`` **even when its prefix is inside the table's own
-      location**, and so is a multi-object ``DELETE``.
-
-    So on a signing warehouse a reader works perfectly while ``expire`` commits
-    and frees nothing and ``remove-orphans`` cannot run at all.
-    """
-
-    #: Use Zamboni's own storage credentials for every operation, whenever they
-    #: are configured. The default: one credential path per run is one place to
-    #: look when access fails.
-    ALWAYS = "always"
-    #: Override only where the catalog's signer refuses -- ``expire``'s deletion
-    #: half and ``remove-orphans``. Reads and compaction keep going through
-    #: catalog-vended credentials, so the catalog's audit trail still sees them.
-    #: Safe rather than merely narrower: the reachable set is compared on
-    #: ``bucket/key`` keys (:func:`zamboni.reachable.canonical`), which do not
-    #: depend on which endpoint or credential produced them.
-    RECLAIM_ONLY = "reclaim-only"
-    #: Never override. The catalog governs Zamboni as it governs any client, and
-    #: reclaim on a signing warehouse refuses rather than half-working.
-    NEVER = "never"
+# `CredentialUse` lives in `zamboni.settings`, which owns the setting, and is
+# re-exported here so `zamboni.session.CredentialUse` keeps working. Defining it
+# here made validating a profile import PyIceberg -- the ~0.8 s still left
+# in `zamboni service-status` after the package import went lazy (ZMBNI-154).
+from .settings import CredentialUse  # noqa: E402 - re-export, see above
 
 
 class StorageCredentialsRequired(RuntimeError):
