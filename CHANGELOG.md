@@ -56,8 +56,9 @@ Two categories beyond the usual set, because this tool deletes files:
 
 - **`zamboni service-status [--probe liveness|readiness|startup]`** — the
   service's state file, or an exit 0/1 answer for a Kubernetes exec probe.
-  Liveness checks only that the scheduler loop ticked. It takes ~1.5 s to
-  answer, so **set `timeoutSeconds` above the 1 s default** (devops.md §8).
+  Liveness checks only that the scheduler loop ticked. It answers in ~0.2 s,
+  inside Kubernetes' 1 s exec-probe default; devops.md §8 still sets
+  `timeoutSeconds: 10` as margin.
 
 - `config-reload`'s `--pid-file` now defaults to the path `serve` writes,
   `$ZAMBONI_ROOT/run/serve.pid`.
@@ -327,6 +328,17 @@ Two categories beyond the usual set, because this tool deletes files:
   checks the guide's surface table against it so the two cannot drift again.
 
 ### Changed
+
+- **`import zamboni` no longer imports the engine** (ZMBNI-154). The package's
+  public names load on first use (PEP 562): `from zamboni import X`, `zamboni.X`
+  and `zamboni.__all__` behave as before, and so does `zamboni.<submodule>`. The
+  `zamboni` console script now starts in `zamboni.entry`, which answers
+  `service-status`, `config-reload` and `--version` without PyIceberg, DuckDB or
+  Arrow and hands every other command to `zamboni.cli` unchanged. Measured with
+  `/usr/bin/time`, three runs each: `service-status --probe liveness` went from
+  1.4-1.5 s to 0.18 s; `import zamboni` alone takes ~60 ms. `CredentialUse` now
+  lives in `zamboni.settings` and is re-exported from `zamboni.session`, so both
+  import paths give the same enum.
 
 - **Compaction now stamps snapshots `zamboni.operation: "compact"`**, not
   `"compaction"`. The other two committing operations already wrote their

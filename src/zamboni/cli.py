@@ -49,11 +49,13 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-from . import capabilities, maintainers, settings, version_banner
+from . import capabilities, maintainers, settings
 from .capabilities import detect
 from .catalog_import import config_from_catalog, load_catalog
 from .compactor import CompactionBlocked, TableCompactor
 from .config import CompactionConfig, MemoryMode
+from .entry import PROBE_COMMANDS, add_global_options, add_probe_commands, run_probe_command
+from .entry import run_dir as probe_run_dir
 from .maintainers import (
     EngineConfigProblem,
     LayoutFeature,
@@ -201,19 +203,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "serve":
         return _serve(args)
 
-    if args.command == "service-status":
-        return _service_status(args)
-
-    if args.command == "config-reload":
-        from .reload import PidFileError, send_reload
-
-        try:
-            pid = send_reload(args.pid_file or _run_dir(args) / "serve.pid")
-        except PidFileError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
-        print(f"sent SIGHUP to zamboni pid {pid}; the service log reports the reload")
-        return 0
+    if args.command in PROBE_COMMANDS:
+        # Normally answered by `zamboni.entry` before this module is imported;
+        # reached only when `zamboni.cli.main` is called directly.
+        return run_probe_command(args)
 
     # These two need no catalog connection: they operate on files.
     if args.command == "from-catalog":
@@ -314,18 +307,7 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog=USAGE,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("-v", "--verbose", action="store_true")
-    parser.add_argument(
-        "--profile",
-        help="non-secret configuration. Default: ./zamboni.yml, then "
-        "$ZAMBONI_ROOT/zamboni.yml. See docs/devops.md.",
-    )
-    parser.add_argument(
-        "--env",
-        help="dotenv file holding credentials. Default: ./.env. Cron gives a job "
-        "almost no environment, and a crontab is a poor place for a secret.",
-    )
-    parser.add_argument("--version", action="version", version=version_banner())
+    add_global_options(parser)
     sub = parser.add_subparsers(dest="command", required=True)
 
     rs = sub.add_parser(
@@ -350,23 +332,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="emit the aggregate as JSON instead of prose, for a dashboard",
     )
 
-    cr = sub.add_parser(
-        "config-reload",
-        help="tell a running `zamboni serve` to reload its fleet file now",
-        description=(
-            "Send SIGHUP to the service named by its pid file. The service polls "
-            "the fleet file anyway; this is for deployments that are not "
-            "containers, and loads at once rather than at the next poll. An "
-            "invalid file leaves the running config in place -- check the "
-            "service's log for the result. Refuses to signal a pid that is not "
-            "a zamboni process, because a stale pid file and SIGHUP's default "
-            "action would otherwise terminate an unrelated process."
-        ),
-    )
-    cr.add_argument(
-        "--pid-file",
-        help="the pid file `zamboni serve` writes. Default: $ZAMBONI_ROOT/run/serve.pid",
-    )
+    # Defined in `zamboni.entry`, which answers them without importing the
+    # engine; registered here too so `zamboni --help` lists them (ZMBNI-154).
+    add_probe_commands(sub)
 
     sv = sub.add_parser(
         "serve",
@@ -415,24 +383,6 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="how often to check the fleet file for changes (default 30)",
     )
-
-    ss = sub.add_parser(
-        "service-status",
-        help="report a running `zamboni serve`'s state, or answer a Kubernetes probe",
-        description=(
-            "Reads the state file `zamboni serve` writes. With --probe, exits 0 or "
-            "1 for an exec probe: liveness asserts only that the scheduler loop "
-            "ticked recently; readiness that it is running on a valid config; "
-            "startup that the first config load and capability probe finished. "
-            "None of them checks a catalog -- an outage there is not fixed by a "
-            "restart."
-        ),
-    )
-    ss.add_argument(
-        "--state-file",
-        help="the state file `zamboni serve` writes. Default: $ZAMBONI_ROOT/run/serve.state.json",
-    )
-    ss.add_argument("--probe", choices=("liveness", "readiness", "startup"))
 
     sub.add_parser("doctor", help="report the installed PyIceberg's capabilities")
     sub.add_parser("engines", help="report what each engine supports, and what it refuses to do")
@@ -1508,11 +1458,6 @@ def _maintenance(session: CatalogSession, args: argparse.Namespace) -> int:
     return report.exit_code
 
 
-def _run_dir(args: argparse.Namespace) -> Path:
-    """Where `serve` keeps its pid file, state file and per-table scratch files."""
-    return Path(args.zamboni_profile.root) / "run"
-
-
 def _serve(args: argparse.Namespace) -> int:
     """`zamboni serve`. 0 on a clean stop; 2 if it could not start."""
     import asyncio
@@ -1523,7 +1468,7 @@ def _serve(args: argparse.Namespace) -> int:
     from .reload import POLL_SECONDS, install_hangup
     from .service import AlreadyRunning, Service, single_instance
 
-    run_dir = _run_dir(args)
+    run_dir = probe_run_dir(args)
     state_path = Path(args.state_file) if args.state_file else run_dir / "serve.state.json"
     pid_path = Path(args.pid_file) if args.pid_file else run_dir / "serve.pid"
     for directory in {state_path.parent, pid_path.parent}:
@@ -1569,24 +1514,6 @@ def _serve(args: argparse.Namespace) -> int:
     except (AlreadyRunning, FleetConfigError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-
-
-def _service_status(args: argparse.Namespace) -> int:
-    """Print the service's state, or answer one probe with 0 or 1."""
-    from .service import probe, read_state
-
-    path = Path(args.state_file) if args.state_file else _run_dir(args) / "serve.state.json"
-    try:
-        state = read_state(path)
-    except (OSError, ValueError) as exc:
-        print(f"no readable service state at {path}: {exc}", file=sys.stderr)
-        return 1 if args.probe else 2
-    if args.probe:
-        ok, why = probe(state, args.probe)
-        print(f"{args.probe}: {'ok' if ok else 'FAIL'} -- {why}")
-        return 0 if ok else 1
-    print(json.dumps(state, indent=2, sort_keys=True))
-    return 0
 
 
 def _runs(args: argparse.Namespace) -> int:
