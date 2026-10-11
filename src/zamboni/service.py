@@ -35,7 +35,7 @@ import fcntl
 import json
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -105,6 +105,9 @@ class ServiceState:
     #: No NATS consumer exists yet (#110); ``None`` says "not configured"
     #: rather than "disconnected", so readiness does not wait for it.
     nats_connected: bool | None = None
+    #: Per event source: received, offered, coalesced, duplicates, unmapped,
+    #: rejected, errors.
+    events: dict[str, dict[str, int]] = field(default_factory=dict)
     last_error: str | None = None
     #: The last reload that was refused. The running config is still valid.
     reload_error: str | None = None
@@ -180,6 +183,7 @@ class ServiceState:
             "workers": self.workers,
             "busy": self.busy,
             "nats_connected": self.nats_connected,
+            "events": self.events,
             "last_error": self.last_error,
             "reload_error": self.reload_error,
             "warehouses": self.warehouses,
@@ -224,6 +228,11 @@ def probe(
         return (phase in ("running", "stopping"), f"phase {phase}")
     if kind == "readiness":
         ok = phase == "running" and int(state.get("generation") or 0) >= 1
+        # An event source that is configured but disconnected makes the service
+        # unready, never unalive: maintenance continues on the schedule, and a
+        # restart would not reconnect a broker that is down (§7).
+        if state.get("nats_connected") is False:
+            return False, f"phase {phase}, event source disconnected"
         return ok, f"phase {phase}, config generation {state.get('generation')}"
     if kind == "liveness":
         if phase == "stopped":
@@ -330,6 +339,7 @@ class Service:
         clock: Callable[[], datetime] = now_utc,
         scheduler_wait: Any = None,
         capability_check: Callable[[], str | None] | None = None,
+        events: Sequence[Any] = (),
     ) -> None:
         self.fleet_path = Path(fleet_path)
         self.size = size
@@ -341,6 +351,9 @@ class Service:
         self.clock = clock
         self.scheduler_wait = scheduler_wait
         self.capability_check = capability_check or _capabilities_unsupported
+        #: Event sources (`zamboni.events.feed.EventSource`); each gets a feed.
+        self.events = tuple(events)
+        self.feeds: list[Any] = []
         self.state = ServiceState(
             fleet_path=str(self.fleet_path),
             dry_run=not worker_config.commit,
@@ -358,6 +371,13 @@ class Service:
             # The state file is for observers. Failing to write it must not stop
             # maintenance; liveness will notice the staleness, which is right.
             logger.exception("could not write the state file %s", self.state_path)
+
+    def _observe_events(self) -> None:
+        """Copy each source's connection and each feed's counters into state."""
+        if not self.events:
+            return
+        self.state.nats_connected = all(bool(s.connected) for s in self.events)
+        self.state.events = {f.source.name: f.counters.as_dict() for f in self.feeds}
 
     def request_stop(self) -> None:
         """First call: graceful. Second: kill the in-flight tables' workers too."""
@@ -397,6 +417,7 @@ class Service:
         def on_tick(at: datetime) -> None:
             self.state.last_tick = at
             self.state.busy = len(queue.in_flight)
+            self._observe_events()
             self._write()
 
         def on_fired(at: datetime, fired: list[str]) -> None:
@@ -433,8 +454,18 @@ class Service:
             self.state.phase = "stopping"
             self._write()
 
+        if self.events:
+            from .events.feed import EventFeed
+
+            self.feeds = [
+                EventFeed(source, fleet=lambda: scheduler.fleet, offer=queue.offer)
+                for source in self.events
+            ]
+        self._observe_events()
+
         try:
             await asyncio.gather(
+                *(feed.run(self.stop) for feed in self.feeds),
                 run_scheduler(
                     scheduler,
                     queue,

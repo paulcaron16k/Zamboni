@@ -23,6 +23,17 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **The event feed** behind `zamboni serve`'s write-completed path (ZMBNI-124),
+  in `zamboni.events.feed`: an `EventSource` protocol for any transport, and an
+  `EventFeed` that parses, maps by warehouse name, deduplicates on
+  `(warehouse, table, snapshot_id)`, debounces per table (5 min quiet, 30 min
+  cap) and offers with `reason=event`. Every handled message is acknowledged
+  once; a malformed one is not redelivered. The service's state file counts each
+  source's messages, and readiness fails while a configured source is
+  disconnected -- liveness never does. Imports no engine module and no
+  transport, so a transport and the forthcoming maintenance runtime reuse it.
+  The NATS source follows.
+
 - **`maintenance --operations OP[,OP...]`** runs only those operations, of the
   ones the profile enables -- it narrows, never widens, so a run can never
   re-enable an operation DevOps switched off. The runbook order is kept. An

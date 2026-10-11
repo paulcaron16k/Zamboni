@@ -357,6 +357,19 @@ duplicated or out-of-order event degrades to the polling path.
 **Not a command.** It states what happened; the consumer decides what that warrants,
 against policy the consumer owns. A writer must never be able to order a deletion.
 
+**Implemented** as [docs/write-completed.md](write-completed.md) (the contract,
+ZMBNI-123) and `zamboni.events.feed` (the consumer, ZMBNI-124). Each received
+message is parsed, mapped to a managed table by warehouse name, deduplicated on
+`(warehouse, table, snapshot_id)`, debounced per table (5 minutes quiet, capped at
+30 so a table written constantly is still maintained), and offered with
+`reason=event`, which runs only `compact`, `rewrite-manifests` and
+`remove-dangling-deletes`. Every message is acknowledged once handled — offered,
+held for its quiet period, a duplicate, unmapped or malformed — and negatively
+acknowledged only on an internal error, so a bad message is never redelivered
+forever. A write reported while its table is being maintained re-runs that table
+once when it finishes. A configured source that is disconnected makes the service
+**unready, never unalive**; maintenance continues on the schedule.
+
 ---
 
 ## 6. Targeting
