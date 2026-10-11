@@ -21,6 +21,8 @@ from zamboni.fleet import CronSchedule, FleetConfig, FleetWarehouse
 from zamboni.scheduler import (
     EVENT,
     MAX_SLEEP,
+    PRESSURE,
+    REASON_OPERATIONS,
     SCHEDULE,
     Candidate,
     CandidateQueue,
@@ -75,17 +77,50 @@ def test_offering_a_queued_table_coalesces():
     assert len(queue) == 1
 
 
-def test_a_table_being_maintained_is_not_re_enqueued():
+def test_a_table_being_maintained_is_never_queued_behind_itself():
+    """An event for a table in flight is not queued while it runs; it marks the
+    table dirty, and the table is offered once more when the run finishes
+    (decided on #110: the run may have read the table before that write)."""
     queue, current = CandidateQueue(), fleet()
     queue.offer(Candidate("acme", "raw.events"))
     item = queue.take(current)
     assert item is not None and item.key in queue.in_flight
 
     assert not queue.offer(Candidate("acme", "raw.events", EVENT))
-    assert queue.take(current) is None
+    assert queue.take(current) is None, "not queued while it runs"
+    assert queue.dirty == {("acme", "raw.events")}
 
     queue.finish(item)
-    assert queue.offer(Candidate("acme", "raw.events", EVENT))
+    assert queue.dirty == frozenset()
+    rerun = queue.take(current)
+    assert rerun is not None and rerun.reason == EVENT, "offered once more, for the event"
+    queue.finish(rerun)
+    assert queue.take(current) is None, "once, not forever"
+
+
+def test_a_schedule_tick_during_a_run_is_still_dropped():
+    """The run in flight is the tick's work; re-running it would repeat expire
+    and the orphan scan for nothing."""
+    queue, current = CandidateQueue(), fleet()
+    queue.offer(Candidate("acme", "raw.events"))
+    item = queue.take(current)
+    assert not queue.offer(Candidate("acme", "raw.events", SCHEDULE))
+    assert queue.dirty == frozenset()
+    queue.finish(item)
+    assert queue.take(current) is None
+
+
+def test_several_events_during_a_run_make_one_rerun_with_the_strongest_reason():
+    queue, current = CandidateQueue(), fleet()
+    queue.offer(Candidate("acme", "raw.events"))
+    item = queue.take(current)
+    queue.offer(Candidate("acme", "raw.events", PRESSURE))
+    queue.offer(Candidate("acme", "raw.events", EVENT))
+    queue.offer(Candidate("acme", "raw.events", PRESSURE))
+    queue.finish(item)
+    rerun = queue.take(current)
+    assert rerun is not None and rerun.reason == EVENT
+    assert queue.take(current) is None
 
 
 def test_the_same_table_name_in_two_warehouses_is_two_candidates():
@@ -390,3 +425,37 @@ def test_a_restart_does_not_re_roll_tonights_firing():
     first = Scheduler(current, at("2026-10-01T00:00")).next_firing("acme")
     again = Scheduler(current, at("2026-10-01T01:15")).next_firing("acme")
     assert first == again
+
+
+# -- reasons decide operations (#110 decision 3) -------------------------------------------
+
+
+def test_an_event_runs_exactly_the_write_driven_operations():
+    """Names here, `Operation`s there: the two must not drift."""
+    from zamboni.maintenance import WRITE_DRIVEN
+
+    assert set(REASON_OPERATIONS[EVENT]) == {op.value for op in WRITE_DRIVEN}
+    assert REASON_OPERATIONS[SCHEDULE] is None, "a schedule runs everything enabled"
+
+
+def test_the_reason_sets_nest_so_merging_keeps_the_stronger():
+    """schedule >= event >= pressure. If a future table breaks the nesting,
+    "keep the stronger reason" would silently drop operations; this fails first."""
+    from zamboni.maintenance import RUNBOOK_ORDER
+
+    everything = {op.value for op in RUNBOOK_ORDER}
+    event, pressure = set(REASON_OPERATIONS[EVENT]), set(REASON_OPERATIONS[PRESSURE])
+    assert pressure <= event <= everything
+
+
+def test_offers_for_a_queued_table_merge_into_the_stronger_reason():
+    queue, current = CandidateQueue(), fleet()
+    queue.offer(Candidate("acme", "raw.events", EVENT))
+    queue.offer(Candidate("acme", "raw.sessions", SCHEDULE))
+    assert not queue.offer(Candidate("acme", "raw.events", SCHEDULE))
+    assert not queue.offer(Candidate("acme", "raw.sessions", PRESSURE))
+    taken = [queue.take(current), queue.take(current)]
+    assert [(i.table, i.reason) for i in taken] == [
+        ("raw.events", SCHEDULE),  # upgraded, and kept its place in the queue
+        ("raw.sessions", SCHEDULE),  # not downgraded
+    ]

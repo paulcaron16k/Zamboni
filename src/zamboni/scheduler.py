@@ -51,6 +51,37 @@ MAX_SLEEP = timedelta(seconds=60)
 
 SCHEDULE = "schedule"
 EVENT = "event"
+PRESSURE = "pressure"
+
+#: Which operations each reason runs (docs/maintenance-runtime.md §3.1). `None`
+#: is "every operation the profile enables". Names, not `Operation` members, so
+#: this module stays free of the engine; a test checks them against
+#: `zamboni.maintenance.WRITE_DRIVEN`. The due-check still decides, within these,
+#: whether each operation has anything to do.
+#:
+#: The sets nest -- schedule >= event >= pressure -- which is what makes merging
+#: two offers for one table "keep the stronger reason" rather than a set union
+#: the worker would have to be told about. A test holds the nesting.
+REASON_OPERATIONS: dict[str, tuple[str, ...] | None] = {
+    SCHEDULE: None,
+    EVENT: ("compact", "remove-dangling-deletes", "rewrite-manifests"),
+    PRESSURE: ("compact", "remove-dangling-deletes"),
+}
+
+#: Strongest first: when two offers for one table merge, the stronger is kept.
+_STRENGTH = {SCHEDULE: 2, EVENT: 1, PRESSURE: 0}
+
+#: Reasons that report a new write. Only these mark a table in flight to be
+#: run once more when it finishes -- the run in flight may have read the table
+#: before that write. A schedule tick during a run is still dropped: the run in
+#: flight *is* the tick's work, and re-running it would repeat `expire` and the
+#: orphan scan for nothing.
+_REOFFER_AFTER_RUN = frozenset({EVENT, PRESSURE})
+
+
+def stronger(a: str, b: str) -> str:
+    """The reason whose operations include the other's."""
+    return a if _STRENGTH.get(a, 2) >= _STRENGTH.get(b, 2) else b
 
 
 @dataclass(frozen=True)
@@ -59,7 +90,8 @@ class Candidate:
 
     warehouse: str
     table: str
-    #: ``"schedule"`` or ``"event"``: why it was offered, for reporting only.
+    #: Why it was offered: ``"schedule"``, ``"event"`` or ``"pressure"``. Decides
+    #: which operations run (:data:`REASON_OPERATIONS`), never whether.
     reason: str = SCHEDULE
 
     @property
@@ -91,19 +123,22 @@ class WorkItem:
 class CandidateQueue:
     """FIFO over tables, coalesced per table.
 
-    * Offering a table already queued does nothing: fifty events during one
-      load are one candidate.
-    * Offering a table **being maintained** does nothing either. A tick or an
-      event that lands mid-run is dropped rather than queued behind it. For a
-      tick that is exactly right -- the run in flight is the work the tick
-      asked for. For an event it can lose a write that landed after the run
-      read its watermark; the next scheduled tick bounds that, and #110 is
-      where it gets revisited if the bound proves too loose.
+    * Offering a table already queued **merges**: fifty events during one load
+      are one candidate, and an event merged into a queued schedule offer runs
+      under the schedule's (larger) set of operations.
+    * Offering a table **being maintained** never queues it behind itself. A
+      schedule tick is dropped -- the run in flight is the work it asked for.
+      An event or a pressure offer marks the table **dirty** instead, and when
+      the run finishes the table is offered once more: the run in flight may
+      have read the table before the write the event reports (decided on
+      #110, 2026-10-06). The due-check makes a re-run that finds nothing new
+      cost one metadata load.
     """
 
     def __init__(self) -> None:
         self._queued: OrderedDict[tuple[str, str], Candidate] = OrderedDict()
         self._in_flight: set[tuple[str, str]] = set()
+        self._dirty: dict[tuple[str, str], Candidate] = {}
         self._ready = asyncio.Event()
 
     def __len__(self) -> int:
@@ -115,9 +150,18 @@ class CandidateQueue:
 
     def offer(self, candidate: Candidate) -> bool:
         """Queue ``candidate``; ``False`` if it coalesced into existing work."""
-        if candidate.key in self._queued or candidate.key in self._in_flight:
+        key = candidate.key
+        if key in self._in_flight:
+            if candidate.reason in _REOFFER_AFTER_RUN:
+                earlier = self._dirty.get(key)
+                self._dirty[key] = candidate if earlier is None else _merged(earlier, candidate)
             return False
-        self._queued[candidate.key] = candidate
+        if key in self._queued:
+            # Merge in place: the entry keeps its position, and the stronger
+            # reason -- the larger set of operations -- wins.
+            self._queued[key] = _merged(self._queued[key], candidate)
+            return False
+        self._queued[key] = candidate
         self._ready.set()
         return True
 
@@ -151,8 +195,19 @@ class CandidateQueue:
             await self._ready.wait()
 
     def finish(self, item: WorkItem) -> None:
-        """The worker is done with ``item``; the table may be offered again."""
+        """The worker is done with ``item``; re-offer it once if it went dirty."""
         self._in_flight.discard(item.key)
+        dirty = self._dirty.pop(item.key, None)
+        if dirty is not None:
+            self.offer(dirty)
+
+    @property
+    def dirty(self) -> frozenset[tuple[str, str]]:
+        return frozenset(self._dirty)
+
+
+def _merged(a: Candidate, b: Candidate) -> Candidate:
+    return a if stronger(a.reason, b.reason) == a.reason else b
 
 
 def _resolve(candidate: Candidate, fleet: FleetConfig) -> WorkItem | None:

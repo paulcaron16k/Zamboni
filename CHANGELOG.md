@@ -23,6 +23,15 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **`maintenance --operations OP[,OP...]`** runs only those operations, of the
+  ones the profile enables -- it narrows, never widens, so a run can never
+  re-enable an operation DevOps switched off. The runbook order is kept. An
+  unknown name is a usage error (exit 2). `zamboni serve` uses it: a table
+  offered because of a write (ZMBNI-124) runs only `compact`,
+  `rewrite-manifests` and `remove-dangling-deletes`, and the schedule still
+  runs everything. A write reported while its table is being maintained re-runs
+  that table once when it finishes.
+
 - **The `write.completed` contract, version 1.0** (ZMBNI-123):
   [docs/write-completed.md](docs/write-completed.md), and its JSON Schema as
   `zamboni.get_write_completed_spec()`. What an Iceberg writer emits once per

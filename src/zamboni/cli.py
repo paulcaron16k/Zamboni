@@ -531,6 +531,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="actually commit every operation. Without it this is a dry run.",
     )
     mt.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
+    mt.add_argument(
+        "--operations",
+        type=_operation_names,
+        metavar="OP[,OP...]",
+        help="run only these operations, of those the profile enables -- never "
+        "more. `zamboni serve` uses it so an event or pressure run does only the "
+        "write-driven work. Order stays the runbook's.",
+    )
     mt.add_argument("--max-snapshot-age-days", type=int)
     mt.add_argument("--min-snapshots-to-keep", type=int)
     mt.add_argument("--older-than-days", type=int)
@@ -1377,6 +1385,32 @@ def _apply_properties(session: CatalogSession, args: argparse.Namespace) -> int:
     return 0
 
 
+def _operation_names(text: str) -> tuple[str, ...]:
+    """``--operations``' type: known operation names, or an argparse error (exit 2)."""
+    wanted = tuple(name.strip() for name in text.split(",") if name.strip())
+    known = {op.value for op in Operation}
+    unknown = sorted(set(wanted) - known)
+    if unknown or not wanted:
+        raise argparse.ArgumentTypeError(
+            f"unknown operation(s) {unknown or [text]}; known: {sorted(known)}"
+        )
+    return wanted
+
+
+def _operations(profile, args: argparse.Namespace) -> list[Operation]:
+    """The profile's operations, narrowed by ``--operations`` if given.
+
+    Narrowed, never widened: an operation the profile switched off stays off,
+    so an event can never re-enable work DevOps disabled. The runbook order is
+    the profile's, whatever order the flag lists them in.
+    """
+    enabled = [Operation(name) for name in profile.operations]
+    wanted = getattr(args, "operations", None)
+    if not wanted:
+        return enabled
+    return [op for op in enabled if op.value in wanted]
+
+
 def _maintenance(session: CatalogSession, args: argparse.Namespace) -> int:
     """Every operation, in the runbook order, over every configured table.
 
@@ -1423,7 +1457,7 @@ def _maintenance(session: CatalogSession, args: argparse.Namespace) -> int:
         tables=tables,
         engine=getattr(args, "engine", "local"),
         engine_options=_engine_options(args),
-        operations=[Operation(name) for name in profile.operations],
+        operations=_operations(profile, args),
         commit=bool(args.yes),
         base_config=_operational_config(args),
         observer=show,
