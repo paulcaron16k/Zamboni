@@ -470,3 +470,55 @@ def test_random_in_the_fleet_file_defaults_fleet_wide_and_a_warehouse_overrides(
 def test_random_must_be_a_boolean(tmp_path, doc):
     with pytest.raises(FleetConfigError, match="true or false"):
         FleetConfig.load(write_fleet(tmp_path, doc))
+
+
+# -- pressure (#175) --------------------------------------------------------------------------
+
+
+def test_pressure_is_on_by_default_with_the_default_thresholds():
+    from zamboni.pressure import PressureSettings
+
+    fleet = FleetConfig.from_dict({"warehouses": [entry()]})
+    assert fleet["acme"].pressure == PressureSettings()
+
+
+def test_a_warehouse_overrides_the_fleet_key_by_key_or_switches_it_off():
+    fleet = FleetConfig.from_dict(
+        {
+            "pressure": {"delete_files": 40, "check_every_minutes": 30},
+            "warehouses": [
+                entry("acme"),
+                entry("globex", pressure={"check_every_minutes": 5}),
+                entry("initech", pressure=False),
+            ],
+        }
+    )
+    assert (fleet["acme"].pressure.delete_files, fleet["acme"].pressure.check_every_minutes) == (
+        40,
+        30,
+    )
+    globex = fleet["globex"].pressure
+    assert (globex.delete_files, globex.check_every_minutes) == (40, 5)
+    assert fleet["initech"].pressure is None
+
+
+def test_pressure_off_for_the_fleet_and_back_on_for_one_warehouse():
+    from zamboni.pressure import PressureSettings
+
+    fleet = FleetConfig.from_dict(
+        {"pressure": False, "warehouses": [entry("acme"), entry("globex", pressure=True)]}
+    )
+    assert fleet["acme"].pressure is None
+    assert fleet["globex"].pressure == PressureSettings()
+
+
+@pytest.mark.parametrize(
+    ("doc", "where"),
+    [
+        ({"pressure": {"delete_ratio": 2}, "warehouses": [entry()]}, "<root>.pressure"),
+        ({"warehouses": [entry(pressure={"tresholds": 1})]}, r"warehouses\[0\] \(acme\)\.pressure"),
+    ],
+)
+def test_a_bad_pressure_block_is_refused_saying_where(doc, where):
+    with pytest.raises(FleetConfigError, match=where):
+        FleetConfig.from_dict(doc)

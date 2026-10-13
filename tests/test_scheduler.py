@@ -98,13 +98,15 @@ def test_a_table_being_maintained_is_never_queued_behind_itself():
     assert queue.take(current) is None, "once, not forever"
 
 
-def test_a_schedule_tick_during_a_run_is_still_dropped():
+@pytest.mark.parametrize("reason", [SCHEDULE, PRESSURE])
+def test_a_schedule_tick_or_pressure_during_a_run_is_dropped(reason):
     """The run in flight is the tick's work; re-running it would repeat expire
-    and the orphan scan for nothing."""
+    and the orphan scan for nothing. Pressure likewise (#175): the run in flight
+    compacts, which is what relieves it."""
     queue, current = CandidateQueue(), fleet()
     queue.offer(Candidate("acme", "raw.events"))
     item = queue.take(current)
-    assert not queue.offer(Candidate("acme", "raw.events", SCHEDULE))
+    assert not queue.offer(Candidate("acme", "raw.events", reason))
     assert queue.dirty == frozenset()
     queue.finish(item)
     assert queue.take(current) is None

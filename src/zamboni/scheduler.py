@@ -71,12 +71,14 @@ REASON_OPERATIONS: dict[str, tuple[str, ...] | None] = {
 #: Strongest first: when two offers for one table merge, the stronger is kept.
 _STRENGTH = {SCHEDULE: 2, EVENT: 1, PRESSURE: 0}
 
-#: Reasons that report a new write. Only these mark a table in flight to be
-#: run once more when it finishes -- the run in flight may have read the table
-#: before that write. A schedule tick during a run is still dropped: the run in
-#: flight *is* the tick's work, and re-running it would repeat `expire` and the
-#: orphan scan for nothing.
-_REOFFER_AFTER_RUN = frozenset({EVENT, PRESSURE})
+#: Reasons that mark a table in flight to be run once more when it finishes.
+#: Only an event, which reports a new write the run in flight may have read the
+#: table before. A schedule tick during a run is dropped: the run in flight *is*
+#: the tick's work, and re-running it would repeat `expire` and the orphan scan
+#: for nothing. Pressure during a run is dropped for the same reason (#175):
+#: every reason compacts, so the run in flight is what relieves the pressure,
+#: and the next check measures the table it left.
+_REOFFER_AFTER_RUN = frozenset({EVENT})
 
 
 def stronger(a: str, b: str) -> str:

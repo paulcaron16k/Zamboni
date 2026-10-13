@@ -41,14 +41,15 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .pressure import PressureSettings
 from .settings import SECRET_PROFILE_KEYS
 from .tableconfig import TableConfig, TableConfigError
 
 #: The fleet file's own format version, independent of table-config's.
 FLEET_VERSION = 1
 
-_ROOT_KEYS = frozenset({"version", "warehouses", "random"})
-_WAREHOUSE_KEYS = frozenset({"name", "uri", "schedule", "table_config", "random"})
+_ROOT_KEYS = frozenset({"version", "warehouses", "random", "pressure"})
+_WAREHOUSE_KEYS = frozenset({"name", "uri", "schedule", "table_config", "random", "pressure"})
 
 
 class FleetConfigError(ValueError):
@@ -341,6 +342,10 @@ class FleetWarehouse:
     #: Lakekeeper serves many warehouses from one URI, so ``None`` -- use
     #: ``zamboni.yml`` -- is the usual case.
     uri: str | None = None
+    #: When a merge-on-read table is compacted between schedules (#175).
+    #: ``None`` is off. On by default, as the fleet file's default is: an
+    #: unmaintained merge-on-read table degrades every reader.
+    pressure: PressureSettings | None = field(default_factory=PressureSettings)
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
@@ -357,6 +362,10 @@ class FleetWarehouse:
             )
         if not isinstance(self.table_config, TableConfig):
             raise FleetConfigError(f"warehouse {self.name!r}: table_config must be a TableConfig")
+        if self.pressure is not None and not isinstance(self.pressure, PressureSettings):
+            raise FleetConfigError(
+                f"warehouse {self.name!r}: pressure must be PressureSettings, or None for off"
+            )
         try:
             self.table_config.validate()
         except TableConfigError as exc:
@@ -476,6 +485,12 @@ class FleetConfig:
             raise FleetConfigError(
                 f"<root>.random: expected true or false, found {_json_name(spread)}"
             )
+        # The fleet-wide pressure settings, which a warehouse overrides key by
+        # key or switches off. On unless switched off (#175).
+        try:
+            pressure = PressureSettings.from_value(raw.get("pressure", True), None)
+        except ValueError as exc:
+            raise FleetConfigError(f"<root>.{exc}") from None
         version = raw.get("version", FLEET_VERSION)
         if not isinstance(version, int) or isinstance(version, bool):
             raise FleetConfigError(
@@ -485,14 +500,20 @@ class FleetConfig:
         sources = [source] if source is not None else []
         warehouses = []
         for index, entry in enumerate(entries):
-            warehouse, read = _warehouse_from_dict(entry, f"warehouses[{index}]", base, spread)
+            warehouse, read = _warehouse_from_dict(
+                entry, f"warehouses[{index}]", base, spread, pressure
+            )
             warehouses.append(warehouse)
             sources.extend(read)
         return cls(warehouses=tuple(warehouses), version=version, sources=tuple(sources))
 
 
 def _warehouse_from_dict(
-    raw: Any, where: str, base: Path | None, spread: bool = False
+    raw: Any,
+    where: str,
+    base: Path | None,
+    spread: bool,
+    pressure: PressureSettings | None,
 ) -> tuple[FleetWarehouse, list[Path]]:
     _check_block(raw, _WAREHOUSE_KEYS, where)
     for key in ("name", "schedule", "table_config"):
@@ -529,12 +550,19 @@ def _warehouse_from_dict(
     except (TableConfigError, OSError) as exc:
         raise FleetConfigError(f"{where}.table_config: {exc}") from exc
 
+    if "pressure" in raw:
+        try:
+            pressure = PressureSettings.from_value(raw["pressure"], pressure)
+        except ValueError as exc:
+            raise FleetConfigError(f"{where}.{exc}") from None
+
     try:
         warehouse = FleetWarehouse(
             name=name,
             schedule=CronSchedule(raw["schedule"], random=raw.get("random", spread)),
             table_config=table_config,
             uri=raw.get("uri"),
+            pressure=pressure,
         )
     except FleetConfigError as exc:
         raise FleetConfigError(f"{where}: {exc}") from exc
