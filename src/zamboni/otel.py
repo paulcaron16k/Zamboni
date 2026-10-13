@@ -15,6 +15,15 @@ the exporter, a library only chooses to be instrumented. An integrator who has
 configured an SDK therefore gets Zamboni's telemetry with no adapter to write;
 `zamboni[otel]` adds an SDK and an OTLP exporter for a deployment that has none.
 
+**The CLI is an application, so it configures one** (#188). Installing an SDK
+configures nothing: a MeterProvider has to be built with a reader and an
+exporter, and until ZMBNI-188 nothing built one, so `--metrics otel` discarded
+everything even with the extra installed. :func:`exporting_provider` is that
+step, and only the CLI calls it -- never this module on its own, so a library
+caller still gets the API-only behaviour above. It returns a provider rather
+than installing a global one: the global can be set once per process, and an
+application embedding Zamboni owns it.
+
 **Naming.** There is **no OpenTelemetry semantic convention for Iceberg**, so
 the counters mirror Iceberg's own defined names under an `iceberg.` namespace
 with hyphens turned to underscores -- `added-data-files` becomes
@@ -276,6 +285,34 @@ class OTelReporter:
         return self._histograms[name]
 
 
+def exporting_provider() -> Any | None:
+    """A MeterProvider exporting over OTLP/HTTP, or ``None`` without the SDK.
+
+    Configured entirely by OTel's own environment variables, read by the SDK
+    and the exporter rather than re-implemented here:
+    ``OTEL_EXPORTER_OTLP_ENDPOINT`` (or ``..._METRICS_ENDPOINT``),
+    ``OTEL_EXPORTER_OTLP_HEADERS``, ``OTEL_SERVICE_NAME``,
+    ``OTEL_RESOURCE_ATTRIBUTES`` and ``OTEL_METRIC_EXPORT_INTERVAL``. Where none
+    names the service, it is ``zamboni`` rather than the SDK's
+    ``unknown_service``.
+
+    The caller owns the provider and must ``shutdown()`` it: that is what
+    exports a short run's metrics before the process exits.
+    """
+    try:
+        from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+        from opentelemetry.sdk.metrics import MeterProvider
+        from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+        from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+    except ImportError:
+        return None
+    resource = Resource.create()
+    if str(resource.attributes.get(SERVICE_NAME, "")).startswith("unknown_service"):
+        resource = resource.merge(Resource({SERVICE_NAME: SCOPE}))
+    reader = PeriodicExportingMetricReader(OTLPMetricExporter())
+    return MeterProvider(resource=resource, metric_readers=[reader])
+
+
 def sdk_configured() -> bool:
     """Has an application configured an OTel SDK in this process?
 
@@ -297,5 +334,6 @@ __all__ = [
     "OPERATION_ATTRIBUTE",
     "TABLE_ATTRIBUTE",
     "OTelReporter",
+    "exporting_provider",
     "sdk_configured",
 ]

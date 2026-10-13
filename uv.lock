@@ -1145,7 +1145,7 @@ trino = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "iceberg-zamboni", extra = ["nats", "s3", "sql", "trino"] },
+    { name = "iceberg-zamboni", extra = ["nats", "otel", "s3", "sql", "trino"] },
     { name = "jsonschema" },
     { name = "mypy" },
     { name = "pre-commit" },
@@ -1182,7 +1182,7 @@ provides-extras = ["s3", "azure", "gcs", "cloud", "otel", "nats", "sql", "trino"
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "iceberg-zamboni", extras = ["sql", "s3", "trino", "nats"] },
+    { name = "iceberg-zamboni", extras = ["sql", "s3", "trino", "nats", "otel"] },
     { name = "jsonschema", specifier = ">=4.20" },
     { name = "mypy", specifier = ">=1.14" },
     { name = "pre-commit", specifier = ">=4.6.1" },

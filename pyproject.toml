@@ -183,7 +183,7 @@ dev = [
     # lets them pick a validator, rather than making every install carry one to
     # check a file most runs never validate.
     "jsonschema>=4.20",
-    "iceberg-zamboni[sql,s3,trino,nats]",
+    "iceberg-zamboni[sql,s3,trino,nats,otel]",
     # Matched to the dev stack's server, not to the extra's range: pinning the
     # client to the server's minor means the dev-stack tests exercise a matched
     # pair rather than Connect's cross-version skew, which is Spark's promise to

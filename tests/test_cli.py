@@ -988,13 +988,133 @@ def test_none_cannot_be_combined_with_a_destination(devops_dir, session, capsys)
     assert "cannot be combined" in capsys.readouterr().err
 
 
-def test_otel_without_an_sdk_says_so_rather_than_failing(devops_dir, session, capsys):
+def test_otel_without_an_sdk_says_so_rather_than_failing(devops_dir, session, capsys, monkeypatch):
     """Instrumented and silent is OTel's intended behaviour for a library, not a
     failure -- but an operator who asked for metrics and got none deserves to
     be told which half is missing."""
+    import zamboni.otel
+
+    monkeypatch.setattr(zamboni.otel, "exporting_provider", lambda: None)  # no extra
+
     assert main(["maintenance", "--yes", "--metrics", "otel"]) == 0
 
-    assert "no OpenTelemetry SDK is configured" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "SDK is not installed" in err
+    assert "iceberg-zamboni[otel]" in err
+
+
+@pytest.fixture
+def collector(monkeypatch):
+    """An OTLP/HTTP endpoint standing in for a collector: records each POST.
+
+    Points the standard variables at it and clears the ones a developer's
+    shell might carry, so the test sees only what it set.
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    received: list[tuple[str, dict[str, str], bytes]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            received.append((self.path, dict(self.headers), body))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-protobuf")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    for name in (
+        "OTEL_SERVICE_NAME",
+        "OTEL_RESOURCE_ATTRIBUTES",
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_HEADERS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", f"http://127.0.0.1:{server.server_port}")
+    yield received
+    server.shutdown()
+
+
+def exported(received) -> tuple[set[str], set[str]]:
+    """The metric names and service names in what the collector received."""
+    from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import (
+        ExportMetricsServiceRequest,
+    )
+
+    names: set[str] = set()
+    services: set[str] = set()
+    for path, _headers, body in received:
+        assert path == "/v1/metrics"
+        request = ExportMetricsServiceRequest.FromString(body)
+        for resource_metrics in request.resource_metrics:
+            for attribute in resource_metrics.resource.attributes:
+                if attribute.key == "service.name":
+                    services.add(attribute.value.string_value)
+            for scope in resource_metrics.scope_metrics:
+                names.update(metric.name for metric in scope.metrics)
+    return names, services
+
+
+def test_otel_exports_a_short_run_to_the_collector_the_environment_names(
+    devops_dir, session, collector, monkeypatch
+):
+    """#188: with the extra installed, `--metrics otel` used to record into a
+    proxy and discard everything. A run of a few seconds is shorter than the
+    reader's 60 s interval, so this also proves the flush on the way out."""
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_HEADERS", "x-zamboni-test=yes")
+
+    assert main(["maintenance", "--yes", "--metrics", "otel"]) == 0
+
+    assert collector, "nothing reached the collector"
+    names, services = exported(collector)
+    assert any(name.startswith("iceberg.") for name in names), names
+    assert services == {"zamboni"}, "no service named: zamboni, not unknown_service"
+    assert all(headers.get("x-zamboni-test") == "yes" for _, headers, _ in collector)
+
+
+def test_otel_takes_the_service_name_from_the_environment(
+    devops_dir, session, collector, monkeypatch
+):
+    monkeypatch.setenv("OTEL_SERVICE_NAME", "zamboni-acme")
+
+    assert main(["maintenance", "--yes", "--metrics", "otel"]) == 0
+
+    assert exported(collector)[1] == {"zamboni-acme"}
+
+
+def test_a_collector_that_is_down_never_changes_the_exit_code(devops_dir, session, monkeypatch):
+    """A reporter can never fail a run, and that includes the final flush."""
+    import socket
+
+    with socket.socket() as probe:  # a port nothing listens on
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", f"http://127.0.0.1:{port}")
+    # The exporter retries until this timeout, so it bounds how long the exit
+    # waits: measured 1.75 s at 2, 3.99 s at 4, 7.8 s at the default 10.
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "2")
+
+    assert main(["maintenance", "--yes", "--metrics", "otel"]) == 0
+
+
+def test_an_sdk_the_host_configured_is_used_not_replaced(devops_dir, session, monkeypatch):
+    """An application embedding Zamboni owns the SDK; the CLI only fills the
+    application's role where there is no application."""
+    import zamboni.otel
+
+    def must_not_build():
+        raise AssertionError("built a provider over the host's")
+
+    monkeypatch.setattr(zamboni.otel, "sdk_configured", lambda: True)
+    monkeypatch.setattr(zamboni.otel, "exporting_provider", must_not_build)
+
+    assert main(["maintenance", "--yes", "--metrics", "otel"]) == 0
 
 
 def test_catalog_metrics_on_a_catalog_without_the_endpoint_says_so(devops_dir, session, capsys):
