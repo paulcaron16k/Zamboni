@@ -71,12 +71,14 @@ REASON_OPERATIONS: dict[str, tuple[str, ...] | None] = {
 #: Strongest first: when two offers for one table merge, the stronger is kept.
 _STRENGTH = {SCHEDULE: 2, EVENT: 1, PRESSURE: 0}
 
-#: Reasons that report a new write. Only these mark a table in flight to be
-#: run once more when it finishes -- the run in flight may have read the table
-#: before that write. A schedule tick during a run is still dropped: the run in
-#: flight *is* the tick's work, and re-running it would repeat `expire` and the
-#: orphan scan for nothing.
-_REOFFER_AFTER_RUN = frozenset({EVENT, PRESSURE})
+#: Reasons that mark a table in flight to be run once more when it finishes.
+#: Only an event, which reports a new write the run in flight may have read the
+#: table before. A schedule tick during a run is dropped: the run in flight *is*
+#: the tick's work, and re-running it would repeat `expire` and the orphan scan
+#: for nothing. Pressure during a run is dropped for the same reason (#175):
+#: every reason compacts, so the run in flight is what relieves the pressure,
+#: and the next check measures the table it left.
+_REOFFER_AFTER_RUN = frozenset({EVENT})
 
 
 def stronger(a: str, b: str) -> str:
@@ -120,6 +122,34 @@ class WorkItem:
         return (self.warehouse, self.table)
 
 
+#: The ``reason`` a :class:`PressureCheck` reports, for logs and run records.
+#: Not a reason a table is *offered* with -- a check offers nothing to the
+#: queue itself; the service offers what it finds with :data:`PRESSURE`.
+PRESSURE_CHECK = "pressure-check"
+
+
+@dataclass(frozen=True)
+class PressureCheck:
+    """A worker job that measures every table of one warehouse (#175).
+
+    Shaped like :class:`WorkItem` where the pool reads one -- warehouse, a
+    ``table`` to name in logs, a reason, the table config and the URI -- so the
+    same worker, crash handling and recycling serve both. The worker runs
+    ``zamboni health --table-config ... --json ...``: one metadata load per
+    table, and the engine stays in the worker, out of the service process.
+    """
+
+    warehouse: str
+    table_config: TableConfig
+    uri: str | None = None
+    table: str = "(pressure check)"
+    reason: str = PRESSURE_CHECK
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.warehouse, self.table)
+
+
 class CandidateQueue:
     """FIFO over tables, coalesced per table.
 
@@ -127,8 +157,8 @@ class CandidateQueue:
       are one candidate, and an event merged into a queued schedule offer runs
       under the schedule's (larger) set of operations.
     * Offering a table **being maintained** never queues it behind itself. A
-      schedule tick is dropped -- the run in flight is the work it asked for.
-      An event or a pressure offer marks the table **dirty** instead, and when
+      schedule tick or a pressure offer is dropped -- the run in flight is the
+      work it asked for. An event marks the table **dirty** instead, and when
       the run finishes the table is offered once more: the run in flight may
       have read the table before the write the event reports (decided on
       #110, 2026-10-06). The due-check makes a re-run that finds nothing new

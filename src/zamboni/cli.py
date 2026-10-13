@@ -47,6 +47,7 @@ import logging
 import os
 import sys
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import capabilities, maintainers, settings
@@ -449,10 +450,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="is this table due for maintenance, and why",
         description=(
             "Read a table's layout signals from one metadata load -- no manifests, no "
-            "storage listing. Cheap enough to ask about every table in a fleet."
+            "storage listing. Cheap enough to ask about every table in a fleet: name "
+            "no table and every table in --table-config is checked."
         ),
     )
-    h.add_argument("table", help="table identifier, e.g. default.events")
+    h.add_argument(
+        "table",
+        nargs="?",
+        help="table identifier, e.g. default.events. Default: every table in --table-config",
+    )
+    h.add_argument("--table-config", help="path to table-config.json, for its list of tables")
+    h.add_argument(
+        "--json",
+        metavar="PATH",
+        help="also write the signals, per table, as one JSON line to PATH. This is how "
+        "`zamboni serve` measures delete pressure (#175)",
+    )
     h.add_argument(
         # `git diff --exit-code`'s pattern, and for its reason: a diagnostic that
         # exits non-zero by default fails a CI job for reporting good news. Off,
@@ -1071,28 +1084,65 @@ def _storage_from(args: argparse.Namespace) -> S3Settings | GCSSettings | AzureS
 
 
 def _health(session: CatalogSession, args: argparse.Namespace) -> int:
-    """Report whether a table is due, from metadata alone.
+    """Report whether tables are due, from metadata alone.
 
     Read-only, so no consent flag: there is nothing here for `--yes` to gate.
+
+    One table, or every table in ``--table-config``. A table that cannot be
+    loaded is reported and the rest are still checked -- one dropped table must
+    not blind a fleet's pressure check -- and makes the exit 1, so a script sees
+    it. ``--exit-code`` then asks "is any table due".
     """
+    import dataclasses
+
     from .health import maintenance_watermark, table_health
 
-    table = session.catalog.load_table(args.table)
-    health = table_health(table)
-    mark = maintenance_watermark(table)
+    if args.table:
+        tables = [args.table]
+    elif args.table_config:
+        tables = sorted(_load_table_config(args).tables)
+    else:
+        print("error: name a table, or give --table-config to check all of its tables")
+        return 2
 
-    verdict = "due" if mark.written_since else "not due"
-    reason = (
-        f"{mark.snapshots_since} snapshot(s) written since maintenance"
-        if mark.written_since
-        else "nothing has written since maintenance last ran"
-    )
-    print(f"{health.identifier}: {verdict} -- {reason}")
-    print(mark.describe())
-    print(health.describe())
+    signals: dict[str, dict] = {}
+    due = failed = 0
+    for name in tables:
+        try:
+            table = session.catalog.load_table(name)
+        except Exception as exc:  # NoSuchTable, an outage: this table's, not the run's
+            failed += 1
+            signals[name] = {"error": f"{type(exc).__name__}: {exc}"}
+            print(f"{name}: cannot check -- {type(exc).__name__}: {exc}")
+            continue
+        health = table_health(table)
+        mark = maintenance_watermark(table)
+        due += bool(mark.written_since)
+        verdict = "due" if mark.written_since else "not due"
+        reason = (
+            f"{mark.snapshots_since} snapshot(s) written since maintenance"
+            if mark.written_since
+            else "nothing has written since maintenance last ran"
+        )
+        print(f"{health.identifier}: {verdict} -- {reason}")
+        print(mark.describe())
+        print(health.describe())
+        record = dataclasses.asdict(health)
+        record.pop("unseen")  # a constant about the method, not the table
+        signals[name] = record | {"written_since": mark.written_since}
 
+    if args.json:
+        doc = {
+            "warehouse": getattr(args, "warehouse", None),
+            "checked_at": datetime.now(UTC).isoformat(),
+            "tables": signals,
+        }
+        with open(args.json, "a") as out:
+            out.write(json.dumps(doc) + "\n")
+    if failed:
+        return 1
     if args.exit_code:
-        return 0 if mark.written_since else 1
+        return 0 if due else 1
     return 0
 
 

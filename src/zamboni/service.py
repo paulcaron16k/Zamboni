@@ -41,10 +41,18 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .fleet import FleetConfig
+from .fleet import FleetConfig, FleetWarehouse
 from .pool import ItemResult, PoolSize, WorkerConfig, WorkerPool, run_workers
 from .reload import POLL_SECONDS, FleetWatcher, watch, write_pid_file
-from .scheduler import MAX_SLEEP, CandidateQueue, Scheduler, run_scheduler
+from .scheduler import (
+    MAX_SLEEP,
+    PRESSURE,
+    Candidate,
+    CandidateQueue,
+    PressureCheck,
+    Scheduler,
+    run_scheduler,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -108,8 +116,9 @@ class ServiceState:
     last_tick: datetime | None = None
     generation: int = 0
     busy: int = 0
-    #: No NATS consumer exists yet (#110); ``None`` says "not configured"
-    #: rather than "disconnected", so readiness does not wait for it.
+    #: Whether every configured event source is connected. ``None`` says "no
+    #: source configured" rather than "disconnected", so readiness does not
+    #: wait for one that was never asked for.
     nats_connected: bool | None = None
     #: Per event source: received, offered, coalesced, duplicates, unmapped,
     #: rejected, errors.
@@ -326,6 +335,102 @@ def single_instance(pid_file: Path):
         handle.close()
 
 
+# -- delete pressure (#175) -------------------------------------------------------
+
+
+def pressure_offers(warehouse: FleetWarehouse, record: dict[str, Any] | None) -> dict[str, Any]:
+    """What one warehouse's check found: which tables are over, and why.
+
+    ``record`` is the ``health --json`` line the worker wrote, or ``None`` if
+    the worker died. Pure, so the decision is tested without a pool.
+    """
+    over: dict[str, str] = {}
+    errors: dict[str, str] = {}
+    settings = warehouse.pressure
+    tables = (record or {}).get("tables") or {}
+    if record is None:
+        errors["*"] = "the check wrote no record"
+    for table, signals in tables.items():
+        if "error" in signals:
+            errors[table] = signals["error"]
+        elif settings is not None and (why := settings.triggered(signals)):
+            over[table] = why
+    return {"over": over, "errors": errors, "checked": len(tables)}
+
+
+async def run_pressure_checks(
+    fleet: Callable[[], FleetConfig],
+    pool: Any,
+    offer: Callable[[Candidate], bool],
+    stop: asyncio.Event,
+    *,
+    clock: Callable[[], datetime] = now_utc,
+    on_check: Callable[[str, dict[str, Any]], None] | None = None,
+    wait: Callable[[asyncio.Event, float], Any] | None = None,
+) -> None:
+    """Measure each warehouse every ``check_every_minutes`` and offer what is over.
+
+    The first check of a warehouse is one interval after it appears -- at
+    start or by reload -- so a restart is not a burst of checks on top of
+    whatever the schedule fires. One check at a time: each takes a worker for
+    one metadata load per table (~25 ms on the dev stack), and a fleet's checks
+    queuing behind each other cost latency, not correctness. A check that fails
+    is reported and retried at the next interval; the schedule still maintains
+    every table.
+    """
+    from .scheduler import _wait
+
+    wait = wait or _wait
+    due: dict[str, datetime] = {}
+    while not stop.is_set():
+        now = clock()
+        current = fleet()
+        for warehouse in current.warehouses:
+            if warehouse.pressure is None:
+                due.pop(warehouse.name, None)
+                continue
+            soonest = now + timedelta(minutes=warehouse.pressure.check_every_minutes)
+            # A reload that shortened the interval takes effect now, not after
+            # the old, longer one.
+            if warehouse.name not in due or due[warehouse.name] > soonest:
+                due[warehouse.name] = soonest
+        for name in set(due) - set(current.names):
+            del due[name]
+
+        for name in sorted(n for n, at in due.items() if at <= now):
+            if stop.is_set():
+                break
+            warehouse = current[name]
+            result = await pool.run(
+                PressureCheck(warehouse.name, warehouse.table_config, warehouse.uri)
+            )
+            found = pressure_offers(warehouse, result.record)
+            offered = 0
+            for table, why in sorted(found["over"].items()):
+                accepted = offer(Candidate(name, table, PRESSURE))
+                offered += accepted
+                logger.info(
+                    "pressure: %s/%s: %s; %s",
+                    name,
+                    table,
+                    why,
+                    "offered" if accepted else "already queued or running",
+                )
+            if found["errors"]:
+                logger.warning("pressure check of %s could not read: %s", name, found["errors"])
+            if on_check is not None:
+                on_check(name, {**found, "offered": offered, "exit_code": result.exit_code})
+            if warehouse.pressure is not None:
+                interval = timedelta(minutes=warehouse.pressure.check_every_minutes)
+                due[name] = clock() + interval
+
+        upcoming = min(due.values(), default=None)
+        seconds = MAX_SLEEP.total_seconds()
+        if upcoming is not None:
+            seconds = min(max((upcoming - clock()).total_seconds(), 0.0), seconds)
+        await wait(stop, seconds)
+
+
 # -- the service ------------------------------------------------------------------
 
 
@@ -466,6 +571,16 @@ class Service:
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(self.stop.wait(), EVENTS_OBSERVE_SECONDS)
 
+        def on_pressure_check(name: str, found: dict[str, Any]) -> None:
+            self.state.warehouses.setdefault(name, {})["pressure"] = {
+                "checked_at": _iso(self.clock()),
+                "tables": found["checked"],
+                "over": len(found["over"]),
+                "offered": found["offered"],
+                "errors": len(found["errors"]),
+            }
+            self._write()
+
         async def mark_stopping() -> None:
             await self.stop.wait()
             self.state.phase = "stopping"
@@ -505,6 +620,14 @@ class Service:
                 ),
                 mark_stopping(),
                 *([observe_events()] if self.feeds else []),
+                run_pressure_checks(
+                    lambda: scheduler.fleet,
+                    self.pool,
+                    queue.offer,
+                    self.stop,
+                    clock=self.clock,
+                    on_check=on_pressure_check,
+                ),
             )
         finally:
             if hasattr(self.pool, "close"):

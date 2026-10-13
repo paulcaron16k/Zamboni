@@ -686,3 +686,50 @@ run in CI against the dev stack's NATS.
 Two `zamboni serve` deployments must not share a subject. On JetStream they
 would share the durable consumer, and each event would reach only one of them;
 on core NATS both would hear every event, for tables only one of them manages.
+
+### Delete pressure
+
+A merge-on-read table gets slower to read with every delete or update until
+compaction folds the deletes back in. On a nightly schedule that can be a day of
+slow reads. So the service also checks each warehouse every 15 minutes and
+offers any table whose deletes have piled up. That table then runs `compact` and
+`remove-dangling-deletes`, and the due-check still decides within them. It is on
+by default; the thresholds sit in the fleet file, beside the schedule:
+
+```yaml
+# fleet.yaml
+pressure:                   # the fleet's; omit for the defaults below
+  delete_files: 10          # live delete files
+  delete_ratio: 0.10        # delete files per data file
+  deleted_rows_ratio: 0.15  # position-deleted rows per row
+  check_every_minutes: 15
+warehouses:
+  - name: acme
+    schedule: "0 2 * * *"
+    pressure: {delete_files: 40}   # this key only; the rest from above
+    table_config: acme/table-config.json
+  - name: globex
+    schedule: "30 3 * * *"
+    pressure: false                # never checked
+    table_config: globex/table-config.json
+```
+
+Any one threshold met is enough; `null` switches one off. **The defaults are
+starting values someone chose, not measurements.** Raise them for a table whose
+readers do not mind, or lower them for one queried all day. A table with
+equality deletes is never offered, because compaction refuses it.
+
+A check is `zamboni health --table-config … --json` in a worker, one
+metadata load per table (about 25 ms on the dev stack). It queues for a worker
+like a table does, so on a pool busy with long compactions checks wait. Run the
+same command yourself to see what the service sees:
+
+```bash
+zamboni health --table-config acme/table-config.json --json /tmp/acme-health.jsonl
+```
+
+`zamboni service-status` shows each warehouse's last check under `pressure`:
+`checked_at`, `tables`, `over`, `offered` and `errors`. Each table offered is
+also logged with the threshold it met. A table that cannot be read is an error
+in that check, not a stop: the others are still measured, and the schedule
+still maintains it.
