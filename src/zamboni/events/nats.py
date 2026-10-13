@@ -344,12 +344,14 @@ class NatsEventSource:
                 self._reported = False
                 return nc
             except Exception as exc:
-                logger.warning(
-                    "NATS at %s unreachable, retrying in %.0fs: %r",
+                logger.log(
+                    logging.DEBUG if self._reported else logging.WARNING,
+                    "NATS at %s unreachable, retrying every %.0fs at most: %r",
                     ",".join(self.settings.servers),
-                    delay,
+                    ceiling,
                     exc,
                 )
+                self._reported = True
             await self._sleep(delay)
             delay = min(delay * 2, ceiling)
 

@@ -384,13 +384,16 @@ def test_a_failing_fetch_is_retried_not_fatal():
     assert sleeps == [1.0, 1.0]
 
 
-def test_a_broker_down_at_start_is_retried_with_backoff_and_reads_as_disconnected():
+def test_a_broker_down_at_start_is_retried_with_backoff_and_reads_as_disconnected(caplog):
     client = FakeClient(FakeJS(jetstream=False), core_messages=[FakeMsg(b"x")])
     src, attempts, sleeps = source(client, failures=3)
     assert not src.connected, "nothing connected yet"
-    asyncio.run(take(src, 1))
+    with caplog.at_level("DEBUG", logger="zamboni.events.nats"):
+        asyncio.run(take(src, 1))
     assert len(attempts) == 4
     assert sleeps == [1.0, 2.0, 4.0]
+    unreachable = [r.levelname for r in caplog.records if "unreachable" in r.message]
+    assert unreachable == ["WARNING", "DEBUG", "DEBUG"], "one warning per outage"
 
 
 def test_a_dropped_connection_reads_as_disconnected():
@@ -480,3 +483,63 @@ def test_live_auto_finds_jetstream_and_the_server_dedups_on_msg_id(live_url):
 def test_live_core_when_told_to(live_url):
     src, received = asyncio.run(live_round_trip(live_url, jetstream=False, duplicates=False))
     assert (src.mode, received) == ("core", [b'{"n": 1}'])
+
+
+# -- in `zamboni serve` ------------------------------------------------------------------------
+
+
+def test_a_broker_that_never_answers_leaves_the_schedule_running_and_readiness_down(tmp_path):
+    """The service-level half of "killing NATS leaves maintenance working, only
+    slower": the schedule maintains the fleet, liveness holds, readiness says
+    the configured source is not there."""
+    from tests.test_service import service
+    from zamboni.service import probe, read_state
+
+    async def refused(**options):
+        raise OSError("connection refused")
+
+    async def forever(seconds):
+        await asyncio.sleep(0)
+
+    src = NatsEventSource(settings(), connect=refused, sleep=forever)
+    pools: list = []
+
+    async def scenario():
+        svc = service(tmp_path, "a", pools=pools, events=[src])
+        task = asyncio.create_task(svc.run())
+        while not (pools and pools[0].ran):
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)  # one more state write
+        state = read_state(tmp_path / "serve.state.json")
+        svc.request_stop()
+        assert await asyncio.wait_for(task, 5) == 0
+        return state
+
+    state = asyncio.run(scenario())
+    assert set(pools[0].ran) == {"raw.a"}, "the schedule ran the table with no broker"
+    assert state["nats_connected"] is False
+    assert probe(state, "readiness")[0] is False
+
+
+def test_serve_without_the_extra_refuses_to_start_naming_it(tmp_path, monkeypatch, capsys):
+    from tests.test_service import fleet_file
+    from zamboni.cli import main
+
+    monkeypatch.chdir(tmp_path)  # no stray zamboni.yml or .env
+    monkeypatch.setenv("ZAMBONI_NATS_SERVERS", "nats://broker:4222")
+    monkeypatch.setenv("ZAMBONI_NATS_SUBJECT", SUBJECT)
+    monkeypatch.setattr(nats_source.importlib.util, "find_spec", lambda name: None)
+    code = main(
+        [
+            "serve",
+            "--fleet",
+            str(fleet_file(tmp_path, "a", schedule="0 2 1 1 *")),
+            "--state-file",
+            str(tmp_path / "state.json"),
+            "--pid-file",
+            str(tmp_path / "serve.pid"),
+        ]
+    )
+    assert code == 2
+    assert EXTRA in capsys.readouterr().err
+    assert not (tmp_path / "state.json").exists(), "refused before the service started"

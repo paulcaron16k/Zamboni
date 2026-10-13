@@ -49,6 +49,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from .events.nats import NatsConfigError, NatsSettings
+
 #: Where per-warehouse configuration lives when nothing says otherwise.
 DEFAULT_ROOT = Path.home() / ".zamboni"
 
@@ -102,6 +104,23 @@ STORAGE_SETTINGS = {
 #: this block does not make the profile a credential file.
 SSL_SETTINGS = frozenset({"ca_bundle", "insecure"})
 
+#: The environment variable for each `nats:` setting. Spelt out rather than
+#: derived from the key so the names can be found by grep, which is how
+#: `tests/test_docs.py` checks that `env.sample` declares them. A test keeps this
+#: and :class:`NatsSettings` in step.
+NATS_ENV = {
+    "servers": "ZAMBONI_NATS_SERVERS",
+    "subject": "ZAMBONI_NATS_SUBJECT",
+    "jetstream": "ZAMBONI_NATS_JETSTREAM",
+    "username": "ZAMBONI_NATS_USERNAME",
+    "password": "ZAMBONI_NATS_PASSWORD",
+    "token": "ZAMBONI_NATS_TOKEN",
+    "tls": "ZAMBONI_NATS_TLS",
+    "creds_file": "ZAMBONI_NATS_CREDS_FILE",
+    "max_deliveries": "ZAMBONI_NATS_MAX_DELIVERIES",
+    "stream": "ZAMBONI_NATS_STREAM",
+}
+
 #: Keys whose presence makes the profile a credential file. Conservative on
 #: purpose:
 #:
@@ -114,7 +133,10 @@ SSL_SETTINGS = frozenset({"ca_bundle", "insecure"})
 SECRET_PROFILE_KEYS = frozenset(
     {
         "credential",
+        # The catalog's bearer token at the top level, and NATS's under `nats:`.
         "token",
+        # NATS's, under `nats:` -- the only block with a password.
+        "password",
         "secret_access_key",
         "account_key",
         "sas_token",
@@ -203,6 +225,10 @@ class Profile:
     #: Which provider a run uses is decided by the table's own location, not by
     #: this block, so configuring two is refused rather than merged.
     storage: dict[str, dict[str, str]] = field(default_factory=dict)
+    #: Where `zamboni serve` hears about writes (docs/write-completed.md). ``None``
+    #: means no broker: every table runs on its schedule. Its repr hides the
+    #: password and token.
+    nats: NatsSettings | None = None
     #: Where this came from, for `--help` and error messages. `None` means
     #: nothing was found and the defaults are in force.
     source: Path | None = None
@@ -243,7 +269,8 @@ class Profile:
             f"operations={self.operations!r}, tables={self.tables!r}, "
             f"engines={self.engines!r}, credential_use={self.credential_use!r}, "
             f"credential={shown['credential']!r}, token={shown['token']!r}, "
-            f"ssl={self.ssl!r}, storage={storage!r}, source={self.source!r}, "
+            f"ssl={self.ssl!r}, storage={storage!r}, nats={self.nats!r}, "
+            f"source={self.source!r}, "
             f"extra={{{len(self.extra)} key(s)}})"
         )
 
@@ -462,6 +489,8 @@ def load_profile(path: Path | None) -> Profile:
         "storage",
         # Not a secret: a CA bundle is a path to a public certificate.
         "ssl",
+        # May hold a password or token; either turns on the mode rule.
+        "nats",
     }
     if unknown := sorted(set(raw) - known):
         raise ProfileError(
@@ -529,6 +558,11 @@ def load_profile(path: Path | None) -> Profile:
             f"Known keys: {', '.join(sorted(SSL_SETTINGS))}"
         )
 
+    nats_block = raw.get("nats") or {}
+    if not isinstance(nats_block, dict):
+        raise ProfileError(f"{path}: 'nats' must be a block of settings")
+    nats = _nats(nats_block, source=path)
+
     # Once it holds a secret it is a credential file, and gets `.env`'s mode
     # rule. Checked after parsing so a malformed profile fails on its contents
     # rather than on its permissions.
@@ -553,6 +587,7 @@ def load_profile(path: Path | None) -> Profile:
         credential=raw.get("credential") or base.credential,
         token=raw.get("token") or base.token,
         storage=storage,
+        nats=nats,
         tables=tuple(raw.get("tables") or ()),
         source=path,
     )
@@ -574,6 +609,24 @@ def _credential_use(value: str) -> str:
     return value
 
 
+def _nats(block: dict[str, Any], *, source: Path | None) -> NatsSettings | None:
+    """The `nats:` block with each :data:`NATS_ENV` variable over its key.
+
+    Per key, not per block, as everywhere else the environment overrides the
+    profile: a container that sets only ``ZAMBONI_NATS_PASSWORD`` from a Secret
+    keeps the servers and subject the committed file names.
+    """
+    merged = dict(block)
+    for key, variable in NATS_ENV.items():
+        if (value := os.environ.get(variable)) is not None:
+            merged[key] = value
+    try:
+        return NatsSettings.from_mapping(merged)
+    except NatsConfigError as exc:
+        where = f"{source}: " if source else ""
+        raise ProfileError(f"{where}{exc}") from exc
+
+
 def _from_environment(*, source: Path | None) -> Profile:
     root = os.environ.get("ZAMBONI_ROOT")
     return Profile(
@@ -582,6 +635,10 @@ def _from_environment(*, source: Path | None) -> Profile:
         engine=os.environ.get("ZAMBONI_ENGINE", "local"),
         credential_use=_credential_use(os.environ.get("ZAMBONI_CREDENTIAL_USE", "always")),
         root=Path(root).expanduser() if root else DEFAULT_ROOT,
+        # With a profile, `load_profile` merges these variables over its block;
+        # judging them here alone would refuse ZAMBONI_NATS_SERVERS set without
+        # the subject the file supplies.
+        nats=_nats({}, source=None) if source is None else None,
         source=source,
     )
 

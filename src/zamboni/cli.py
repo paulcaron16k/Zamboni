@@ -345,7 +345,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "the fleet file reloaded when it changes. Each table runs exactly what "
             "`zamboni maintenance <table>` would. Without --yes every table "
             "previews, as everywhere else. SIGTERM stops intake and lets tables in "
-            "flight finish; a second SIGTERM stops them too. See "
+            "flight finish; a second SIGTERM stops them too. With a `nats:` block "
+            "in the profile (zamboni[nats]) it also consumes write.completed "
+            "events and brings a written table's write-driven maintenance "
+            "forward; without one, the schedule does everything. See "
             "docs/event-driven-maintenance.md and docs/devops.md."
         ),
     )
@@ -1526,6 +1529,22 @@ def _serve(args: argparse.Namespace) -> int:
         size.threads_per_worker,
         size.duckdb_memory_bytes,
     )
+    events = []
+    if profile.nats is not None:
+        # Built before the service starts so a missing extra is a refusal to
+        # start (exit 2), not a source that fails once the schedule is running.
+        from .events.nats import NatsEventSource
+
+        try:
+            events.append(NatsEventSource(profile.nats))
+        except ImportError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        logging.getLogger(__name__).info(
+            "write.completed events from %s on %s",
+            profile.nats.subject,
+            ",".join(profile.nats.servers),
+        )
     service = Service(
         args.fleet,
         size=size,
@@ -1533,6 +1552,7 @@ def _serve(args: argparse.Namespace) -> int:
         state_path=state_path,
         run_log=args.json,
         poll_seconds=args.poll_seconds or POLL_SECONDS,
+        events=events,
     )
 
     async def until_signalled() -> int:
