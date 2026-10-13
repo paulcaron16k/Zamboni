@@ -103,7 +103,7 @@ jobs:
         run: |
           uv venv --python 3.13 /tmp/consumer
           uv pip install --python /tmp/consumer/bin/python \
-            "$(ls dist/*.whl)[sql,s3,trino,cloud]" \
+            "$(ls dist/*.whl)[sql,s3,trino,cloud,nats]" \
             pytest jsonschema "pyspark-client>=4.1.3,<4.2"
 
       # Asserted rather than assumed. A leg that resolved the fork by mistake
