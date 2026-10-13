@@ -1003,64 +1003,6 @@ def test_otel_without_an_sdk_says_so_rather_than_failing(devops_dir, session, ca
     assert "iceberg-zamboni[otel]" in err
 
 
-@pytest.fixture
-def collector(monkeypatch):
-    """An OTLP/HTTP endpoint standing in for a collector: records each POST.
-
-    Points the standard variables at it and clears the ones a developer's
-    shell might carry, so the test sees only what it set.
-    """
-    import threading
-    from http.server import BaseHTTPRequestHandler, HTTPServer
-
-    received: list[tuple[str, dict[str, str], bytes]] = []
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):
-            body = self.rfile.read(int(self.headers["Content-Length"]))
-            received.append((self.path, dict(self.headers), body))
-            self.send_response(200)
-            self.send_header("Content-Type", "application/x-protobuf")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-
-        def log_message(self, *args):
-            pass
-
-    server = HTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    for name in (
-        "OTEL_SERVICE_NAME",
-        "OTEL_RESOURCE_ATTRIBUTES",
-        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
-        "OTEL_EXPORTER_OTLP_HEADERS",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", f"http://127.0.0.1:{server.server_port}")
-    yield received
-    server.shutdown()
-
-
-def exported(received) -> tuple[set[str], set[str]]:
-    """The metric names and service names in what the collector received."""
-    from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import (
-        ExportMetricsServiceRequest,
-    )
-
-    names: set[str] = set()
-    services: set[str] = set()
-    for path, _headers, body in received:
-        assert path == "/v1/metrics"
-        request = ExportMetricsServiceRequest.FromString(body)
-        for resource_metrics in request.resource_metrics:
-            for attribute in resource_metrics.resource.attributes:
-                if attribute.key == "service.name":
-                    services.add(attribute.value.string_value)
-            for scope in resource_metrics.scope_metrics:
-                names.update(metric.name for metric in scope.metrics)
-    return names, services
-
-
 def test_otel_exports_a_short_run_to_the_collector_the_environment_names(
     devops_dir, session, collector, monkeypatch
 ):
@@ -1071,11 +1013,11 @@ def test_otel_exports_a_short_run_to_the_collector_the_environment_names(
 
     assert main(["maintenance", "--yes", "--metrics", "otel"]) == 0
 
-    assert collector, "nothing reached the collector"
-    names, services = exported(collector)
+    assert collector.requests, "nothing reached the collector"
+    names = collector.names()
     assert any(name.startswith("iceberg.") for name in names), names
-    assert services == {"zamboni"}, "no service named: zamboni, not unknown_service"
-    assert all(headers.get("x-zamboni-test") == "yes" for _, headers, _ in collector)
+    assert collector.services() == {"zamboni"}, "no service named: zamboni, not unknown_service"
+    assert all(headers.get("x-zamboni-test") == "yes" for _, headers, _ in collector.requests)
 
 
 def test_otel_takes_the_service_name_from_the_environment(
@@ -1085,7 +1027,7 @@ def test_otel_takes_the_service_name_from_the_environment(
 
     assert main(["maintenance", "--yes", "--metrics", "otel"]) == 0
 
-    assert exported(collector)[1] == {"zamboni-acme"}
+    assert collector.services() == {"zamboni-acme"}
 
 
 def test_a_collector_that_is_down_never_changes_the_exit_code(devops_dir, session, monkeypatch):

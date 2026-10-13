@@ -385,6 +385,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "Default: $ZAMBONI_ROOT/run/serve.pid",
     )
     sv.add_argument(
+        "--metrics",
+        action="append",
+        choices=("none", "otel"),
+        metavar="{none,otel}",
+        help="'otel' reports the write.completed consumer through OpenTelemetry's "
+        "messaging metrics, exported over OTLP to OTEL_EXPORTER_OTLP_ENDPOINT when "
+        "iceberg-zamboni[otel] is installed. Needs a `nats:` block; table runs are "
+        "not reported by it. Default: none.",
+    )
+    sv.add_argument(
         "--poll-seconds",
         type=_positive_int,
         default=None,
@@ -1599,29 +1609,52 @@ def _serve(args: argparse.Namespace) -> int:
             profile.nats.subject,
             ",".join(profile.nats.servers),
         )
-    service = Service(
-        args.fleet,
-        size=size,
-        worker_config=config,
-        state_path=state_path,
-        run_log=args.json,
-        poll_seconds=args.poll_seconds or POLL_SECONDS,
-        events=events,
-    )
-
-    async def until_signalled() -> int:
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, service.request_stop)
-        install_hangup(loop, service.hangup)
-        return await service.run()
-
-    try:
-        with single_instance(pid_path):
-            return asyncio.run(until_signalled())
-    except (AlreadyRunning, FleetConfigError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    wanted = set(args.metrics or ())
+    if "none" in wanted and len(wanted) > 1:
+        print("--metrics none cannot be combined with another destination.", file=sys.stderr)
         return 2
+    otel = "otel" in wanted
+    if otel and not events:
+        # Accepted, since a nats: block may be added later, but said: there is
+        # nothing for it to report until then.
+        print(
+            "--metrics otel: no `nats:` block in the profile, so there is no event "
+            "consumer to report.",
+            file=sys.stderr,
+        )
+
+    with _otel_provider(otel) as provider:
+        observer = None
+        if otel and events:
+            from . import __version__
+            from .otel import SCOPE, OTelFeedObserver
+
+            meter = provider.get_meter(SCOPE, __version__) if provider is not None else None
+            observer = OTelFeedObserver(meter)
+        service = Service(
+            args.fleet,
+            size=size,
+            worker_config=config,
+            state_path=state_path,
+            run_log=args.json,
+            poll_seconds=args.poll_seconds or POLL_SECONDS,
+            events=events,
+            feed_observer=observer,
+        )
+
+        async def until_signalled() -> int:
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, service.request_stop)
+            install_hangup(loop, service.hangup)
+            return await service.run()
+
+        try:
+            with single_instance(pid_path):
+                return asyncio.run(until_signalled())
+        except (AlreadyRunning, FleetConfigError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
 
 def _runs(args: argparse.Namespace) -> int:
@@ -1656,22 +1689,23 @@ def _runs(args: argparse.Namespace) -> int:
 
 
 @contextlib.contextmanager
-def _metrics(session: CatalogSession, args: argparse.Namespace) -> Iterator[Any]:
-    """The reporter for this run, with an OTel SDK behind it if one is needed.
+def _otel_provider(wanted: bool) -> Iterator[Any]:
+    """An exporting OTel MeterProvider the CLI owns for the block, or ``None``.
 
     `--metrics otel` in a process where nothing configured an SDK -- a cron line,
-    a container -- gets an exporting provider built here, because the CLI is the
+    a container -- gets a provider built here, because the CLI is the
     application and an SDK that is installed configures nothing by itself
-    (#188). One a host application already configured is used as it is.
+    (#188). One a host application already configured is used as it is, and
+    this yields ``None``.
 
-    The provider is shut down on the way out, whatever the run's outcome, which
-    is what exports a short run's metrics at all: the periodic reader would
+    The provider is shut down on the way out, whatever the outcome, which is
+    what exports a short run's metrics at all: the periodic reader would
     otherwise be killed with the process before its first interval. A failure
     there is logged and never changes the exit code -- a reporter can never
     fail a run.
     """
     provider = None
-    if "otel" in set(getattr(args, "metrics", None) or ()):
+    if wanted:
         from .otel import exporting_provider, sdk_configured
 
         if not sdk_configured():
@@ -1689,7 +1723,7 @@ def _metrics(session: CatalogSession, args: argparse.Namespace) -> Iterator[Any]
                     file=sys.stderr,
                 )
     try:
-        yield _reporter_from(session, args, provider=provider)
+        yield provider
     finally:
         if provider is not None:
             try:
@@ -1698,6 +1732,13 @@ def _metrics(session: CatalogSession, args: argparse.Namespace) -> Iterator[Any]
                 logging.getLogger(__name__).warning(
                     "--metrics otel: flushing metrics failed", exc_info=True
                 )
+
+
+@contextlib.contextmanager
+def _metrics(session: CatalogSession, args: argparse.Namespace) -> Iterator[Any]:
+    """The reporter for this run, with an OTel SDK behind it if one is needed."""
+    with _otel_provider("otel" in set(getattr(args, "metrics", None) or ())) as provider:
+        yield _reporter_from(session, args, provider=provider)
 
 
 def _reporter_from(session: CatalogSession, args: argparse.Namespace, provider: Any = None):
