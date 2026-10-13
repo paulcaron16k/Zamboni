@@ -240,13 +240,126 @@ def test_tables_pending_when_the_source_ends_are_still_offered():
     assert offered, "the source ended; its pending table was flushed anyway"
 
 
+# -- telemetry (#181) ----------------------------------------------------------------------
+
+
+class Recorder:
+    """A FeedObserver that records -- or, with ``fail``, raises every time."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+        self.heard: list[tuple[str, float, BaseException | None]] = []
+        self.offers: list[Candidate] = []
+
+    def consumed(self, source, outcome, seconds, error):
+        if self.fail:
+            raise RuntimeError("exporter down")
+        self.heard.append((outcome, seconds, error))
+
+    def offered(self, source, candidate):
+        if self.fail:
+            raise RuntimeError("exporter down")
+        self.offers.append(candidate)
+
+
+def one_of_each() -> list[bytes]:
+    """A message for every outcome but `error`, which needs a broken feed."""
+    return [
+        payload("events", 1),  # pending
+        payload("events", 1),  # duplicate
+        payload("events", 2),  # coalesced: same table, later snapshot
+        payload("events", 3, warehouse="initech"),  # unmapped
+        b"{not json",  # rejected
+        b"boom",  # error -- see broken()
+    ]
+
+
+def broken(f: EventFeed) -> EventFeed:
+    """Make handling `boom` raise, as an internal error would."""
+    handle = f.handle
+
+    def raising(data: bytes) -> str:
+        if data == b"boom":
+            raise KeyError("internal")
+        return handle(data)
+
+    f.handle = raising  # type: ignore[method-assign]
+    return f
+
+
+def test_the_observer_hears_every_outcome_once_and_every_offer():
+    from zamboni.events.feed import OUTCOMES
+
+    clock, recorder, offered = Clock(), Recorder(), []
+    source = FakeSource(one_of_each())
+    f = broken(
+        EventFeed(
+            source,
+            fleet=fleet,
+            offer=lambda c: offered.append(c) or True,
+            clock=clock,
+            observer=recorder,
+        )
+    )
+
+    asyncio.run(f._read())
+    clock.now += QUIET
+    f.flush_due()
+
+    assert [outcome for outcome, _, _ in recorder.heard] == [
+        "pending",
+        "duplicate",
+        "coalesced",
+        "unmapped",
+        "rejected",
+        "error",
+    ]
+    assert {outcome for outcome, _, _ in recorder.heard} == set(OUTCOMES)
+    assert all(seconds >= 0 for _, seconds, _ in recorder.heard)
+    errors = [error for outcome, _, error in recorder.heard if error is not None]
+    assert len(errors) == 1 and isinstance(errors[0], KeyError), "only `error` carries one"
+    assert recorder.offers == offered == [Candidate("acme", "raw.events", EVENT)]
+
+
+def test_an_observer_that_raises_changes_nothing_the_feed_does():
+    """A reporter can never fail a run; an observer can never fail a feed. Every
+    message is still settled exactly once and the table is still offered."""
+    clock, offered = Clock(), []
+    source = FakeSource(one_of_each())
+    f = broken(
+        EventFeed(
+            source,
+            fleet=fleet,
+            offer=lambda c: offered.append(c) or True,
+            clock=clock,
+            observer=Recorder(fail=True),
+        )
+    )
+
+    asyncio.run(f._read())
+    clock.now += QUIET
+    f.flush_due()
+
+    assert [(m.acked, m.naked) for m in source.messages] == [(1, 0)] * 5 + [(0, 1)]
+    assert f.counters.as_dict() == {
+        "received": 5,
+        "offered": 1,
+        "coalesced": 1,
+        "duplicates": 1,
+        "unmapped": 1,
+        "rejected": 1,
+        "errors": 1,
+    }
+    assert offered == [Candidate("acme", "raw.events", EVENT)]
+
+
 # -- reuse -----------------------------------------------------------------------------------
 
 
 def test_the_feed_imports_no_engine_and_no_transport():
     """Shared by `zamboni serve` and the maintenance runtime, and imported by a
     service process that must stay light (#154)."""
-    heavy = ("pyiceberg", "duckdb", "pyarrow", "nats")
+    heavy = ("pyiceberg", "duckdb", "pyarrow", "nats", "opentelemetry")
     code = (
         "import sys, json; import zamboni.events.feed; "
         f"print(json.dumps(sorted(m for m in {heavy!r} if m in sys.modules)))"

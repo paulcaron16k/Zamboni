@@ -10,6 +10,8 @@ install.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from zamboni.metrics import (
@@ -241,3 +243,185 @@ def test_importing_zamboni_does_not_import_opentelemetry():
     out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
 
     assert out.stdout.strip() == "False", "importing zamboni pulled in opentelemetry"
+
+
+# -- the write.completed consumer (#181) -----------------------------------------
+
+
+def consumer_metrics(payloads: list[bytes], source_attributes: Any) -> dict[str, Any]:
+    """Run a real feed over ``payloads`` into a real SDK meter; the metrics read
+    back, by name. One payload, `boom`, raises inside handling."""
+    import asyncio
+    from datetime import UTC, datetime
+
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    from zamboni.events.feed import QUIET, EventFeed
+    from zamboni.fleet import CronSchedule, FleetConfig, FleetWarehouse
+    from zamboni.otel import OTelFeedObserver
+    from zamboni.tableconfig import NamespaceSettings, TableConfig, TableSettings
+
+    class Message:
+        def __init__(self, data: bytes) -> None:
+            self.payload = data
+
+        async def ack(self) -> None: ...
+
+        async def nak(self) -> None: ...
+
+    class Source:
+        name = "nats"
+        connected = True
+        telemetry_attributes = source_attributes.telemetry_attributes
+        receive_operation = source_attributes.receive_operation
+
+        async def _iterate(self):
+            for data in payloads:
+                yield Message(data)
+
+        def __aiter__(self):
+            return self._iterate()
+
+    config = TableConfig(
+        warehouse="acme", namespaces={"raw": NamespaceSettings(tables={"events": TableSettings()})}
+    )
+    fleet = FleetConfig(warehouses=(FleetWarehouse("acme", CronSchedule("0 2 * * *"), config),))
+    now = [datetime(2026, 10, 13, tzinfo=UTC)]
+    reader = InMemoryMetricReader()
+    meter = MeterProvider(metric_readers=[reader]).get_meter("test")
+    feed = EventFeed(
+        Source(),
+        fleet=lambda: fleet,
+        offer=lambda c: True,
+        clock=lambda: now[0],
+        observer=OTelFeedObserver(meter),
+    )
+    handle = feed.handle
+
+    def raising(data: bytes) -> str:
+        if data == b"boom":
+            raise KeyError("internal")
+        return handle(data)
+
+    feed.handle = raising  # type: ignore[method-assign]
+    asyncio.run(feed._read())
+    now[0] += QUIET
+    feed.flush_due()
+
+    metrics = {}
+    for resource in reader.get_metrics_data().resource_metrics:
+        for scope in resource.scope_metrics:
+            for metric in scope.metrics:
+                metrics[metric.name] = metric
+    return metrics
+
+
+def event_payload(snapshot_id: int, warehouse: str = "acme") -> bytes:
+    import json
+
+    return json.dumps(
+        {
+            "specversion": "1.0",
+            "type": "writeCompleted",
+            "source": "uri:test:host",
+            "id": f"{warehouse}/raw/events@{snapshot_id}",
+            "data": {
+                "warehouse": warehouse,
+                "namespace": ["raw"],
+                "table": "events",
+                "snapshot_id": snapshot_id,
+                "completed_at": "2026-10-13T02:00:00Z",
+            },
+        }
+    ).encode()
+
+
+def jetstream_source() -> Any:
+    from zamboni.events.nats import NatsEventSource, NatsSettings
+
+    async def never(**options):
+        raise AssertionError("no broker in this test")
+
+    source = NatsEventSource(
+        NatsSettings(servers=("nats://n:4222",), subject="prod.iceberg.write.completed"),
+        connect=never,
+    )
+    source.mode = "jetstream"
+    return source
+
+
+ONE_OF_EACH = [
+    event_payload(1),  # pending
+    event_payload(1),  # duplicate
+    event_payload(2),  # coalesced
+    event_payload(3, warehouse="initech"),  # unmapped
+    b"{not json",  # rejected
+    b"boom",  # error
+]
+
+
+def test_the_consumer_emits_the_convention_metrics_with_their_units():
+    from zamboni.otel import CONSUMED_MESSAGES, EVENTS_OFFERED, PROCESS_DURATION
+
+    metrics = consumer_metrics(ONE_OF_EACH, jetstream_source())
+
+    assert set(metrics) == {CONSUMED_MESSAGES, PROCESS_DURATION, EVENTS_OFFERED}
+    assert metrics["messaging.client.consumed.messages"].unit == "{message}"
+    assert metrics["messaging.process.duration"].unit == "s"
+    assert metrics["zamboni.events.offered"].unit == "{table}"
+
+
+def test_every_outcome_is_distinguishable_and_each_message_is_counted_once():
+    """What an operator needs to tell "no events" from "events, all unmapped"."""
+    from zamboni.events.feed import OUTCOMES
+
+    metrics = consumer_metrics(ONE_OF_EACH, jetstream_source())
+
+    consumed = {
+        p.attributes["zamboni.event.outcome"]: p.value
+        for p in metrics["messaging.client.consumed.messages"].data.data_points
+    }
+    assert consumed == dict.fromkeys(OUTCOMES, 1)
+    offered = metrics["zamboni.events.offered"].data.data_points
+    assert [p.value for p in offered] == [1]
+
+
+def test_the_attributes_are_the_conventions_and_error_type_marks_only_failures():
+    metrics = consumer_metrics(ONE_OF_EACH, jetstream_source())
+
+    for point in metrics["messaging.client.consumed.messages"].data.data_points:
+        attributes = dict(point.attributes)
+        assert attributes["messaging.system"] == "nats"
+        assert attributes["messaging.destination.name"] == "prod.iceberg.write.completed"
+        assert attributes["messaging.consumer.group.name"] == "zamboni_prod_iceberg_write_completed"
+        assert attributes["messaging.operation.name"] == "fetch"
+        assert attributes["messaging.operation.type"] == "receive"
+        assert "error.type" not in attributes, "receiving never failed"
+
+    errors = {
+        p.attributes["zamboni.event.outcome"]: p.attributes.get("error.type")
+        for p in metrics["messaging.process.duration"].data.data_points
+    }
+    assert errors == {
+        "pending": None,
+        "duplicate": None,
+        "coalesced": None,
+        "unmapped": None,
+        "rejected": "zamboni.events.EventError",
+        "error": "KeyError",
+    }
+    for point in metrics["messaging.process.duration"].data.data_points:
+        assert point.attributes["messaging.operation.name"] == "process"
+        assert point.count == 1 and point.sum >= 0
+
+
+def test_core_nats_receives_and_has_no_consumer_group():
+    source = jetstream_source()
+    source.mode = "core"
+
+    assert source.receive_operation == "receive"
+    assert source.telemetry_attributes == {
+        "messaging.system": "nats",
+        "messaging.destination.name": "prod.iceberg.write.completed",
+    }
