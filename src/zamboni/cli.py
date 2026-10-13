@@ -533,8 +533,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="where to send Iceberg-shaped metrics; repeat for several. "
         "'catalog' POSTs a CommitReport to the catalog's metrics endpoint, which "
         "is what Java does by default; 'log' writes one JSON line per report; "
-        "'otel' records through OpenTelemetry, which is silent unless an SDK is "
-        "configured (install zamboni[otel]). Default: none.",
+        "'otel' exports over OTLP to OTEL_EXPORTER_OTLP_ENDPOINT when "
+        "iceberg-zamboni[otel] is installed, and is silent without it. Default: none.",
     )
     mt.add_argument(
         "--json",
