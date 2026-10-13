@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/paulcaron16k/Zamboni/blob/main/docs/write-completed.md/1.0",
+  "title": "iceberg.table.write.completed",
+  "description": "A CloudEvents 1.0 event, structured-mode JSON, that an Iceberg writer emits once when it has finished with a table for a run. Generated from zamboni.events; do not edit by hand. See docs/write-completed.md.",
+  "x-contract-version": "1.0",
+  "type": "object",
+  "required": [
+    "specversion",
+    "type",
+    "source",
+    "id",
+    "data"
+  ],
+  "properties": {
+    "specversion": {
+      "const": "1.0"
+    },
+    "type": {
+      "const": "writeCompleted"
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The producer and its host, \"uri:<producer>:<host>\"."
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Deterministic, so a redelivered or re-emitted event can be recognised: \"<warehouse>/<namespace levels joined by />/<table>@<snapshot_id>\"."
+    },
+    "dataschema": {
+      "type": "string",
+      "description": "https://github.com/paulcaron16k/Zamboni/blob/main/docs/write-completed.md/<major>.<minor> -- the contract version the event was written against."
+    },
+    "datacontenttype": {
+      "const": "application/json"
+    },
+    "data": {
+      "type": "object",
+      "required": [
+        "warehouse",
+        "namespace",
+        "table",
+        "snapshot_id",
+        "completed_at"
+      ],
+      "properties": {
+        "warehouse": {
+          "type": "string",
+          "description": "The warehouse's name, as the catalog knows it. The matching key: a consumer maps the event to a table by this name, exactly.",
+          "minLength": 1
+        },
+        "namespace": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "The namespace as a list of levels, outermost first -- never a dotted string, because a dot inside a level is legal and \"a.b\" is ambiguous.",
+          "minItems": 1
+        },
+        "table": {
+          "type": "string",
+          "description": "The table's name within the namespace.",
+          "minLength": 1
+        },
+        "snapshot_id": {
+          "type": "integer",
+          "description": "The last snapshot this writer committed to the table in this run."
+        },
+        "completed_at": {
+          "type": "string",
+          "description": "When the writer finished with the table: the end of the write window, ISO-8601 with a UTC offset.",
+          "format": "date-time"
+        },
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "When the writer's first commit to the table began, ISO-8601 UTC.",
+          "format": "date-time"
+        },
+        "writer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The producer and its version, e.g. \"target-iceberg/0.3.0\"."
+        },
+        "load_method": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "How the writer loaded: \"append-only\", \"upsert\" or \"overwrite\"."
+        },
+        "full_refresh": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "True when the table's contents were replaced wholesale."
+        },
+        "rows": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Rows the writer committed to the table in this run."
+        },
+        "data_files_added": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Data files the run added."
+        },
+        "bytes_added": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Bytes of data files the run added."
+        },
+        "partitions_changed": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Partitions the run changed. Omitted rather than estimated when not exact: summing per-snapshot counts over-counts."
+        },
+        "snapshot_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Snapshots the run committed to the table."
+        },
+        "streams": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "The source streams that wrote the table."
+        },
+        "table_uuid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The table's `table-uuid` from its metadata (required from format v2). Informational: tells a consumer the table was recreated since the write."
+        },
+        "warehouse_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The catalog's own identifier for the warehouse, where it has one. Informational only: not part of the Iceberg REST specification."
+        },
+        "catalog_uri": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The catalog URI as the writer reached it. Informational only: the same catalog is reached by different URLs from different places."
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

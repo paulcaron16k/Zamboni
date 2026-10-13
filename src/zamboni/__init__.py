@@ -22,6 +22,7 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers and editors only
     from .compactor import CompactionBlocked, CompactionResult, TableCompactor
     from .config import CompactionConfig, MemoryMode, config_from_table_settings
     from .deletes import DanglingDeleteCleaner
+    from .events import get_write_completed_spec
     from .expire import RetentionPolicy, SnapshotExpirer
     from .fleet import CronSchedule, FleetConfig, FleetConfigError, FleetWarehouse
     from .health import TableHealth, Watermark, maintenance_watermark, table_health
@@ -155,6 +156,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     "engines_lacking": (".maintainers", "engines_lacking"),
     "get_maintainer": (".maintainers", "get"),
     "get_table_config_spec": (".tableconfig_schema", "load_schema"),
+    "get_write_completed_spec": (".events", "get_write_completed_spec"),
     "maintain": (".maintenance", "maintain"),
     "maintenance_watermark": (".health", "maintenance_watermark"),
     "no_commit_metrics": (".metrics", "no_commit_metrics"),
@@ -336,6 +338,7 @@ __all__ = [
     "engines_lacking",
     "get_maintainer",
     "get_table_config_spec",
+    "get_write_completed_spec",
     "maintain",
     "maintenance_watermark",
     "no_commit_metrics",

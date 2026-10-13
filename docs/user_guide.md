@@ -565,6 +565,7 @@ internal and may move in a patch release. The entry points you need:
 | `MaintenanceRequest` | engine-neutral inputs — retention plus overrides |
 | `TableConfig` | loading and reading `table-config.json` |
 | `get_table_config_spec()` | the JSON Schema for `table-config.json`, as a dict — for validating a file you generated, or driving editor completion. See [below](#validating-a-generated-table-configjson) |
+| `get_write_completed_spec()` | the JSON Schema for the `write.completed` event a writer emits when it has finished with a table — for a producer's spec-diff test. See [write-completed.md](write-completed.md) |
 | `commit_reports(result, snapshots)` / `CommitReport` | Iceberg's own `CommitReport` for each snapshot an operation committed, built from the snapshot summary using Iceberg's defined counter names |
 | `MetricsReporter` / `NoopReporter` / `CollectingReporter` / `LoggingReporter` / `MultiReporter` / `RestMetricsReporter` | where reports go: one method, `report(MetricsReport)`, copying Iceberg's own seam. Pass one as `maintain(reporter=…)`; the default emits nothing |
 | `reporter_for(catalog, extra)` | the reporter that suits a catalog — the metrics endpoint for a REST catalog, nothing to post to for a local one |
