@@ -54,6 +54,12 @@ logger = logging.getLogger(__name__)
 LIVENESS_STALE = MAX_SLEEP * 3
 
 STATE_VERSION = 1
+#: How often an event source's connection and counters are checked for a change
+#: worth writing. The scheduler writes the state file only when it ticks, up to
+#: MAX_SLEEP apart, which would leave readiness a minute behind a broker outage
+#: -- and a fresh start unready for a minute after it connected. A write happens
+#: only on a change, so a quiet service costs one comparison a second.
+EVENTS_OBSERVE_SECONDS = 1.0
 
 PROBES = ("liveness", "readiness", "startup")
 
@@ -449,6 +455,17 @@ class Service:
                 self.state.reload_error = reason
                 self._write()
 
+        async def observe_events() -> None:
+            last = None
+            while not self.stop.is_set():
+                self._observe_events()
+                seen = (self.state.nats_connected, json.dumps(self.state.events, sort_keys=True))
+                if seen != last:
+                    last = seen
+                    self._write()
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self.stop.wait(), EVENTS_OBSERVE_SECONDS)
+
         async def mark_stopping() -> None:
             await self.stop.wait()
             self.state.phase = "stopping"
@@ -487,6 +504,7 @@ class Service:
                     interval=self.poll_seconds,
                 ),
                 mark_stopping(),
+                *([observe_events()] if self.feeds else []),
             )
         finally:
             if hasattr(self.pool, "close"):

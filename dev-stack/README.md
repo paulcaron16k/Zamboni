@@ -1,6 +1,6 @@
 # Zamboni dev stack
 
-Lakekeeper, Postgres and MinIO, configured so that Zamboni's **storage
+Lakekeeper, Postgres, MinIO and NATS, configured so that Zamboni's **storage
 reclamation actually works** — which is not the default and is the whole reason
 this stack exists.
 
@@ -20,6 +20,7 @@ Then, from the project root:
 ./bin/zamboni-demo --catalog lakekeeper next-day
 ./bin/zamboni-demo --catalog lakekeeper maintenance --reclaim-now
 uv run pytest tests/test_dev_stack.py        # 12 tests; skipped if the stack is down
+ZAMBONI_TEST_NATS_URL=nats://localhost:4232 uv run pytest tests/test_nats.py   # live NATS tests
 ```
 
 | | |
@@ -29,6 +30,7 @@ uv run pytest tests/test_dev_stack.py        # 12 tests; skipped if the stack is
 | MinIO S3 | http://localhost:9010 |
 | MinIO console | http://localhost:9011 |
 | Postgres | localhost:5433 |
+| NATS (JetStream) | nats://localhost:4232 |
 
 Ports are shifted off the defaults so this coexists with any other Lakekeeper or
 MinIO on the machine. `docker compose down -v` removes the volumes too.

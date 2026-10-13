@@ -10,13 +10,17 @@ skip when none answers on ``ZAMBONI_TEST_NATS_URL``; the dev stack runs one.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import signal
 import socket
 import ssl
 import subprocess
 import sys
+import time
 import uuid
+from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
@@ -413,7 +417,9 @@ def test_a_dropped_connection_reads_as_disconnected():
 
 # -- live: a real nats-server -----------------------------------------------------------------
 
-LIVE_URL = os.environ.get("ZAMBONI_TEST_NATS_URL", "nats://127.0.0.1:4222")
+#: The dev stack's NATS (dev-stack/.env.sample, NATS_PORT).
+LIVE_URL = os.environ.get("ZAMBONI_TEST_NATS_URL", "nats://127.0.0.1:4232")
+DEV_STACK = Path(__file__).resolve().parent.parent / "dev-stack"
 
 
 @pytest.fixture
@@ -543,3 +549,164 @@ def test_serve_without_the_extra_refuses_to_start_naming_it(tmp_path, monkeypatc
     assert code == 2
     assert EXTRA in capsys.readouterr().err
     assert not (tmp_path / "state.json").exists(), "refused before the service started"
+
+
+def test_readiness_follows_the_connection_without_waiting_for_a_tick(tmp_path):
+    """The scheduler writes state when it ticks, up to a minute apart; a source
+    connecting or dropping is written within a second of it happening."""
+    from tests.test_service import FakePool, fleet_file
+    from zamboni.pool import PoolSize, WorkerConfig
+    from zamboni.service import Service, read_state
+
+    class Flipping:
+        name, connected = "nats", False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.sleep(3600)
+
+    source = Flipping()
+    state_path = tmp_path / "state.json"
+
+    async def scenario():
+        svc = Service(
+            fleet_file(tmp_path, "a", schedule="0 2 1 1 *"),  # one tick, then a 60 s sleep
+            size=PoolSize(1, 1, "test", None),
+            worker_config=WorkerConfig(workdir=tmp_path),
+            state_path=state_path,
+            pool_factory=lambda size, config: FakePool(size, config),
+            capability_check=lambda: None,
+            events=[source],
+        )
+        task = asyncio.create_task(svc.run())
+        seen = []
+        for connected in (True, False):
+            await asyncio.sleep(0.2)
+            source.connected = connected
+            for _ in range(30):
+                await asyncio.sleep(0.1)
+                if read_state(state_path).get("nats_connected") is connected:
+                    seen.append(connected)
+                    break
+        svc.request_stop()
+        await asyncio.wait_for(task, 5)
+        return seen
+
+    assert asyncio.run(scenario()) == [True, False]
+
+
+# -- live: kill NATS under a real `zamboni serve` ----------------------------------------------
+
+
+def compose(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["docker", "compose", *args], cwd=DEV_STACK, capture_output=True, text=True, timeout=120
+    )
+
+
+@pytest.fixture
+def dev_stack_nats(live_url) -> str:
+    """The dev stack's own NATS container, which this test stops and starts. A
+    NATS that is not the compose service is skipped: stopping it is not ours."""
+    try:
+        running = compose("ps", "-q", "nats").stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        running = ""
+    if not running:
+        if os.environ.get("ZAMBONI_REQUIRE_DEV_STACK"):
+            pytest.fail("the dev stack's nats service is not running")
+        pytest.skip("the dev stack's nats service is not running")
+    return live_url
+
+
+def test_killing_nats_under_zamboni_serve_costs_readiness_and_nothing_else(
+    tmp_path, dev_stack_nats
+):
+    """docs/event-driven-maintenance.md's test for the whole design: stop the
+    broker under a running service and it stays alive, says it is not ready,
+    and picks the events up again when the broker returns."""
+    import nats
+
+    from tests.test_feed import payload
+    from tests.test_service import fleet_file
+    from zamboni.cli import main
+    from zamboni.service import read_state
+
+    subject = f"zamboni.test.{uuid.uuid4().hex}"
+    run = tmp_path / "run"
+    state, pid = run / "serve.state.json", run / "serve.pid"
+    workdir = tmp_path / "cwd"
+    workdir.mkdir()  # no stray zamboni.yml or .env
+    env = {
+        **os.environ,
+        "ZAMBONI_LOCAL_WAREHOUSE": str(tmp_path / "wh"),
+        "ZAMBONI_NATS_SERVERS": dev_stack_nats,
+        "ZAMBONI_NATS_SUBJECT": subject,
+    }
+    command = [
+        sys.executable,
+        "-c",
+        "from zamboni.cli import main; raise SystemExit(main())",
+        "serve",
+        "--fleet",
+        str(fleet_file(tmp_path, "events", schedule="0 2 1 1 *")),
+        "--state-file",
+        str(state),
+        "--pid-file",
+        str(pid),
+    ]
+    status = ["service-status", "--state-file", str(state), "--probe"]
+
+    def wait_for(predicate, what: str, timeout: float = 60):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.2)
+        raise AssertionError(f"timed out waiting for {what}")
+
+    def received() -> int:
+        return read_state(state).get("events", {}).get("nats", {}).get("received", 0)
+
+    async def publish(snapshot_id: int) -> None:
+        nc = await nats.connect(dev_stack_nats)
+        await nc.jetstream().publish(
+            subject, payload("events", snapshot_id), headers={"Nats-Msg-Id": uuid.uuid4().hex}
+        )
+        await nc.close()
+
+    proc = subprocess.Popen(command, cwd=workdir, env=env, stderr=subprocess.PIPE, text=True)
+    try:
+        wait_for(lambda: state.exists() and main([*status, "readiness"]) == 0, "readiness")
+        asyncio.run(publish(1))
+        wait_for(lambda: received() == 1, "the first event")
+
+        assert compose("stop", "nats").returncode == 0
+        wait_for(lambda: main([*status, "readiness"]) == 1, "readiness to drop", 15)
+        assert main([*status, "liveness"]) == 0, "a broker outage is not a reason to restart"
+        assert proc.poll() is None
+
+        assert compose("start", "nats").returncode == 0
+        wait_for(lambda: main([*status, "readiness"]) == 0, "readiness to return")
+        asyncio.run(publish(2))
+        wait_for(lambda: received() == 2, "an event after the outage")
+
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=30) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        compose("up", "-d", "--wait", "nats")
+
+        async def drop_stream() -> None:
+            nc = await nats.connect(dev_stack_nats)
+            with contextlib.suppress(Exception):
+                await nc.jetstream().delete_stream(
+                    stream_name(NatsSettings(servers=(dev_stack_nats,), subject=subject))
+                )
+            await nc.close()
+
+        asyncio.run(drop_stream())

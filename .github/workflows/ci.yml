@@ -274,10 +274,14 @@ jobs:
       # ZAMBONI_REQUIRE_DEV_STACK turns "cannot reach the stack" from a skip into
       # a failure. Without it a stack that never started produces a suite of
       # skips, and a green tick that means nothing was tested.
+      # tests/test_nats.py too: its live half -- JetStream detection, Msg-Id
+      # dedup, and NATS stopped and restarted under a real `zamboni serve` --
+      # needs the stack's nats service, and skips everywhere else. The `test`
+      # job runs the rest of the file.
       - name: Run the dev-stack tests
         env:
           ZAMBONI_REQUIRE_DEV_STACK: "1"
-        run: uv run pytest tests/test_dev_stack.py -v
+        run: uv run pytest tests/test_dev_stack.py tests/test_nats.py -v
 
       - name: The demo, end to end on Lakekeeper and MinIO
         env:
