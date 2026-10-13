@@ -41,10 +41,24 @@ def attached() -> set[str]:
     return {word for word in create.split() if word.endswith(".json")}
 
 
+def published(spec_path: Path) -> str:
+    """The repository path of the file an accessor reads.
+
+    Derived from the name, not from ``spec_path`` itself: installed from a
+    wheel -- CI's consumer job -- the accessor reads from site-packages, which
+    is not under the repository at all.
+    """
+    assert spec_path.parent.name == "zamboni", f"{spec_path} is not in the package"
+    return f"src/zamboni/{spec_path.name}"
+
+
 @pytest.mark.parametrize(("spec_path", "doc"), SCHEMAS)
 def test_each_schema_is_attached_to_the_release_from_the_path_its_accessor_reads(spec_path, doc):
-    relative = spec_path.resolve().relative_to(ROOT).as_posix()
+    relative = published(spec_path)
     assert relative in attached(), f"release.yml does not attach {relative}"
+    # What a producer fetches is what the accessor returns: in a checkout the
+    # same file, and installed from a wheel the copy the wheel shipped.
+    assert (ROOT / relative).read_bytes() == spec_path.read_bytes()
 
 
 def test_every_shipped_schema_is_a_release_asset():
@@ -59,7 +73,7 @@ def test_every_shipped_schema_is_a_release_asset():
 @pytest.mark.parametrize(("spec_path", "doc"), SCHEMAS)
 def test_the_doc_promises_the_path_and_both_urls(spec_path, doc):
     text = (ROOT / doc).read_text()
-    relative = spec_path.resolve().relative_to(ROOT).as_posix()
+    relative = published(spec_path)
     assert f"`{relative}`" in text, f"{doc} does not name the promised path {relative}"
     assert f"https://raw.githubusercontent.com/{REPO_URL}/v0.6.0/{relative}" in text
     assert f"https://github.com/{REPO_URL}/releases/download/v0.6.0/{spec_path.name}" in text
