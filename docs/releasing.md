@@ -27,6 +27,7 @@ them is breaking:
 | **Defaults that decide what gets deleted** | lowering `older_than_days`, raising `max_snapshot_age_days`, enabling a reclaim step that was off | changing a default that only affects performance, e.g. `target_file_size_bytes` |
 | **What is refused** | allowing an operation previously blocked as unsafe | blocking something newly discovered to be unsafe (see below) |
 | **`as_dict()` keys** | removing a key, renaming one, or changing what a key *counts* | adding a key, changing `describe()`'s wording, adding an operation with its own keys |
+| **Published schemas** (`src/zamboni/*_spec.json`) | moving or renaming the file, or dropping it from the release assets — producers fetch it by path (#183) | adding a schema; a `write.completed` minor version, which only adds optional fields |
 
 **The fourth row is the one worth the effort of writing this down.** A release
 that lowers the orphan-removal age guard from three days to one deletes files on
@@ -235,6 +236,27 @@ and uploads to PyPI as `iceberg-zamboni`. There is deliberately no
 `workflow_dispatch` — a release that can be fired without a tag is one nobody can
 reconstruct later. So step 5 is the point of no return, and everything before it
 is reversible.
+
+**It also makes a GitHub release** (from 0.6.0, #183), whose notes are the tag
+message. Its assets are the wheel and sdist — the same artifact the PyPI job
+uploads, not a second build — and the published schemas,
+`zamboni-write-completed_spec.json` and `zamboni-table-config_spec.json`, for
+producers that vendor them rather than install the package. PyPI stays the
+install path: a wheel from the release still resolves its dependencies from
+PyPI, and pins one exact version. The release is created as a **draft before the PyPI upload**
+and published **after** it, so nothing goes public unless both succeed and no
+version reaches PyPI without its schemas. A schema missing from the tree fails
+the draft, before PyPI. `tests/test_release_assets.py` holds the attached files,
+the accessors and the docs that promise the paths together.
+
+If the PyPI upload fails, the draft stays a draft and nothing is public. Fix the
+cause and re-run the failed jobs: the draft job deletes and recreates a draft
+it finds. It never deletes a published release; `gh release create` should then
+refuse the existing tag, which is not tested here. If the version has to be
+abandoned instead, delete the draft (`gh release delete vX.Y.Z`) along with the
+tag. Checked against a throwaway draft on 2026-10-13: creating it with a real
+wheel, sdist and both schemas, replacing it, and refusing a missing asset. The step that publishes the
+draft is first exercised by 0.6.0.
 
 **The tag must agree with `pyproject.toml`,** and the workflow refuses when it
 does not. This is the one guard worth having: a `v0.3.0` tag publishing `0.2.0`

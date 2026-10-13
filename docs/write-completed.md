@@ -14,6 +14,23 @@ spec = get_write_completed_spec()      # a dict; spec["x-contract-version"] == "
 Why the contract has this shape — the decisions and the alternatives rejected —
 is in [maintenance-runtime.md §5](maintenance-runtime.md).
 
+### Getting the schema without installing Zamboni
+
+A producer that may not depend on this package fetches the same file. **Its path
+is promised:** `src/zamboni/zamboni-write-completed_spec.json`, and moving or
+renaming it is a breaking change, recorded as one in the changelog. Two places
+serve it, identical at a given version:
+
+- **The repository, at a tag:**
+  `https://raw.githubusercontent.com/paulcaron16k/Zamboni/v0.6.0/src/zamboni/zamboni-write-completed_spec.json`
+- **The GitHub release, as an asset:**
+  `https://github.com/paulcaron16k/Zamboni/releases/download/v0.6.0/zamboni-write-completed_spec.json`
+
+Substitute the release you build against. 0.6.0 is the first that carries the
+contract; before it is tagged, use the repository URL at a commit on `main`.
+Vendor the file at a pinned version and refresh it with a script, so a contract
+change reaches your repository as a reviewed diff, never silently.
+
 ---
 
 ## When to emit

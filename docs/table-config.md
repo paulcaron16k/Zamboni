@@ -19,6 +19,14 @@ keys, types, enumerations, and no unknown keys anywhere — and
 `TableConfig.load()` remains the authority for everything cross-field. See
 [the user guide](user_guide.md#validating-a-generated-table-configjson).
 
+A tool that cannot install this package fetches the same file. **Its path is
+promised:** `src/zamboni/zamboni-table-config_spec.json`, and moving or renaming
+it is a breaking change. It is served from the repository at a tag
+(`https://raw.githubusercontent.com/paulcaron16k/Zamboni/v0.6.0/src/zamboni/zamboni-table-config_spec.json`)
+and, from 0.6.0, as an asset of each GitHub release
+(`https://github.com/paulcaron16k/Zamboni/releases/download/v0.6.0/zamboni-table-config_spec.json`).
+Substitute the release you validate against, and pin it.
+
 Because it is generated, it cannot describe a format this package does not
 implement; if a key below is missing from the schema, the schema is right and
 this document is stale.

@@ -46,6 +46,16 @@ Two categories beyond the usual set, because this tool deletes files:
   credential file (`chmod 600`). The library surface is `zamboni.events.nats`.
   See docs/devops.md §8, "Events from NATS".
 
+- **Each release is also a GitHub release, carrying the wheel, the sdist and
+  the JSON Schemas** (ZMBNI-183). The distributions are the files uploaded to
+  PyPI, which stays the install path. `src/zamboni/zamboni-write-completed_spec.json`
+  and `src/zamboni/zamboni-table-config_spec.json` are fetchable from the
+  repository at any tag and attached to every release, so a producer that may
+  not depend on this package can vendor the contract it is tested against.
+  Moving or renaming either file is now a breaking change (docs/releasing.md
+  §1). This is the first release with a GitHub release at all; its notes are
+  the tag message.
+
 - **Delete pressure for `zamboni serve`** (ZMBNI-175): every 15 minutes the
   service checks each warehouse's merge-on-read tables and offers any over a
   threshold with reason `pressure`, which runs `compact` and

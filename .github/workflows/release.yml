@@ -11,6 +11,15 @@
 # convention -- so publishing is `git tag -a v0.2.0 && git push --tags` and
 # nothing else. There is deliberately no manual `workflow_dispatch`: a release
 # that can be fired without a tag is a release nobody can reconstruct later.
+#
+# **A GitHub release too, carrying the wheel, the sdist and the published
+# schemas** (#183). The distributions are the ones uploaded to PyPI. Producers that
+# may not depend on this package -- target-iceberg emitting `write.completed` --
+# vendor the JSON Schema from here. The release is drafted *before* PyPI and
+# made public only *after* it: a draft's assets cannot be downloaded publicly,
+# so nothing is published unless both succeed, and a version never reaches PyPI
+# without its schemas. The paths attached are promised in docs/write-completed.md
+# and docs/table-config.md; tests/test_release_assets.py holds the three together.
 name: Release
 
 on:
@@ -64,8 +73,45 @@ jobs:
           name: dist
           path: dist/
 
-  publish:
+  # Draft the GitHub release, schemas attached, before anything is public. A
+  # missing schema fails `gh release create`, so the version is never consumed
+  # on PyPI. A draft left by an earlier failed attempt is replaced. A published
+  # release for this tag is never deleted; create is expected to refuse it
+  # (not tested -- it needs a published release).
+  draft-release:
     needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload its assets
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The notes are the tag's message -- the changelog section, per
+      # docs/releasing.md §3. checkout's shallow fetch is not documented to bring
+      # the annotated tag object (not verified either way), so fetch it by name.
+      - run: git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+      # The wheel and sdist attached are the artifact `publish` uploads, not a
+      # second build, so the release carries byte-for-byte what PyPI serves.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+      - name: Draft the release with the built distributions and the schemas
+        run: |
+          git tag -l --format='%(contents)' "$TAG" > notes.md
+          test -s notes.md || { echo "::error::$TAG has no tag message to use as notes"; exit 1; }
+          if [ "$(gh release view "$TAG" --json isDraft -q .isDraft 2>/dev/null)" = "true" ]; then
+            gh release delete "$TAG" --yes
+          fi
+          gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes-file notes.md \
+            dist/* \
+            src/zamboni/zamboni-write-completed_spec.json \
+            src/zamboni/zamboni-table-config_spec.json
+
+  publish:
+    needs: draft-release
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -76,3 +122,15 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+
+  # PyPI has the version, so the release and its schemas go public.
+  release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # publish the draft
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
