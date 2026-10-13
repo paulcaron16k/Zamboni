@@ -46,6 +46,23 @@ Two categories beyond the usual set, because this tool deletes files:
   credential file (`chmod 600`). The library surface is `zamboni.events.nats`.
   See docs/devops.md §8, "Events from NATS".
 
+- **Delete pressure for `zamboni serve`** (ZMBNI-175): every 15 minutes the
+  service checks each warehouse's merge-on-read tables and offers any over a
+  threshold with reason `pressure`, which runs `compact` and
+  `remove-dangling-deletes` between schedules. **On by default** at 10 delete
+  files, 0.10 delete files per data file, or 0.15 position-deleted rows per
+  row -- chosen starting values, not measurements. Set or switch them off with
+  a `pressure:` block in the fleet file, fleet-wide or per warehouse, per key.
+  A table with equality deletes is never offered, since compaction refuses it.
+  `service-status` shows each warehouse's last check. See docs/devops.md §8,
+  "Delete pressure".
+
+- **`zamboni health --table-config FILE`** checks every table the config lists
+  when no table is named, and **`--json PATH`** appends one record per check
+  with each table's signals, or the error for a table it could not read. One
+  unreadable table does not stop the rest; it makes the exit code 1. The
+  pressure check runs exactly this in a worker.
+
 - **NATS in the dev stack**, JetStream enabled, on port 4232. Existing
   `dev-stack/.env` files need `NATS_PORT` and `NATS_VERSION` from `.env.sample`.
 

@@ -200,14 +200,25 @@ def entry(name: str = "acme", **overrides) -> dict:
     return {"name": name, "schedule": "0 2 * * *", "table_config": table_config_body(), **overrides}
 
 
-def test_the_documented_fleet_file_loads(tmp_path):
-    """The sample in event-driven-maintenance.md §4 is the one a provisioner
-    author will copy, so it has to load against the current code."""
-    text = (DOCS / "event-driven-maintenance.md").read_text()
-    section = text.split("## 4. Configuration", 1)[1]
-    sample = re.search(r"```yaml\n(.*?)```", section, re.S)
-    assert sample, "the fleet sample was not found; has §4 changed?"
-    raw = yaml.safe_load(sample.group(1))
+def documented_fleet_files() -> list:
+    """The fleet samples a provisioner author or DevOps will copy: the first
+    one in event-driven-maintenance.md §4, and each labelled ``# fleet.yaml``
+    in devops.md."""
+    design = (DOCS / "event-driven-maintenance.md").read_text().split("## 4. Configuration", 1)[1]
+    first = re.search(r"```yaml\n(.*?)```", design, re.S)
+    assert first, "the fleet sample was not found; has event-driven-maintenance.md §4 changed?"
+    devops = re.findall(r"```yaml\n# fleet\.yaml\n(.*?)```", (DOCS / "devops.md").read_text(), re.S)
+    assert devops, "no `# fleet.yaml` sample in devops.md; has §8 changed?"
+    return [pytest.param(first.group(1), id="event-driven-maintenance.md §4")] + [
+        pytest.param(body, id=f"devops.md fleet sample {n}") for n, body in enumerate(devops, 1)
+    ]
+
+
+@pytest.mark.parametrize("sample", documented_fleet_files())
+def test_the_documented_fleet_files_load(tmp_path, sample):
+    """A sample that no longer loads is copied and then fails in production,
+    so each has to load against the current code."""
+    raw = yaml.safe_load(sample)
 
     # The sample references a file by path; supply it where the path says.
     for warehouse in raw["warehouses"]:

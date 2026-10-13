@@ -110,10 +110,12 @@ Implemented by `zamboni.scheduler` (ZMBNI-120). What it settles, each tested in
   every decision not yet started and none in flight, and a warehouse a reload
   removed drops out of the queue without being cancelled. The key includes the
   warehouse because a table identifier is not unique across a fleet.
-- **A table in flight is not re-enqueued**, by a tick or an event. For a tick the
-  run in flight *is* the work asked for. For an event it can miss a write that
-  landed after the run read its watermark; the next scheduled tick bounds that,
-  and #110 revisits it if the bound is too loose.
+- **A table in flight is not re-enqueued** by a tick or a pressure check: the
+  run in flight *is* the work asked for. **An event re-runs it once when it
+  finishes** (#110, 2026-10-06), because the run may have read its watermark
+  before the write the event reports; the due-check makes a re-run that finds
+  nothing new cheap. Tested by
+  `test_a_schedule_tick_or_pressure_during_a_run_is_dropped`.
 - **A missed firing fires once, late** — a suspended host does not lose the
   night's run, nor replay six of them. **A fresh start waits for the next
   firing**, as cron does, so a rollout is not a fleet-wide sweep.
@@ -226,6 +228,7 @@ warehouses:
   - name: globex
     schedule: "30 3 * * *"
     random: false                           # exactly 03:30; spreading is on otherwise
+    pressure: {delete_files: 20}            # this key over the defaults; false is off
     table_config: globex/table-config.json  # or a path, relative to this file
 ```
 
@@ -275,6 +278,45 @@ tested in `tests/test_fleet.py`:
   deployments sharing one object store, for cron deployments
   ([devops.md §1](devops.md) shows the crontab equivalent), or for everything
   else in the estate scheduled on the hour.
+
+**Delete pressure** (#175) brings a merge-on-read table's compaction forward
+when deletes pile up between schedules. Each delete or update leaves a delete
+file that every later reader opens beside the data files, so readers slow down
+until compaction folds the deletes back in. Implemented by `zamboni.pressure`;
+each decision is tested in `tests/test_pressure.py` and `tests/test_fleet.py`:
+
+```yaml
+pressure:                   # top level: the fleet's; per warehouse: over it
+  delete_files: 10          # live delete files, of any kind
+  delete_ratio: 0.10        # delete files per data file
+  deleted_rows_ratio: 0.15  # position-deleted rows per row
+  check_every_minutes: 15
+```
+
+- **On by default, at those values.** They are chosen starting values, not
+  measurements (decided 2026-10-08). DevOps change them in the fleet file:
+  `pressure: false` switches it off, `true` takes the defaults (or the fleet's),
+  and a block sets only the keys it names. A threshold set to `null` is off; all
+  three off is refused, because that means `false`.
+- **Any one threshold met triggers**, at its value and not only above it. The
+  table is offered with reason `pressure`, which runs `compact` and
+  `remove-dangling-deletes`; the due-check still decides within them. A
+  pressure offer is the weakest reason: a queued event or schedule run keeps
+  its own operations, and one made while the table is running is dropped.
+- **The signal is the snapshot summary**, the same one metadata load as
+  `zamboni health`. A counter the summary did not report meets no threshold:
+  "not reported" is neither zero nor over.
+- **Equality deletes make a table ineligible.** Compaction refuses them, so an
+  offer would be refused at every check; and `total-delete-files` counts both
+  kinds together, so position delete files cannot be counted on their own.
+  An unreported equality-delete count is treated the same way.
+- **Measured in a worker, decided in the service.** Each check is
+  `zamboni health --table-config … --json`, run through the pool like a table.
+  The service reads the record and applies the thresholds without importing an
+  engine (`test_the_service_process_imports_no_engine_to_decide`). Checks run
+  one at a time. A warehouse is first checked one interval after it appears, at
+  start or by reload, so a restart does not burst a check per warehouse.
+  End to end: `test_a_real_worker_measures_a_merge_on_read_table_over_the_default_thresholds`.
 
 **(b) `zamboni.yml` + `.env` — written by the operator.** Storage endpoints and
 credentials, catalog auth, engine choice, spill directory, the NATS address. Needs a
@@ -329,30 +371,36 @@ settles, each tested in `tests/test_reload.py`:
 
 ## 5. The event contract
 
-One subject, one payload, any Iceberg writer. CloudEvents, because Lakekeeper
-already emits that envelope.
+One event, any Iceberg writer: `write.completed`, emitted **once per table when
+the writer has finished with it** — *completed*, not *committed*. A catalog's
+per-commit events fire during ingestion, when maintenance must not run; a writer
+that has finished is when it should.
 
-**Subject**: `iceberg.table.write.completed` — *completed*, not *committed*.
-Lakekeeper's per-commit events fire **during** ingestion, when maintenance must not
-run. A writer fires once, when it has finished, which is when maintenance should.
+**The contract is [docs/write-completed.md](write-completed.md)**, version 1.0
+(ZMBNI-123), with its JSON Schema published as `zamboni.get_write_completed_spec()`.
+Build a producer against that, not against this section. An earlier draft of
+this section had its own field table — `catalog`, a dotted namespace,
+`operation: full-refresh`, a fixed subject — which the contract replaced: the
+table is matched by **warehouse name** and a **list** of namespace levels, a
+replaced table is `full_refresh: true`, the CloudEvents `type` is
+`writeCompleted`, and the NATS subject is configured per environment. Why it has
+that shape is [maintenance-runtime.md §5](maintenance-runtime.md).
 
-| Field | Meaning |
-|---|---|
-| `catalog`, `namespace`, `table` | table identity |
-| `snapshot_id` | the last snapshot this run produced |
-| `writer` | e.g. `target-iceberg/0.9.2` |
-| `load_method` | `append-only` \| `upsert` \| `overwrite` |
-| `operation` | `full-refresh` when the table was replaced |
-| `rows` | rows this run committed |
-| `data_files_added`, `bytes_added` | what the run produced |
-| `partitions_changed` | count, and the values when bounded |
-| `started_at`, `completed_at` | the write window |
+What the contract keeps from the design:
 
-**Delivery semantics.** At-least-once and unordered; consumers deduplicate on
-`snapshot_id`. **Advisory** — a dropped event costs latency, never correctness,
-because every field is independently derivable from table metadata.
-**Fire-and-forget** — an emit failure is logged and the ingestion succeeds.
-**Bounded** — no record samples, no config dumps.
+- **Advisory.** A dropped event costs latency, never correctness, because every
+  field is derivable from table metadata. Emitting never fails or slows the
+  write.
+- **At-least-once and unordered** on JetStream, at-most-once on core NATS. The
+  consumer deduplicates on `(warehouse, table, snapshot_id)`; the event's
+  deterministic `id` lets the server deduplicate too.
+- **Bounded** — no record samples, no configuration, never a credential.
+
+The CloudEvents envelope was chosen to match Lakekeeper's own events, so one
+subscriber stack reads both. What this repository says about Lakekeeper's events
+— that envelope, a per-commit `updateTable` type, at-most-once delivery — is
+**not verified here**; #182 checks it against upstream. Nothing in the contract
+depends on it.
 
 **The governing principle: the event is a hint; the table is the truth.** A missed,
 duplicated or out-of-order event degrades to the polling path.
