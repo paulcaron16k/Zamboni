@@ -61,9 +61,12 @@ from pathlib import Path
 from typing import Any
 
 from .fleet import FleetConfig
-from .scheduler import REASON_OPERATIONS, Candidate, CandidateQueue, WorkItem
+from .scheduler import REASON_OPERATIONS, Candidate, CandidateQueue, PressureCheck, WorkItem
 
 logger = logging.getLogger(__name__)
+
+#: What a worker runs: a table, or a warehouse's pressure check (#175).
+Job = WorkItem | PressureCheck
 
 #: A worker exits and is replaced after this many tables, to hand back memory
 #: that a long-lived Python, Arrow and DuckDB process fragments rather than
@@ -317,33 +320,46 @@ class WorkerConfig:
         )
 
 
-def worker_argv(
-    item: WorkItem, config: WorkerConfig, table_config: Path, record: Path
-) -> list[str]:
-    """The ``zamboni`` command line a worker runs for ``item``. Strings only."""
-    argv = [
-        "maintenance",
-        item.table,
-        "--warehouse",
-        item.warehouse,
-        "--table-config",
-        str(table_config),
-        "--json",
-        str(record),
-        "--threads",
-        str(config.threads),
-    ]
-    if (operations := REASON_OPERATIONS.get(item.reason)) is not None:
-        argv += ["--operations", ",".join(operations)]
-    if config.duckdb_memory_bytes is not None:
-        argv += ["--duckdb-memory-limit-bytes", str(config.duckdb_memory_bytes)]
+def worker_argv(item: Job, config: WorkerConfig, table_config: Path, record: Path) -> list[str]:
+    """The ``zamboni`` command line a worker runs for ``item``. Strings only.
+
+    A table is ``maintenance <table>``; a :class:`PressureCheck` is ``health``
+    over every table in the warehouse's config -- read-only, so never ``--yes``.
+    """
+    if isinstance(item, PressureCheck):
+        argv = [
+            "health",
+            "--warehouse",
+            item.warehouse,
+            "--table-config",
+            str(table_config),
+            "--json",
+            str(record),
+        ]
+    else:
+        argv = [
+            "maintenance",
+            item.table,
+            "--warehouse",
+            item.warehouse,
+            "--table-config",
+            str(table_config),
+            "--json",
+            str(record),
+            "--threads",
+            str(config.threads),
+        ]
+        if (operations := REASON_OPERATIONS.get(item.reason)) is not None:
+            argv += ["--operations", ",".join(operations)]
+        if config.duckdb_memory_bytes is not None:
+            argv += ["--duckdb-memory-limit-bytes", str(config.duckdb_memory_bytes)]
     if item.uri:
         argv += ["--uri", item.uri]
     if config.profile_path:
         argv += ["--profile", config.profile_path]
     if config.env_path:
         argv += ["--env", config.env_path]
-    if config.commit:
+    if config.commit and not isinstance(item, PressureCheck):
         argv.append("--yes")
     return argv
 
@@ -408,7 +424,7 @@ def _read_record(path: Path) -> dict[str, Any] | None:
 
 @dataclass(frozen=True)
 class ItemResult:
-    item: WorkItem
+    item: Job
     #: The CLI's exit code for this table -- the same number a cron run of
     #: ``zamboni maintenance <table>`` would exit with -- or 1 if the worker
     #: died, which is Python's own code for an uncaught crash.
@@ -449,7 +465,7 @@ class WorkerPool:
         for slot in self._slots:
             self._idle.put_nowait(slot)
 
-    async def run(self, item: WorkItem) -> ItemResult:
+    async def run(self, item: Job) -> ItemResult:
         """Maintain one table on the next free worker."""
         slot = await self._idle.get()
         try:
@@ -457,7 +473,7 @@ class WorkerPool:
         finally:
             self._idle.put_nowait(slot)
 
-    def _run_blocking(self, slot: _Slot, item: WorkItem) -> ItemResult:
+    def _run_blocking(self, slot: _Slot, item: Job) -> ItemResult:
         started = time.monotonic()
         job_id = uuid.uuid4().hex
         table_config = self.config.workdir / f"zamboni-{job_id}.table-config.json"
@@ -507,7 +523,7 @@ class WorkerPool:
         child.close()
         slot.process, slot.conn, slot.tables = process, parent, 0
 
-    def _died(self, slot: _Slot, item: WorkItem, started: float) -> ItemResult:
+    def _died(self, slot: _Slot, item: Job, started: float) -> ItemResult:
         slot.process.join(timeout=5)
         if slot.process.is_alive():
             # The pipe failed but the process did not exit: it can no longer be

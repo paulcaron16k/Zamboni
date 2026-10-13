@@ -160,3 +160,184 @@ def test_the_module_imports_no_engine():
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert json.loads(out.stdout) == []
+
+
+# -- the check, in a worker ------------------------------------------------------------------
+
+
+def warehouse(pressure=None, *tables: str):
+    from tests.test_pool import table_config
+    from zamboni.fleet import CronSchedule, FleetWarehouse
+
+    config = table_config(*(tables or ("mor",)), namespace="db")
+    kw = {} if pressure is None else {"pressure": pressure}
+    return FleetWarehouse("acme", CronSchedule("0 2 1 1 *"), config, **kw)
+
+
+def test_a_pressure_check_is_health_in_a_worker_and_never_commits(tmp_path):
+    from zamboni.pool import WorkerConfig, worker_argv
+    from zamboni.scheduler import PressureCheck
+
+    wh = warehouse()
+    config = WorkerConfig(workdir=tmp_path, commit=True, profile_path="/p.yml")
+    argv = worker_argv(
+        PressureCheck("acme", wh.table_config), config, tmp_path / "t", tmp_path / "r"
+    )
+    assert argv[0] == "health"
+    assert "--yes" not in argv, "read-only, whatever the service's --yes"
+    assert "--operations" not in argv and "maintenance" not in argv
+    assert argv[argv.index("--json") + 1] == str(tmp_path / "r")
+    assert argv[argv.index("--profile") + 1] == "/p.yml"
+
+
+def test_a_real_worker_measures_a_merge_on_read_table_over_the_default_thresholds(
+    tmp_path, monkeypatch, mor_table
+):
+    """End to end through a spawned worker: `health --json` on a local catalog,
+    read back by the service's decision. The fixture's 1 delete file to 4 data
+    files is a ratio of 0.25, over the default 0.10 -- and agreeing field names
+    between health's record and the decision are what this proves."""
+    import asyncio
+    import os
+
+    from zamboni.pool import PoolSize, WorkerConfig, WorkerPool
+    from zamboni.scheduler import PressureCheck
+    from zamboni.service import pressure_offers
+
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)  # no developer zamboni.yml or .env
+    environ = {
+        "PATH": os.environ.get("PATH", ""),
+        "ZAMBONI_LOCAL_WAREHOUSE": str(tmp_path / "warehouse"),
+    }
+    wh = warehouse(None, "mor", "absent")
+
+    async def scenario():
+        pool = WorkerPool(
+            PoolSize(1, 1, "test"), WorkerConfig(workdir=workdir, base_environ=environ)
+        )
+        try:
+            return await pool.run(PressureCheck("acme", wh.table_config))
+        finally:
+            await pool.close()
+
+    result = asyncio.run(scenario())
+    assert result.exit_code == 1, "a table it could not read makes the exit 1"
+    signals = result.record["tables"]["db.mor"]
+    assert (signals["delete_files"], signals["data_files"], signals["equality_deletes"]) == (
+        1,
+        4,
+        0,
+    )
+    found = pressure_offers(wh, result.record)
+    assert list(found["over"]) == ["db.mor"] and "0.25" in found["over"]["db.mor"]
+    assert list(found["errors"]) == ["db.absent"], "the rest are still checked"
+
+
+# -- what the service does with a check ------------------------------------------------------
+
+
+def test_pressure_offers_reads_a_record_and_a_dead_worker():
+    wh = warehouse()
+    record = {"tables": {"db.mor": health(delete_files=12), "db.calm": QUIET}}
+    assert pressure_offers_(wh, record)["over"].keys() == {"db.mor"}
+    dead = pressure_offers_(wh, None)
+    assert (dead["over"], dead["checked"]) == ({}, 0) and dead["errors"]
+
+
+def pressure_offers_(wh, record):
+    from zamboni.service import pressure_offers
+
+    return pressure_offers(wh, record)
+
+
+class Result:
+    def __init__(self, record, exit_code=0):
+        self.record, self.exit_code = record, exit_code
+
+
+class CheckPool:
+    def __init__(self, record) -> None:
+        self.record = record
+        self.checked: list[str] = []
+
+    async def run(self, item):
+        self.checked.append(item.warehouse)
+        return Result(self.record)
+
+
+def run_loop(fleet, pool, *, minutes: int):
+    """Drive run_pressure_checks over ``minutes`` of a clock that advances one
+    minute per wait, then stop."""
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    from zamboni.service import run_pressure_checks
+
+    now = [datetime(2026, 10, 13, tzinfo=UTC)]
+    end = now[0] + timedelta(minutes=minutes)
+    offered, checks = [], []
+
+    async def scenario():
+        stop = asyncio.Event()
+
+        async def wait(stop_event, seconds):
+            now[0] += timedelta(minutes=1)
+            if now[0] >= end:
+                stop_event.set()
+            await asyncio.sleep(0)
+
+        await run_pressure_checks(
+            lambda: fleet,
+            pool,
+            lambda c: offered.append(c) or True,
+            stop,
+            clock=lambda: now[0],
+            on_check=lambda name, found: checks.append((name, found)),
+            wait=wait,
+        )
+
+    asyncio.run(scenario())
+    return offered, checks
+
+
+def test_each_warehouse_is_checked_every_interval_starting_one_interval_in():
+    from zamboni.fleet import FleetConfig
+    from zamboni.scheduler import PRESSURE, Candidate
+
+    fleet = FleetConfig(warehouses=(warehouse(PressureSettings(check_every_minutes=10)),))
+    pool = CheckPool({"tables": {"db.mor": health(delete_files=12)}})
+    offered, checks = run_loop(fleet, pool, minutes=35)
+    assert pool.checked == ["acme"] * 3, "at 10, 20 and 30 minutes; none at start"
+    assert offered == [Candidate("acme", "db.mor", PRESSURE)] * 3
+    assert checks[0][1]["offered"] == 1
+
+
+def test_a_warehouse_with_pressure_off_is_never_checked():
+    from zamboni.fleet import FleetConfig
+
+    off = warehouse(None)
+    off = type(off)(off.name, off.schedule, off.table_config, pressure=None)
+    pool = CheckPool({"tables": {}})
+    run_loop(FleetConfig(warehouses=(off,)), pool, minutes=60)
+    assert pool.checked == []
+
+
+def test_the_service_process_imports_no_engine_to_decide():
+    """The check runs in a worker; the decision runs here, on its record."""
+    code = (
+        "import sys, json\n"
+        "import zamboni.service\n"
+        "from zamboni.fleet import FleetWarehouse, CronSchedule\n"
+        "from zamboni.tableconfig import TableConfig\n"
+        "wh = FleetWarehouse('acme', CronSchedule('0 2 * * *'), TableConfig(warehouse='acme'))\n"
+        "rec = {'tables': {'db.t': {'delete_files': 50, 'data_files': 10, 'equality_deletes': 0,"
+        " 'position_deletes': 1, 'records': 100}}}\n"
+        "assert zamboni.service.pressure_offers(wh, rec)['over']\n"
+        "heavy = ('pyiceberg', 'duckdb', 'pyarrow')\n"
+        "print(json.dumps(sorted(m for m in heavy if m in sys.modules)))"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout) == []

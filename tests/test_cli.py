@@ -1080,3 +1080,53 @@ def test_an_unknown_operation_is_a_usage_error(capsys):
         main(["maintenance", "--operations", "compact,defrag"])
     assert exc.value.code == 2
     assert "unknown operation(s) ['defrag']" in capsys.readouterr().err
+
+
+def test_health_checks_every_table_in_a_config_and_writes_json(
+    warehouse, tmp_path, unpartitioned, mor_table, capsys
+):
+    """The warehouse mode `zamboni serve`'s pressure check runs (#175): every
+    table in --table-config, one JSON line, and a table that cannot be read is
+    reported without hiding the rest."""
+    import json
+
+    from zamboni.cli import main
+
+    config = tmp_path / "tc.json"
+    config.write_text(
+        json.dumps(
+            {
+                "warehouse": "acme",
+                "namespaces": {"db": {"tables": {"unpartitioned": {}, "mor": {}, "absent": {}}}},
+            }
+        )
+    )
+    out = tmp_path / "health.jsonl"
+    code = main(
+        [
+            "health",
+            "--table-config",
+            str(config),
+            "--json",
+            str(out),
+            "--local-warehouse",
+            warehouse,
+        ]
+    )
+    assert code == 1, "one table could not be read"
+    (line,) = out.read_text().splitlines()
+    doc = json.loads(line)
+    tables = doc["tables"]
+    assert set(tables) == {"db.unpartitioned", "db.mor", "db.absent"}
+    assert "error" in tables["db.absent"]
+    assert (tables["db.mor"]["delete_files"], tables["db.unpartitioned"]["delete_files"]) == (1, 0)
+    assert tables["db.mor"]["written_since"] is True
+    assert "unseen" not in tables["db.mor"]
+    assert "db.unpartitioned: due" in capsys.readouterr().out
+
+
+def test_health_with_neither_a_table_nor_a_config_is_a_usage_error(warehouse, capsys):
+    from zamboni.cli import main
+
+    assert main(["health", "--local-warehouse", warehouse]) == 2
+    assert "--table-config" in capsys.readouterr().out
