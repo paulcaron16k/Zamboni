@@ -132,6 +132,7 @@ Found automatically at `./zamboni.yml`, or given with `--profile`. Everything
 that is not a credential:
 
 ```yaml
+# zamboni.yml
 # Catalog connection. The URI and warehouse a client needs; no credentials.
 uri: https://lakekeeper.internal/catalog
 warehouse: acme
@@ -469,12 +470,13 @@ no baseline.
 
 ### The one-off decision this feeds
 
-Separately from the standing health question, one decision is waiting on this
-data: whether to build phase 5 of event-driven maintenance (the NATS consumer).
-Phase 6, partition targeting, shipped on its own merits; phase 4, the scheduler
-and `zamboni serve` (§8 below), was built ahead of the data by its owner's
-decision on 2026-09-30, recorded on #106. The decision record — owner, evidence
-needed, and what would make the answer "build it" — is in
+Separately from the standing health question, this data was to decide whether
+to build phases 4 and 5 of event-driven maintenance. Both were built ahead of it
+by their owner's decision, recorded on #106: phase 4, the scheduler and `zamboni
+serve` (§8 below), on 2026-09-30, and phase 5, the NATS consumer (§8, "Events from
+NATS"), to make `zamboni serve` feature-complete for 0.6.0. Phase 6, partition
+targeting, shipped on its own merits. The review still answers whether events are
+worth *running* — the decision record, with the evidence that would say so, is
 [event-driven-maintenance.md §8](event-driven-maintenance.md).
 
 The short version, because it is easy to read the wrong conclusion out of a
@@ -622,3 +624,65 @@ SIGHUP's default action would otherwise kill an unrelated one.
 one. The service only adopts a change it has seen unchanged on two consecutive
 polls, so a file caught half-written is not adopted — but a rename is never
 half-written at all.
+
+### Events from NATS
+
+On its own the service maintains every table on its schedule. With a `nats:`
+block it also hears when a table was **written** — a `write.completed` event
+([write-completed.md](write-completed.md)) — and brings that table's
+write-driven maintenance forward from the next schedule to minutes after the
+writes stop. It needs `iceberg-zamboni[nats]`; without the extra, a `nats:` block
+is exit 2 at start, naming it.
+
+```yaml
+# zamboni.yml
+nats:
+  servers: [nats://nats-0.nats:4222, nats://nats-1.nats:4222]
+  subject: prod.iceberg.write.completed     # one subject per environment
+  jetstream: auto                          # auto | true | false
+  username: zamboni
+  # password: from ZAMBONI_NATS_PASSWORD, in the Secret
+```
+
+Every key has a `ZAMBONI_NATS_*` variable that overrides it alone (env.sample
+lists them), so the servers and subject can sit in a committed ConfigMap and only
+the password or token come from the Secret. A password or token written into the
+file makes it a credential file, with §3's mode rule.
+
+**What an event does — and does not.** A table's events are coalesced until it
+has been quiet for 5 minutes, or 30 minutes after the first, whichever is sooner;
+then the table is offered with reason `event`, which runs only `compact`,
+`remove-dangling-deletes` and `rewrite-manifests` — never `expire` or
+`remove-orphans`, which stay on the schedule. The due-check still decides whether
+there is work. An event naming a table the fleet file does not list is counted
+and dropped. An event for a table already being maintained runs it once more
+when it finishes, so a write during a run is not lost.
+
+**Core NATS or JetStream.** `auto` asks the account for JetStream and uses it if
+it answers; `true` refuses to start consuming without it.
+
+| | Core | JetStream |
+|---|---|---|
+| Delivery | at-most-once: an event published while the service is down is gone | at-least-once: a durable consumer resumes where it stopped |
+| Duplicates | possible from the publisher; the service deduplicates on table and snapshot | also deduplicated by the server on `Nats-Msg-Id` |
+| On the broker | a subscription | stream `zamboni_<subject>` (dots become `_`) if no stream already captures the subject, kept 7 days; durable consumer `zamboni_<subject>` |
+
+Neither is a correctness requirement: an event lost on core NATS costs that table
+the wait for its schedule. On JetStream, `max_deliveries` (default 5) bounds
+redelivery after an internal error, and is applied **when the durable consumer is
+created** — to change it later, delete the consumer (`nats consumer rm`) and let
+the service recreate it. Name `stream` when your platform team owns streams and
+Zamboni should not create one.
+
+**When NATS goes away**, nothing stops. The service retries the broker forever,
+the schedule keeps maintaining the fleet, liveness holds, and **readiness fails**
+until the source reconnects — within a second of either change. `zamboni
+service-status` shows `nats_connected` and, under `events`, the counts per
+source: `received`, `offered`, `coalesced`, `duplicates`, `unmapped`,
+`rejected`, `errors`. That a running service survives the broker being stopped
+and started under it is a test (`test_killing_nats_under_zamboni_serve_costs_readiness_and_nothing_else`),
+run in CI against the dev stack's NATS.
+
+Two `zamboni serve` deployments must not share a subject. On JetStream they
+would share the durable consumer, and each event would reach only one of them;
+on core NATS both would hear every event, for tables only one of them manages.

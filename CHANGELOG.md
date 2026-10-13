@@ -23,6 +23,41 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **The event feed** behind `zamboni serve`'s write-completed path (ZMBNI-124),
+  in `zamboni.events.feed`: an `EventSource` protocol for any transport, and an
+  `EventFeed` that parses, maps by warehouse name, deduplicates on
+  `(warehouse, table, snapshot_id)`, debounces per table (5 min quiet, 30 min
+  cap) and offers with `reason=event`. Every handled message is acknowledged
+  once; a malformed one is not redelivered. The service's state file counts each
+  source's messages, and readiness fails while a configured source is
+  disconnected -- liveness never does. Imports no engine module and no
+  transport, so a transport and the forthcoming maintenance runtime reuse it.
+
+- **NATS for `zamboni serve`** (ZMBNI-124): a `nats:` block in `zamboni.yml`, or
+  `ZAMBONI_NATS_*` per key (env.sample lists them), makes the service consume
+  `write.completed` events and bring a written table's write-driven maintenance
+  forward. Needs the new **`nats` extra** (nats-py); without it a `nats:` block is
+  exit 2 at start, and without a block nothing changes. `jetstream: auto` uses
+  JetStream when the account has it (durable pull consumer, at-least-once) and
+  core NATS otherwise (at-most-once). With no stream capturing the subject, one
+  is created: `zamboni_<subject>`, kept 7 days. A broker that is down or goes
+  away is retried forever: the schedule keeps running, liveness holds, readiness
+  fails within a second. A password or token under `nats:` makes the profile a
+  credential file (`chmod 600`). The library surface is `zamboni.events.nats`.
+  See docs/devops.md §8, "Events from NATS".
+
+- **NATS in the dev stack**, JetStream enabled, on port 4232. Existing
+  `dev-stack/.env` files need `NATS_PORT` and `NATS_VERSION` from `.env.sample`.
+
+- **`maintenance --operations OP[,OP...]`** runs only those operations, of the
+  ones the profile enables -- it narrows, never widens, so a run can never
+  re-enable an operation DevOps switched off. The runbook order is kept. An
+  unknown name is a usage error (exit 2). `zamboni serve` uses it: a table
+  offered because of a write (ZMBNI-124) runs only `compact`,
+  `rewrite-manifests` and `remove-dangling-deletes`, and the schedule still
+  runs everything. A write reported while its table is being maintained re-runs
+  that table once when it finishes.
+
 - **The `write.completed` contract, version 1.0** (ZMBNI-123):
   [docs/write-completed.md](docs/write-completed.md), and its JSON Schema as
   `zamboni.get_write_completed_spec()`. What an Iceberg writer emits once per

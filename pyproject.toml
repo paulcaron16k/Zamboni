@@ -126,6 +126,12 @@ otel = [
     "opentelemetry-sdk>=1.30,<2",
     "opentelemetry-exporter-otlp-proto-http>=1.30,<2",
 ]
+# The NATS client behind `zamboni.events.nats`, for `zamboni serve` with a
+# `nats:` block. Optional because an event is a hint the schedule backs up: a
+# deployment with no broker runs every table on its schedule and never imports
+# a NATS client. `nkeys` is what `creds_file` (NATS JWT auth) needs; without it
+# nats-py fails at connect, not at install.
+nats = ["nats-py[nkeys]>=2.9,<3"]
 # Local SQL catalog, used by the test suite and handy for dry runs.
 sql = ["pyiceberg[sql-sqlite]>=0.12,<0.13"]
 # A *client* for a Trino you already have -- the dev stack's `trino` compose
@@ -177,7 +183,7 @@ dev = [
     # lets them pick a validator, rather than making every install carry one to
     # check a file most runs never validate.
     "jsonschema>=4.20",
-    "iceberg-zamboni[sql,s3,trino]",
+    "iceberg-zamboni[sql,s3,trino,nats]",
     # Matched to the dev stack's server, not to the extra's range: pinning the
     # client to the server's minor means the dev-stack tests exercise a matched
     # pair rather than Connect's cross-version skew, which is Spark's promise to

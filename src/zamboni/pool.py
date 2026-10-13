@@ -61,7 +61,7 @@ from pathlib import Path
 from typing import Any
 
 from .fleet import FleetConfig
-from .scheduler import Candidate, CandidateQueue, WorkItem
+from .scheduler import REASON_OPERATIONS, Candidate, CandidateQueue, WorkItem
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +333,8 @@ def worker_argv(
         "--threads",
         str(config.threads),
     ]
+    if (operations := REASON_OPERATIONS.get(item.reason)) is not None:
+        argv += ["--operations", ",".join(operations)]
     if config.duckdb_memory_bytes is not None:
         argv += ["--duckdb-memory-limit-bytes", str(config.duckdb_memory_bytes)]
     if item.uri:

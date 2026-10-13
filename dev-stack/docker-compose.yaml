@@ -1,4 +1,4 @@
-# Zamboni dev stack: Lakekeeper (with its built-in UI), Postgres, MinIO.
+# Zamboni dev stack: Lakekeeper (with its built-in UI), Postgres, MinIO, NATS.
 #
 # Ports are deliberately shifted off the defaults so this coexists with any
 # other Lakekeeper/MinIO stack on the machine. Values come from .env -- copy
@@ -116,6 +116,27 @@ services:
       mc mb --ignore-existing zamboni/${S3_BUCKET} &&
       echo 'bucket ${S3_BUCKET} ready'
       "
+    networks: [zamboni]
+
+  # NATS with JetStream, for `zamboni serve`'s write.completed events (#124).
+  # In the default stack, unlike Trino and Spark, because it is ~20MB and the
+  # dev-stack CI job runs tests/test_nats.py against it. No volume: the stream
+  # lives in the container, so it survives `docker compose restart nats` (the
+  # kill-NATS test) and not `down`, which is what a dev stack wants.
+  # The alpine image rather than the scratch one because the healthcheck needs
+  # wget; `js-enabled-only` makes "healthy" mean JetStream is up, not just the
+  # server.
+  nats:
+    image: nats:${NATS_VERSION}
+    command: ["--jetstream", "--store_dir", "/data", "--http_port", "8222"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz?js-enabled-only=true"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+      start_period: 2s
+    ports:
+      - "${NATS_PORT}:4222"
     networks: [zamboni]
 
   # Trino, for ZMBNI-14. Optional by design: it is the heaviest thing here (a

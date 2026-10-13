@@ -1048,3 +1048,35 @@ def test_maintenance_preview_names_the_compaction_it_would_do(tmp_path, capsys, 
     assert code == 0
     assert "db.t: would rewrite 6 file(s)" in out
     assert "rewrote 0 file(s)" not in out
+
+
+# -- --operations narrows, never widens ------------------------------------------------------
+
+
+def test_operations_narrows_the_profile_and_keeps_runbook_order():
+    import argparse
+
+    from zamboni.cli import _operations
+    from zamboni.settings import Profile
+
+    profile = Profile(operations=("compact", "rewrite-manifests", "expire", "remove-orphans"))
+    args = argparse.Namespace(operations=("expire", "compact"))
+    assert [op.value for op in _operations(profile, args)] == ["compact", "expire"]
+
+
+def test_operations_never_reenables_what_the_profile_switched_off():
+    import argparse
+
+    from zamboni.cli import _operations
+    from zamboni.settings import Profile
+
+    profile = Profile(operations=("compact", "expire"))  # rewrite-manifests is off
+    args = argparse.Namespace(operations=("compact", "rewrite-manifests"))
+    assert [op.value for op in _operations(profile, args)] == ["compact"]
+
+
+def test_an_unknown_operation_is_a_usage_error(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["maintenance", "--operations", "compact,defrag"])
+    assert exc.value.code == 2
+    assert "unknown operation(s) ['defrag']" in capsys.readouterr().err

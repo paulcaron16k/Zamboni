@@ -677,3 +677,22 @@ def test_workdir_may_be_a_string_and_must_be_a_path():
     assert WorkerConfig(workdir="/tmp").workdir == Path("/tmp")
     with pytest.raises(TypeError, match="workdir must be a path"):
         WorkerConfig(workdir=42)  # type: ignore[arg-type]
+
+
+# -- the reason reaches the worker as --operations ----------------------------------------
+
+
+def test_an_event_item_runs_only_the_write_driven_operations(tmp_path):
+    from zamboni.cli import _build_parser
+    from zamboni.scheduler import EVENT, PRESSURE, REASON_OPERATIONS
+
+    for reason in (EVENT, PRESSURE):
+        work = WorkItem("acme", "raw.events", reason, table_config("events"))
+        argv = worker_argv(work, WorkerConfig(workdir=tmp_path), tmp_path / "t", tmp_path / "r")
+        args = _build_parser().parse_args(argv)
+        assert args.operations == REASON_OPERATIONS[reason]
+
+
+def test_a_scheduled_item_runs_everything_the_profile_enables(tmp_path):
+    argv = worker_argv(item(), WorkerConfig(workdir=tmp_path), tmp_path / "t", tmp_path / "r")
+    assert "--operations" not in argv

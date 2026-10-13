@@ -359,3 +359,83 @@ def test_no_engine_setting_is_named_like_a_secret():
     beats trusting the convention that nobody will put one here."""
     for allowed in settings.ENGINE_SETTINGS.values():
         assert not {"password", "token", "secret", "credential"} & set(allowed)
+
+
+# -- nats: (#124) ---------------------------------------------------------------
+
+
+@pytest.fixture
+def no_nats_env(monkeypatch):
+    for variable in settings.NATS_ENV.values():
+        monkeypatch.delenv(variable, raising=False)
+
+
+def test_every_nats_setting_has_its_environment_variable():
+    from zamboni.events.nats import NatsSettings
+
+    assert set(settings.NATS_ENV) == NatsSettings.keys()
+    assert all(v == f"ZAMBONI_NATS_{k.upper()}" for k, v in settings.NATS_ENV.items())
+
+
+def test_without_a_nats_block_there_is_no_broker(tmp_path, no_nats_env):
+    assert settings.load_profile(write(tmp_path, "zamboni.yml", "warehouse: acme\n")).nats is None
+
+
+def test_a_nats_block_loads(tmp_path, no_nats_env):
+    path = write(
+        tmp_path,
+        "zamboni.yml",
+        "nats:\n  servers: [nats://a:4222, nats://b:4222]\n"
+        "  subject: prod.iceberg.write.completed\n  jetstream: false\n",
+    )
+    nats = settings.load_profile(path).nats
+    assert nats is not None
+    assert (nats.servers, nats.subject, nats.jetstream) == (
+        ("nats://a:4222", "nats://b:4222"),
+        "prod.iceberg.write.completed",
+        False,
+    )
+
+
+def test_the_environment_overrides_the_block_key_by_key(tmp_path, no_nats_env, monkeypatch):
+    """A container that injects only the password from a Secret, or only points
+    at another server, keeps the rest of the committed file."""
+    path = write(tmp_path, "zamboni.yml", "nats:\n  servers: nats://a:4222\n  subject: s.t\n")
+    monkeypatch.setenv("ZAMBONI_NATS_SERVERS", "nats://b:4222")
+    monkeypatch.setenv("ZAMBONI_NATS_USERNAME", "svc")
+    monkeypatch.setenv("ZAMBONI_NATS_PASSWORD", "from-a-secret")
+    nats = settings.load_profile(path).nats
+    assert (nats.servers, nats.subject, nats.username, nats.password) == (
+        ("nats://b:4222",),
+        "s.t",
+        "svc",
+        "from-a-secret",
+    )
+
+
+def test_with_no_profile_the_environment_alone_configures_nats(no_nats_env, monkeypatch):
+    monkeypatch.setenv("ZAMBONI_NATS_SERVERS", "nats://a:4222")
+    monkeypatch.setenv("ZAMBONI_NATS_SUBJECT", "s.t")
+    assert settings.load_profile(None).nats.subject == "s.t"
+
+
+def test_a_nats_block_that_cannot_be_used_is_refused_naming_the_file(tmp_path, no_nats_env):
+    path = write(tmp_path, "zamboni.yml", "nats:\n  servers: nats://a:4222\n  jetsream: true\n")
+    with pytest.raises(settings.ProfileError, match=r"zamboni\.yml: nats: unknown setting"):
+        settings.load_profile(path)
+
+
+@pytest.mark.parametrize("secret", ["password: pw", "token: tk"])
+def test_a_nats_secret_makes_the_profile_a_credential_file(tmp_path, no_nats_env, secret):
+    extra = "  username: svc\n" if secret.startswith("password") else ""
+    path = write(
+        tmp_path,
+        "zamboni.yml",
+        f"nats:\n  servers: nats://a:4222\n  subject: s.t\n{extra}  {secret}\n",
+    )
+    path.chmod(0o644)
+    with pytest.raises(settings.ProfileError, match="chmod 600"):
+        settings.load_profile(path)
+    path.chmod(0o600)
+    profile = settings.load_profile(path)
+    assert secret.split(": ")[1] not in repr(profile)
