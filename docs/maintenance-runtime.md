@@ -358,14 +358,22 @@ handling. A source with no acknowledgement (core NATS) implements both as no-ops
 
 Zamboni ships `NatsEventSource` (`zamboni[nats]`):
 
-- **`jetstream: auto | true | false`.** `auto` reads the server's connect `INFO`
-  (`"jetstream": true` is present only when JetStream is enabled), then confirms
-  with a `$JS.API.INFO` request, because JetStream can be enabled for the server
-  and not the account; a plain server answers 503 no-responders. Verified against
-  nats-server 2.15.0 (2026-10-06).
-- On JetStream: a durable pull consumer, at-least-once, and the server
-  deduplicates on `Nats-Msg-Id`. On core NATS: at-most-once, and the schedule is
-  the backstop.
+- **`jetstream: auto | true | false`.** `auto` asks the account with a
+  `$JS.API.INFO` request: an answer is JetStream, a 503 is core. The server's
+  connect `INFO` (`"jetstream": true` only when enabled) was the first design and
+  is not consulted: JetStream can be enabled for the server and not the account,
+  so the account's answer is the one that decides — and nats-py keeps `INFO`
+  private. Verified against nats-server 2.15.0 with nats-py 2.16 (2026-10-12).
+  `true` against a core account refuses rather than falling back.
+- On JetStream: a durable pull consumer per subject, at-least-once, starting at
+  new messages when first created; the server deduplicates on `Nats-Msg-Id`.
+  `max_deliveries` bounds redelivery after an internal error and applies when the
+  consumer is created. With no `stream` named and none capturing the subject,
+  one is created (`zamboni_<subject>`, kept 7 days) — the same best-effort
+  provisioning the other services sharing these settings do. On core NATS:
+  at-most-once, and the schedule is the backstop.
+- A broker that is down is retried forever; the source reports `connected`
+  false meanwhile, which fails readiness and nothing else.
 - **Setting names** are the set shared across the systems that use NATS beside
   Zamboni, without the env prefix: `servers`, `jetstream`, `username`,
   `password`, `token`, `tls`, `creds_file`, `max_deliveries`, `stream`, plus

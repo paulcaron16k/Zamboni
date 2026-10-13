@@ -32,7 +32,22 @@ Two categories beyond the usual set, because this tool deletes files:
   source's messages, and readiness fails while a configured source is
   disconnected -- liveness never does. Imports no engine module and no
   transport, so a transport and the forthcoming maintenance runtime reuse it.
-  The NATS source follows.
+
+- **NATS for `zamboni serve`** (ZMBNI-124): a `nats:` block in `zamboni.yml`, or
+  `ZAMBONI_NATS_*` per key (env.sample lists them), makes the service consume
+  `write.completed` events and bring a written table's write-driven maintenance
+  forward. Needs the new **`nats` extra** (nats-py); without it a `nats:` block is
+  exit 2 at start, and without a block nothing changes. `jetstream: auto` uses
+  JetStream when the account has it (durable pull consumer, at-least-once) and
+  core NATS otherwise (at-most-once). With no stream capturing the subject, one
+  is created: `zamboni_<subject>`, kept 7 days. A broker that is down or goes
+  away is retried forever: the schedule keeps running, liveness holds, readiness
+  fails within a second. A password or token under `nats:` makes the profile a
+  credential file (`chmod 600`). The library surface is `zamboni.events.nats`.
+  See docs/devops.md §8, "Events from NATS".
+
+- **NATS in the dev stack**, JetStream enabled, on port 4232. Existing
+  `dev-stack/.env` files need `NATS_PORT` and `NATS_VERSION` from `.env.sample`.
 
 - **`maintenance --operations OP[,OP...]`** runs only those operations, of the
   ones the profile enables -- it narrows, never widens, so a run can never

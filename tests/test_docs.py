@@ -225,6 +225,40 @@ def test_the_documented_configurations_are_valid():
             raise AssertionError(f"{name} documents a config that does not load: {exc}") from exc
 
 
+def profile_samples() -> list[tuple[str, str]]:
+    """Every ```yaml block in docs/ whose first line is ``# zamboni.yml`` -- the
+    label is what makes a block a whole profile rather than a fragment."""
+    found = []
+    for path in sorted(DOCS.glob("*.md")):
+        for block in re.findall(r"```yaml\n(.*?)```", path.read_text(), re.S):
+            if block.startswith("# zamboni.yml\n"):
+                found.append((path.name, block))
+    return found
+
+
+def test_the_documented_profiles_load(tmp_path, monkeypatch):
+    """A `zamboni.yml` sample that `load_profile` refuses is a reader's first
+    error. The `nats:` sample in devops.md §8 is what prompted it: a profile
+    block's keys are an allow-list, so a misspelt one fails at load -- which is
+    the point, and also why a sample must be proven against it."""
+    from zamboni import settings
+
+    for variable in settings.NATS_ENV.values():
+        monkeypatch.delenv(variable, raising=False)
+    samples = profile_samples()
+    assert len(samples) >= 2, "the `# zamboni.yml` label stopped matching"
+    for name, block in samples:
+        path = tmp_path / "zamboni.yml"
+        path.write_text(block)
+        path.chmod(0o600)
+        try:
+            settings.load_profile(path)
+        except settings.ProfileError as exc:
+            raise AssertionError(
+                f"{name} documents a zamboni.yml that does not load: {exc}"
+            ) from exc
+
+
 def test_the_guide_documents_every_run_control():
     """The reference table has to keep up with the dataclass.
 

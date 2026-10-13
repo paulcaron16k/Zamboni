@@ -319,8 +319,11 @@ settles, each tested in `tests/test_reload.py`:
   outlives its process, pids are reused, and SIGHUP's default action is to
   terminate — so a stale pid file would otherwise kill an unrelated process.
   The check reads `/proc/<pid>/cmdline`; where `/proc` is absent it refuses.
-- **The event subscription** (#119's last acceptance line) has nothing to
-  re-subscribe until the NATS consumer exists; it is #124's to honour.
+- **The event subscription** (#119's last acceptance line) needs no
+  re-subscribing: the subject comes from the profile, not the fleet file, and
+  the feed maps each event against the fleet as reloaded at that moment, so a
+  table added by a reload is matched from the next event. Changing `nats:`
+  itself takes a restart, as any profile change does.
 
 ---
 
@@ -369,6 +372,15 @@ acknowledged only on an internal error, so a bad message is never redelivered
 forever. A write reported while its table is being maintained re-runs that table
 once when it finishes. A configured source that is disconnected makes the service
 **unready, never unalive**; maintenance continues on the schedule.
+
+The transport is `zamboni.events.nats` (`zamboni[nats]`), configured by a `nats:`
+block or `ZAMBONI_NATS_*` and operated as [devops.md §8](devops.md), "Events
+from NATS". `jetstream: auto` asks the account (`$JS.API.INFO`); on JetStream it
+is a durable pull consumer, on core a subscription. The promise in §10's risk
+table — killing NATS leaves maintenance working, only slower — is, for the
+maintenance half (the ingestion half is the publisher's to prove),
+`test_killing_nats_under_zamboni_serve_costs_readiness_and_nothing_else`, run in
+CI against the dev stack's broker.
 
 ---
 
@@ -630,7 +642,7 @@ only, no router, no bodies, no path parameters.**
 |---|---|---|
 | commit-shaped facts | Iceberg's counter names mirrored under `iceberg.`, hyphens to underscores | **shipped** (ZMBNI-129) |
 | reclaim and decision facts | ours — nothing defined upstream | **shipped** |
-| NATS consumer | `messaging.client.consumed.messages` (Counter, `{message}`), `messaging.process.duration` (Histogram, `s`), attributes `messaging.system=nats`, `messaging.operation.name`, `messaging.destination.name` | phase 5 — researched, not implemented |
+| NATS consumer | `messaging.client.consumed.messages` (Counter, `{message}`), `messaging.process.duration` (Histogram, `s`), attributes `messaging.system=nats`, `messaging.operation.name`, `messaging.destination.name` | phase 5 — the consumer is built (#124); its counts are in the state file, not yet emitted as these metrics |
 | service identity | `service.name`, `service.version`, `service.instance.id` | phase 4 |
 
 The two messaging metrics were checked against
@@ -639,9 +651,10 @@ One caveat that the phrase "published convention" hides: both are marked
 **Development**, not Stable, so they may still move before anything here depends
 on them.
 
-Instrumenting a consumer that does not exist would be untestable code, so
-phases 4 and 5 carry their own instrumentation. What ships now is the part that
-has something to measure.
+Instrumenting a consumer that did not exist would have been untestable code, so
+phases 4 and 5 carry their own instrumentation. The consumer now exists and
+counts what it receives, offers, coalesces and drops in `zamboni service-status`;
+emitting those as the two metrics above is still to do.
 
 OTel's naming rules apply throughout: durations in **seconds**, units in the
 instrument's unit field and **not** in the name, `{file}` and `{record}` as singular
@@ -703,6 +716,7 @@ runs, exit 4, and a sweep duration trending toward the gap between cron firings.
 | **Evidence needed** | `zamboni runs` over a production fleet, several nightly cycles, per warehouse |
 | **Baseline** | 38% of scheduled work had no input, measured locally over 8 runs / 2 warehouses / 5 tables. **Not production**, and recorded only so the first production figure has something to be surprising against |
 | **Decide by** | first monthly review with production data — [devops.md §7](devops.md) |
+| **Taken** | build, ahead of the evidence, by the owner — recorded on #106: phase 4 on 2026-09-30, phase 5 to make `zamboni serve` feature-complete for 0.6.0. The evidence still decides whether a deployment should *run* events, which is configuration, not code |
 
 **What would make the answer "build it":** a large skip share *and* evidence
 that the latency between a write and its maintenance matters — streaming tables,
