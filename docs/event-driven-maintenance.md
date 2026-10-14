@@ -397,10 +397,40 @@ What the contract keeps from the design:
 - **Bounded** — no record samples, no configuration, never a credential.
 
 The CloudEvents envelope was chosen to match Lakekeeper's own events, so one
-subscriber stack reads both. What this repository says about Lakekeeper's events
-— that envelope, a per-commit `updateTable` type, at-most-once delivery — is
-**not verified here**; #182 checks it against upstream. Nothing in the contract
-depends on it.
+subscriber stack reads both. Nothing in the contract depends on Lakekeeper, but
+what this repository says about its events was checked (ZMBNI-182) — in the
+source of v0.13.1, the dev stack's pin (the event code is unchanged through
+v0.13.5), and against live events from the dev stack, whose Lakekeeper publishes
+on `lakekeeper.events`:
+
+| Claim | Where it is settled |
+|---|---|
+| CloudEvents 1.0, **structured-mode JSON** | `CloudEventsPublisherBackgroundTask::publish` builds it with `EventBuilderV10`; `NatsBackend::publish` (lakekeeper-events-nats) sends `serde_json::to_vec(&event)`. Captured: `tests/fixtures/lakekeeper-0.13.1-updateTable.json`, checked by `test_lakekeepers_event_has_the_envelope_the_docs_say_ours_shares` |
+| table commits are typed **`updateTable`**, camelCase like the rest (`createTable`, `dropTable`, `undropTabulars`) | `CloudEventsPublisher::transaction_committed` |
+| **one per commit**: per table per committed request, after it succeeds, carrying the request (requirements and updates), not the resulting metadata | the same function; a single-table commit takes the same path (`commit_table` → `commit_tables_inner`). Live: `test_lakekeeper_publishes_one_update_table_per_commit_in_the_captured_shape` |
+| the **id** is fresh per publication | `Uuid::now_v7()` — time-ordered, nothing derived from the write, so a consumer cannot deduplicate Lakekeeper's events by id. Ours is deterministic for that reason (`test_lakekeepers_event_is_the_commit_request_with_a_fresh_id`) |
+| one subject, no hierarchy | one `LAKEKEEPER__NATS_TOPIC`, published to with core `client.publish` — never a JetStream publish, so no server acknowledgement |
+| **at-most-once** | see below |
+
+At-most-once holds, and the loss is in two places, measured with
+`scripts/lakekeeper-event-loss.py` against the dev stack (property-update
+commits on 4–16 tables at once, 100–190 commits/s on a developer machine):
+
+- **In Lakekeeper, only while NATS is unreachable.** Events queue in a
+  1,000-slot channel (`serve.rs`) and async-nats's 2,048-command client buffer
+  (its default `sender_capacity`), and are sent on reconnect: 200 commits during
+  a ~2 s outage all arrived. Past those ~3,048, each event is dropped after a
+  50 ms wait (`CloudEventsPublisher::new`), logged as "Failed to emit event", and
+  that wait is added to the commit: 4,000 commits through a 39 s outage stored
+  3,049 and logged 951 drops. With NATS up, 4,000 commits lost none. At one
+  commit a second, the buffers cover about 50 minutes of broker outage.
+- **At the subscriber, whenever it is not connected.** Core NATS delivers only to
+  whoever is subscribed at that moment: in the long outage the server got
+  3,049 events and a subscriber that reconnected afterwards saw none of them.
+  This is the loss that matters in practice — every restart of a core-NATS
+  consumer drops what was published meanwhile — and it is the same for
+  `write.completed` on core NATS, which is why `zamboni serve` prefers JetStream
+  (`jetstream: auto`) and the schedule is the backstop for either.
 
 **The governing principle: the event is a hint; the table is the truth.** A missed,
 duplicated or out-of-order event degrades to the polling path.

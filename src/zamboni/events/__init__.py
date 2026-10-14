@@ -44,7 +44,9 @@ from typing import Any, get_args, get_origin
 CONTRACT_VERSION = "1.0"
 
 #: The CloudEvents ``type``. camelCase, as Lakekeeper names its own events
-#: (``updateTable``), so one subscriber stack reads both.
+#: (``updateTable``, from ``CloudEventsPublisher::transaction_committed`` in
+#: v0.13.1; tests/fixtures holds a captured one), so one subscriber stack reads
+#: both -- and distinct from all of them, so ``parse_event`` refuses theirs.
 EVENT_TYPE = "writeCompleted"
 
 #: The ``dataschema`` a producer sets: this URI plus ``/<major>.<minor>``.

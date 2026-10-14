@@ -85,6 +85,19 @@ Two categories beyond the usual set, because this tool deletes files:
 
 - **NATS in the dev stack**, JetStream enabled, on port 4232. Existing
   `dev-stack/.env` files need `NATS_PORT` and `NATS_VERSION` from `.env.sample`.
+  The stack's Lakekeeper publishes its own events there too, on
+  `lakekeeper.events`, and now waits for NATS to be healthy: it will not start
+  without it.
+
+- **What the docs say about Lakekeeper's own events is checked** (ZMBNI-182),
+  against its v0.13.1 source and live events, with a captured `updateTable`
+  kept as a test fixture so an upgrade that changes them fails a test. Every
+  claim held: structured-mode CloudEvents 1.0, a camelCase `updateTable` per
+  committed request, a fresh UUIDv7 id, at-most-once. The docs now also say
+  where the loss is, measured with `scripts/lakekeeper-event-loss.py`: none
+  with NATS up, buffered through a short outage, dropped past ~3,048 events
+  of outage -- and, on core NATS, everything published while a consumer is
+  not connected. docs/event-driven-maintenance.md §5.
 
 - **`maintenance --operations OP[,OP...]`** runs only those operations, of the
   ones the profile enables -- it narrows, never widens, so a run can never

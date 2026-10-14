@@ -295,7 +295,8 @@ Cron stays UTC-only; the time-zone behaviour lives in the type that needs it.
 
 `iceberg.table.write.completed`, CloudEvents 1.0, structured-mode JSON — the
 envelope and wire shape Lakekeeper's events use, so one subscriber stack reads
-both. **Zamboni defines and publishes it** as a JSON Schema,
+both (checked against Lakekeeper v0.13.1 and live events in ZMBNI-182 —
+[event-driven-maintenance.md §5](event-driven-maintenance.md)). **Zamboni defines and publishes it** as a JSON Schema,
 `zamboni.events.get_write_completed_spec()`, versioned `major.minor` with a minor
 increment strictly additive. Each producer publishes the schema of what it emits,
 and a spec-diff test in the producer's repository catches drift.
@@ -316,7 +317,8 @@ and a spec-diff test in the producer's repository catches drift.
 
 **Completed, not committed.** A writer emits once, when it has finished with the
 table for this run. A catalog's per-commit events fire during ingestion, when
-maintenance must not run.
+maintenance must not run — Lakekeeper's `updateTable` fires once per committed
+request, so a load committing in batches emits one per batch.
 
 **The event is a hint; the table is the truth.** Every field is derivable from
 table metadata. A lost event costs latency; a duplicated one costs a metadata
@@ -371,7 +373,9 @@ Zamboni ships `NatsEventSource` (`zamboni[nats]`):
   consumer is created. With no `stream` named and none capturing the subject,
   one is created (`zamboni_<subject>`, kept 7 days) — the same best-effort
   provisioning the other services sharing these settings do. On core NATS:
-  at-most-once, and the schedule is the backstop.
+  at-most-once — anything published while the consumer is not connected,
+  including across its own restarts, is gone — and the schedule is the
+  backstop.
 - A broker that is down is retried forever; the source reports `connected`
   false meanwhile, which fails readiness and nothing else.
 - **Setting names** are the set shared across the systems that use NATS beside
