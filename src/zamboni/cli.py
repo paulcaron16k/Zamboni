@@ -352,7 +352,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "flight finish; a second SIGTERM stops them too. With a `nats:` block "
             "in the profile (zamboni[nats]) it also consumes write.completed "
             "events and brings a written table's write-driven maintenance "
-            "forward; without one, the schedule does everything. See "
+            "forward; without one, the schedule does everything. --metrics otel "
+            "reports that consumer through OpenTelemetry. See "
             "docs/event-driven-maintenance.md and docs/devops.md."
         ),
     )

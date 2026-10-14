@@ -690,19 +690,43 @@ only, no router, no bodies, no path parameters.**
 |---|---|---|
 | commit-shaped facts | Iceberg's counter names mirrored under `iceberg.`, hyphens to underscores | **shipped** (ZMBNI-129) |
 | reclaim and decision facts | ours — nothing defined upstream | **shipped** |
-| NATS consumer | `messaging.client.consumed.messages` (Counter, `{message}`), `messaging.process.duration` (Histogram, `s`), attributes `messaging.system=nats`, `messaging.operation.name`, `messaging.destination.name` | phase 5 — the consumer is built (#124); its counts are in the state file, not yet emitted as these metrics |
-| service identity | `service.name`, `service.version`, `service.instance.id` | phase 4 |
+| NATS consumer | `messaging.client.consumed.messages` (Counter, `{message}`), `messaging.process.duration` (Histogram, `s`), attributes `messaging.system=nats`, `messaging.operation.name`, `messaging.destination.name` | **shipped** (ZMBNI-181), under `serve --metrics otel` |
+| what the consumer decided | `zamboni.event.outcome` on both, and `zamboni.events.offered` (Counter, `{table}`) — ours, the conventions have no notion of it | **shipped** (ZMBNI-181) |
+| service identity | `service.name`, `service.version`, `service.instance.id` | `service.name` **shipped** (ZMBNI-188): `zamboni` unless `OTEL_SERVICE_NAME` says otherwise; the other two only through `OTEL_RESOURCE_ATTRIBUTES` |
 
 The two messaging metrics were checked against
-`open-telemetry/semantic-conventions@main` so phase 5 has no research to redo.
-One caveat that the phrase "published convention" hides: both are marked
-**Development**, not Stable, so they may still move before anything here depends
-on them.
+`open-telemetry/semantic-conventions@main`, and again when they were built
+(6afd3ad, 2026-10-13). Two caveats the phrase "published convention" hides:
+both metrics and every `messaging.*` attribute are marked **Development**, not
+Stable, so they may still move; and **`nats` is not one of the convention's
+well-known `messaging.system` values** — it allows a custom value where none
+applies, and `nats` is ours.
 
-Instrumenting a consumer that did not exist would have been untestable code, so
-phases 4 and 5 carry their own instrumentation. The consumer now exists and
-counts what it receives, offers, coalesces and drops in `zamboni service-status`;
-emitting those as the two metrics above is still to do.
+Implemented as a `FeedObserver` the feed is handed (`zamboni.events.feed`), so
+the feed imports no telemetry and the #157 runtime reuses it, and
+`zamboni.otel.OTelFeedObserver` behind `serve --metrics otel` (ZMBNI-181). What
+it settles, each tested in `tests/test_otel.py`, `tests/test_feed.py` and
+`tests/test_nats.py`:
+
+- **One count per delivery**, as the convention says, so a redelivered message
+  counts again. The receive operation is `fetch` on JetStream (nats-py's pull)
+  and `receive` on core; on JetStream the durable consumer is
+  `messaging.consumer.group.name`.
+- **`zamboni.event.outcome` on both metrics** — `pending`, `coalesced`,
+  `duplicate`, `unmapped`, `rejected`, `error` — which is what tells "no
+  events" from "events, all unmapped". The conventions have no attribute for
+  what a consumer decided, so it is ours and namespaced.
+- **`error.type` only where processing failed**, and only on the processing
+  metric — receiving never failed. The documented list the convention asks
+  for: `zamboni.events.EventError` for a malformed message, the exception's
+  class for an internal error.
+- **An observer can never fail the feed.** Anything it raises is logged — with
+  its traceback the first time, at debug after that — and swallowed; every
+  message is still settled exactly once.
+- **Without the flag, nothing is imported.** A `serve` process that did not
+  ask for telemetry loads no `opentelemetry` module.
+- End to end, against the dev stack's NATS and a stand-in collector:
+  `test_a_live_serve_exports_the_consumer_metrics_to_a_collector`.
 
 OTel's naming rules apply throughout: durations in **seconds**, units in the
 instrument's unit field and **not** in the name, `{file}` and `{record}` as singular
