@@ -273,7 +273,13 @@ Two categories beyond the usual set, because this tool deletes files:
   SDK configured every instrument is a proxy and every add is a no-op, which is
   what OTel prescribes for a library and means an integrator who has configured
   an SDK gets Zamboni's telemetry with no adapter. `iceberg-zamboni[otel]` adds
-  an SDK and an OTLP exporter for a deployment that has none.
+  an SDK and an OTLP exporter for a deployment that has none, and with it the
+  CLI configures the SDK from OpenTelemetry's own `OTEL_*` variables -- set in
+  the process environment, not `.env` -- and flushes when the run ends, so a
+  cron run exports. Without that step an installed SDK configured nothing and
+  `--metrics otel` discarded everything (ZMBNI-188, found before release). An
+  unreachable collector delays the exit by up to `OTEL_EXPORTER_OTLP_TIMEOUT`
+  and never changes the exit code.
 
   This is a deliberate exception to the rule stated beside the `cloud` extra —
   a dependency belongs in the base install when its absence stops the tool doing

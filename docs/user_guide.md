@@ -813,7 +813,7 @@ So:
 |---|---|---|
 | plain install | `opentelemetry-api` | instrumented, emits nothing on its own |
 | embedded in an app with its own SDK | theirs | telemetry appears in their pipeline |
-| standalone | `zamboni[otel]` → SDK + OTLP | exports on its own |
+| standalone | `zamboni[otel]` → SDK + OTLP | the CLI configures the SDK from `OTEL_*` and exports over OTLP ([devops.md §6](devops.md)) |
 | a run that does not ask for it | — | `opentelemetry` is never even imported |
 
 Counters mirror Iceberg's defined names under `iceberg.`, hyphens to

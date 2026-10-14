@@ -350,13 +350,30 @@ zamboni maintenance --warehouse acme --yes --metrics catalog
   asking for the rest of the run.
 - **`log`** writes one JSON line per report to the `zamboni.metrics` logger —
   the same zero-infrastructure route as `--json`.
-- **`otel`** records through OpenTelemetry. Without an SDK this is **silent by
-  design**, and the run says so on stderr rather than leaving you wondering;
-  install `iceberg-zamboni[otel]` and set `OTEL_EXPORTER_OTLP_ENDPOINT` to
-  export, or embed Zamboni in an application that configures one.
+- **`otel`** exports over OTLP/HTTP when `iceberg-zamboni[otel]` is installed.
+  Without the extra it is **silent by design**, and the run says so on stderr
+  rather than leaving you wondering.
 
 Repeat the flag for several. It costs one extra metadata load per *committing*
 operation, which is why it is off by default.
+
+**Configuring `otel`** is OpenTelemetry's own environment variables, read by its
+SDK — set them in the process environment (the cron line, the unit, the pod
+spec), **not in `.env`**, which supplies only `ZAMBONI_*`:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318 \
+OTEL_SERVICE_NAME=zamboni-acme \
+  zamboni maintenance --warehouse acme --yes --metrics otel
+```
+
+`OTEL_EXPORTER_OTLP_HEADERS` and `OTEL_RESOURCE_ATTRIBUTES` work as the SDK
+documents them; the service is named `zamboni` unless you name it. The metrics
+are sent when the run ends — a run is shorter than the SDK's 60 s export
+interval — so **an unreachable collector delays the exit**, by up to
+`OTEL_EXPORTER_OTLP_TIMEOUT` (default 10 s; measured 7.8 s). It never changes
+the exit code. Embedded in an application that has configured its own SDK,
+Zamboni uses that one and configures nothing.
 
 **None of this replaces §6.** The monthly review runs on `zamboni runs`, which
 needs no collector at all. Metrics are for a deployment that already has

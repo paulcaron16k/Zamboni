@@ -42,13 +42,16 @@ invocation works from a shell, a cron entry, or a container.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import os
 import sys
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from . import capabilities, maintainers, settings
 from .capabilities import detect
@@ -530,8 +533,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="where to send Iceberg-shaped metrics; repeat for several. "
         "'catalog' POSTs a CommitReport to the catalog's metrics endpoint, which "
         "is what Java does by default; 'log' writes one JSON line per report; "
-        "'otel' records through OpenTelemetry, which is silent unless an SDK is "
-        "configured (install zamboni[otel]). Default: none.",
+        "'otel' exports over OTLP to OTEL_EXPORTER_OTLP_ENDPOINT when "
+        "iceberg-zamboni[otel] is installed, and is silent without it. Default: none.",
     )
     mt.add_argument(
         "--json",
@@ -1504,18 +1507,19 @@ def _maintenance(session: CatalogSession, args: argparse.Namespace) -> int:
         stream = sys.stderr if outcome.exit_code else sys.stdout
         print(f"  {outcome.operation.value}: {outcome.detail}", file=stream)
 
-    report = maintain(
-        session,
-        table_config=_load_table_config(args),
-        tables=tables,
-        engine=getattr(args, "engine", "local"),
-        engine_options=_engine_options(args),
-        operations=_operations(profile, args),
-        commit=bool(args.yes),
-        base_config=_operational_config(args),
-        observer=show,
-        reporter=_reporter_from(session, args),
-    )
+    with _metrics(session, args) as reporter:
+        report = maintain(
+            session,
+            table_config=_load_table_config(args),
+            tables=tables,
+            engine=getattr(args, "engine", "local"),
+            engine_options=_engine_options(args),
+            operations=_operations(profile, args),
+            commit=bool(args.yes),
+            base_config=_operational_config(args),
+            observer=show,
+            reporter=reporter,
+        )
 
     if before is not None:
         _print_status_delta(session, tables, before)
@@ -1651,13 +1655,61 @@ def _runs(args: argparse.Namespace) -> int:
     return 0
 
 
-def _reporter_from(session: CatalogSession, args: argparse.Namespace):
+@contextlib.contextmanager
+def _metrics(session: CatalogSession, args: argparse.Namespace) -> Iterator[Any]:
+    """The reporter for this run, with an OTel SDK behind it if one is needed.
+
+    `--metrics otel` in a process where nothing configured an SDK -- a cron line,
+    a container -- gets an exporting provider built here, because the CLI is the
+    application and an SDK that is installed configures nothing by itself
+    (#188). One a host application already configured is used as it is.
+
+    The provider is shut down on the way out, whatever the run's outcome, which
+    is what exports a short run's metrics at all: the periodic reader would
+    otherwise be killed with the process before its first interval. A failure
+    there is logged and never changes the exit code -- a reporter can never
+    fail a run.
+    """
+    provider = None
+    if "otel" in set(getattr(args, "metrics", None) or ()):
+        from .otel import exporting_provider, sdk_configured
+
+        if not sdk_configured():
+            provider = exporting_provider()
+            if provider is None:
+                # Not an error -- a library that is instrumented and silent is
+                # exactly what the OTel API is for -- but an operator who asked
+                # for metrics and gets none deserves to be told which half is
+                # missing.
+                print(
+                    "--metrics otel: the OpenTelemetry SDK is not installed, so "
+                    "these metrics are recorded and discarded. Install "
+                    "iceberg-zamboni[otel] and set OTEL_EXPORTER_OTLP_ENDPOINT, or "
+                    "embed Zamboni in an application that configures an SDK.",
+                    file=sys.stderr,
+                )
+    try:
+        yield _reporter_from(session, args, provider=provider)
+    finally:
+        if provider is not None:
+            try:
+                provider.shutdown()
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "--metrics otel: flushing metrics failed", exc_info=True
+                )
+
+
+def _reporter_from(session: CatalogSession, args: argparse.Namespace, provider: Any = None):
     """Build the reporter `--metrics` asked for, or ``None`` for no telemetry.
 
     ``None`` rather than a `NoopReporter` because `maintain()` skips the extra
     metadata load per committing operation when there is no reporter at all, and
     building a report costs that load. A default that is free is what makes
     telemetry opt-in rather than opt-out-if-you-notice.
+
+    ``provider`` is the OTel MeterProvider :func:`_metrics` built, if any;
+    without one, `otel` records through whatever the process has configured.
     """
     from .reporters import LoggingReporter, MetricsReporter, MultiReporter, reporter_for
 
@@ -1675,20 +1727,11 @@ def _reporter_from(session: CatalogSession, args: argparse.Namespace):
     if "log" in wanted:
         extra.append(LoggingReporter())
     if "otel" in wanted:
-        from .otel import OTelReporter, sdk_configured
+        from . import __version__
+        from .otel import SCOPE, OTelReporter
 
-        if not sdk_configured():
-            # Not an error -- a library that is instrumented and silent is
-            # exactly what the OTel API is for -- but an operator who asked for
-            # metrics and gets none deserves to be told which half is missing.
-            print(
-                "--metrics otel: no OpenTelemetry SDK is configured in this "
-                "process, so these metrics are recorded and discarded. Install "
-                "zamboni[otel] and set OTEL_EXPORTER_OTLP_ENDPOINT, or embed "
-                "Zamboni in an application that configures one.",
-                file=sys.stderr,
-            )
-        extra.append(OTelReporter())
+        meter = provider.get_meter(SCOPE, __version__) if provider is not None else None
+        extra.append(OTelReporter(meter))
 
     if "catalog" not in wanted:
         return MultiReporter(*extra) if len(extra) > 1 else extra[0]
