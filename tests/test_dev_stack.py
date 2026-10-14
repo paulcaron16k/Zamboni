@@ -1037,9 +1037,13 @@ def test_lakekeeper_publishes_one_update_table_per_commit_in_the_captured_shape(
     namespace = f"zt_{uuid.uuid4().hex[:8]}"
 
     def write() -> list[int]:
+        """Each commit's snapshot, in commit order -- read after each append,
+        not from `metadata.snapshots`, which Lakekeeper returns in a different
+        order on every load."""
         session.catalog.create_namespace(namespace)
         request.addfinalizer(lambda: _drop_namespace(session, namespace))
         tbl = session.catalog.create_table(f"{namespace}.events", schema=SCHEMA)
+        committed = []
         for i in range(2):
             tbl.append(
                 pa.table(
@@ -1047,7 +1051,8 @@ def test_lakekeeper_publishes_one_update_table_per_commit_in_the_captured_shape(
                     schema=ARROW,
                 )
             )
-        return [s.snapshot_id for s in tbl.metadata.snapshots]
+            committed.append(tbl.metadata.current_snapshot_id)
+        return committed
 
     async def capture() -> tuple[list[int], list[dict]]:
         client = await nats.connect(lakekeeper_nats)
@@ -1077,7 +1082,11 @@ def test_lakekeeper_publishes_one_update_table_per_commit_in_the_captured_shape(
         for e in updates
         for u in e["data"]["updates"]
         if u["action"] == "add-snapshot"
-    ] == snapshots, "one updateTable per commit, each carrying the snapshot it added"
+    ] == snapshots, (
+        "one updateTable per commit, each carrying the snapshot it added, in commit order: "
+        "commit_tables_inner awaits the event's enqueue before it responds, and one task "
+        "drains that queue"
+    )
     captured = json.loads(LAKEKEEPER_FIXTURE.read_text())
     for e in updates:
         assert set(e) == set(captured), "Lakekeeper's event attributes changed"
