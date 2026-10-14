@@ -43,9 +43,19 @@ services:
         condition: service_healthy
     networks: [zamboni]
 
+  # Lakekeeper also publishes its own CloudEvents to the stack's NATS, so the
+  # claims the event docs make about them are checked against a real one
+  # (tests/test_dev_stack.py, #182) rather than repeated. Its own subject, not
+  # Zamboni's: Lakekeeper publishes on core NATS to one fixed topic
+  # (lakekeeper-events-nats, `NatsBackend::publish`). It connects at startup and
+  # will not start if it cannot (`build_nats_publisher_from_config`; observed:
+  # exit 1, "Failed to connect to NATS"), hence the dependency on a healthy nats.
   lakekeeper:
     image: *lakekeeper_image
-    environment: *lakekeeper_env
+    environment:
+      <<: *lakekeeper_env
+      LAKEKEEPER__NATS_ADDRESS: nats://nats:4222
+      LAKEKEEPER__NATS_TOPIC: lakekeeper.events
     command: ["serve"]
     healthcheck:
       test: ["CMD", "/home/nonroot/lakekeeper", "healthcheck"]
@@ -56,6 +66,8 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      nats:
+        condition: service_healthy
     ports:
       - "${LAKEKEEPER_PORT}:8181"
     networks: [zamboni]

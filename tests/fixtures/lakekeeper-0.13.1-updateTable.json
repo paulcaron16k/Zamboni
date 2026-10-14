@@ -1,0 +1,66 @@
+{
+  "specversion": "1.0",
+  "id": "01a13800-1208-7d40-8b2d-285ba0736f1d",
+  "type": "updateTable",
+  "source": "uri:iceberg-catalog-service:28c0affa32a3",
+  "datacontenttype": "application/json",
+  "data": {
+    "identifier": {
+      "namespace": [
+        "zcap_481bc6"
+      ],
+      "name": "events"
+    },
+    "requirements": [
+      {
+        "type": "assert-ref-snapshot-id",
+        "ref": "main",
+        "snapshot-id": null
+      },
+      {
+        "type": "assert-table-uuid",
+        "uuid": "01a13800-0d4f-7831-ad12-bfc7c158b6ef"
+      }
+    ],
+    "updates": [
+      {
+        "action": "add-snapshot",
+        "snapshot": {
+          "snapshot-id": 6419461856202066331,
+          "sequence-number": 1,
+          "timestamp-ms": 1791940890691,
+          "manifest-list": "s3://warehouse/zamboni/01a13800-0d4f-7831-ad12-bfc7c158b6ef/metadata/snap-6419461856202066331-0-2f79dc80-6738-4039-a223-0b7d730012e0.avro",
+          "summary": {
+            "operation": "append",
+            "total-data-files": "1",
+            "total-files-size": "566",
+            "total-position-deletes": "0",
+            "total-equality-deletes": "0",
+            "added-data-files": "1",
+            "added-records": "2",
+            "added-files-size": "566",
+            "total-records": "2",
+            "total-delete-files": "0"
+          },
+          "schema-id": 0
+        }
+      },
+      {
+        "action": "set-snapshot-ref",
+        "ref-name": "main",
+        "snapshot-id": 6419461856202066331,
+        "type": "branch"
+      }
+    ]
+  },
+  "tabular-type": "Table",
+  "sequence-number": 0,
+  "warehouse-id": "5352f054-af77-11f1-9e5c-8fadd640774e",
+  "namespace": "zcap_481bc6",
+  "actor": "{\"type\":\"anonymous\"}",
+  "prefix": "",
+  "num-events": 1,
+  "name": "events",
+  "trace-id": "01a13800-1049-7643-bc33-6e3231d15750",
+  "tabular-id": "01a13800-0d4f-7831-ad12-bfc7c158b6ef"
+}

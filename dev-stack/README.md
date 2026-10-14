@@ -19,7 +19,7 @@ Then, from the project root:
 ./bin/zamboni-demo --catalog lakekeeper clear
 ./bin/zamboni-demo --catalog lakekeeper next-day
 ./bin/zamboni-demo --catalog lakekeeper maintenance --reclaim-now
-uv run pytest tests/test_dev_stack.py        # 12 tests; skipped if the stack is down
+uv run pytest tests/test_dev_stack.py        # skipped if the stack is down
 ZAMBONI_TEST_NATS_URL=nats://localhost:4232 uv run pytest tests/test_nats.py   # live NATS tests
 ```
 
@@ -31,11 +31,20 @@ ZAMBONI_TEST_NATS_URL=nats://localhost:4232 uv run pytest tests/test_nats.py   #
 | MinIO console | http://localhost:9011 |
 | Postgres | localhost:5433 |
 | NATS (JetStream) | nats://localhost:4232 |
+| Lakekeeper's own events | core NATS subject `lakekeeper.events` |
 
 Ports are shifted off the defaults so this coexists with any other Lakekeeper or
 MinIO on the machine. `docker compose down -v` removes the volumes too.
 
 There is **no separate UI container** — Lakekeeper serves its own UI at `/ui/`.
+
+Lakekeeper publishes its own CloudEvents (`createTable`, `updateTable` per
+commit, `dropTable`, …) to the stack's NATS on `lakekeeper.events`, separate
+from the subjects Zamboni's tests use, so what the event docs say about them is
+checked against live ones
+(`test_lakekeeper_publishes_one_update_table_per_commit_in_the_captured_shape`).
+It will not start without NATS. To watch them: `nats sub lakekeeper.events -s
+nats://localhost:4232`, with the [NATS CLI](https://github.com/nats-io/natscli).
 
 ---
 

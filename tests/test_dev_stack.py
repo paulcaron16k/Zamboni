@@ -1000,3 +1000,89 @@ def _storage_keys(tbl):
     from zamboni.orphans import list_storage, storage_roots
 
     return list_storage(tbl, storage_roots(tbl))
+
+
+# -- Lakekeeper's own events (#182) ---------------------------------------
+
+#: The subject the lakekeeper service publishes on (dev-stack/docker-compose.yaml).
+LAKEKEEPER_SUBJECT = "lakekeeper.events"
+#: tests/test_events.py's fixture, captured from this stack.
+LAKEKEEPER_FIXTURE = (
+    Path(__file__).resolve().parent / "fixtures" / "lakekeeper-0.13.1-updateTable.json"
+)
+
+
+@pytest.fixture
+def lakekeeper_nats(env) -> str:
+    if any(os.environ.get(var) for var in OVERRIDES.values()):
+        pytest.skip("only the dev stack's Lakekeeper is configured to publish to its NATS")
+    return f"nats://127.0.0.1:{env['NATS_PORT']}"
+
+
+def test_lakekeeper_publishes_one_update_table_per_commit_in_the_captured_shape(
+    session, lakekeeper_nats, request
+):
+    """What the event docs say about Lakekeeper's events, against live ones:
+    structured-mode CloudEvents 1.0, a camelCase `updateTable` per commit
+    carrying that commit's snapshot, and a fresh UUIDv7 id per event. The
+    attribute set must equal the captured fixture's, so an upgrade that adds,
+    drops or renames one fails here -- recapture the fixture and recheck the
+    docs (docs/event-driven-maintenance.md §5) when it does."""
+    import asyncio
+    import json
+
+    import nats
+    import nats.errors
+
+    namespace = f"zt_{uuid.uuid4().hex[:8]}"
+
+    def write() -> list[int]:
+        session.catalog.create_namespace(namespace)
+        request.addfinalizer(lambda: _drop_namespace(session, namespace))
+        tbl = session.catalog.create_table(f"{namespace}.events", schema=SCHEMA)
+        for i in range(2):
+            tbl.append(
+                pa.table(
+                    {"id": pa.array([i], type=pa.int32()), "category": pa.array(["a"])},
+                    schema=ARROW,
+                )
+            )
+        return [s.snapshot_id for s in tbl.metadata.snapshots]
+
+    async def capture() -> tuple[list[int], list[dict]]:
+        client = await nats.connect(lakekeeper_nats)
+        try:
+            subscription = await client.subscribe(LAKEKEEPER_SUBJECT)
+            await client.flush()
+            snapshots = await asyncio.to_thread(write)
+            events: list[dict] = []
+            with contextlib.suppress(nats.errors.TimeoutError):
+                while len(events) < 3:
+                    doc = json.loads((await subscription.next_msg(timeout=5)).data)
+                    if doc.get("namespace") == namespace:
+                        events.append(doc)
+            return snapshots, events
+        finally:
+            await client.close()
+
+    snapshots, events = asyncio.run(capture())
+
+    assert [e["type"] for e in events] == ["createTable", "updateTable", "updateTable"], (
+        f"none at all on {LAKEKEEPER_SUBJECT} means Lakekeeper is not publishing there: "
+        "check LAKEKEEPER__NATS_TOPIC on the lakekeeper service"
+    )
+    updates = events[1:]
+    assert [
+        u["snapshot"]["snapshot-id"]
+        for e in updates
+        for u in e["data"]["updates"]
+        if u["action"] == "add-snapshot"
+    ] == snapshots, "one updateTable per commit, each carrying the snapshot it added"
+    captured = json.loads(LAKEKEEPER_FIXTURE.read_text())
+    for e in updates:
+        assert set(e) == set(captured), "Lakekeeper's event attributes changed"
+        assert (e["specversion"], e["datacontenttype"]) == ("1.0", "application/json")
+        assert (e["num-events"], e["sequence-number"]) == (1, 0)
+    ids = [uuid.UUID(e["id"]) for e in events]
+    assert {i.version for i in ids} == {7}
+    assert len(set(ids)) == len(ids)
