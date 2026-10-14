@@ -56,7 +56,11 @@ touch one.
 ## The event
 
 A CloudEvents 1.0 event in **structured-mode JSON** — the envelope and wire shape
-Lakekeeper uses for its own events, so one subscriber stack reads both.
+Lakekeeper uses for its own events, so one subscriber stack reads both. That is
+checked against Lakekeeper's source and live events, with a captured one kept as
+a test fixture: [event-driven-maintenance.md §5](event-driven-maintenance.md).
+Sharing the envelope is not sharing the type — a consumer of this contract
+refuses Lakekeeper's `updateTable` rather than mistaking it for a write.
 
 ```json
 {
@@ -151,7 +155,9 @@ separate subjects (a per-deployment prefix), not payload fields.
 - **On JetStream**, publish with the `Nats-Msg-Id` header equal to the event's
   `id`, so the server deduplicates within its window. Delivery is then
   at-least-once.
-- **On core NATS**, delivery is at-most-once; the consumer's schedule is the
+- **On core NATS**, delivery is at-most-once: a consumer that is not connected
+  when the event is published never sees it, so every restart of a core-NATS
+  consumer loses what was published meanwhile. The consumer's schedule is the
   backstop for anything lost.
 
 Neither is a correctness requirement: the event is a hint, and a consumer that

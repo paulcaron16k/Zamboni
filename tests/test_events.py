@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import uuid
 from pathlib import Path
 
 import jsonschema
@@ -162,6 +163,53 @@ def test_the_identifier_and_the_deterministic_id():
     parsed = parse_event(event(namespace=["raw", "telemetry"]))
     assert parsed.data.identifier == "raw.telemetry.events"
     assert parsed.data.expected_id == "acme/raw/telemetry/events@42"
+
+
+# -- Lakekeeper's own events (#182) -----------------------------------------------------
+
+#: An `updateTable` captured from the dev stack's Lakekeeper (v0.13.1) on
+#: 2026-10-14, after one append. tests/test_dev_stack.py checks that a live one
+#: still has this shape, so an upgrade that changes it fails a test, not the docs.
+LAKEKEEPER_UPDATE_TABLE = (
+    Path(__file__).resolve().parent / "fixtures" / "lakekeeper-0.13.1-updateTable.json"
+)
+
+
+def lakekeeper_event() -> dict:
+    return json.loads(LAKEKEEPER_UPDATE_TABLE.read_text())
+
+
+def test_lakekeepers_event_has_the_envelope_the_docs_say_ours_shares():
+    """What docs/write-completed.md means by "the envelope and wire shape
+    Lakekeeper uses": CloudEvents 1.0 in structured mode -- attributes and
+    data in one JSON object -- with a camelCase type. Every attribute ours
+    requires is there."""
+    doc = lakekeeper_event()
+    assert doc["specversion"] == "1.0"
+    assert doc["type"] == "updateTable"
+    assert doc["datacontenttype"] == "application/json"
+    assert isinstance(doc["data"], dict)
+    assert set(event()) - {"dataschema"} <= set(doc)
+
+
+def test_lakekeepers_event_is_the_commit_request_with_a_fresh_id():
+    """The data is the committed request -- not the table's resulting metadata
+    -- and the id a `Uuid::now_v7()` drawn per publication
+    (`CloudEventsPublisher::transaction_committed`). Nothing in the id derives
+    from the write, so Lakekeeper's events cannot be deduplicated by it; that is
+    why ours is deterministic. One event per commit is checked live, in
+    tests/test_dev_stack.py."""
+    doc = lakekeeper_event()
+    assert {"requirements", "updates"} <= set(doc["data"])
+    assert [u["action"] for u in doc["data"]["updates"]] == ["add-snapshot", "set-snapshot-ref"]
+    assert uuid.UUID(doc["id"]).version == 7
+
+
+def test_a_lakekeeper_event_is_refused_not_mistaken_for_ours():
+    """One subscriber stack reads both; a consumer of ours never acts on theirs."""
+    with pytest.raises(EventError, match="type 'updateTable' is not 'writeCompleted'"):
+        parse_event(lakekeeper_event())
+    assert not schema_accepts(lakekeeper_event())
 
 
 # -- the doc ----------------------------------------------------------------------------
