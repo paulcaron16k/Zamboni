@@ -311,6 +311,31 @@ class NatsEventSource:
         delivers nothing, and readiness should say so."""
         return self._consuming and self._nc is not None and self._nc.is_connected
 
+    @property
+    def telemetry_attributes(self) -> dict[str, str]:
+        """OpenTelemetry messaging attributes describing this source (#181).
+
+        Keys from the messaging semantic conventions, whose attributes are still
+        *Development*. ``nats`` is not one of the convention's well-known
+        ``messaging.system`` values; it allows a custom one where none applies.
+        The subject is low-cardinality -- one per deployment -- which is the
+        condition for ``messaging.destination.name``. On JetStream the durable
+        consumer is the consumer group; core NATS has none.
+        """
+        attributes = {
+            "messaging.system": "nats",
+            "messaging.destination.name": self.settings.subject,
+        }
+        if self.mode == "jetstream":
+            attributes["messaging.consumer.group.name"] = durable_name(self.settings)
+        return attributes
+
+    @property
+    def receive_operation(self) -> str:
+        """The system-specific name of how a message arrived: a JetStream pull
+        consumer *fetches* (nats-py's ``fetch``); a core subscription receives."""
+        return "fetch" if self.mode == "jetstream" else "receive"
+
     def __aiter__(self) -> AsyncIterator[_Received]:
         return self._messages()
 

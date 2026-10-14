@@ -73,6 +73,16 @@ Two categories beyond the usual set, because this tool deletes files:
   unreadable table does not stop the rest; it makes the exit code 1. The
   pressure check runs exactly this in a worker.
 
+- **`zamboni serve --metrics otel`** reports the `write.completed` consumer
+  through OpenTelemetry (ZMBNI-181): `messaging.client.consumed.messages` and
+  `messaging.process.duration` from the messaging semantic conventions, each
+  with `zamboni.event.outcome` (pending, coalesced, duplicate, unmapped,
+  rejected, error), and `zamboni.events.offered`. Configured and exported as
+  `maintenance --metrics otel` is. Reports the consumer, not table runs. Without
+  the flag the service imports no OpenTelemetry module. The `messaging.*` names
+  are still Development upstream and may move. The feed's telemetry is a
+  `FeedObserver` it is handed, so `zamboni.events.feed` stays telemetry-free.
+
 - **NATS in the dev stack**, JetStream enabled, on port 4232. Existing
   `dev-stack/.env` files need `NATS_PORT` and `NATS_VERSION` from `.env.sample`.
 

@@ -14,7 +14,8 @@ cause work the schedule would not eventually have done.
 
 This module is shared by `zamboni serve` today and by the maintenance runtime
 (docs/maintenance-runtime.md) tomorrow, which is why it takes its fleet and its
-queue as callables rather than reaching for either.
+queue as callables rather than reaching for either -- and why telemetry is a
+:class:`FeedObserver` it is handed, not an OpenTelemetry import (#181).
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -43,6 +45,17 @@ CAP = timedelta(minutes=30)
 #: long-running service's memory is too; an older duplicate falls to the
 #: due-check, which makes it cost one metadata load.
 DEDUP_SIZE = 10_000
+
+#: What happened to one message: :meth:`EventFeed.handle`'s answers, plus
+#: ``error`` when handling raised. Pending and coalesced are both accepted -- the
+#: first event for a table starts its quiet period, a later one extends it.
+PENDING = "pending"
+COALESCED = "coalesced"
+DUPLICATE = "duplicate"
+UNMAPPED = "unmapped"
+REJECTED = "rejected"
+ERROR = "error"
+OUTCOMES = (PENDING, COALESCED, DUPLICATE, UNMAPPED, REJECTED, ERROR)
 
 
 @runtime_checkable
@@ -68,6 +81,24 @@ class EventSource(Protocol):
     def connected(self) -> bool: ...
 
     def __aiter__(self) -> AsyncIterator[ReceivedEvent]: ...
+
+
+class FeedObserver(Protocol):
+    """Told what the feed did -- for telemetry, without the feed importing any.
+
+    Called inline from the feed and **never allowed to affect it**: anything an
+    observer raises is logged and swallowed, as for every reporter.
+    """
+
+    def consumed(
+        self, source: EventSource, outcome: str, seconds: float, error: BaseException | None
+    ) -> None:
+        """One message handled: its outcome (:data:`OUTCOMES`), the seconds from
+        receiving it to settling it, and the exception when ``outcome`` is
+        :data:`ERROR`."""
+
+    def offered(self, source: EventSource, candidate: Candidate) -> None:
+        """A table offered once its quiet period, or cap, passed."""
 
 
 @dataclass
@@ -105,11 +136,16 @@ class EventFeed:
     dedup_size: int = DEDUP_SIZE
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
     counters: FeedCounters = field(default_factory=FeedCounters)
+    observer: FeedObserver | None = None
+    #: Monotonic seconds, for how long a message took; separate from ``clock``,
+    #: which is wall time and may jump.
+    timer: Callable[[], float] = time.perf_counter
     _seen: OrderedDict[tuple[str, str, int], None] = field(default_factory=OrderedDict)
     _pending: dict[tuple[str, str], _Pending] = field(default_factory=dict)
     #: Set when a table first becomes pending, so the flusher wakes for it
     #: instead of finishing a sleep chosen before it arrived.
     _woken: asyncio.Event = field(default_factory=asyncio.Event)
+    _observer_failed: bool = False
 
     # -- the pure half: one message in, a decision out --------------------------------
 
@@ -123,16 +159,16 @@ class EventFeed:
             # improve by being sent again.
             self.counters.rejected += 1
             logger.warning("rejected an event from %s: %s", self.source.name, exc)
-            return "rejected"
+            return REJECTED
         mapped = map_event(event, self.fleet())
         if not isinstance(mapped, Mapped):
             self.counters.unmapped += 1
             logger.debug("unmapped event %s: %s", event.id, mapped.reason)
-            return "unmapped"
+            return UNMAPPED
         identity = (mapped.warehouse, mapped.table, event.data.snapshot_id)
         if identity in self._seen:
             self.counters.duplicates += 1
-            return "duplicate"
+            return DUPLICATE
         self._seen[identity] = None
         while len(self._seen) > self.dedup_size:
             self._seen.popitem(last=False)
@@ -141,10 +177,10 @@ class EventFeed:
         if key in self._pending:
             self._pending[key].last = now
             self.counters.coalesced += 1
-            return "coalesced"
+            return COALESCED
         self._pending[key] = _Pending(first=now, last=now)
         self._woken.set()
-        return "pending"
+        return PENDING
 
     def flush_due(self, now: datetime | None = None) -> list[tuple[str, str]]:
         """Offer every pending table whose quiet period, or cap, has passed."""
@@ -152,8 +188,10 @@ class EventFeed:
         due = [key for key, p in self._pending.items() if p.due(self.quiet, self.cap) <= now]
         for key in due:
             del self._pending[key]
-            self.offer(Candidate(key[0], key[1], EVENT))
+            candidate = Candidate(key[0], key[1], EVENT)
+            self.offer(candidate)
             self.counters.offered += 1
+            self._observe("offered", self.source, candidate)
         return due
 
     def next_due(self) -> datetime | None:
@@ -214,11 +252,32 @@ class EventFeed:
 
     async def _read(self) -> None:
         async for message in self.source:
+            started = self.timer()
+            error: BaseException | None = None
             try:
-                self.handle(message.payload)
-            except Exception:  # an internal error, not the message's fault
+                outcome = self.handle(message.payload)
+            except Exception as exc:  # an internal error, not the message's fault
                 self.counters.errors += 1
                 logger.exception("handling an event from %s", self.source.name)
+                outcome, error = ERROR, exc
                 await message.nak()
-                continue
-            await message.ack()
+            else:
+                await message.ack()
+            self._observe("consumed", self.source, outcome, self.timer() - started, error)
+
+    def _observe(self, method: str, *args: Any) -> None:
+        """Tell the observer, which can never fail the feed. Its first failure
+        is logged with the traceback; later ones only at debug, so a broken
+        exporter does not log once per message."""
+        if self.observer is None:
+            return
+        try:
+            getattr(self.observer, method)(*args)
+        except Exception:
+            logger.log(
+                logging.DEBUG if self._observer_failed else logging.WARNING,
+                "feed observer %s failed; the feed carries on",
+                method,
+                exc_info=True,
+            )
+            self._observer_failed = True

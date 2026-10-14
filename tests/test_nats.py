@@ -21,6 +21,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from typing import ClassVar
 from urllib.parse import urlparse
 
 import pytest
@@ -710,3 +711,189 @@ def test_killing_nats_under_zamboni_serve_costs_readiness_and_nothing_else(
             await nc.close()
 
         asyncio.run(drop_stream())
+
+
+# -- serve --metrics otel (#181) ----------------------------------------------------
+
+
+class StubService:
+    """Stands in for `Service`: records what `serve` built it with, then stops."""
+
+    built: ClassVar[dict] = {}
+
+    def __init__(self, *args, **kwargs):
+        StubService.built = kwargs
+        self.hangup = asyncio.Event()
+
+    def request_stop(self): ...
+
+    async def run(self) -> int:
+        return 0
+
+
+def serve_with(tmp_path, monkeypatch, *extra: str, nats: bool = True) -> dict:
+    """Run `zamboni serve` with the Service stubbed out; what it was built with,
+    and the exit code under ``exit``."""
+    from tests.test_service import fleet_file
+    from zamboni import service
+    from zamboni.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    if nats:
+        monkeypatch.setenv("ZAMBONI_NATS_SERVERS", "nats://broker:4222")
+        monkeypatch.setenv("ZAMBONI_NATS_SUBJECT", SUBJECT)
+    monkeypatch.setattr(service, "Service", StubService)
+    code = main(
+        [
+            "serve",
+            "--fleet",
+            str(fleet_file(tmp_path, "a", schedule="0 2 1 1 *")),
+            "--state-file",
+            str(tmp_path / "state.json"),
+            "--pid-file",
+            str(tmp_path / "serve.pid"),
+            *extra,
+        ]
+    )
+    return {**StubService.built, "exit": code}
+
+
+def test_serve_reports_the_consumer_only_when_asked(tmp_path, monkeypatch, collector):
+    from zamboni.otel import OTelFeedObserver
+
+    assert serve_with(tmp_path, monkeypatch)["feed_observer"] is None
+    built = serve_with(tmp_path, monkeypatch, "--metrics", "otel")
+    assert built["exit"] == 0
+    assert isinstance(built["feed_observer"], OTelFeedObserver)
+
+
+def test_serve_without_metrics_never_imports_opentelemetry(tmp_path):
+    """The service process stays as light as #154 requires: a deployment that
+    did not ask for telemetry does not import it."""
+    code = f"""
+import sys
+from pathlib import Path
+from typing import ClassVar
+from tests.test_nats import serve_with
+class MP:
+    def chdir(self, p): import os; os.chdir(p)
+    def setenv(self, k, v): import os; os.environ[k] = v
+    def setattr(self, o, n, v): setattr(o, n, v)
+built = serve_with(Path({str(tmp_path)!r}), MP())
+assert built["exit"] == 0 and built["feed_observer"] is None
+print(sorted(m for m in sys.modules if m.startswith("opentelemetry")))
+"""
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=Path(__file__).resolve().parent.parent,
+    )
+    assert out.stdout.strip() == "[]"
+
+
+def test_serve_metrics_without_a_nats_block_says_there_is_nothing_to_report(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.delenv("ZAMBONI_NATS_SERVERS", raising=False)
+    monkeypatch.delenv("ZAMBONI_NATS_SUBJECT", raising=False)
+
+    built = serve_with(tmp_path, monkeypatch, "--metrics", "otel", nats=False)
+
+    assert built["exit"] == 0 and built["feed_observer"] is None
+    assert "no `nats:` block" in capsys.readouterr().err
+
+
+def attributes_of(point) -> dict[str, str]:
+    return {kv.key: kv.value.string_value for kv in point.attributes}
+
+
+def test_a_live_serve_exports_the_consumer_metrics_to_a_collector(tmp_path, live_url, collector):
+    """End to end: a real `zamboni serve --metrics otel` consumes from the dev
+    stack's NATS, and on SIGTERM what it measured reaches the collector named
+    by OTEL_EXPORTER_OTLP_ENDPOINT -- the convention's names and attributes."""
+    import nats
+
+    from tests.test_feed import payload
+    from tests.test_service import fleet_file
+    from zamboni.service import read_state
+
+    subject = f"zamboni.test.{uuid.uuid4().hex}"
+    state = tmp_path / "run" / "serve.state.json"
+    workdir = tmp_path / "cwd"
+    workdir.mkdir()
+    env = {
+        **os.environ,  # carries the collector's OTEL_EXPORTER_OTLP_ENDPOINT
+        "ZAMBONI_LOCAL_WAREHOUSE": str(tmp_path / "wh"),
+        "ZAMBONI_NATS_SERVERS": live_url,
+        "ZAMBONI_NATS_SUBJECT": subject,
+    }
+    command = [
+        sys.executable,
+        "-c",
+        "from zamboni.cli import main; raise SystemExit(main())",
+        "serve",
+        "--fleet",
+        str(fleet_file(tmp_path, "events", schedule="0 2 1 1 *")),
+        "--state-file",
+        str(state),
+        "--pid-file",
+        str(tmp_path / "run" / "serve.pid"),
+        "--metrics",
+        "otel",
+    ]
+
+    def received() -> int:
+        if not state.exists():
+            return -1
+        return read_state(state).get("events", {}).get("nats", {}).get("received", 0)
+
+    async def publish() -> None:
+        nc = await nats.connect(live_url)
+        js = nc.jetstream()
+        for data in (payload("events", 1), b"{not json"):
+            await js.publish(subject, data, headers={"Nats-Msg-Id": uuid.uuid4().hex})
+        await nc.close()
+
+    proc = subprocess.Popen(command, cwd=workdir, env=env, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.monotonic() + 60
+        while not (state.exists() and read_state(state).get("nats_connected")):
+            assert time.monotonic() < deadline, "the service never connected"
+            time.sleep(0.2)
+        asyncio.run(publish())
+        while received() < 2:
+            assert time.monotonic() < deadline, "the events never arrived"
+            time.sleep(0.2)
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=30) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+        async def drop_stream() -> None:
+            nc = await nats.connect(live_url)
+            with contextlib.suppress(Exception):
+                await nc.jetstream().delete_stream(
+                    stream_name(NatsSettings(servers=(live_url,), subject=subject))
+                )
+            await nc.close()
+
+        asyncio.run(drop_stream())
+
+    metrics = {metric.name: metric for _, metric in collector.metrics()}
+    assert collector.services() == {"zamboni"}
+    consumed = metrics["messaging.client.consumed.messages"].sum.data_points
+    by_outcome = {attributes_of(p)["zamboni.event.outcome"]: p.as_int for p in consumed}
+    assert by_outcome == {"pending": 1, "rejected": 1}
+    for point in consumed:
+        attributes = attributes_of(point)
+        assert attributes["messaging.system"] == "nats"
+        assert attributes["messaging.destination.name"] == subject
+        assert attributes["messaging.operation.name"] == "fetch"
+        assert attributes["messaging.consumer.group.name"] == durable_name(
+            NatsSettings(servers=(live_url,), subject=subject)
+        )
+    assert metrics["messaging.process.duration"].unit == "s"

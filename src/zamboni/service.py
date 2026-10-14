@@ -451,6 +451,7 @@ class Service:
         scheduler_wait: Any = None,
         capability_check: Callable[[], str | None] | None = None,
         events: Sequence[Any] = (),
+        feed_observer: Any = None,
     ) -> None:
         self.fleet_path = Path(fleet_path)
         self.size = size
@@ -464,6 +465,9 @@ class Service:
         self.capability_check = capability_check or _capabilities_unsupported
         #: Event sources (`zamboni.events.feed.EventSource`); each gets a feed.
         self.events = tuple(events)
+        #: Told what each feed does (`zamboni.events.feed.FeedObserver`) -- the
+        #: OpenTelemetry one under `serve --metrics otel` (#181).
+        self.feed_observer = feed_observer
         self.feeds: list[Any] = []
         self.state = ServiceState(
             fleet_path=str(self.fleet_path),
@@ -590,7 +594,12 @@ class Service:
             from .events.feed import EventFeed
 
             self.feeds = [
-                EventFeed(source, fleet=lambda: scheduler.fleet, offer=queue.offer)
+                EventFeed(
+                    source,
+                    fleet=lambda: scheduler.fleet,
+                    offer=queue.offer,
+                    observer=self.feed_observer,
+                )
                 for source in self.events
             ]
         self._observe_events()

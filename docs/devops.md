@@ -700,6 +700,28 @@ source: `received`, `offered`, `coalesced`, `duplicates`, `unmapped`,
 and started under it is a test (`test_killing_nats_under_zamboni_serve_costs_readiness_and_nothing_else`),
 run in CI against the dev stack's NATS.
 
+**The same counts in OpenTelemetry**, for a deployment that collects it:
+`zamboni serve --metrics otel`, configured exactly as for `maintenance` (§6 —
+the `OTEL_*` variables in the pod spec, not `.env`). It reports the consumer,
+not the table runs:
+
+| Metric | Unit | Per |
+|---|---|---|
+| `messaging.client.consumed.messages` | `{message}` | message delivered — a redelivery counts again |
+| `messaging.process.duration` | `s` | message, from receipt to acknowledgement |
+| `zamboni.events.offered` | `{table}` | table offered once its quiet period passed |
+
+Each carries `messaging.system=nats` and the subject as
+`messaging.destination.name`; on JetStream, the durable consumer as
+`messaging.consumer.group.name`. The two messaging metrics also carry
+`zamboni.event.outcome` — `pending` and `coalesced` (accepted), `duplicate`,
+`unmapped` (a table the fleet file does not list), `rejected` (malformed) and
+`error` (ours) — so "no events" and "events, all for tables we do not manage"
+look different on a dashboard. `error.type` marks a processing failure:
+`zamboni.events.EventError` for a malformed message, the exception's class for
+an internal one. The `messaging.*` names are OpenTelemetry's and still marked
+Development upstream, so a later convention may rename them.
+
 Two `zamboni serve` deployments must not share a subject. On JetStream they
 would share the durable consumer, and each event would reach only one of them;
 on core NATS both would hear every event, for tables only one of them manages.

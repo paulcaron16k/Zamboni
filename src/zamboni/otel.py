@@ -285,6 +285,86 @@ class OTelReporter:
         return self._histograms[name]
 
 
+# -- the write.completed consumer (#181) --------------------------------------------
+
+#: OpenTelemetry's messaging semantic conventions, checked against
+#: open-telemetry/semantic-conventions@main (6afd3ad, 2026-10-13). Both metrics
+#: and every ``messaging.*`` attribute are **Development**, not Stable, so they
+#: may move; this block is where that would be absorbed.
+CONSUMED_MESSAGES = "messaging.client.consumed.messages"
+PROCESS_DURATION = "messaging.process.duration"
+MESSAGE = "{message}"
+OPERATION_NAME = "messaging.operation.name"
+OPERATION_TYPE = "messaging.operation.type"
+SYSTEM = "messaging.system"
+ERROR_TYPE = "error.type"
+
+#: Zamboni's own, because the conventions have no notion of what a consumer
+#: *decided*. Namespaced so they cannot collide with a convention that later
+#: does. ``zamboni.event.outcome`` is one of `zamboni.events.feed.OUTCOMES`.
+EVENTS_OFFERED = "zamboni.events.offered"
+OUTCOME_ATTRIBUTE = "zamboni.event.outcome"
+TABLE = "{table}"
+
+#: ``error.type`` for a message the parser refused. The convention asks for a
+#: low-cardinality class name, and documented: this one, and for an internal
+#: error the class of the exception raised.
+REJECTED_ERROR_TYPE = "zamboni.events.EventError"
+
+
+def _error_type(error: BaseException) -> str:
+    kind = type(error)
+    return (
+        kind.__qualname__
+        if kind.__module__ == "builtins"
+        else f"{kind.__module__}.{kind.__qualname__}"
+    )
+
+
+class OTelFeedObserver:
+    """Reports an event feed through the messaging semantic conventions.
+
+    Per message, ``messaging.client.consumed.messages`` once (the convention's
+    "once per message delivery", so a redelivery counts again) and
+    ``messaging.process.duration`` from receipt to settlement. Both carry the
+    source's own attributes and ``zamboni.event.outcome``, which is what tells
+    "no events" from "events, all unmapped". ``error.type`` is set on the
+    processing metric only, and only when processing failed: a message refused
+    as malformed, or an internal error. Receiving it did not fail.
+
+    Per table offered, ``zamboni.events.offered``.
+    """
+
+    def __init__(self, meter: Any = None) -> None:
+        meter = meter or otel_metrics.get_meter(SCOPE, __version__)
+        self._consumed = meter.create_counter(CONSUMED_MESSAGES, unit=MESSAGE)
+        self._duration = meter.create_histogram(PROCESS_DURATION, unit=SECOND)
+        self._offered = meter.create_counter(EVENTS_OFFERED, unit=TABLE)
+
+    def consumed(
+        self, source: Any, outcome: str, seconds: float, error: BaseException | None
+    ) -> None:
+        base = _source_attributes(source) | {OUTCOME_ATTRIBUTE: outcome}
+        receive_operation = getattr(source, "receive_operation", "receive")
+        self._consumed.add(1, base | {OPERATION_NAME: receive_operation, OPERATION_TYPE: "receive"})
+        processed = base | {OPERATION_NAME: "process", OPERATION_TYPE: "process"}
+        if error is not None:
+            processed[ERROR_TYPE] = _error_type(error)
+        elif outcome == "rejected":
+            processed[ERROR_TYPE] = REJECTED_ERROR_TYPE
+        self._duration.record(seconds, processed)
+
+    def offered(self, source: Any, candidate: Any) -> None:
+        self._offered.add(1, _source_attributes(source))
+
+
+def _source_attributes(source: Any) -> dict[str, str]:
+    """What the source says about itself, or its name as the system -- which
+    the convention requires, and a source that declares nothing still has."""
+    declared = getattr(source, "telemetry_attributes", None)
+    return dict(declared) if declared else {SYSTEM: source.name}
+
+
 def exporting_provider() -> Any | None:
     """A MeterProvider exporting over OTLP/HTTP, or ``None`` without the SDK.
 
@@ -333,6 +413,7 @@ __all__ = [
     "NO_COMMIT_UNITS",
     "OPERATION_ATTRIBUTE",
     "TABLE_ATTRIBUTE",
+    "OTelFeedObserver",
     "OTelReporter",
     "exporting_provider",
     "sdk_configured",

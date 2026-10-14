@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import pyarrow as pa
 import pytest
@@ -176,3 +176,82 @@ def bucketed(session):
     for i in range(4):
         tbl.append(batch(i * 10, 10))
     return tbl
+
+
+# -- an OTLP collector stand-in (#188, #181) --------------------------------------
+
+
+class Collector:
+    """What an OTLP/HTTP collector stand-in received, decoded on demand."""
+
+    def __init__(self) -> None:
+        #: (path, headers, body) per POST.
+        self.requests: list[tuple[str, dict[str, str], bytes]] = []
+
+    def metrics(self) -> list[tuple[str, Any]]:
+        """Every (service.name, Metric) received, across all requests."""
+        from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import (
+            ExportMetricsServiceRequest,
+        )
+
+        found = []
+        for path, _headers, body in self.requests:
+            assert path == "/v1/metrics"
+            for resource in ExportMetricsServiceRequest.FromString(body).resource_metrics:
+                service = next(
+                    (
+                        a.value.string_value
+                        for a in resource.resource.attributes
+                        if a.key == "service.name"
+                    ),
+                    "",
+                )
+                for scope in resource.scope_metrics:
+                    found.extend((service, metric) for metric in scope.metrics)
+        return found
+
+    def names(self) -> set[str]:
+        return {metric.name for _, metric in self.metrics()}
+
+    def services(self) -> set[str]:
+        return {service for service, _ in self.metrics()}
+
+
+@pytest.fixture
+def collector(monkeypatch):
+    """An OTLP/HTTP endpoint standing in for a collector: records each POST.
+
+    Points the standard variables at it and clears the ones a developer's
+    shell might carry, so the test sees only what it set. The environment is
+    inherited by a subprocess, so a `zamboni serve` started from the test
+    exports here too.
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    received = Collector()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            received.requests.append((self.path, dict(self.headers), body))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-protobuf")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    for name in (
+        "OTEL_SERVICE_NAME",
+        "OTEL_RESOURCE_ATTRIBUTES",
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_HEADERS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", f"http://127.0.0.1:{server.server_port}")
+    yield received
+    server.shutdown()
