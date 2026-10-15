@@ -43,7 +43,11 @@ Two categories beyond the usual set, because this tool deletes files:
   is created: `zamboni_<subject>`, kept 7 days. A broker that is down or goes
   away is retried forever: the schedule keeps running, liveness holds, readiness
   fails within a second. A password or token under `nats:` makes the profile a
-  credential file (`chmod 600`). The library surface is `zamboni.events.nats`.
+  credential file (`chmod 600`). A server URL carrying credentials
+  (`nats://user:pw@host`, or `user:pw@host`, which nats-py reads the same way)
+  is refused, exit 2: a URL is what gets logged and shown, and the mode rule
+  cannot see a secret inside one (ZMBNI-194, found by the release's security
+  review). The library surface is `zamboni.events.nats`.
   See docs/devops.md §8, "Events from NATS".
 
 - **Each release is also a GitHub release, carrying the wheel, the sdist and
@@ -127,7 +131,7 @@ Two categories beyond the usual set, because this tool deletes files:
   object to be built against.
 
   Keys are allow-listed, a credential is refused by name (the file is defined as
-  holding none), and validation runs on construction so a fleet built in code is
+  holding none) and inside a warehouse's `uri` (ZMBNI-194), and validation runs on construction so a fleet built in code is
   held to the same rules as one loaded from disk. **An empty fleet is refused**,
   because the file is generated and a generator that fails open would otherwise
   stop every warehouse's maintenance on reload. Schedules are crontab(5)

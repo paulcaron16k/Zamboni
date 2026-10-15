@@ -291,7 +291,12 @@ class WorkerConfig:
     #: the real environment win, so a worker inheriting already-loaded keys
     #: would never see a credential rotated in ``.env``. Restoring it per table
     #: makes every table read ``.env`` fresh, exactly as a cron run would.
-    base_environ: Mapping[str, str] = field(default_factory=lambda: dict(os.environ))
+    #:
+    #: Out of the repr: this is a copy of the process environment, so in a
+    #: container it holds every secret the Secret injected. Nothing reprs a
+    #: WorkerConfig today, but a ``%r``, a traceback that prints locals or a
+    #: debug print would have published all of them (ZMBNI-194).
+    base_environ: Mapping[str, str] = field(default_factory=lambda: dict(os.environ), repr=False)
     #: ``module:function`` taking an argv and returning an exit code. The CLI;
     #: replaceable so a test can make a worker crash on cue.
     entry: str = "zamboni.cli:main"
