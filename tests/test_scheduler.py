@@ -22,13 +22,16 @@ from zamboni.scheduler import (
     EVENT,
     MAX_SLEEP,
     PRESSURE,
+    PRESSURE_CHECK,
     REASON_OPERATIONS,
     SCHEDULE,
     Candidate,
     CandidateQueue,
     Scheduler,
+    UnknownReasonError,
     WorkItem,
     run_scheduler,
+    stronger,
 )
 from zamboni.tableconfig import NamespaceSettings, TableConfig, TableSettings
 
@@ -448,6 +451,41 @@ def test_the_reason_sets_nest_so_merging_keeps_the_stronger():
     everything = {op.value for op in RUNBOOK_ORDER}
     event, pressure = set(REASON_OPERATIONS[EVENT]), set(REASON_OPERATIONS[PRESSURE])
     assert pressure <= event <= everything
+
+
+#: Reasons nobody declared: near misses, the pressure *check*'s reason (a job
+#: label, never an offer), and nothing at all.
+UNKNOWN_REASONS = ["Event", "evnt", "SCHEDULE", "", PRESSURE_CHECK]
+
+
+@pytest.mark.parametrize("reason", UNKNOWN_REASONS)
+def test_an_unknown_reason_is_refused_where_it_enters(reason):
+    """ZMBNI-195: an undeclared reason read as "every operation", reclaim
+    included, and ranked as a schedule, so it also won every merge."""
+    with pytest.raises(UnknownReasonError):
+        Candidate("acme", "raw.events", reason)
+    with pytest.raises(UnknownReasonError):
+        WorkItem("acme", "raw.events", reason, TableConfig(warehouse="acme"))
+    for pair in ((reason, SCHEDULE), (PRESSURE, reason)):
+        with pytest.raises(UnknownReasonError):
+            stronger(*pair)
+
+
+def test_the_stronger_of_two_reasons_runs_everything_the_other_does():
+    """Over every declared pair, so a reason added to REASON_OPERATIONS without
+    a strength fails here rather than ranking by accident."""
+    from zamboni.maintenance import RUNBOOK_ORDER
+
+    def runs(reason):
+        operations = REASON_OPERATIONS[reason]
+        return {op.value for op in RUNBOOK_ORDER} if operations is None else set(operations)
+
+    for a in REASON_OPERATIONS:
+        Candidate("acme", "raw.events", a)
+        for b in REASON_OPERATIONS:
+            winner = stronger(a, b)
+            loser = b if winner == a else a
+            assert runs(loser) <= runs(winner)
 
 
 def test_offers_for_a_queued_table_merge_into_the_stronger_reason():

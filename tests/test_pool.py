@@ -30,7 +30,7 @@ from zamboni.pool import (
     size_pool,
     worker_argv,
 )
-from zamboni.scheduler import Candidate, CandidateQueue, WorkItem
+from zamboni.scheduler import Candidate, CandidateQueue, UnknownReasonError, WorkItem
 from zamboni.tableconfig import NamespaceSettings, TableConfig, TableSettings
 
 MiB = 1024 * 1024
@@ -706,3 +706,34 @@ def test_an_event_item_runs_only_the_write_driven_operations(tmp_path):
 def test_a_scheduled_item_runs_everything_the_profile_enables(tmp_path):
     argv = worker_argv(item(), WorkerConfig(workdir=tmp_path), tmp_path / "t", tmp_path / "r")
     assert "--operations" not in argv
+
+
+@pytest.mark.parametrize("reason", ["Event", "evnt", "pressure-check"])
+def test_an_unknown_reason_never_reaches_a_worker_as_every_operation(tmp_path, reason):
+    """ZMBNI-195. `WorkItem` refuses an unknown reason on construction, but a
+    work item reaches its worker by pickle, and unpickling a dataclass does not
+    run `__post_init__` -- so the argv is the second place it is refused. It
+    used to come out with no `--operations`: expire and remove-orphans, with
+    `--yes` when the service had it."""
+    import pickle
+
+    work = item()
+    object.__setattr__(work, "reason", reason)
+    arrived = pickle.loads(pickle.dumps(work))
+    assert arrived.reason == reason, "unpickling skipped the constructor's check"
+
+    with pytest.raises(UnknownReasonError):
+        worker_argv(
+            arrived, WorkerConfig(commit=True, workdir=tmp_path), tmp_path / "t", tmp_path / "r"
+        )
+
+
+def test_every_declared_reason_runs_exactly_its_operations(tmp_path):
+    """Derived from REASON_OPERATIONS, so a new reason is covered by adding it."""
+    from zamboni.cli import _build_parser
+    from zamboni.scheduler import REASON_OPERATIONS
+
+    for reason, operations in REASON_OPERATIONS.items():
+        work = WorkItem("acme", "raw.events", reason, table_config("events"))
+        argv = worker_argv(work, WorkerConfig(workdir=tmp_path), tmp_path / "t", tmp_path / "r")
+        assert _build_parser().parse_args(argv).operations == operations

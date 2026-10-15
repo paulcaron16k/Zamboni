@@ -61,7 +61,7 @@ from pathlib import Path
 from typing import Any
 
 from .fleet import FleetConfig
-from .scheduler import REASON_OPERATIONS, Candidate, CandidateQueue, PressureCheck, WorkItem
+from .scheduler import Candidate, CandidateQueue, PressureCheck, WorkItem, operations_for
 
 logger = logging.getLogger(__name__)
 
@@ -354,7 +354,9 @@ def worker_argv(item: Job, config: WorkerConfig, table_config: Path, record: Pat
             "--threads",
             str(config.threads),
         ]
-        if (operations := REASON_OPERATIONS.get(item.reason)) is not None:
+        # Not `.get`: a reason missing from the table would read as None, which
+        # means every operation, reclaim included (ZMBNI-195).
+        if (operations := operations_for(item.reason)) is not None:
             argv += ["--operations", ",".join(operations)]
         if config.duckdb_memory_bytes is not None:
             argv += ["--duckdb-memory-limit-bytes", str(config.duckdb_memory_bytes)]

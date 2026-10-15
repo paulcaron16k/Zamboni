@@ -143,7 +143,10 @@ Two categories beyond the usual set, because this tool deletes files:
   it yet. A per-warehouse cron tick offers every table to a queue that
   coalesces per table and refuses one already in flight; whether a table needs
   work is still decided only by `maintain()`'s due-check, so no scheduling path
-  can bypass it.
+  can bypass it. A reason it does not declare is refused where it enters and
+  again where a worker's command line is built, rather than read as "every
+  operation", which would have included `expire` and `remove-orphans`
+  (ZMBNI-195, found by the release's security review).
 
 - **`zamboni serve`** — maintain a fleet from a fleet file on its own schedule,
   with no crontab (ZMBNI-122, completing phase 4 of event-driven maintenance).
