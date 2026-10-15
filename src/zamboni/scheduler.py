@@ -81,9 +81,38 @@ _STRENGTH = {SCHEDULE: 2, EVENT: 1, PRESSURE: 0}
 _REOFFER_AFTER_RUN = frozenset({EVENT})
 
 
+class UnknownReasonError(ValueError):
+    """A work reason :data:`REASON_OPERATIONS` does not name."""
+
+
+def operations_for(reason: str) -> tuple[str, ...] | None:
+    """The operations ``reason`` runs; ``None`` is every one the profile enables.
+
+    **Refuses a reason it does not know** rather than answering ``None``. A
+    lookup that defaulted would read a misspelt ``"Event"`` as "every
+    operation" -- `expire` and `remove-orphans` included, and with ``--yes``
+    when the service has it -- so a typo would widen a run to the reclaim
+    operations instead of failing it (ZMBNI-195, found by the 0.6.0 security
+    review). Unreachable while every reason is one of the constants above; it
+    stops being so the first time a reason arrives as a string.
+    """
+    try:
+        return REASON_OPERATIONS[reason]
+    except KeyError:
+        raise UnknownReasonError(
+            f"unknown work reason {reason!r}; known: {', '.join(sorted(REASON_OPERATIONS))}"
+        ) from None
+
+
 def stronger(a: str, b: str) -> str:
-    """The reason whose operations include the other's."""
-    return a if _STRENGTH.get(a, 2) >= _STRENGTH.get(b, 2) else b
+    """The reason whose operations include the other's.
+
+    An unknown reason is refused, not ranked: it used to rank as a schedule,
+    the strongest, and so win every merge.
+    """
+    for reason in (a, b):
+        operations_for(reason)
+    return a if _STRENGTH[a] >= _STRENGTH[b] else b
 
 
 @dataclass(frozen=True)
@@ -95,6 +124,9 @@ class Candidate:
     #: Why it was offered: ``"schedule"``, ``"event"`` or ``"pressure"``. Decides
     #: which operations run (:data:`REASON_OPERATIONS`), never whether.
     reason: str = SCHEDULE
+
+    def __post_init__(self) -> None:
+        operations_for(self.reason)
 
     @property
     def key(self) -> tuple[str, str]:
@@ -116,6 +148,9 @@ class WorkItem:
     table_config: TableConfig
     #: The warehouse's own catalog URI, or ``None`` for the profile's.
     uri: str | None = None
+
+    def __post_init__(self) -> None:
+        operations_for(self.reason)
 
     @property
     def key(self) -> tuple[str, str]:
