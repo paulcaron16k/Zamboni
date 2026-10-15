@@ -21,6 +21,8 @@ from zamboni.health import (
     table_health,
 )
 
+from .conftest import REORDERINGS
+
 
 def test_reads_the_signals_from_the_snapshot_summary(unpartitioned):
     health = table_health(unpartitioned)
@@ -203,6 +205,56 @@ def test_the_newest_stamp_wins_not_the_first(session, unpartitioned):
 
     assert later.snapshot_id != first.snapshot_id, "the watermark did not advance"
     assert later.written_since is False, "the rewrite is the newest snapshot"
+
+
+@pytest.mark.parametrize("reorder", REORDERINGS.values(), ids=REORDERINGS.keys())
+def test_the_watermark_does_not_depend_on_the_order_snapshots_are_listed_in(
+    session, unpartitioned, reorder
+):
+    """The same table, listed in another order, has the same watermark (ZMBNI-192).
+
+    Lakekeeper returns `metadata.snapshots` in a different order on every load.
+    Read by position, this table -- compacted, then written twice -- was
+    reported anywhere from 0 to 7 writes behind, and at 0 the run skipped it
+    as unchanged.
+    """
+    from zamboni.compactor import TableCompactor
+    from zamboni.config import CompactionConfig
+
+    from .conftest import batch, reordered
+
+    TableCompactor(session, "db.unpartitioned", CompactionConfig(min_input_files=2)).execute()
+    for start in (900, 910):
+        session.catalog.load_table("db.unpartitioned").append(batch(start, 5))
+    tbl = session.catalog.load_table("db.unpartitioned")
+    listed = maintenance_watermark(tbl)
+    assert listed.snapshots_since == 2, "the SQL catalog lists in commit order"
+
+    assert maintenance_watermark(reordered(tbl, reorder)) == listed
+
+
+def test_commit_order_is_the_sequence_number_not_the_clock(unpartitioned):
+    """A writer's clock can run backwards; the sequence number cannot.
+
+    Every timestamp is reversed against commit order here, as a writer with a
+    skewed clock would leave them, and the order still follows the commits.
+    """
+    from zamboni.health import commit_order
+
+    from .conftest import reordered
+
+    def clocks_backwards(snapshots: list) -> list:
+        stamps = sorted(s.timestamp_ms for s in snapshots)
+        return [
+            s.model_copy(update={"timestamp_ms": stamp})
+            for s, stamp in zip(snapshots, reversed(stamps), strict=True)
+        ]
+
+    tbl = reordered(unpartitioned, clocks_backwards)
+    committed = [s.snapshot_id for s in unpartitioned.metadata.snapshots]
+
+    shuffled = REORDERINGS["shuffled-0"](list(tbl.metadata.snapshots))
+    assert [s.snapshot_id for s in commit_order(shuffled)] == committed
 
 
 # -- the stamp vocabulary (ZMBNI-135) ------------------------------------

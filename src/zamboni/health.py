@@ -47,7 +47,10 @@ from typing import TYPE_CHECKING
 from .units import human_bytes
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from pyiceberg.table import Table
+    from pyiceberg.table.snapshots import Snapshot
 
 #: The summary key every snapshot-producing operation stamps. Three of the six
 #: operations produce a snapshot at all -- compaction, `rewrite-manifests` and
@@ -324,16 +327,39 @@ class Watermark:
         return self.snapshots_since > 0
 
 
+def commit_order(snapshots: Iterable[Snapshot]) -> list[Snapshot]:
+    """The snapshots oldest commit first, whatever order the catalog sent them in.
+
+    `metadata.snapshots` is not in commit order. The spec promises no order for
+    it, and Lakekeeper (v0.13.1) returns a different one on every load: measured
+    on the dev stack, a table maintained two appends ago had its watermark read
+    as anything from 0 to 7 writes back over 50 loads (ZMBNI-192). The SQL
+    catalog happens to keep append order, which is how reading list position as
+    commit order went unnoticed.
+
+    The sequence number is commit order. From format v2 every commit takes the
+    table's `last-sequence-number` + 1 (PyIceberg:
+    `TableMetadata.next_sequence_number`), so it is unique and increasing across
+    every branch. Not `timestamp_ms`: that comes from whichever client
+    committed, and a writer with a skewed clock would reorder history -- the
+    same concern is why `maintainers/spark.py` documents its `older_than`
+    literal as the *client's* clock.
+
+    On v1 every sequence number is 0, and the sort, being stable, leaves the
+    catalog's order as it was: no worse than before, and no better on a catalog
+    that reorders. Compaction refuses v1 (`profile.py`) but `rewrite-manifests`
+    and `remove-dangling-deletes` do not check, so a v1 table can carry a stamp.
+    """
+    return sorted(snapshots, key=lambda snapshot: snapshot.sequence_number or 0)
+
+
 def maintenance_watermark(tbl: Table) -> Watermark:
     """Read the last-maintenance mark, and the writes after it, from metadata.
 
-    Ordered by position in `metadata.snapshots` rather than by `timestamp_ms`,
-    deliberately: that list is append order, while timestamps come from whichever
-    client committed and a writer with a skewed clock could otherwise reorder
-    history. The same concern is why `maintainers/spark.py` documents its
-    `older_than` literal as the *client's* clock.
+    "After" is commit order, which :func:`commit_order` takes from the sequence
+    numbers -- never from position in `metadata.snapshots`, which has none.
     """
-    snapshots = list(tbl.metadata.snapshots)
+    snapshots = commit_order(tbl.metadata.snapshots)
 
     newest_stamped: tuple[int, int, int, str] | None = None
     for position, snapshot in enumerate(snapshots):

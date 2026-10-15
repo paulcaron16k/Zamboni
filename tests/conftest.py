@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import os
+import random
+from collections.abc import Callable
 from typing import Any, NamedTuple
 
 import pyarrow as pa
 import pytest
 from pyiceberg.partitioning import PartitionField, PartitionSpec
 from pyiceberg.schema import Schema
+from pyiceberg.table import Table
 from pyiceberg.table.sorting import NullOrder, SortDirection, SortField, SortOrder
 from pyiceberg.transforms import BucketTransform, IdentityTransform
 from pyiceberg.types import IntegerType, NestedField, StringType
@@ -65,6 +68,36 @@ def batch(start: int, count: int, category: str = "a") -> pa.Table:
         },
         schema=ARROW_SCHEMA,
     )
+
+
+#: Ways a catalog may list `metadata.snapshots`, none of them commit order.
+#: Reversed and rotated are there because each moves every stamp's position,
+#: so code reading position as commit order fails on them for certain; the
+#: shuffles are what Lakekeeper actually does (ZMBNI-192).
+REORDERINGS: dict[str, Callable[[list], list]] = {
+    "reversed": lambda snapshots: snapshots[::-1],
+    "rotated": lambda snapshots: snapshots[1:] + snapshots[:1],
+    **{
+        f"shuffled-{seed}": lambda snapshots, seed=seed: random.Random(seed).sample(
+            snapshots, len(snapshots)
+        )
+        for seed in range(5)
+    },
+}
+
+
+def reordered(tbl: Table, reorder: Callable[[list], list]) -> Table:
+    """`tbl` as a catalog that does not keep snapshot order would return it.
+
+    The SQL catalog these tests run on happens to list `metadata.snapshots` in
+    append order, and Lakekeeper lists it in a different order on every load --
+    so code that read position as commit order passed here and failed there.
+    Only the list is rearranged; every snapshot, its sequence number included,
+    is the one the catalog committed.
+    """
+    snapshots = reorder(list(tbl.metadata.snapshots))
+    metadata = tbl.metadata.model_copy(update={"snapshots": snapshots})
+    return Table(tbl.name(), metadata, tbl.metadata_location, tbl.io, tbl.catalog)
 
 
 @pytest.fixture

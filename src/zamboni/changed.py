@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING
 
 from pyiceberg.manifest import DataFileContent
 
-from .health import maintenance_watermark
+from .health import commit_order, maintenance_watermark
 
 if TYPE_CHECKING:  # pragma: no cover
     from pyiceberg.table import Table
@@ -102,15 +102,17 @@ def _snapshots_since_watermark(tbl: Table) -> list | None:
     whose stamp has been expired away. Both mean "everything is potentially
     stale", and the caller must widen rather than narrow.
 
-    Ordered by **position** in `metadata.snapshots`, matching
-    `maintenance_watermark`, because that list is append order while timestamps
-    come from whichever client committed.
+    "After" in :func:`~zamboni.health.commit_order`, the same order
+    `maintenance_watermark` counts in -- never position in `metadata.snapshots`,
+    which a catalog may return in any order. Taken from position, this was a
+    random subset on Lakekeeper, so compaction could miss written partitions
+    (ZMBNI-192).
     """
     mark = maintenance_watermark(tbl)
     if not mark.maintained or mark.snapshot_id is None:
         return None
 
-    snapshots = list(tbl.metadata.snapshots)
+    snapshots = commit_order(tbl.metadata.snapshots)
     for position, snapshot in enumerate(snapshots):
         if snapshot.snapshot_id == mark.snapshot_id:
             return snapshots[position + 1 :]
