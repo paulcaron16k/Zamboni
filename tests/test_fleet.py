@@ -331,6 +331,32 @@ def test_a_credential_is_refused_by_name(tmp_path, key):
             FleetConfig.load(write_fleet(tmp_path, doc))
 
 
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "https://svc:s3cr3t-planted-194@catalog.internal/catalog",
+        "https://s3cr3t-planted-194@catalog.internal/catalog",
+        "svc:s3cr3t-planted-194@catalog.internal/catalog",
+    ],
+)
+def test_a_credential_inside_the_uri_is_refused_without_repeating_it(tmp_path, uri):
+    """ZMBNI-194: the key-name check above cannot see a password inside a value,
+    and the fleet file is never mode-checked, so the URI is refused on its own.
+    requests would send that userinfo as basic auth, so it is a credential in
+    every sense that matters."""
+    with pytest.raises(FleetConfigError) as caught:
+        FleetConfig.load(write_fleet(tmp_path, {"warehouses": [entry(uri=uri)]}))
+    assert "credentials" in str(caught.value)
+    assert "s3cr3t-planted-194" not in str(caught.value)
+
+
+def test_a_uri_with_an_at_sign_only_in_its_path_is_accepted(tmp_path):
+    uri = "https://catalog.internal/catalog/team@acme"
+    assert (
+        FleetConfig.load(write_fleet(tmp_path, {"warehouses": [entry(uri=uri)]}))["acme"].uri == uri
+    )
+
+
 def test_an_unquoted_star_schedule_says_to_quote_it(tmp_path):
     path = tmp_path / "fleet.yaml"
     path.write_text("warehouses:\n  - name: acme\n    schedule: */5 * * * *\n")

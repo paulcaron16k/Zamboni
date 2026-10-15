@@ -44,6 +44,7 @@ from typing import Any
 from .pressure import PressureSettings
 from .settings import SECRET_PROFILE_KEYS
 from .tableconfig import TableConfig, TableConfigError
+from .urls import carries_userinfo
 
 #: The fleet file's own format version, independent of table-config's.
 FLEET_VERSION = 1
@@ -359,6 +360,14 @@ class FleetWarehouse:
             raise FleetConfigError(
                 f"warehouse {self.name!r}: 'uri' must be a non-empty string, or omitted "
                 "to use the profile's"
+            )
+        # The fleet file refuses credential keys and is never mode-checked, so
+        # a password inside the URI would be the one secret in a file meant to
+        # be committed (ZMBNI-194). Not echoed: the URI is the secret.
+        if self.uri is not None and carries_userinfo(self.uri):
+            raise FleetConfigError(
+                f"warehouse {self.name!r}: 'uri' has credentials written into it. The "
+                "fleet file holds none; put the catalog credential in zamboni.yml or .env"
             )
         if not isinstance(self.table_config, TableConfig):
             raise FleetConfigError(f"warehouse {self.name!r}: table_config must be a TableConfig")

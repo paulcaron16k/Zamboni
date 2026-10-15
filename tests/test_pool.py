@@ -252,6 +252,16 @@ def test_every_table_starts_from_the_environment_the_worker_was_given(tmp_path):
     assert second.record["marker"] is None
 
 
+def test_the_environment_a_worker_is_given_stays_out_of_its_repr(tmp_path, monkeypatch):
+    """ZMBNI-194: `base_environ` is a copy of the process environment, every
+    injected secret included, on a dataclass whose repr printed it whole."""
+    monkeypatch.setenv("ZAMBONI_NATS_PASSWORD", "s3cr3t-planted-194")
+    config = WorkerConfig(workdir=tmp_path)
+
+    assert config.base_environ["ZAMBONI_NATS_PASSWORD"] == "s3cr3t-planted-194"
+    assert "s3cr3t-planted-194" not in repr(config)
+
+
 def test_a_worker_is_recycled_after_its_quota_of_tables(tmp_path):
     results = run_items(tmp_path, [item("raw.a"), item("raw.b"), item("raw.c")], recycle_after=2)
     pids = [r.record["pid"] for r in results]

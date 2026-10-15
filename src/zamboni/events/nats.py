@@ -39,6 +39,8 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any
 
+from ..urls import carries_userinfo
+
 if TYPE_CHECKING:
     from nats.aio.client import Client
     from nats.aio.msg import Msg
@@ -102,6 +104,16 @@ class NatsSettings:
     def __post_init__(self) -> None:
         if not self.servers or not all(self.servers):
             raise NatsConfigError("nats.servers: at least one server URL is required")
+        # Refused here rather than in `from_mapping`, so a caller constructing
+        # the settings directly is held to it too. The URL is not repeated in
+        # the message: it is the secret.
+        for position, server in enumerate(self.servers, start=1):
+            if carries_userinfo(server):
+                raise NatsConfigError(
+                    f"nats.servers: server {position} has credentials written into its "
+                    "URL, where they would be logged and shown. Put them in "
+                    "nats.username and nats.password, or nats.token, instead"
+                )
         if not self.subject or re.search(r"\s", self.subject):
             raise NatsConfigError(f"nats.subject: {self.subject!r} is not a NATS subject")
         if self.token and (self.username or self.password):
