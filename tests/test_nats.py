@@ -124,6 +124,61 @@ def test_secrets_stay_out_of_the_repr():
     assert "svc" in repr(s), "a username is not a secret, and helps debugging"
 
 
+#: Planted in each refused server URL, and looked for in everything that refuses it.
+PLANTED = "s3cr3t-planted-194"
+
+#: Credentials in every form nats-py accepts them, the schemeless ones included.
+URLS_WITH_CREDENTIALS = [
+    f"nats://alice:{PLANTED}@broker:4222",
+    f"tls://alice:{PLANTED}@broker:4222",
+    f"ws://alice:{PLANTED}@broker:80",
+    f"nats://{PLANTED}@broker:4222",
+    f"alice:{PLANTED}@broker:4222",
+    f"{PLANTED}@broker",
+]
+URLS_WITHOUT = ["nats://broker:4222", "tls://broker", "ws://broker:80/a@b", "broker:4222", "broker"]
+
+
+@pytest.mark.parametrize("url", URLS_WITH_CREDENTIALS + URLS_WITHOUT)
+def test_what_is_refused_is_what_nats_py_would_authenticate_with(url):
+    """The refusal and nats-py agree on what counts as a credential.
+
+    Asked of nats-py's own parser rather than listed by hand, so the
+    schemeless forms -- which `Client._parse_server_uri` prefixes with
+    ``nats://`` -- cannot be missed by one side and honoured by the other.
+    """
+    from nats.aio.client import Client
+
+    parsed = Client._parse_server_uri(url)
+    authenticates = parsed.username is not None or parsed.password is not None
+
+    try:
+        NatsSettings(servers=(url,), subject=SUBJECT)
+        refused = False
+    except NatsConfigError:
+        refused = True
+
+    assert refused == authenticates
+
+
+@pytest.mark.parametrize("url", URLS_WITH_CREDENTIALS)
+@pytest.mark.parametrize("position", [0, 1])
+def test_credentials_in_a_server_url_are_refused_without_repeating_them(url, position):
+    """ZMBNI-194: a password in the URL was logged at every serve start, shown
+    in repr(Profile), and invisible to the profile's permission check. Refused
+    at load, so none of the places a URL is shown can see one."""
+    servers = ["nats://other:4222"]
+    servers.insert(position, url)
+
+    with pytest.raises(NatsConfigError) as caught:
+        NatsSettings.from_mapping({"servers": ",".join(servers), "subject": SUBJECT})
+
+    message = str(caught.value)
+    assert PLANTED not in message, "the refusal echoed the secret it refused"
+    assert f"server {position + 1}" in message
+    assert "nats.password" in message and "nats.token" in message
+
+
 # -- names on the broker ----------------------------------------------------------------------
 
 

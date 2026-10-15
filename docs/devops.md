@@ -664,7 +664,10 @@ nats:
 Every key has a `ZAMBONI_NATS_*` variable that overrides it alone (env.sample
 lists them), so the servers and subject can sit in a committed ConfigMap and only
 the password or token come from the Secret. A password or token written into the
-file makes it a credential file, with §3's mode rule.
+file makes it a credential file, with §3's mode rule. **Not in a server URL:**
+`nats://zamboni:pw@nats-0.nats:4222` is refused at start (exit 2), because a URL
+is what gets logged and shown, and the mode rule cannot see a secret inside one
+(`test_a_credential_in_a_nats_server_url_is_refused_whatever_the_file_mode`).
 
 **What an event does — and does not.** A table's events are coalesced until it
 has been quiet for 5 minutes, or 30 minutes after the first, whichever is sooner;

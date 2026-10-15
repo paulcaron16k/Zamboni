@@ -439,3 +439,29 @@ def test_a_nats_secret_makes_the_profile_a_credential_file(tmp_path, no_nats_env
     path.chmod(0o600)
     profile = settings.load_profile(path)
     assert secret.split(": ")[1] not in repr(profile)
+
+
+@pytest.mark.parametrize("source", ["file", "environment"])
+def test_a_credential_in_a_nats_server_url_is_refused_whatever_the_file_mode(
+    tmp_path, no_nats_env, monkeypatch, source
+):
+    """ZMBNI-194, found by the 0.6.0 security review. The secret-key detector
+    matches key names, so a password inside `servers` let a 0644 profile load,
+    and `repr(profile)` then showed it. Refused before either can happen, by
+    either route the setting arrives."""
+    secret = "s3cr3t-planted-194"
+    url = f"nats://svc:{secret}@a:4222"
+    block = "nats:\n  subject: s.t\n"
+    if source == "file":
+        block += f"  servers: {url}\n"
+    else:
+        monkeypatch.setenv("ZAMBONI_NATS_SERVERS", url)
+    path = write(tmp_path, "zamboni.yml", block)
+    path.chmod(0o644)
+
+    with pytest.raises(settings.ProfileError) as caught:
+        settings.load_profile(path)
+
+    assert "nats.password" in str(caught.value)
+    assert secret not in str(caught.value)
+    assert secret not in str(caught.value.__cause__)
