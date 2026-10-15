@@ -24,6 +24,8 @@ from zamboni.changed import (
 from zamboni.compactor import TableCompactor
 from zamboni.config import CompactionConfig
 
+from .conftest import REORDERINGS, reordered
+
 SCHEMA = Schema(
     NestedField(1, "id", IntegerType(), required=False),
     NestedField(2, "category", StringType(), required=False),
@@ -223,6 +225,27 @@ def test_a_burst_of_writes_is_one_union(session, table):
 
     assert changed.paths == frozenset({"category=a", "category=b"})
     assert changed.snapshots == 3
+
+
+@pytest.mark.parametrize("reorder", REORDERINGS.values(), ids=REORDERINGS.keys())
+def test_the_changed_set_does_not_depend_on_the_order_snapshots_are_listed_in(
+    session, table, reorder
+):
+    """The same table, listed in another order, has the same changed set (ZMBNI-192).
+
+    Taken by list position on Lakekeeper, which reorders `metadata.snapshots` on
+    every load, "since the watermark" was a random subset of the history: the
+    fixture's own pre-compaction appends could count as new, and the writes
+    after it could be dropped.
+    """
+    for categories in ("ab", "c"):
+        reload(session, table).append(rows(categories))
+    tbl = reload(session, table)
+    listed = changed_partitions(tbl)
+    assert listed.paths == frozenset({"category=a", "category=b", "category=c"})
+    assert listed.snapshots == 2, "the SQL catalog lists in commit order"
+
+    assert changed_partitions(reordered(tbl, reorder)) == listed
 
 
 # -- restricting compaction to the changed set (ZMBNI-126) ---------------

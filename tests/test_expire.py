@@ -20,6 +20,7 @@ from zamboni.expire import (
     decide_retention,
     files_of_snapshots,
 )
+from zamboni.health import commit_order
 from zamboni.reachable import reachable_files
 
 from .conftest import SCHEMA, batch
@@ -349,8 +350,12 @@ def test_files_of_snapshots_covers_manifests_and_lists(aged):
 
 
 def tag_oldest(tbl, name: str) -> int:
-    """Tag the oldest snapshot, so it is pinned by something other than main."""
-    oldest = tbl.metadata.snapshots[0].snapshot_id
+    """Tag the oldest snapshot, so it is pinned by something other than main.
+
+    Oldest by commit order: `metadata.snapshots` has none, and the first entry
+    is the oldest only on a catalog that happens to keep append order (ZMBNI-192).
+    """
+    oldest = commit_order(tbl.metadata.snapshots)[0].snapshot_id
     tbl.manage_snapshots().create_tag(snapshot_id=oldest, tag_name=name).commit()
     return oldest
 
@@ -381,7 +386,7 @@ def test_a_stale_tag_is_dropped_and_its_snapshot_expires(session, aged):
 
 def test_a_stale_branch_is_dropped_too(session, aged):
     """Branches and tags are removed through different PyIceberg calls."""
-    oldest = aged.metadata.snapshots[0].snapshot_id
+    oldest = commit_order(aged.metadata.snapshots)[0].snapshot_id
     aged.manage_snapshots().create_branch(snapshot_id=oldest, branch_name="abandoned").commit()
     tbl = session.table("db.aged")
     assert tbl.metadata.refs["abandoned"].snapshot_ref_type == SnapshotRefType.BRANCH

@@ -1095,3 +1095,47 @@ def test_lakekeeper_publishes_one_update_table_per_commit_in_the_captured_shape(
     ids = [uuid.UUID(e["id"]) for e in events]
     assert {i.version for i in ids} == {7}
     assert len(set(ids)) == len(ids)
+
+
+# -- the watermark on a catalog that reorders snapshots (#192) -------------
+
+
+def test_the_watermark_and_changed_set_hold_on_every_load(session, table):
+    """Lakekeeper lists `metadata.snapshots` in a different order on every load.
+
+    Read by position, this table -- compacted, then written twice -- was
+    reported 0 to 7 writes behind over 50 loads, and at 0 a run skipped it as
+    unchanged. The unit tests reorder the list by hand
+    (tests/test_health.py, tests/test_changed.py); this is the catalog doing it.
+
+    The first assertion is about Lakekeeper, not Zamboni: if a release starts
+    keeping commit order, this test can no longer catch the bug, and says so
+    rather than passing for the wrong reason.
+    """
+    from zamboni.changed import changed_partitions
+    from zamboni.health import maintenance_watermark
+
+    TableCompactor(session, table, CompactionConfig()).execute()
+    for category in ("c", "d"):
+        session.table(table).append(
+            pa.table(
+                {"id": pa.array([100], type=pa.int32()), "category": pa.array([category])},
+                schema=ARROW,
+            )
+        )
+
+    loads = [session.table(table) for _ in range(20)]
+
+    orders = {tuple(s.snapshot_id for s in t.metadata.snapshots) for t in loads}
+    assert len(orders) > 1, (
+        "Lakekeeper listed the snapshots in one order on 20 loads, so this test no "
+        "longer exercises a reordering catalog; tests/test_health.py still does"
+    )
+    for tbl in loads:
+        mark = maintenance_watermark(tbl)
+        assert (mark.maintained, mark.snapshots_since) == (True, 2), (
+            "two appends since the compaction, whatever order the catalog listed them in"
+        )
+        changed = changed_partitions(tbl)
+        assert changed.paths == frozenset({"category=c", "category=d"})
+        assert changed.snapshots == 2
