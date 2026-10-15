@@ -402,6 +402,19 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **On Lakekeeper, a table written since its last maintenance could be skipped
+  as unchanged, or compacted only in part** (ZMBNI-192). The maintenance
+  watermark and the changed-partition set read a snapshot's position in
+  `metadata.snapshots` as commit order. The spec gives that list no order, and
+  Lakekeeper returns it in a different one on every load: a table maintained two
+  writes ago read as anything from 0 to 7 writes behind over 50 loads, and at 0
+  the run reported `nothing written since` and did nothing. With
+  `only_changed_partitions`, the partitions taken as changed were a
+  random part of the table's history. Both now order by sequence number, which
+  each commit increments from format v2. The SQL catalog happens to keep append
+  order, which is why no unit test caught it. Expiry and orphan removal look
+  snapshots up by id, so no data was at risk.
+
 - **A `zamboni serve` worker that died during startup broke its slot for good**
   (ZMBNI-155). The parent saw `ConnectionResetError` rather than `EOFError` -- the
   worker exited with its first job unread -- and only `EOFError` was handled, so
