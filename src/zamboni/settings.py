@@ -44,6 +44,7 @@ without editing it.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -452,6 +453,37 @@ def find_profile(explicit: str | None = None, *, start: Path | None = None) -> P
     return None
 
 
+#: A Python repr of a string, as PyYAML quotes content into its messages.
+_QUOTED = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
+
+
+def describe_yaml_error(exc: Exception) -> str:
+    """Where a YAML file failed to parse and why, without quoting the file.
+
+    `str()` of a PyYAML error, for text it parsed, ends with a snippet of the
+    offending line -- and a profile may hold credentials, so a missing quote
+    after `credential: "client:...` printed the secret (ZMBNI-207). The
+    `problem` and `context` fields are not safe either: an undefined alias, an
+    unknown tag and a duplicate anchor are each quoted by name, and
+    `token: *s3cr3t` is an undefined alias. All checked against PyYAML 6.0.3.
+    So: the position, and PyYAML's description with anything quoted replaced.
+    """
+
+    def at(mark) -> str:
+        return f"line {mark.line + 1}, column {mark.column + 1}"
+
+    problem_mark = getattr(exc, "problem_mark", None)
+    context_mark = getattr(exc, "context_mark", None)
+    where = at(problem_mark) if problem_mark else "position unknown"
+    # An unclosed quote fails at the end of the file; where the construct began
+    # is the line to look at.
+    if context_mark and (problem_mark is None or context_mark.line != problem_mark.line):
+        where += f" (in what starts at {at(context_mark)})"
+    parts = [p for p in (getattr(exc, "context", None), getattr(exc, "problem", None)) if p]
+    what = _QUOTED.sub("'...'", "; ".join(parts)) if parts else type(exc).__name__
+    return f"{where}: {what}"
+
+
 def load_profile(path: Path | None) -> Profile:
     """Parse a profile, rejecting what it cannot honour.
 
@@ -468,7 +500,9 @@ def load_profile(path: Path | None) -> Profile:
     try:
         raw = yaml.safe_load(path.read_text()) or {}
     except yaml.YAMLError as exc:
-        raise ProfileError(f"{path}: not valid YAML: {exc}") from exc
+        # `from None`: the original carries the text describe_yaml_error leaves
+        # out, and a chained cause prints in any traceback or logger.exception.
+        raise ProfileError(f"{path}: not valid YAML: {describe_yaml_error(exc)}") from None
     if not isinstance(raw, dict):
         raise ProfileError(f"{path}: expected a mapping at the top level")
 

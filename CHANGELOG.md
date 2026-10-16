@@ -459,6 +459,19 @@ Two categories beyond the usual set, because this tool deletes files:
   wrong thing, now works too. `sort_expression` is unchanged: it is SQL by
   design, and only an operator can set it.
 
+- **A `zamboni.yml` that was not valid YAML could print a credential in the
+  error** (ZMBNI-207; found by the 0.6.0 release security review, and present in
+  earlier releases). PyYAML's message quotes the line it stopped at. A profile
+  may hold credentials, so `credential: "client:...` with no closing quote put
+  the secret on stderr. PyYAML's own description also names some content: an
+  undefined alias, as in `token: *...`, an unknown tag, or a duplicate anchor.
+  The error now gives the line and column, where an unclosed construct began,
+  and PyYAML's description with anything quoted replaced by `'...'`. It is no
+  longer chained to PyYAML's exception, so a traceback does not carry the
+  original. The fleet file's error, new in this release, does the same. A fleet
+  file holds no credentials by contract, but under `serve` that message also
+  goes to the state file and the error log.
+
 - **After one sorted rewrite spilled to disk, every later sorted rewrite on the
   same session failed** (found writing ZMBNI-186). Once a connection has
   spilled, DuckDB 1.5.5 refuses any `SET temp_directory`, even to the path it
