@@ -35,6 +35,18 @@ Two categories beyond the usual set, because this tool deletes files:
   exported too. A test reads `maintain()`'s exception handling from the source
   and fails if any Zamboni exception it maps to an exit code is not public.
 
+- **`CatalogSession.from_catalog` takes `storage=` and `credential_use=`**
+  (ZMBNI-200, asked for by IWS). An integrator with its own catalog *and* its
+  own object-store credentials could not use `from_catalog`, so it built the
+  dataclass around a bare `duckdb.connect()`. That connection never received
+  `SET threads`, so it took a thread per core, beside whatever else the process
+  serves, and the session's `threads=4` described a connection nobody had
+  configured. `for_lakekeeper` and `for_local` now build through
+  `from_catalog`, so it is the one place a session's connection is set up. A
+  test checks that each constructor's `table()` behaves as the `storage` and
+  `credential_use` fields say. The `CatalogSession` docstring says that direct
+  construction configures nothing. IWS can drop its hand-built connection.
+
 - **The event feed** behind `zamboni serve`'s write-completed path (ZMBNI-124),
   in `zamboni.events.feed`: an `EventSource` protocol for any transport, and an
   `EventFeed` that parses, maps by warehouse name, deduplicates on

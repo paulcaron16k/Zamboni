@@ -161,3 +161,30 @@ def test_the_properties_actually_reach_the_http_session(settings, expected):
     assert catalog._session.verify == expected
     if expected is False:
         assert catalog._session.verify is False, "a truthy 'false' would verify against a filename"
+
+
+def _duckdb_setting(session, name: str):
+    return session.con.execute(f"select current_setting('{name}')").fetchone()[0]
+
+
+def test_from_catalog_with_storage_still_configures_duckdb(tmp_path):
+    """ZMBNI-200. IWS passes its own credentials, which `from_catalog` did not
+    take, so it built the dataclass around a bare `duckdb.connect()` -- every
+    core, DuckDB's own memory default -- while the session's fields said
+    `threads=4`. The settings are read back from DuckDB, not from the fields."""
+    from pyiceberg.catalog import load_catalog
+
+    catalog = load_catalog(
+        "own", type="sql", uri=f"sqlite:///{tmp_path}/c.db", warehouse=f"file://{tmp_path}"
+    )
+    storage = S3Settings(endpoint="http://minio:9000", access_key_id="k", secret_access_key="s")
+
+    session = CatalogSession.from_catalog(
+        catalog, storage=storage, threads=2, memory_limit_bytes=256 * 1024 * 1024
+    )
+    try:
+        assert session.storage is storage
+        assert _duckdb_setting(session, "threads") == 2
+        assert _duckdb_setting(session, "memory_limit") == "256.0 MiB"
+    finally:
+        session.close()
