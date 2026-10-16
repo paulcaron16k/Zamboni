@@ -99,6 +99,21 @@ jobs:
       - name: Build the wheel a consumer would install
         run: uv build --wheel
 
+      # What the README's first line installs: no extras at all. Through 0.6.0
+      # that could not compact -- the safety probes need SQLAlchemy, only the
+      # `sql` extra brought it, an unobserved build is assumed unsafe -- and no
+      # job saw it, because the install below has every extra (ZMBNI-213). Its
+      # own venv, the probe cache off so the answer is measured here, and run
+      # from outside the checkout. `doctor` exits 1 when the build is unusable
+      # (measured on a bare 0.6.0), which fails the step.
+      - name: A no-extras install is usable
+        env:
+          ZAMBONI_NO_PROBE_CACHE: "1"
+        run: |
+          uv venv --python 3.13 /tmp/bare
+          uv pip install --python /tmp/bare/bin/python "$(ls dist/*.whl)"
+          cd "$RUNNER_TEMP" && /tmp/bare/bin/zamboni doctor
+
       - name: Install it from PyPI resolution, with no source redirect
         run: |
           uv venv --python 3.13 /tmp/consumer

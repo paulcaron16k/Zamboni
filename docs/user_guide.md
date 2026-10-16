@@ -545,11 +545,18 @@ Airflow's have to intersect** — and Airflow pins tightly. The `BashOperator` f
 above does not share an interpreter, which is the durable reason to prefer it:
 one installation upgrades without asking the other's permission.
 
-If you do want the in-process form, note that only the `sql` extra brings a
-database driver stack with it. Against a REST catalog — Lakekeeper, Polaris,
-Nessie, Glue — `pip install iceberg-zamboni` shares very little with Airflow, and
-the question rarely arises. `pip install 'iceberg-zamboni[sql]'` into an Airflow
-environment is where to check the resolver's output before trusting it.
+If you do want the in-process form, the dependency to check is **SQLAlchemy**,
+which Airflow uses for its own metadata database. Since 0.6.1 every install of
+Zamboni brings SQLAlchemy 2, through PyIceberg's SQL catalog, because the safety
+probes need it (ZMBNI-213). Against PyPI's metadata, checked 2026-10-16:
+
+| Airflow | Its SQLAlchemy requirement | In-process Zamboni |
+|---|---|---|
+| 3.x (`apache-airflow-core` 3.3.2) | `>=2.0.50` | Resolves |
+| 2.x (`apache-airflow` 2.10.5) | `<2.0,>=1.4.36` | **Does not resolve.** Use the `BashOperator` form, with Zamboni in its own venv or `pipx` |
+
+Whatever the versions, read the resolver's output before trusting an install
+into a shared Airflow environment.
 
 ### What to check on any deployment
 

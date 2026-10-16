@@ -605,7 +605,7 @@ guessed: nothing in the inventory changed, and two things broke anyway.
 
 | Constraint | Consequence |
 |---|---|
-| PyIceberg's SQL-catalog extra pins SQLAlchemy, which a shared site-packages need not satisfy | Everything runs from a locked `uv` venv; nothing resolves against global packages, so no global pin can conflict. Only the `sql` extra pulls SQLAlchemy in — a REST-catalog install never meets the constraint |
+| PyIceberg's SQL-catalog extra pins SQLAlchemy 2, which a shared site-packages need not satisfy | Everything runs from a locked `uv` venv; nothing resolves against global packages, so no global pin can conflict. Since 0.6.1 every install carries it, not only the `sql` extra, because the safety probes need a SQLite catalog (ZMBNI-213). The cost is a host that pins SQLAlchemy 1.x, such as Airflow 2: Zamboni no longer installs into its interpreter, and runs beside it instead ([user_guide.md](user_guide.md)) |
 | The `bin/zamboni` executable pins its Python from `.python-version` | The shipped executable runs the interpreter the tests ran on |
 | Lakekeeper OSS has no maintenance queues | Expiry and orphan removal run from this tool, scheduled by the operator |
 | A remote-signing Lakekeeper warehouse (`sts-enabled: false`, `push-s3-delete-disabled: true`) signs object GET/PUT only | `ListObjectsV2`, `HeadObject` and multi-object `DELETE` are refused. Zamboni therefore reclaims on **its own** object-store credentials rather than the catalog's — see §6.4a — and refuses up front when it has none. Measured in [live-verification.md](live-verification.md) |

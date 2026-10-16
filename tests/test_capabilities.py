@@ -7,7 +7,10 @@ from dataclasses import replace
 
 import pytest
 
-from zamboni.capabilities import PyIcebergCapabilities, detect
+from zamboni.capabilities import CouldNotRun, PyIcebergCapabilities, detect
+
+#: A probe that could not run, as one does on an install without SQLAlchemy.
+MISSING = CouldNotRun("sqlalchemy is not installed")
 
 
 def test_probes_the_installed_build():
@@ -341,15 +344,17 @@ def test_the_structural_answer_still_decides_when_nothing_can_be_observed(monkey
     """
     from zamboni import capabilities
 
-    monkeypatch.setattr(capabilities, "_pruning_behaves", lambda: None)
+    monkeypatch.setattr(capabilities, "_pruning_behaves", lambda: MISSING)
 
     safe, evidence = capabilities._derivation_is_correct(prunes=False)
     assert safe
     assert "not observed" in evidence
+    assert MISSING.why in evidence, "the evidence does not say why nothing was observed"
 
     safe, evidence = capabilities._derivation_is_correct(prunes=True)
     assert not safe
     assert "unknown" in evidence
+    assert MISSING.why in evidence
 
 
 def test_a_pruning_build_is_settled_by_observation(monkeypatch):
@@ -367,16 +372,42 @@ def test_a_pruning_build_is_settled_by_observation(monkeypatch):
 
 
 def test_an_unanswerable_probe_is_treated_as_unsafe(monkeypatch):
-    """`None` means we could not establish the answer, which is not the same as
-    establishing a good one. Refusing costs a skipped run; guessing costs rows."""
+    """`CouldNotRun` means we could not establish the answer, which is not the same
+    as establishing a good one. Refusing costs a skipped run; guessing costs rows."""
     from zamboni import capabilities
 
-    monkeypatch.setattr(capabilities, "_pruning_behaves", lambda: None)
+    monkeypatch.setattr(capabilities, "_pruning_behaves", lambda: MISSING)
 
     safe, evidence = capabilities._derivation_is_correct(prunes=True)
 
     assert not safe
     assert "unknown" in evidence
+
+
+def test_a_missing_sqlalchemy_is_named_in_the_reason_compaction_refuses(monkeypatch):
+    """What a plain install through 0.6.0 saw, with the cause now in the message.
+
+    The behavioural probes build a table on a SQLite catalog. With SQLAlchemy
+    unimportable the build cannot be observed and is assumed unsafe, which
+    stops compaction -- correct, but the reason used to say only "the
+    behavioural probe could not run" (ZMBNI-213). Run for real, not by
+    replacing the probe: `sqlalchemy` is hidden the way a missing module is.
+    """
+    import sys
+
+    from zamboni import capabilities
+
+    monkeypatch.setitem(sys.modules, "sqlalchemy", None)
+    monkeypatch.delitem(sys.modules, "pyiceberg.catalog.sql", raising=False)
+
+    observed = capabilities._pruning_behaves()
+    assert observed == CouldNotRun("sqlalchemy is not installed")
+
+    probed, unobserved = capabilities._probe()
+    reason = probed.unsupported_reason()
+    assert reason is not None and "sqlalchemy is not installed" in reason
+    assert "incorrectly" not in reason, "claimed a defect that was never observed"
+    assert any("sqlalchemy" in gap for gap in unobserved), unobserved
 
 
 def test_the_behavioural_probe_agrees_with_the_installed_build():
@@ -390,7 +421,9 @@ def test_the_behavioural_probe_agrees_with_the_installed_build():
 
     observed = _pruning_behaves()
 
-    assert observed is not None, "the probe could not run; it would report 'unknown'"
+    assert observed in (True, False), (
+        f"the probe could not run ({observed}); it would report 'unknown'"
+    )
     # 0.11.1 does not prune, so correctness here is trivially true; on a 0.12
     # that prunes, this is the real answer.
     assert (

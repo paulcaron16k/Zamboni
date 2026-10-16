@@ -131,6 +131,37 @@ def test_the_rust_core_arrives_with_the_base_install():
     )
 
 
+def test_the_safety_probes_catalog_arrives_with_the_base_install():
+    """SQLAlchemy is installed by a plain `pip install iceberg-zamboni` (ZMBNI-213).
+
+    Two capability probes build a table on a SQLite catalog to observe what the
+    installed PyIceberg does. Without SQLAlchemy they cannot run, an unobserved
+    build is assumed unsafe, and compact, rewrite-manifests and
+    remove-dangling-deletes refuse -- which is what a bare install did through
+    0.6.0, while every test environment, CI's consumer leg included, installed
+    the `sql` extra and never saw it. Asserted on the declaration because this
+    environment always has the extra; CI's bare-install leg checks the result.
+    """
+    import tomllib
+    from pathlib import Path
+
+    from packaging.requirements import Requirement
+
+    declared = [
+        Requirement(r)
+        for r in tomllib.loads(
+            (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text()
+        )["project"]["dependencies"]
+    ]
+    assert any(r.name == "pyiceberg" and "sql-sqlite" in r.extras for r in declared) or any(
+        r.name.lower() == "sqlalchemy" for r in declared
+    ), (
+        "the base dependencies must bring SQLAlchemy -- pyiceberg[sql-sqlite] or "
+        "sqlalchemy directly -- or a bare install cannot run the safety probes "
+        "and refuses to compact"
+    )
+
+
 def test_bucket_partitioned_table_compacts(session, bucketed):
     """The transform that defeats PyIceberg's add_files-based partition inference.
 

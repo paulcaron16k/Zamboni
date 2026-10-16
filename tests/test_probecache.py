@@ -188,15 +188,15 @@ def test_detect_reprobes_when_the_build_moves(monkeypatch):
     capabilities.detect.cache_clear()
     monkeypatch.setattr(probecache, "build_signature", lambda: "build-two")
     other = replace(first, added_files_honour_spec=not first.added_files_honour_spec)
-    monkeypatch.setattr(capabilities, "_probe", lambda: other)
+    monkeypatch.setattr(capabilities, "_probe", lambda: capabilities.Probed(other))
     assert capabilities.detect() == other, "served an answer keyed to a different build"
 
 
 def test_detect_probes_when_the_build_cannot_be_keyed(monkeypatch):
     monkeypatch.setattr(probecache, "build_signature", lambda: None)
-    probed = capabilities._probe()
+    probed = capabilities._probe().capabilities
     marked = replace(probed, pruning_evidence="probed just now")
-    monkeypatch.setattr(capabilities, "_probe", lambda: marked)
+    monkeypatch.setattr(capabilities, "_probe", lambda: capabilities.Probed(marked))
     assert capabilities.detect() == marked
     assert "disabled" in capabilities.cache_status()
 
@@ -206,9 +206,33 @@ def test_the_cache_can_be_turned_off(monkeypatch):
     monkeypatch.setattr(
         probecache, "build_signature", lambda: pytest.fail("consulted the cache anyway")
     )
-    marked = replace(capabilities._probe(), pruning_evidence="probed just now")
-    monkeypatch.setattr(capabilities, "_probe", lambda: marked)
+    marked = replace(capabilities._probe().capabilities, pruning_evidence="probed just now")
+    monkeypatch.setattr(capabilities, "_probe", lambda: capabilities.Probed(marked))
     assert capabilities.detect() == marked
+
+
+def test_an_answer_some_probe_could_not_give_is_not_stored(monkeypatch, tmp_path):
+    """A gap describes this environment, which the key does not cover (ZMBNI-213).
+
+    The key fingerprints PyIceberg and Zamboni. A probe that could not run --
+    SQLAlchemy missing, the temp directory unwritable -- is fixed by changing
+    neither, so a stored "unknown, assume unsafe" would outlive the fix and keep
+    compaction refusing after the operator had installed what was missing.
+    """
+    monkeypatch.setattr(probecache, "build_signature", lambda: "gappy-build")
+    caps = capabilities._probe().capabilities
+    gap = "manifest-pruning probe: sqlalchemy is not installed"
+    monkeypatch.setattr(capabilities, "_probe", lambda: capabilities.Probed(caps, (gap,)))
+
+    assert capabilities.detect() == caps
+    assert probecache.load("gappy-build") is None, "stored an answer a probe could not give"
+    assert gap in capabilities.cache_status(), "doctor would not say why nothing was stored"
+
+    # Once every probe runs, the same build caches as usual.
+    capabilities.detect.cache_clear()
+    monkeypatch.setattr(capabilities, "_probe", lambda: capabilities.Probed(caps))
+    capabilities.detect()
+    assert probecache.load("gappy-build") is not None
 
 
 def test_this_environment_caches_exactly_when_nothing_is_editable():

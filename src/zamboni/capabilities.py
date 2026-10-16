@@ -75,10 +75,51 @@ import logging
 import os
 from dataclasses import asdict, dataclass, fields
 from functools import lru_cache
+from typing import NamedTuple
 
 from . import probecache
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class CouldNotRun:
+    """A behavioural probe that could not run, and why.
+
+    Distinct from a False answer: "this build cannot do it" and "we could not
+    find out" lead an operator to different places. Before ZMBNI-213 this was a
+    bare ``None``, so `doctor` said "could not run" and never what was missing --
+    on a plain install, SQLAlchemy, which made compaction refuse with a reason
+    naming nothing an operator could act on.
+    """
+
+    why: str
+
+    @classmethod
+    def from_exception(cls, exc: BaseException) -> CouldNotRun:
+        if isinstance(exc, ImportError) and exc.name:
+            return cls(f"{exc.name} is not installed")
+        return cls(f"{type(exc).__name__}: {exc}")
+
+
+#: How pruning evidence that was actually measured begins. `_probe` reads it to
+#: tell a measurement from a fallback; tests assert on it.
+OBSERVED = "observed"
+#: How it begins when nothing could be measured and the build is assumed unsafe.
+#: `unsupported_reason` reads it so as not to claim a defect nobody observed.
+UNKNOWN = "unknown"
+
+
+class Probed(NamedTuple):
+    """What `_probe` found, and which probes could not run.
+
+    The gaps are kept beside the capabilities rather than as a field on them,
+    for the reason `_cache_state` is: they describe this environment, not the
+    build, and two probes of one build must compare equal.
+    """
+
+    capabilities: PyIcebergCapabilities
+    unobserved: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -164,6 +205,14 @@ class PyIcebergCapabilities:
             # previous wording asserted a mechanism -- "the producer does not
             # derive that predicate" -- which the probe no longer checks
             # directly, and which was guesswork about somebody else's code.
+            if self.pruning_evidence.startswith(UNKNOWN):
+                # Nothing was measured, so do not claim the defect: say what
+                # stopped the measurement, which is the thing to fix (ZMBNI-213).
+                return (
+                    "this build's manifest pruning could not be verified: "
+                    f"{self.pruning_evidence}. Reinstall iceberg-zamboni so its "
+                    "dependencies are complete, then run `zamboni doctor` again."
+                )
             return (
                 "this build prunes manifests by predicate and does so "
                 f"incorrectly: {self.pruning_evidence}. A manifest holding "
@@ -214,12 +263,12 @@ def detect() -> PyIcebergCapabilities:
 
     if os.environ.get("ZAMBONI_NO_PROBE_CACHE"):
         _cache_state = "disabled (ZAMBONI_NO_PROBE_CACHE)"
-        return _probe()
+        return _probe().capabilities
 
     signature = probecache.build_signature()
     if signature is None:
         _cache_state = probecache.describe(None, hit=False)
-        return _probe()
+        return _probe().capabilities
 
     stored = probecache.load(signature)
     if stored is not None:
@@ -228,7 +277,15 @@ def detect() -> PyIcebergCapabilities:
             _cache_state = probecache.describe(signature, hit=True)
             return restored
 
-    probed = _probe()
+    probed, unobserved = _probe()
+    if unobserved:
+        # Not stored. A probe that could not run is a fact about this
+        # environment -- a missing module, an unwritable temp directory -- and
+        # the key covers only PyIceberg and Zamboni, so a stored "unknown" would
+        # outlive the fix: install the module and the cache still says unsafe
+        # (ZMBNI-213). `doctor` prints this line.
+        _cache_state = f"not stored -- {'; '.join(unobserved)}"
+        return probed
     written = probecache.store(signature, asdict(probed))
     _cache_state = (
         probecache.describe(signature, hit=False)
@@ -254,7 +311,7 @@ def _from_cache(stored: dict) -> PyIcebergCapabilities | None:
         return None
 
 
-def _probe() -> PyIcebergCapabilities:
+def _probe() -> Probed:
     """Ask the installed PyIceberg, every time. The uncached half of `detect`."""
     from importlib.metadata import version
 
@@ -265,8 +322,21 @@ def _probe() -> PyIcebergCapabilities:
         _OverwriteFiles._existing_manifests, "manifest_evaluator", if_unavailable=True
     )
     derives, evidence = _derivation_is_correct(prunes)
+    added_files = _added_files_honour_their_spec()
+    delete_manifests = _delete_manifests_writable()
 
-    return PyIcebergCapabilities(
+    unobserved = tuple(
+        f"{name}: {answer.why}"
+        for name, answer in (
+            ("added-file spec probe", added_files),
+            ("delete-manifest probe", delete_manifests),
+        )
+        if isinstance(answer, CouldNotRun)
+    )
+    if not evidence.startswith(OBSERVED):
+        unobserved = (f"manifest-pruning probe: {evidence}", *unobserved)
+
+    capabilities = PyIcebergCapabilities(
         version=version("pyiceberg"),
         operation_is_injectable="operation"
         in inspect.signature(_SnapshotProducer.__init__).parameters,
@@ -282,13 +352,14 @@ def _probe() -> PyIcebergCapabilities:
         # blocker and let compaction resurrect deleted rows.
         # Unknown -> assume absent. Declaring a layout feature we could not
         # demonstrate is how a configured evolution gets silently ignored.
-        added_files_honour_spec=_added_files_honour_their_spec() is True,
+        added_files_honour_spec=added_files is True,
         equality_deletes_readable=not _guard_anywhere_in_scan_planning(),
         # Unknown -> assume NOT writable, which limits dangling-delete removal
         # to whole manifests. Guessing the other way would let us rewrite a
         # delete manifest into one labelled as data.
-        delete_manifests_writable=_delete_manifests_writable() is True,
+        delete_manifests_writable=delete_manifests is True,
     )
+    return Probed(capabilities, unobserved)
 
 
 def _derivation_is_correct(prunes: bool) -> tuple[bool, str]:
@@ -340,21 +411,27 @@ def _derivation_is_correct(prunes: bool) -> tuple[bool, str]:
     """
     observed = _pruning_behaves()
     if observed is True:
-        return True, "observed -- an overwrite on a transformed partition kept the right rows"
+        return True, f"{OBSERVED} -- an overwrite on a transformed partition kept the right rows"
     if observed is False:
-        return False, "observed -- an overwrite on a transformed partition kept a replaced row"
+        return False, f"{OBSERVED} -- an overwrite on a transformed partition kept a replaced row"
 
     if not prunes:
         # Unobserved, and nothing in the source suggests pruning. Safe, but say
         # that it was not measured -- `doctor` prints this line.
         return (
             True,
-            "not observed -- the probe could not run, and this build shows no sign of pruning",
+            (
+                f"not observed -- the probe could not run ({observed.why}), and this "
+                "build shows no sign of pruning"
+            ),
         )
-    return False, "unknown -- the behavioural probe could not run; assuming unsafe"
+    return (
+        False,
+        f"{UNKNOWN} -- the behavioural probe could not run ({observed.why}); assuming unsafe",
+    )
 
 
-def _pruning_behaves() -> bool | None:
+def _pruning_behaves() -> bool | CouldNotRun:
     """Do the smallest thing that would go wrong, and look at what survived.
 
     Two rows in a day-partitioned table; replace one; count. A build that prunes
@@ -366,9 +443,9 @@ def _pruning_behaves() -> bool | None:
     a data file records its partition values already transformed, so comparing
     a source column against a partition value only holds for identity.
 
-    Returns None when the probe could not run -- no catalog available, no
-    writable temp directory. That is not the same as a bad answer, and the
-    caller treats it as "assume unsafe" rather than as "unsafe".
+    Returns :class:`CouldNotRun` when the probe could not run -- no catalog
+    available, no writable temp directory. That is not the same as a bad answer,
+    and the caller treats it as "assume unsafe" rather than as "unsafe".
     """
     try:
         import datetime as dt
@@ -380,10 +457,11 @@ def _pruning_behaves() -> bool | None:
         from pyiceberg.schema import Schema
         from pyiceberg.transforms import DayTransform
         from pyiceberg.types import IntegerType, NestedField, TimestampType
-    except ImportError:  # pragma: no cover - depends on the install
-        # `sql` is an optional extra; without it there is no catalog to build a
-        # table in, and the question cannot be settled here.
-        return None
+    except ImportError as exc:  # pragma: no cover - depends on the install
+        # Without SQLAlchemy there is no catalog to build a table in, and the
+        # question cannot be settled here. A base dependency since ZMBNI-213, so
+        # this now means a broken install rather than a missing extra.
+        return CouldNotRun.from_exception(exc)
 
     try:
         with tempfile.TemporaryDirectory(prefix="zamboni-probe-") as root:
@@ -418,12 +496,12 @@ def _pruning_behaves() -> bool | None:
             table.refresh()
 
             return sorted(table.scan().to_arrow()["k"].to_pylist()) == [1, 2]
-    except Exception:  # pragma: no cover - any failure means "could not establish"
+    except Exception as exc:  # pragma: no cover - any failure means "could not establish"
         logger.debug("manifest-pruning behavioural probe did not complete", exc_info=True)
-        return None
+        return CouldNotRun.from_exception(exc)
 
 
-def _added_files_honour_their_spec() -> bool | None:
+def _added_files_honour_their_spec() -> bool | CouldNotRun:
     """Does the build write an added file under the spec it was written for?
 
     Behavioural, because the question is what the library *does* with a file it
@@ -447,9 +525,10 @@ def _added_files_honour_their_spec() -> bool | None:
     the case where added files span two specs -- so a False answer withdraws that
     one layout feature and leaves the six operations alone.
 
-    Returns None when the probe could not run: no `sql` extra, no writable temp
-    directory. Treated by the caller as "assume absent", because declaring a
-    feature we cannot demonstrate is how a config gets silently ignored.
+    Returns :class:`CouldNotRun` when the probe could not run: SQLAlchemy
+    missing, no writable temp directory. Treated by the caller as "assume
+    absent", because declaring a feature we cannot demonstrate is how a config
+    gets silently ignored.
     """
     try:
         import datetime as dt
@@ -463,8 +542,8 @@ def _added_files_honour_their_spec() -> bool | None:
         from pyiceberg.schema import Schema
         from pyiceberg.transforms import DayTransform
         from pyiceberg.types import NestedField, StringType, TimestampType
-    except ImportError:  # pragma: no cover - depends on the install
-        return None
+    except ImportError as exc:  # pragma: no cover - depends on the install
+        return CouldNotRun.from_exception(exc)
 
     try:
         with tempfile.TemporaryDirectory(prefix="zamboni-probe-") as root:
@@ -516,7 +595,7 @@ def _added_files_honour_their_spec() -> bool | None:
                 # The commit itself failing *is* the answer, not a probe that
                 # could not run: a build that writes the file into a manifest
                 # for the wrong spec raises from the Avro writer. Distinguished
-                # from the setup failures below, which return None, because
+                # from the setup failures below, which return CouldNotRun, because
                 # "cannot do this" and "could not find out" lead an operator to
                 # different places.
                 logger.debug("added-file spec probe: the commit was refused", exc_info=True)
@@ -527,15 +606,15 @@ def _added_files_honour_their_spec() -> bool | None:
             committed = catalog.load_table("probe.evolved")
             snapshot = committed.current_snapshot()
             if snapshot is None:
-                return None
+                return CouldNotRun("the probe's commit left no current snapshot")
             for manifest in snapshot.manifests(io=committed.io):
                 entries = manifest.fetch_manifest_entry(io=committed.io, discard_deleted=False)
                 if any(e.data_file.spec_id != manifest.partition_spec_id for e in entries):
                     return False
             return True
-    except Exception:  # pragma: no cover - any failure means "could not establish"
+    except Exception as exc:  # pragma: no cover - any failure means "could not establish"
         logger.debug("added-file spec behavioural probe did not complete", exc_info=True)
-        return None
+        return CouldNotRun.from_exception(exc)
 
 
 def _guard_anywhere_in_scan_planning() -> bool:
@@ -567,7 +646,7 @@ def _guard_anywhere_in_scan_planning() -> bool:
         return True
 
 
-def _delete_manifests_writable() -> bool | None:
+def _delete_manifests_writable() -> bool | CouldNotRun:
     """Write one and read back what it claims to be.
 
     **Converted from structural to behavioural (ZMBNI-38).** It used to return
@@ -592,9 +671,9 @@ def _delete_manifests_writable() -> bool | None:
     is the cheapest of the three conversions considered and the only one whose
     wrong answer is silent corruption rather than a loud failure.
 
-    Returns None when the probe could not run at all, which the caller treats as
-    "not writable" -- the safe direction, limiting dangling-delete removal to
-    dropping whole delete manifests.
+    Returns :class:`CouldNotRun` when the probe could not run at all, which the
+    caller treats as "not writable" -- the safe direction, limiting
+    dangling-delete removal to dropping whole delete manifests.
     """
     try:
         import tempfile
@@ -612,8 +691,8 @@ def _delete_manifests_writable() -> bool | None:
         from pyiceberg.partitioning import PartitionSpec
         from pyiceberg.schema import Schema
         from pyiceberg.types import IntegerType, NestedField
-    except ImportError:  # pragma: no cover - depends on the install
-        return None
+    except ImportError as exc:  # pragma: no cover - depends on the install
+        return CouldNotRun.from_exception(exc)
 
     try:
         with tempfile.TemporaryDirectory(prefix="zamboni-probe-") as root:
@@ -653,9 +732,9 @@ def _delete_manifests_writable() -> bool | None:
             # An empty manifest raises on close, which is why an entry is
             # written rather than an empty file being probed.
             return writer.to_manifest_file().content is ManifestContent.DELETES
-    except Exception:  # pragma: no cover - any failure means "could not establish"
+    except Exception as exc:  # pragma: no cover - any failure means "could not establish"
         logger.debug("delete-manifest behavioural probe did not complete", exc_info=True)
-        return None
+        return CouldNotRun.from_exception(exc)
 
 
 def _replace_summary_supported(operation_enum) -> bool:

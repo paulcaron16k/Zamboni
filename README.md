@@ -105,7 +105,7 @@ extensions or extras.
 | `cloud` | All three of the above, for an image built before the tenant's cloud is known. Not the default: one deployment uses one cloud | `s3fs`, `adlfs`, `gcsfs` |
 | `otel` | The OpenTelemetry **SDK and an OTLP exporter**, for `--metrics otel` in a deployment that has no SDK of its own. The `opentelemetry-api` half is in the base install, so Zamboni is always instrumented and, without this extra, always silent -- which is OTel's intended behaviour for a library rather than a failure. Not needed when Zamboni is embedded in an application that configures its own SDK: it reports into theirs | `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` |
 | `nats` | The NATS client for `zamboni serve` to consume `write.completed` events (docs/write-completed.md), core NATS or JetStream. Not needed without a broker: every table is still maintained on its schedule, and an event only brings a write-driven run forward. `nkeys` is included because NATS credentials-file authentication fails at connect without it | `nats-py[nkeys]` |
-| `sql` | A local SQLite catalog, with no catalog server to run. Enough to create and open a warehouse on a laptop; used by the test suite, the demo, and dry runs. Not needed against a REST catalog such as Lakekeeper or Polaris | `pyiceberg[sql-sqlite]` (`sqlalchemy`) |
+| `sql` | A local SQLite catalog, with no catalog server to run. **Part of the base install since 0.6.1**, because the safety probes need it -- without it a plain install could not compact (ZMBNI-213). The extra remains, installing the same thing, so existing install lines keep working | `pyiceberg[sql-sqlite]` (`sqlalchemy`) |
 | `trino` | The client for `--engine trino`, which runs five of the six operations as `ALTER TABLE … EXECUTE`. **Requires a local Trino stand-alone instance via `dev-stack --profile trino`, or an Enterprise Trino cluster** -- this extra is a client and starts nothing. Not needed to *query* through Trino from a BI tool | `trino` |
 | `spark` | The Spark **Connect** client for `--engine spark --spark-remote sc://…`, which runs all six operations through the Iceberg Spark procedures, Z-order included. **Requires a local Spark stand-alone instance via `dev-stack --profile spark`, or an Enterprise Spark master/cluster.** ~13MB on disk, pure Python, and **no JVM on your machine** -- the driver runs on the server. Needs Spark 4 | `pyspark-client` |
 | `spark-lib` | The **embedded** Spark library: a driver JVM inside this process, so no Spark server or cluster is required anywhere. The cost is why it is not the default -- **~472MB on disk** and **~470MB resident** for even a trivial session (measured: 440MB JVM + 34MB Python), rising toward `spark.driver.memory` (1GB by default) under real work, plus a JDK 17 or 21 you install yourself. Mutually exclusive with `spark`: both provide the `pyspark` module | `pyspark` |
@@ -811,9 +811,9 @@ is the compose gateway rather than `minio` — are explained in
 ## Environment
 
 Everything runs from a locked virtualenv, and nothing resolves against global site-packages.
-That is not fastidiousness: PyIceberg's SQL-catalog extra pins SQLAlchemy, and a shared
-site-packages is under no obligation to agree. A venv makes that a non-question rather than a
-resolution problem.
+That is not fastidiousness: every install carries SQLAlchemy 2, through PyIceberg's SQL
+catalog, and a shared site-packages is under no obligation to agree. A venv makes that a
+non-question rather than a resolution problem.
 
 ```bash
 uv sync            # builds .venv from uv.lock, Python pinned by .python-version

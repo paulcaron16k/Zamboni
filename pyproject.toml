@@ -54,7 +54,17 @@ dependencies = [
     # and tests against, and `capabilities.detect()` for the probe that refuses
     # rather than corrupting when the installed build lacks it. A consumer
     # redirects the source itself; nothing here obliges them to use our fork.
-    "pyiceberg[pyarrow]>=0.12,<0.13",
+    #
+    # `sql-sqlite` (SQLAlchemy) is in the base install, not only the `sql` extra,
+    # because the safety probes need it (ZMBNI-213). Two of them build a table on
+    # a SQLite catalog to observe what this PyIceberg does; without SQLAlchemy
+    # they cannot run, an unobserved build is assumed unsafe, and compact,
+    # rewrite-manifests and remove-dangling-deletes refuse. That was a plain
+    # `pip install iceberg-zamboni` through 0.6.0. Taken through PyIceberg's
+    # extra so the SQLAlchemy range is the one its SqlCatalog declares. Measured
+    # 2026-10-16, site-packages of a no-extras install from PyPI resolution: 322 MB
+    # for 0.6.0, 352 MB with this (SQLAlchemy 2.1.4).
+    "pyiceberg[pyarrow,sql-sqlite]>=0.12,<0.13",
     # 0.12 moved `pyiceberg-core` out of the `[pyarrow]` extra into one of its
     # own, while `transforms.pyarrow_transform` still needs it for **six**
     # transforms -- bucket, day, month, year, hour, truncate. Without it a
@@ -132,7 +142,10 @@ otel = [
 # a NATS client. `nkeys` is what `creds_file` (NATS JWT auth) needs; without it
 # nats-py fails at connect, not at install.
 nats = ["nats-py[nkeys]>=2.9,<3"]
-# Local SQL catalog, used by the test suite and handy for dry runs.
+# The local SQL catalog. Now part of the base install (ZMBNI-213, see the
+# pyiceberg line above); kept, and kept equal to what it always installed, so
+# that `iceberg-zamboni[sql]` in existing install lines still resolves without a
+# warning.
 sql = ["pyiceberg[sql-sqlite]>=0.12,<0.13"]
 # A *client* for a Trino you already have -- the dev stack's `trino` compose
 # profile, or a cluster. Optional so nobody installs a query-engine client to
