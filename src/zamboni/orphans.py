@@ -42,7 +42,7 @@ from pyiceberg.catalog import Catalog
 from pyiceberg.io.pyarrow import PyArrowFileIO
 from pyiceberg.table import Table
 
-from .reachable import Category, ReachableSet, canonical, reachable_files
+from .reachable import Category, MaintenanceAborted, ReachableSet, canonical, reachable_files
 from .units import human_bytes
 
 logger = logging.getLogger(__name__)
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_OLDER_THAN_DAYS = 3
 
 
-class OrphanCleanupAborted(RuntimeError):
+class OrphanCleanupAborted(MaintenanceAborted):
     """A safety invariant failed. Nothing was deleted."""
 
 

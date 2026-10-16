@@ -485,6 +485,46 @@ def test_an_abort_counts_its_operation_once_and_not_as_a_skip(warehouse, tmp_pat
     assert len(expire) == 2, "the abort and its note share the operation name"
 
 
+def test_both_reclaim_aborts_share_one_base():
+    from zamboni.expire import ExpiryAborted
+    from zamboni.orphans import OrphanCleanupAborted
+    from zamboni.reachable import MaintenanceAborted
+
+    for abort in (ExpiryAborted, OrphanCleanupAborted):
+        assert issubclass(abort, MaintenanceAborted)
+        assert issubclass(abort, RuntimeError), "an existing `except RuntimeError` still catches it"
+
+
+def test_any_maintenance_abort_is_exit_4_and_stops_its_table(warehouse, tmp_path, monkeypatch):
+    """ZMBNI-199: `_run` catches the base, so an abort this test invents -- as
+    a third reclaim operation would -- is exit 4 and stops the rest of the
+    table, with nobody adding it to an except clause."""
+    from zamboni.maintainers.local import LocalMaintainer
+    from zamboni.reachable import MaintenanceAborted
+
+    class NewOperationAborted(MaintenanceAborted):
+        pass
+
+    original = LocalMaintainer.execute
+
+    def abort(self, operation, table, *, request, dry_run):
+        if operation is Operation.EXPIRE:
+            raise NewOperationAborted("a check nobody has written yet")
+        return original(self, operation, table, request=request, dry_run=dry_run)
+
+    monkeypatch.setattr(LocalMaintainer, "execute", abort)
+
+    report = maintain(warehouse, table_config=config(tmp_path), commit=True)
+
+    expire = next(o for o in report.outcomes if o.operation is Operation.EXPIRE)
+    assert expire.exit_code == 4
+    assert "nothing deleted" in (expire.detail or "")
+    assert report.exit_code == 4
+    after = RUNBOOK_ORDER[RUNBOOK_ORDER.index(Operation.EXPIRE) + 1 :]
+    ran = {o.operation for o in report.outcomes}
+    assert not ran & set(after), "operations after an abort ran on the same table"
+
+
 def test_the_skip_share_is_the_number_the_gate_rests_on(warehouse, tmp_path):
     """A run over a table nothing wrote to reports the write-driven three as
     skipped, and the share says so. This is the measurement the initiative's

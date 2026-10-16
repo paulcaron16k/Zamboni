@@ -33,6 +33,21 @@ from pyiceberg.io.pyarrow import PyArrowFileIO
 from pyiceberg.table import Table
 
 
+class MaintenanceAborted(RuntimeError):
+    """A reclaim operation's safety check refused, and nothing was deleted.
+
+    Exit 4. The base of :class:`~zamboni.expire.ExpiryAborted` and
+    :class:`~zamboni.orphans.OrphanCleanupAborted`, so a caller driving the
+    operations directly catches one type for "stop and look", and a third
+    reclaim operation's abort is exit 4 in `maintain()` by subclassing it
+    (ZMBNI-199, asked for by IWS as ELT-604).
+
+    Declared here because both reclaim operations already import this module --
+    it is the set they both subtract from -- and neither should import the
+    other.
+    """
+
+
 class Category(StrEnum):
     """Why a file is referenced. Carried through so reports can say what a
     file *is*, not merely that it is unreferenced."""
