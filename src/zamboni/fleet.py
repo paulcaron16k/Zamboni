@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from .pressure import PressureSettings
-from .settings import SECRET_PROFILE_KEYS
+from .settings import SECRET_PROFILE_KEYS, describe_yaml_error
 from .tableconfig import TableConfig, TableConfigError
 from .urls import carries_userinfo
 
@@ -458,8 +458,13 @@ class FleetConfig:
         except yaml.YAMLError as exc:
             # The one YAML mistake a cron schedule invites: an unquoted value
             # starting with `*` is an alias, not a string.
+            # Described, not quoted: a fleet file holds no credentials by
+            # contract, but the key refusal that enforces it runs only after a
+            # parse, and under `serve` this message also reaches the state file
+            # and the error log (ZMBNI-207).
             raise FleetConfigError(
-                f"{path}: invalid YAML: {exc}. A schedule starting with '*' must be quoted."
+                f"{path}: invalid YAML: {describe_yaml_error(exc)}. "
+                "A schedule starting with '*' must be quoted."
             ) from None
         try:
             return cls.from_dict(raw, base=path.parent, source=path)
