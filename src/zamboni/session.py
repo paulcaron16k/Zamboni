@@ -47,7 +47,19 @@ class StorageCredentialsRequired(RuntimeError):
 
 @dataclass
 class CatalogSession:
-    """A catalog plus the DuckDB connection used to move data for it."""
+    """A catalog plus the DuckDB connection used to move data for it.
+
+    Build one with :meth:`from_catalog` -- or :meth:`for_lakekeeper` /
+    :meth:`for_local`, which build the catalog and then call it. Those are what
+    configure the connection from :attr:`threads` and
+    :attr:`memory_limit_bytes`. Constructing the dataclass directly does not:
+    the connection it is given runs as whoever opened it set it up -- a bare
+    ``duckdb.connect()`` takes one thread per core it detects (DuckDB 1.5.5:
+    ``threads`` read back as 4 on a 4-core host) and DuckDB's own memory
+    default -- and the two fields then describe nothing (ZMBNI-200). An
+    integrator with its own catalog and storage credentials wants
+    :meth:`from_catalog`.
+    """
 
     catalog: Catalog
     con: duckdb.DuckDBPyConnection
@@ -267,13 +279,12 @@ class CatalogSession:
         # The credentials are passed to PyIceberg *and* kept here. Passing them
         # is what a non-signing catalog honours; keeping them is what lets us
         # override a signing one, which PyIceberg offers no way to ask for.
-        return cls(
-            catalog=catalog,
-            con=_new_duckdb(threads, memory_limit_bytes),
-            threads=threads,
-            memory_limit_bytes=memory_limit_bytes,
+        return cls.from_catalog(
+            catalog,
             storage=storage,
             credential_use=credential_use,
+            threads=threads,
+            memory_limit_bytes=memory_limit_bytes,
         )
 
     @classmethod
@@ -297,23 +308,44 @@ class CatalogSession:
             uri=uri or f"sqlite:///{warehouse_path.rstrip('/')}/catalog.db",
             warehouse=f"file://{warehouse_path.rstrip('/')}",
         )
-        return cls(
-            catalog=catalog,
-            con=_new_duckdb(threads, memory_limit_bytes),
-            threads=threads,
-            memory_limit_bytes=memory_limit_bytes,
-        )
+        return cls.from_catalog(catalog, threads=threads, memory_limit_bytes=memory_limit_bytes)
 
     @classmethod
     def from_catalog(
-        cls, catalog: Catalog, *, threads: int = 4, memory_limit_bytes: int | None = None
+        cls,
+        catalog: Catalog,
+        *,
+        storage: StorageSettings | None = None,
+        credential_use: CredentialUse = CredentialUse.ALWAYS,
+        threads: int = 4,
+        memory_limit_bytes: int | None = None,
     ) -> CatalogSession:
-        """Wrap an already-configured PyIceberg catalog."""
+        """Wrap an already-configured PyIceberg catalog.
+
+        The one place a session's DuckDB connection is configured: the other two
+        constructors build their catalog and come here, so a session made from
+        an integrator's own catalog is the same session they would have made.
+
+        Args:
+            catalog: Any PyIceberg catalog, configured however the caller likes.
+            storage: Zamboni's own object-store credentials --
+                :class:`S3Settings`, :class:`GCSSettings` or
+                :class:`AzureSettings` -- for a catalog that remote-signs, or
+                whenever the caller owns the storage. Unlike
+                :meth:`for_lakekeeper`, they are *not* given to the catalog,
+                which already exists; :meth:`table` swaps them in per table.
+            credential_use: When to prefer them over the catalog's. See
+                :class:`CredentialUse`.
+            threads: Threads DuckDB may use; see the field.
+            memory_limit_bytes: DuckDB's memory limit; see the field.
+        """
         return cls(
             catalog=catalog,
             con=_new_duckdb(threads, memory_limit_bytes),
             threads=threads,
             memory_limit_bytes=memory_limit_bytes,
+            storage=storage,
+            credential_use=credential_use,
         )
 
 

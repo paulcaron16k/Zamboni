@@ -424,6 +424,26 @@ session = CatalogSession.for_lakekeeper(
 )
 ```
 
+If your application already builds its own PyIceberg catalog, and holds its own
+object-store credentials, wrap it with `from_catalog` and pass them as
+`storage=`. It configures DuckDB exactly as `for_lakekeeper` does:
+
+```python
+session = CatalogSession.from_catalog(
+    catalog,                                          # your configured catalog
+    storage=S3Settings(endpoint=..., access_key_id=..., secret_access_key=...),
+    threads=2,
+    memory_limit_bytes=2 * 1024**3,
+)
+```
+
+Don't construct `CatalogSession(...)` directly around a `duckdb.connect()` of
+your own. The session does not configure a connection it is handed, so that
+connection takes a thread per core and DuckDB's own memory default, whatever
+the session's `threads` and `memory_limit_bytes` fields say.
+`test_from_catalog_with_storage_still_configures_duckdb` reads both settings
+back from DuckDB.
+
 Two things worth knowing:
 
 - **`S3Settings` redacts its secret in `repr()`.** A frozen dataclass otherwise

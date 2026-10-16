@@ -423,3 +423,38 @@ def test_azure_connection_string_maps_and_redacts():
     assert "SEKRIT" not in repr(az)
     # unset stays absent, not an empty string
     assert "adls.connection-string" not in AzureSettings(account_name="a").as_properties()
+
+
+# -- an integrator's own catalog (ZMBNI-200) -------------------------------
+
+
+@pytest.mark.parametrize("mode", list(CredentialUse))
+@pytest.mark.parametrize("properties", [SIGNING, VENDED], ids=["signing", "vending"])
+def test_every_constructor_gives_storage_the_meaning_of_the_fields(monkeypatch, mode, properties):
+    """IWS builds its own catalog and has its own credentials, and `from_catalog`
+    did not take them. Each constructor must hand `table()` the session its
+    `storage` and `credential_use` fields describe -- derived by loading the
+    same table through each and through the bare dataclass, not by restating
+    what the override does. `for_lakekeeper` is here because it now builds
+    through `from_catalog`, so comparing those two alone would pass on a bug
+    they shared."""
+    from zamboni import session as session_module
+
+    catalog = FakeCatalog(**properties)
+    monkeypatch.setattr(session_module, "load_catalog", lambda name, **props: catalog)
+
+    meaning = CatalogSession(catalog=catalog, con=None, storage=CREDS, credential_use=mode)
+    built = {
+        "from_catalog": CatalogSession.from_catalog(catalog, storage=CREDS, credential_use=mode),
+        "for_lakekeeper": CatalogSession.for_lakekeeper(
+            uri="http://lakekeeper", warehouse="w", storage=CREDS, credential_use=mode
+        ),
+    }
+
+    for reclaiming in (False, True):
+        expected = meaning.table("db.t", reclaiming=reclaiming).io
+        for name, session_ in built.items():
+            got = session_.table("db.t", reclaiming=reclaiming).io
+            assert (type(got), got.properties) == (type(expected), expected.properties), (
+                f"{name}, {mode.value}, reclaiming={reclaiming}"
+            )
