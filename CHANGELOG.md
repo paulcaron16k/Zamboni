@@ -21,6 +21,8 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-16
+
 ### Added
 
 - **The refusals an operation raises are public** (ZMBNI-199, asked for by IWS
