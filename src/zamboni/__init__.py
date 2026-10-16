@@ -23,7 +23,7 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers and editors only
     from .config import CompactionConfig, MemoryMode, config_from_table_settings
     from .deletes import DanglingDeleteCleaner
     from .events import get_write_completed_spec
-    from .expire import RetentionPolicy, SnapshotExpirer
+    from .expire import ExpiryAborted, RetentionPolicy, SnapshotExpirer
     from .fleet import CronSchedule, FleetConfig, FleetConfigError, FleetWarehouse
     from .health import TableHealth, Watermark, maintenance_watermark, table_health
     from .maintainers import (
@@ -59,10 +59,10 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers and editors only
         no_commit_metrics,
         no_commit_report,
     )
-    from .orphans import OrphanCleaner
+    from .orphans import OrphanCleaner, OrphanCleanupAborted
     from .planner import CompactionPlan, CompactionPlanner, FileGroup
     from .profile import Finding, Severity, TableProfile, profile_table
-    from .reachable import reachable_files
+    from .reachable import MaintenanceAborted, reachable_files
     from .reporters import (
         CollectingReporter,
         LoggingReporter,
@@ -73,11 +73,18 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers and editors only
         reporter_for,
     )
     from .runlog import FleetSummary, summarise_logs
-    from .session import AzureSettings, CatalogSession, GCSSettings, S3Settings
+    from .session import (
+        AzureSettings,
+        CatalogSession,
+        GCSSettings,
+        S3Settings,
+        StorageCredentialsRequired,
+    )
     from .settings import Profile
     from .settings import resolve as resolve_settings
     from .tableconfig import Retention, TableConfig, TableConfigError, TableSettings
     from .tableconfig_schema import load_schema as get_table_config_spec
+    from .workdir import WorkspaceUnavailable
 
 #: Every public name, and where it lives. Loaded on first use, not at import
 #: (ZMBNI-154): importing this package used to import the whole engine --
@@ -100,6 +107,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     "CronSchedule": (".fleet", "CronSchedule"),
     "DanglingDeleteCleaner": (".deletes", "DanglingDeleteCleaner"),
     "EngineConfigProblem": (".maintainers", "EngineConfigProblem"),
+    "ExpiryAborted": (".expire", "ExpiryAborted"),
     "FileGroup": (".planner", "FileGroup"),
     "Finding": (".profile", "Finding"),
     "FleetConfig": (".fleet", "FleetConfig"),
@@ -111,6 +119,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     "LoggingReporter": (".reporters", "LoggingReporter"),
     "Maintainer": (".maintainers", "Maintainer"),
     "MaintainerCapabilities": (".maintainers", "MaintainerCapabilities"),
+    "MaintenanceAborted": (".reachable", "MaintenanceAborted"),
     "MaintenanceReport": (".maintenance", "MaintenanceReport"),
     "MaintenanceRequest": (".maintainers", "MaintenanceRequest"),
     "ManifestRewriter": (".manifests", "ManifestRewriter"),
@@ -122,6 +131,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     "Operation": (".maintainers", "Operation"),
     "OperationSupport": (".maintainers", "OperationSupport"),
     "OrphanCleaner": (".orphans", "OrphanCleaner"),
+    "OrphanCleanupAborted": (".orphans", "OrphanCleanupAborted"),
     "Outcome": (".maintenance", "Outcome"),
     "PreviewUnavailable": (".maintainers", "PreviewUnavailable"),
     "Profile": (".settings", "Profile"),
@@ -138,6 +148,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     "S3Settings": (".session", "S3Settings"),
     "Severity": (".profile", "Severity"),
     "SnapshotExpirer": (".expire", "SnapshotExpirer"),
+    "StorageCredentialsRequired": (".session", "StorageCredentialsRequired"),
     "Support": (".maintainers", "Support"),
     "TableCompactor": (".compactor", "TableCompactor"),
     "TableConfig": (".tableconfig", "TableConfig"),
@@ -149,6 +160,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     "UnsupportedOperation": (".maintainers", "UnsupportedOperation"),
     "UnsupportedPyIceberg": (".committer", "UnsupportedPyIceberg"),
     "Watermark": (".health", "Watermark"),
+    "WorkspaceUnavailable": (".workdir", "WorkspaceUnavailable"),
     "available_engines": (".maintainers", "available"),
     "commit_reports": (".metrics", "commit_reports"),
     "config_from_table_settings": (".config", "config_from_table_settings"),
@@ -282,6 +294,7 @@ __all__ = [
     "CronSchedule",
     "DanglingDeleteCleaner",
     "EngineConfigProblem",
+    "ExpiryAborted",
     "FileGroup",
     "Finding",
     "FleetConfig",
@@ -293,6 +306,7 @@ __all__ = [
     "LoggingReporter",
     "Maintainer",
     "MaintainerCapabilities",
+    "MaintenanceAborted",
     "MaintenanceReport",
     "MaintenanceRequest",
     "ManifestRewriter",
@@ -304,6 +318,7 @@ __all__ = [
     "Operation",
     "OperationSupport",
     "OrphanCleaner",
+    "OrphanCleanupAborted",
     "Outcome",
     "PreviewUnavailable",
     "Profile",
@@ -319,6 +334,7 @@ __all__ = [
     "S3Settings",
     "Severity",
     "SnapshotExpirer",
+    "StorageCredentialsRequired",
     "Support",
     "TableCompactor",
     "TableConfig",
@@ -330,6 +346,7 @@ __all__ = [
     "UnsupportedOperation",
     "UnsupportedPyIceberg",
     "Watermark",
+    "WorkspaceUnavailable",
     "__version__",
     "available_engines",
     "commit_reports",

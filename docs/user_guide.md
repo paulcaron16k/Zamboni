@@ -575,6 +575,7 @@ internal and may move in a patch release. The entry points you need:
 | `available_engines()` | what this install can drive |
 | `config_from_table_settings` | turning table-config layout into the compaction config `COMPACT` needs |
 | `TableCompactor`, `SnapshotExpirer`, `OrphanCleaner`, … | the local engine's own classes, when you want its richer results |
+| `MaintenanceAborted` / `ExpiryAborted` / `OrphanCleanupAborted` / `CompactionBlocked` / `ConcurrentModification` / `UnsupportedPyIceberg` / `UnsupportedOperation` / `PreviewUnavailable` / `EngineConfigProblem` / `WorkspaceUnavailable` / `StorageCredentialsRequired` | what an operation raises when you drive it through `get_maintainer()` or a class above instead of `maintain()`, which turns each into an exit code. Catch `MaintenanceAborted` for exit 4 — a reclaim safety check refused and nothing was deleted; `ExpiryAborted` and `OrphanCleanupAborted` are its two kinds. `test_every_refusal_maintain_reports_is_public` keeps this list complete |
 
 A maintainer is engine-neutral: the same four lines drive `local`, `trino` or
 `spark`, and each raises `UnsupportedOperation` rather than pretending when
@@ -743,7 +744,8 @@ Four things that used to be the caller's problem and are not any more:
 - **A safety abort stops that table.** Exit code 4 means a check refused and
   *nothing was deleted*; everything after it on the same table would be reading
   state we have just said we do not trust, so it is skipped and the other tables
-  continue.
+  continue. Driving an operation directly, the same refusal arrives as
+  `MaintenanceAborted`.
 - **The worst exit code wins, not the last.** A run where compaction was blocked
   and everything after it succeeded still reports 3.
 

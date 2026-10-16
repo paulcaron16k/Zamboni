@@ -40,7 +40,7 @@ from pyiceberg.table.metadata import TableMetadata
 from pyiceberg.table.refs import MAIN_BRANCH, SnapshotRefType
 from pyiceberg.table.snapshots import Snapshot, ancestors_of
 
-from .reachable import canonical, reachable_files
+from .reachable import MaintenanceAborted, canonical, reachable_files
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ PROP_MIN_SNAPSHOTS = "history.expire.min-snapshots-to-keep"
 PROP_MAX_REF_AGE = "history.expire.max-ref-age-ms"
 
 
-class ExpiryAborted(RuntimeError):
+class ExpiryAborted(MaintenanceAborted):
     """A safety check failed; nothing was deleted."""
 
 

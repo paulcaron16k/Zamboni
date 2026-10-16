@@ -34,7 +34,6 @@ from pyiceberg.exceptions import CommitFailedException, ValidationException
 from .committer import ConcurrentModification, UnsupportedPyIceberg
 from .compactor import CompactionBlocked
 from .config import CompactionConfig, config_from_table_settings
-from .expire import ExpiryAborted
 from .maintainers import (
     EngineConfigProblem,
     Maintainer,
@@ -45,7 +44,7 @@ from .maintainers import (
     UnsupportedOperation,
 )
 from .maintainers import get as get_maintainer
-from .orphans import OrphanCleanupAborted
+from .reachable import MaintenanceAborted
 from .reporters import MetricsReporter, emit
 from .session import CatalogSession, StorageCredentialsRequired
 from .tableconfig import TableConfig, TableConfigError
@@ -634,9 +633,11 @@ def _run(
             f"another writer committed to this table during {operation.value}; "
             f"nothing was changed -- retry outside the load window ({exc})",
         )
-    except (ExpiryAborted, OrphanCleanupAborted) as exc:
+    except MaintenanceAborted as exc:
         # A safety check refused. Nothing was deleted, and the operator response
-        # is the same in both cases: stop and look.
+        # is the same for every reclaim operation: stop and look. The base, not
+        # the two subclasses, so a new reclaim operation's abort is exit 4 by
+        # subclassing rather than by someone remembering this line (ZMBNI-199).
         return Outcome(table, operation, 4, f"aborted, nothing deleted: {exc}")
     except (
         PreviewUnavailable,

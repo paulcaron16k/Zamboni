@@ -66,6 +66,52 @@ def test_every_public_name_still_resolves():
     assert missing == []
 
 
+def _exceptions_maintain_maps_to_exit_codes() -> list[type[BaseException]]:
+    """Every exception class named in an ``except`` clause of `maintenance._run`.
+
+    Read from the source rather than listed here, so a refusal added to `_run`
+    is covered without anyone remembering this test exists.
+    """
+    import ast
+    import inspect
+
+    from zamboni import maintenance
+
+    run = ast.parse(inspect.getsource(maintenance._run)).body[0]
+    names: list[str] = []
+    for node in ast.walk(run):
+        if isinstance(node, ast.ExceptHandler) and node.type is not None:
+            caught = node.type.elts if isinstance(node.type, ast.Tuple) else [node.type]
+            names += [n.id for n in caught if isinstance(n, ast.Name)]
+    return [getattr(maintenance, name) for name in names]
+
+
+def test_every_refusal_maintain_reports_is_public():
+    """ZMBNI-199, asked for by IWS (ELT-604). `maintain()` turns these into exit
+    codes, but a caller driving `get_maintainer()` / `Maintainer.execute()` or
+    an operation class directly meets them raw, and should not have to import
+    them from a private module. PyIceberg's own exceptions are PyIceberg's to
+    export."""
+    caught = _exceptions_maintain_maps_to_exit_codes()
+    ours = [cls for cls in caught if cls.__module__.startswith("zamboni")]
+    assert len(ours) >= 8, f"the except clauses were not found: {caught}"
+
+    private = [
+        cls.__name__
+        for cls in ours
+        if cls.__name__ not in zamboni.__all__ or getattr(zamboni, cls.__name__) is not cls
+    ]
+    assert private == []
+
+
+def test_each_reclaim_abort_is_public_and_shares_the_public_base():
+    """`_run` names only the base, so the derivation above cannot see the two
+    subclasses a direct caller actually catches."""
+    for name in ("ExpiryAborted", "OrphanCleanupAborted"):
+        assert name in zamboni.__all__
+        assert issubclass(getattr(zamboni, name), zamboni.MaintenanceAborted)
+
+
 def test_the_lazy_table_and_all_agree():
     """A name exported but not loadable, or loadable but not exported, is a
     drift between two lists that used to be one import block."""

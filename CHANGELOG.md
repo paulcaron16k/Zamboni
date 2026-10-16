@@ -23,6 +23,18 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **The refusals an operation raises are public** (ZMBNI-199, asked for by IWS
+  as ELT-604). `maintain()` turns each into an exit code, but a caller driving
+  `get_maintainer()` or `SnapshotExpirer` / `OrphanCleaner` directly met
+  `ExpiryAborted` and `OrphanCleanupAborted` raw and had to import them from
+  `zamboni.expire` and `zamboni.orphans`. Both are now exported, under a new
+  exported base, `MaintenanceAborted`: catch it for exit 4, a safety check that
+  refused with nothing deleted. They remain `RuntimeError`s, so existing
+  handlers still catch them. `WorkspaceUnavailable` and
+  `StorageCredentialsRequired`, which `maintain()` reports as exit 2, are
+  exported too. A test reads `maintain()`'s exception handling from the source
+  and fails if any Zamboni exception it maps to an exit code is not public.
+
 - **The event feed** behind `zamboni serve`'s write-completed path (ZMBNI-124),
   in `zamboni.events.feed`: an `EventSource` protocol for any transport, and an
   `EventFeed` that parses, maps by warehouse name, deduplicates on
