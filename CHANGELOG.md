@@ -446,6 +446,19 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **A column name containing `"` could inject SQL into a sorted or z-ordered
+  rewrite** (ZMBNI-206; found by the 0.6.0 release security review, and present
+  in every earlier release). The DuckDB backend quoted column names without
+  escaping them. That covers the table's declared sort order, `ordering.sort` in
+  table-config.json, and `ordering.zorder`. Iceberg allows any column name, so
+  someone who could rename a table's columns, or write its table-config entry,
+  could add an expression to the query that rewrites it. DuckDB can read local
+  files, so the result could be written into the table. Every name is now
+  escaped, as the Trino and Spark engines already did. A z-order column with
+  `{` or `}` in its name, which crashed the rewrite or silently ordered by the
+  wrong thing, now works too. `sort_expression` is unchanged: it is SQL by
+  design, and only an operator can set it.
+
 - **After one sorted rewrite spilled to disk, every later sorted rewrite on the
   same session failed** (found writing ZMBNI-186). Once a connection has
   spilled, DuckDB 1.5.5 refuses any `SET temp_directory`, even to the path it

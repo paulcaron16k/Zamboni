@@ -6,6 +6,8 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass
 
+from .zorder import quote_identifier
+
 # Matches DEFAULT_TARGET_FILE_SIZE_BYTES in duckdb-iceberg's rewrite planner
 # (src/maintenance/rewrite_data_files_planner.cpp), so plans line up if you ever
 # cross-check this against the native iceberg_rewrite_data_files function.
@@ -305,8 +307,12 @@ def config_from_table_settings(settings, base: CompactionConfig | None = None) -
     zorder_columns = None
     zorder_bits = base.zorder_precision_bits
     if ordering.mode == "sort":
+        # table-config.json is the file analysts own, so its column names are
+        # quoted rather than trusted (ZMBNI-206). `sort_expression` itself stays
+        # raw SQL: set directly, it is the operator's.
         sort_expression = ", ".join(
-            f'"{k.column}" {k.direction.upper()} NULLS {k.nulls.upper()}' for k in ordering.sort
+            f"{quote_identifier(k.column)} {k.direction.upper()} NULLS {k.nulls.upper()}"
+            for k in ordering.sort
         )
     elif ordering.mode == "zorder" and ordering.zorder:
         zorder_columns = tuple(ordering.zorder.columns)
