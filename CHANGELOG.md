@@ -42,6 +42,13 @@ Two categories beyond the usual set, because this tool deletes files:
   instead, which docs/user_guide.md already preferred. Airflow 3
   (`apache-airflow-core` 3.3.2, `sqlalchemy>=2.0.50`) is unaffected.
 
+  When a probe cannot run, for whatever reason, `doctor` now says why, for
+  example "sqlalchemy is not installed". It no longer reports that the build
+  "prunes manifests … incorrectly" when nothing was observed. Such an answer is
+  also no longer cached. The cache key covers only PyIceberg and Zamboni, so a
+  stored "unknown, assume unsafe" outlived installing the missing module, and
+  compaction kept refusing until one of those two packages changed.
+
 ## [0.6.0] - 2026-10-16
 
 ### Added
