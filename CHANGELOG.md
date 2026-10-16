@@ -21,6 +21,8 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-16
+
 ### Fixed
 
 - **A plain `pip install iceberg-zamboni` could not compact** (ZMBNI-213; 0.5.1
