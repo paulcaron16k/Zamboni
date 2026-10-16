@@ -16,7 +16,12 @@ from importlib.metadata import version as _distribution_version
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - for type checkers and editors only
-    from .backends.base import RewriteBackend, RewriteContext, RewriteOutput
+    from .backends.base import (
+        RewriteBackend,
+        RewriteContext,
+        RewriteOutput,
+        SpillLimitExceeded,
+    )
     from .capabilities import PyIcebergCapabilities, detect
     from .committer import ConcurrentModification, ReplaceCommitter, UnsupportedPyIceberg
     from .compactor import CompactionBlocked, CompactionResult, TableCompactor
@@ -148,6 +153,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     "S3Settings": (".session", "S3Settings"),
     "Severity": (".profile", "Severity"),
     "SnapshotExpirer": (".expire", "SnapshotExpirer"),
+    "SpillLimitExceeded": (".backends.base", "SpillLimitExceeded"),
     "StorageCredentialsRequired": (".session", "StorageCredentialsRequired"),
     "Support": (".maintainers", "Support"),
     "TableCompactor": (".compactor", "TableCompactor"),
@@ -334,6 +340,7 @@ __all__ = [
     "S3Settings",
     "Severity",
     "SnapshotExpirer",
+    "SpillLimitExceeded",
     "StorageCredentialsRequired",
     "Support",
     "TableCompactor",

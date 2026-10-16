@@ -140,6 +140,14 @@ class CompactionConfig:
             rather have the speed.
         temp_directory: Where DuckDB spills sorts and hash tables. ``None``
             leaves DuckDB's default in place.
+        max_temp_directory_bytes: Ceiling on what DuckDB may spill there.
+            ``None`` leaves DuckDB's own default, 90% of the free disk *it can
+            see* -- on Kubernetes that is the node's disk, not the
+            ``emptyDir``'s ``sizeLimit``, so a large sorted rewrite spills past
+            the limit and the kubelet evicts the pod (ZMBNI-186). Set it at or
+            below the volume's limit and a rewrite that needs more raises
+            :class:`~zamboni.backends.base.SpillLimitExceeded` for that table
+            instead.
         sort_by_table_order: Order rewritten rows by the table's declared sort
             order, and stamp that order's id onto the output files. This is the
             only case where stamping is truthful, because the ordering we apply
@@ -196,6 +204,7 @@ class CompactionConfig:
     #: rather than a way to be fast.
     max_read_ahead_files: int = 8
     temp_directory: str | None = None
+    max_temp_directory_bytes: int | None = None
     sort_by_table_order: bool = False
     sort_expression: str | None = None
     zorder_columns: tuple[str, ...] | None = None
@@ -218,6 +227,10 @@ class CompactionConfig:
             raise ValueError(f"read_ahead_bytes must be >= 0, got {self.read_ahead_bytes}")
         if self.max_read_ahead_files < 1:
             raise ValueError(f"max_read_ahead_files must be >= 1, got {self.max_read_ahead_files}")
+        if self.max_temp_directory_bytes is not None and self.max_temp_directory_bytes < 1:
+            raise ValueError(
+                f"max_temp_directory_bytes must be >= 1, got {self.max_temp_directory_bytes}"
+            )
         if self.min_input_files < 1:
             raise ValueError(f"min_input_files must be >= 1, got {self.min_input_files}")
         if (

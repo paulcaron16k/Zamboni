@@ -886,6 +886,15 @@ def _add_config_args(p: argparse.ArgumentParser) -> None:
     )
     g.add_argument("--temp-directory")
     g.add_argument(
+        "--max-temp-directory-bytes",
+        type=_positive_int,
+        default=os.environ.get("ZAMBONI_MAX_TEMP_DIRECTORY_BYTES"),
+        help="ceiling on DuckDB's spill. Default: DuckDB's own, 90%% of the free "
+        "disk it can see -- on Kubernetes the node's, not the emptyDir's sizeLimit. "
+        "Set it at or below that limit and a rewrite needing more fails its table "
+        "(exit 3) instead of getting the pod evicted.",
+    )
+    g.add_argument(
         "--sort-by",
         dest="sort_expression",
         help="arbitrary DuckDB ORDER BY expression; output keeps sort_order_id = None",
@@ -1172,6 +1181,7 @@ def _operational_config(args: argparse.Namespace) -> CompactionConfig:
         read_ahead_bytes=args.read_ahead_bytes,
         max_read_ahead_files=args.max_read_ahead_files,
         temp_directory=args.temp_directory,
+        max_temp_directory_bytes=args.max_temp_directory_bytes,
         branch=args.branch,
         snapshot_operation=args.snapshot_operation,
         dangling_delete_policy=args.dangling_delete_policy,
@@ -1191,6 +1201,7 @@ def _config_from(args: argparse.Namespace) -> CompactionConfig:
         read_ahead_bytes=args.read_ahead_bytes,
         max_read_ahead_files=args.max_read_ahead_files,
         temp_directory=args.temp_directory,
+        max_temp_directory_bytes=args.max_temp_directory_bytes,
         sort_by_table_order=args.sort_by_table_order,
         sort_expression=args.sort_expression,
         branch=args.branch,

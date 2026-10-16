@@ -31,6 +31,7 @@ from typing import Any
 
 from pyiceberg.exceptions import CommitFailedException, ValidationException
 
+from .backends.base import SpillLimitExceeded
 from .committer import ConcurrentModification, UnsupportedPyIceberg
 from .compactor import CompactionBlocked
 from .config import CompactionConfig, config_from_table_settings
@@ -595,13 +596,16 @@ def _run(
         # Declared, not a failure: Trino cannot remove dangling deletes, and a
         # nightly fleet run should skip it rather than fail every night.
         return Outcome(table, operation, 0, f"skipped -- {exc}")
-    except (CompactionBlocked, UnsupportedPyIceberg) as exc:
-        # Both are refusals rather than failures: the table, or the build under
-        # it, is blocked. `UnsupportedPyIceberg` escaping instead would abort the
-        # whole fleet run with a traceback and exit 1 -- contradicting both the
-        # exit-code contract and this function's promise that each table is
-        # attempted. Added with ZMBNI-37, which gave five more operations a way
-        # to raise it.
+    except (CompactionBlocked, UnsupportedPyIceberg, SpillLimitExceeded) as exc:
+        # All three are refusals rather than failures: the table, or the build
+        # under it, is blocked. `UnsupportedPyIceberg` escaping instead would
+        # abort the whole fleet run with a traceback and exit 1 -- contradicting
+        # both the exit-code contract and this function's promise that each table
+        # is attempted. Added with ZMBNI-37, which gave five more operations a
+        # way to raise it. `SpillLimitExceeded` is the same shape for one table
+        # under this host's spill cap: the cap exists so this is what happens
+        # instead of the pod being evicted, and the next table must still run
+        # (ZMBNI-186).
         return Outcome(table, operation, 3, str(exc))
     except (ConcurrentModification, CommitFailedException, ValidationException) as exc:
         # Another writer committed to this table while the operation was running.
