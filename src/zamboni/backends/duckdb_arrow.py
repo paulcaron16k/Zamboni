@@ -25,6 +25,7 @@ from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 
+import duckdb
 import pyarrow as pa
 from pyiceberg.io.pyarrow import ArrowScan, _dataframe_to_data_files
 from pyiceberg.manifest import DataFile
@@ -33,11 +34,22 @@ from pyiceberg.table.sorting import NullOrder, SortDirection
 from pyiceberg.transforms import IdentityTransform
 
 from ..capabilities import detect
+from ..committer import cleanup_orphans
 from ..config import MemoryMode
 from ..planner import FileGroup
-from ..workdir import resolve_temp_directory
+from ..workdir import WorkspaceUnavailable, resolve_temp_directory
 from ..zorder import build_zorder_sql
-from .base import RewriteBackend, RewriteContext, RewriteOutput
+from .base import RewriteBackend, RewriteContext, RewriteOutput, SpillLimitExceeded
+
+#: What identifies DuckDB's spill-cap refusal among its out-of-memory errors.
+#: `max_temp_directory_size` and `memory_limit` both raise
+#: `duckdb.OutOfMemoryException`; only this one names the setting. Measured with
+#: DuckDB 1.5.5: "Out of Memory Error: failed to offload data block ... This
+#: limit was set by the 'max_temp_directory_size' setting." Reading the message
+#: is the only way to tell them apart, so if DuckDB rewords it the refusal
+#: reverts to an uncaught exception --
+#: `test_a_rewrite_over_the_cap_is_refused_and_cleaned_up` fails first.
+_SPILL_CAP_SETTING = "max_temp_directory_size"
 
 
 class DuckDBArrowBackend(RewriteBackend):
@@ -56,6 +68,14 @@ class DuckDBArrowBackend(RewriteBackend):
         return True, ""
 
     def rewrite(self, group: FileGroup, ctx: RewriteContext) -> RewriteOutput:
+        try:
+            return self._rewrite(group, ctx)
+        except duckdb.OutOfMemoryException as exc:
+            if _SPILL_CAP_SETTING not in str(exc):
+                raise
+            raise SpillLimitExceeded(_spill_refusal(group, ctx, exc)) from exc
+
+    def _rewrite(self, group: FileGroup, ctx: RewriteContext) -> RewriteOutput:
         mode = _resolve_mode(group, ctx)
         tasks = self._scan_tasks(group, ctx)
         source_live_rows = self._live_row_count(tasks, ctx)
@@ -91,8 +111,16 @@ class DuckDBArrowBackend(RewriteBackend):
                 return RewriteOutput(self._write(stream, group, ctx), source_live_rows)
 
             written: list[DataFile] = []
-            for chunk in _bin_pack(stream, group.target_file_size_bytes):
-                written.extend(self._write(chunk, group, ctx))
+            try:
+                for chunk in _bin_pack(stream, group.target_file_size_bytes):
+                    written.extend(self._write(chunk, group, ctx))
+            except Exception:
+                # The committer cleans up what a *returned* group wrote; a group
+                # that fails here never returns, so its chunks are ours to remove.
+                # A sort's spill refusal measured at `execute`, before the first
+                # batch (DuckDB 1.5.5), so this is for whatever fails later.
+                cleanup_orphans(ctx.table, written)
+                raise
             return RewriteOutput(written, source_live_rows)
 
     # -- read ------------------------------------------------------------
@@ -368,8 +396,36 @@ class DuckDBArrowBackend(RewriteBackend):
         # creates lazily, so the failure lands partway through a large rewrite
         # (ZMBNI-90). `resolve_temp_directory` falls back to `tempfile.gettempdir()`,
         # which honours TMPDIR.
-        spill = resolve_temp_directory(ctx.config.temp_directory).replace("'", "''")
-        self._con.execute(f"SET temp_directory = '{spill}'")
+        #
+        # But only when it differs. Once a connection has spilled, DuckDB refuses
+        # any `SET temp_directory` -- even to the path it already has -- with
+        # NotImplementedException ("Cannot switch temporary directory after the
+        # current one has been used"; DuckDB 1.5.5, whether the spill succeeded
+        # or not). Setting it unconditionally meant the first table in a run to
+        # spill made every later sorted rewrite on the session raise, which
+        # `maintain()` does not catch, so the whole run died there (found while
+        # writing ZMBNI-186). DuckDB keeps the path verbatim, so a plain string
+        # comparison is enough.
+        spill = resolve_temp_directory(ctx.config.temp_directory)
+        current = self._con.execute("SELECT current_setting('temp_directory')").fetchone()
+        if current is None or current[0] != spill:
+            quoted = spill.replace("'", "''")
+            try:
+                self._con.execute(f"SET temp_directory = '{quoted}'")
+            except duckdb.NotImplementedException as exc:
+                raise WorkspaceUnavailable(
+                    f"this session's DuckDB connection has already spilled to "
+                    f"{current[0] if current else '?'!r} and cannot move to {spill!r}. "
+                    "Use one temp_directory per CatalogSession."
+                ) from exc
+        # Reset when unset rather than left alone: the session's connection
+        # outlives this rewrite, and a cap one caller set must not bind the next.
+        cap = ctx.config.max_temp_directory_bytes
+        if cap is None:
+            self._con.execute(f"RESET {_SPILL_CAP_SETTING}")
+        else:
+            # `B` for bytes, as `_new_duckdb` does for memory_limit.
+            self._con.execute(f"SET {_SPILL_CAP_SETTING} = '{int(cap)}B'")
 
     # -- write -----------------------------------------------------------
 
@@ -560,6 +616,22 @@ def _bin_pack(reader: pa.RecordBatchReader, target_bytes: int) -> Iterator[pa.Ta
             batch_buffer, buffered = [], 0
     if batch_buffer:
         yield pa.Table.from_batches(batch_buffer, schema=schema)
+
+
+def _spill_refusal(group: FileGroup, ctx: RewriteContext, exc: Exception) -> str:
+    cap = ctx.config.max_temp_directory_bytes
+    limit = (
+        f"max_temp_directory_bytes={cap:,} allows"
+        if cap is not None
+        else "DuckDB's default allows (90% of the free disk it can see)"
+    )
+    return (
+        f"rewriting {group.describe()} needed more spill than {limit}; this "
+        "group was not committed. Raise --max-temp-directory-bytes "
+        "(ZAMBONI_MAX_TEMP_DIRECTORY_BYTES) if the spill volume has room for it, "
+        "or give the spill directory a larger volume. DuckDB: "
+        f"{str(exc).splitlines()[0]}"
+    )
 
 
 def _to_arrow_reader(result) -> pa.RecordBatchReader:

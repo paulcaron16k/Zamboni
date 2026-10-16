@@ -35,6 +35,19 @@ Two categories beyond the usual set, because this tool deletes files:
   exported too. A test reads `maintain()`'s exception handling from the source
   and fails if any Zamboni exception it maps to an exit code is not public.
 
+- **A cap on DuckDB's spill** (ZMBNI-186; IWS ELT-1041):
+  `--max-temp-directory-bytes`, `ZAMBONI_MAX_TEMP_DIRECTORY_BYTES`, and
+  `CompactionConfig.max_temp_directory_bytes`. DuckDB limits its spill to 90% of
+  the free disk it can see. On Kubernetes that is the node's disk, not the spill
+  `emptyDir`'s `sizeLimit`, so one large sorted rewrite could get the pod
+  evicted, along with every table in flight and, in IWS, the API the pod also
+  serves. With the cap, that rewrite raises the new, exported
+  `SpillLimitExceeded`, which `maintain()` reports as exit 3. Nothing is
+  committed for the group, and the next table runs. Unset by default, so nothing
+  changes until you set it. The cap is per worker process; docs/devops.md §8
+  says how to size it. Deliberately not a table-config key: it belongs to the
+  pod, not the table.
+
 - **`CatalogSession.from_catalog` takes `storage=` and `credential_use=`**
   (ZMBNI-200, asked for by IWS). An integrator with its own catalog *and* its
   own object-store credentials could not use `from_catalog`, so it built the
@@ -432,6 +445,26 @@ Two categories beyond the usual set, because this tool deletes files:
   without it. One source, two renderings.
 
 ### Fixed
+
+- **After one sorted rewrite spilled to disk, every later sorted rewrite on the
+  same session failed** (found writing ZMBNI-186). Once a connection has
+  spilled, DuckDB 1.5.5 refuses any `SET temp_directory`, even to the path it
+  already has. The DuckDB backend set it before every sorted rewrite, and
+  `maintain()` does not catch DuckDB's `NotImplementedException`. So in a run
+  over many tables, which shares one session, the first table to spill ended
+  the run at the next table that sorted. The directory is now set only when it
+  changes. Moving it after a spill is refused as `WorkspaceUnavailable` (exit
+  2), naming both paths.
+
+- **A rewrite group that failed partway through its output left the chunks it
+  had already written behind** (ZMBNI-186). The committer removes what a
+  finished group wrote, but a group that raises never returns its files. The
+  streaming path now removes its own.
+
+- **The unwritable-spill-directory message told operators to set
+  `temp_directory` in zamboni.yml**, a key the profile does not have. It now
+  says to pass `--temp-directory`, set `TMPDIR`, or set
+  `CompactionConfig.temp_directory`.
 
 - **On Lakekeeper, a table written since its last maintenance could be skipped
   as unchanged, or compacted only in part** (ZMBNI-192). The maintenance

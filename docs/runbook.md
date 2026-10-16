@@ -20,7 +20,7 @@ is the fastest way to avoid investigating the wrong one.
 |---|---|---|
 | 0 | Success | — |
 | 2 | Usage error: bad flag, missing `--uri`/`--warehouse`, negative guard | Fix the invocation |
-| 3 | The table is **blocked**: format version 1 or 3, equality deletes, an unsafe PyIceberg build, or **another writer committed to it while maintenance ran** | Read the reason. These are refusals, not failures — see [design.md §6](design.md#6-constraints). For the busy-table case nothing was changed and the run continued to the next table; re-run outside the load window |
+| 3 | The table is **blocked**: format version 1 or 3, equality deletes, an unsafe PyIceberg build, a rewrite that needed more spill than `--max-temp-directory-bytes` allows, or **another writer committed to it while maintenance ran** | Read the reason. These are refusals, not failures — see [design.md §6](design.md#6-constraints). For the busy-table case nothing was changed and the run continued to the next table; re-run outside the load window |
 | 4 | A **safety check aborted** the run. Nothing was deleted | Investigate before retrying. This is the interesting one |
 
 **Exit 4 deserves attention.** It means a reclaim operation found its own view of
@@ -256,6 +256,15 @@ memory section of [user_guide.md](user_guide.md).
 deletes to it — usually a Flink or merge-on-read pipeline. PyIceberg cannot read
 them, so the table is refused rather than compacted into something that
 resurrects deleted rows.
+
+**Exit 3 naming `max_temp_directory_bytes`.** A rewrite group needed more spill
+than the cap allows, and the cap refused it rather than let it fill the disk. On
+Kubernetes, that is the pod not being evicted. Nothing was committed for that
+group, and the run went on. The message names the group, with its size in
+bytes and rows. Either the cap is lower than the volume can bear, so raise it
+within the volume's `sizeLimit` (divided by the workers; see
+[devops.md §8](devops.md#kubernetes)), or the partition really is that large
+and needs a bigger spill volume. It recurs every run until one of them changes.
 
 ---
 

@@ -595,7 +595,7 @@ internal and may move in a patch release. The entry points you need:
 | `available_engines()` | what this install can drive |
 | `config_from_table_settings` | turning table-config layout into the compaction config `COMPACT` needs |
 | `TableCompactor`, `SnapshotExpirer`, `OrphanCleaner`, … | the local engine's own classes, when you want its richer results |
-| `MaintenanceAborted` / `ExpiryAborted` / `OrphanCleanupAborted` / `CompactionBlocked` / `ConcurrentModification` / `UnsupportedPyIceberg` / `UnsupportedOperation` / `PreviewUnavailable` / `EngineConfigProblem` / `WorkspaceUnavailable` / `StorageCredentialsRequired` | what an operation raises when you drive it through `get_maintainer()` or a class above instead of `maintain()`, which turns each into an exit code. Catch `MaintenanceAborted` for exit 4 — a reclaim safety check refused and nothing was deleted; `ExpiryAborted` and `OrphanCleanupAborted` are its two kinds. `test_every_refusal_maintain_reports_is_public` keeps this list complete |
+| `MaintenanceAborted` / `ExpiryAborted` / `OrphanCleanupAborted` / `CompactionBlocked` / `SpillLimitExceeded` / `ConcurrentModification` / `UnsupportedPyIceberg` / `UnsupportedOperation` / `PreviewUnavailable` / `EngineConfigProblem` / `WorkspaceUnavailable` / `StorageCredentialsRequired` | what an operation raises when you drive it through `get_maintainer()` or a class above instead of `maintain()`, which turns each into an exit code. Catch `MaintenanceAborted` for exit 4 — a reclaim safety check refused and nothing was deleted; `ExpiryAborted` and `OrphanCleanupAborted` are its two kinds. `test_every_refusal_maintain_reports_is_public` keeps this list complete |
 
 A maintainer is engine-neutral: the same four lines drive `local`, `trino` or
 `spark`, and each raises `UnsupportedOperation` rather than pretending when
@@ -1588,6 +1588,14 @@ deleting every live file. Expiry answers to the clock, not to writes.
   somewhere with more room if you Z-order large partitions; the sort itself is
   not held in memory.
 
+  **Cap the spill on Kubernetes.** DuckDB limits its spill to 90% of the free
+  disk *it can see*, which is the node's disk, not the `emptyDir`'s
+  `sizeLimit`. A large sorted rewrite therefore spills past the limit, and the
+  kubelet evicts the pod. Set `max_temp_directory_bytes` at or below the
+  `sizeLimit`, minus room for anything else that writes there, and a rewrite
+  that needs more raises `SpillLimitExceeded` for that table, with nothing
+  committed. `test_a_rewrite_over_the_cap_is_refused_and_cleaned_up` runs one.
+
   **On a container with a read-only root filesystem, check this before your
   first run.** `zamboni doctor` reports the resolved location and whether it is
   writable. A rewrite that exceeds the memory budget streams through DuckDB and
@@ -1760,6 +1768,7 @@ default; `test_cli_defaults_match_the_dataclass` keeps them honest.
 | `--read-ahead-bytes` | 64 MiB | How much of a group the streaming path may have in flight. `0` reads strictly one file at a time — bounded tightest, and slower against object storage because it serialises the round trips |
 | `--max-read-ahead-files` | 8 | Ceiling on concurrent reads regardless of the byte window |
 | `--temp-directory` | system | Where DuckDB spills sorts. Point it somewhere with room if you Z-order |
+| `--max-temp-directory-bytes` | DuckDB's: 90% of the free disk it can see | Ceiling on that spill; also `ZAMBONI_MAX_TEMP_DIRECTORY_BYTES`. A rewrite that needs more fails its table with exit 3 (`SpillLimitExceeded`) instead of filling the disk. On Kubernetes, set it below the spill volume's `sizeLimit`; see [devops.md §8](devops.md#kubernetes) |
 | `--partial-progress` | off | Commit each group as it finishes. More commits, but a failure keeps the finished ones |
 | `--branch` | `main` | Which branch to commit to |
 | `--snapshot-operation` | `replace` | How the snapshot is labelled |

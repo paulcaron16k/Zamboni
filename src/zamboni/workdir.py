@@ -57,9 +57,10 @@ def assert_writable(path: str, *, setting: str, flag: str) -> None:
         raise WorkspaceUnavailable(
             f"{path!r} is not writable ({exc.strerror or exc}), and compaction needs "
             f"somewhere to spill: a rewrite larger than the memory budget streams "
-            f"through DuckDB, which writes sorts and hash tables to disk. Set "
-            f"{setting} in zamboni.yml, pass {flag}, or set TMPDIR. On Kubernetes "
-            f"with a read-only root filesystem, mount an emptyDir at /tmp."
+            f"through DuckDB, which writes sorts and hash tables to disk. Pass "
+            f"{flag}, set TMPDIR, or -- calling the Python API -- set "
+            f"CompactionConfig.{setting}. On Kubernetes with a read-only root "
+            f"filesystem, mount an emptyDir at /tmp."
         ) from exc
 
 

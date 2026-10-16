@@ -19,6 +19,20 @@ from ..config import CompactionConfig
 from ..planner import FileGroup
 
 
+class SpillLimitExceeded(RuntimeError):
+    """A rewrite needed more spill than ``max_temp_directory_bytes`` allows.
+
+    The cap exists so that this is what happens instead of the kubelet evicting
+    the pod (ZMBNI-186), so it is a refusal for one table rather than a crash:
+    `maintain()` reports it as exit 3, blocked under this host's limits, and goes
+    on. Raised from inside the rewrite, before anything is committed; the
+    committer's cleanup removes what the group had already written.
+
+    Declared here, beside the seam, rather than in the DuckDB backend, so a
+    caller can catch it without importing an engine.
+    """
+
+
 @dataclass(frozen=True)
 class RewriteContext:
     table: Table
