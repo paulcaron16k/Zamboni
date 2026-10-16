@@ -38,7 +38,7 @@ from ..committer import cleanup_orphans
 from ..config import MemoryMode
 from ..planner import FileGroup
 from ..workdir import WorkspaceUnavailable, resolve_temp_directory
-from ..zorder import build_zorder_sql
+from ..zorder import build_zorder_sql, quote_identifier
 from .base import RewriteBackend, RewriteContext, RewriteOutput, SpillLimitExceeded
 
 #: What identifies DuckDB's spill-cap refusal among its out-of-memory errors.
@@ -525,7 +525,7 @@ def ordering_sql(relation: str, columns: list[str], ctx: RewriteContext) -> str 
     if not order_by:
         return None
 
-    projected = ", ".join(f'"{c}"' for c in columns)
+    projected = ", ".join(quote_identifier(c) for c in columns)
     return f"SELECT {projected} FROM {relation} ORDER BY {order_by}"
 
 
@@ -559,7 +559,7 @@ def _table_order_sql(table) -> str | None:
             raise ValueError(f"sort order references unknown source id {field.source_id}")
         direction = "ASC" if field.direction == SortDirection.ASC else "DESC"
         nulls = "NULLS FIRST" if field.null_order == NullOrder.NULLS_FIRST else "NULLS LAST"
-        terms.append(f'"{column}" {direction} {nulls}')
+        terms.append(f"{quote_identifier(column)} {direction} {nulls}")
     return ", ".join(terms)
 
 

@@ -40,20 +40,75 @@ from dataclasses import dataclass
 MAX_ZORDER_BITS = 62
 
 
+def quote_identifier(name: str) -> str:
+    """Quote a DuckDB identifier, doubling any embedded quote.
+
+    Every column name in the SQL this package builds goes through here. The
+    names come from a table's schema and from table-config.json, and Iceberg
+    allows any string as a column name: before ZMBNI-206, `"{name}"` let a
+    column named `id", (SELECT 42) AS "x` add an expression to the rewrite's
+    SELECT (reproduced with DuckDB 1.5.5) -- and DuckDB can read local files.
+    The same rule as `maintainers.trino.quote`.
+    """
+    return '"' + name.replace('"', '""') + '"'
+
+
 @dataclass(frozen=True)
 class ZOrderSQL:
-    """The SQL fragments needed to order a relation by a z-order key."""
+    """The SQL needed to order a relation by a z-order key."""
 
-    #: CTE body computing the interleaved key alongside every original column.
-    projection: str
+    #: Key columns, in interleave order.
+    columns: tuple[str, ...]
+    precision_bits: int
     #: The column name holding the interleaved key.
-    key_column: str
+    key_column: str = "_zamboni_zkey"
+
+    def projection(self, relation: str) -> str:
+        """The CTE body computing the interleaved key alongside every column of ``relation``.
+
+        Built per call rather than stored as a template to `str.format`: the
+        template would hold the column names, and one containing `{` or `}`
+        would break the formatting, or be substituted into.
+        """
+        k = len(self.columns)
+        max_code = (1 << self.precision_bits) - 1
+
+        # DENSE_RANK is 1-based; shifting to 0-based keeps the whole code space
+        # usable and makes a single-distinct-value column collapse to 0 rather than
+        # to an arbitrary constant.
+        rank_terms = [
+            f"DENSE_RANK() OVER (ORDER BY {quote_identifier(col)}) - 1 AS _r{j}"
+            for j, col in enumerate(self.columns)
+        ]
+        span_terms = [f"GREATEST(MAX(_r{j}) OVER (), 1) AS _span{j}" for j in range(k)]
+
+        # Proportional scale into [0, max_code]. Integer division after multiplying
+        # keeps this exact for the endpoints and monotonic in between.
+        scale_terms = [f"CAST(_r{j} * {max_code} / _span{j} AS BIGINT) AS _c{j}" for j in range(k)]
+
+        interleave = " + ".join(
+            f"(((_c{j} >> {i}) & 1) << {i * k + j})"
+            for i in range(self.precision_bits)
+            for j in range(k)
+        )
+
+        return (
+            "SELECT *, "
+            f"({interleave}) AS {self.key_column} "
+            "FROM (SELECT *, "
+            + ", ".join(scale_terms)
+            + " FROM (SELECT *, "
+            + ", ".join(span_terms)
+            + " FROM (SELECT *, "
+            + ", ".join(rank_terms)
+            + f" FROM {relation}) _z_ranked) _z_spanned) _z_scaled"
+        )
 
     def select(self, relation: str, columns: list[str]) -> str:
         """A full SELECT that returns ``columns`` ordered by the z-order key."""
-        projected = ", ".join(f'"{c}"' for c in columns)
+        projected = ", ".join(quote_identifier(c) for c in columns)
         return (
-            f"WITH _zamboni_ranked AS ({self.projection.format(relation=relation)}) "
+            f"WITH _zamboni_ranked AS ({self.projection(relation)}) "
             f"SELECT {projected} FROM _zamboni_ranked ORDER BY {self.key_column}"
         )
 
@@ -77,38 +132,7 @@ def build_zorder_sql(columns: list[str], precision_bits: int = 16) -> ZOrderSQL:
             f"{MAX_ZORDER_BITS}-bit ordering key"
         )
 
-    k = len(columns)
-    max_code = (1 << precision_bits) - 1
-
-    # DENSE_RANK is 1-based; shifting to 0-based keeps the whole code space
-    # usable and makes a single-distinct-value column collapse to 0 rather than
-    # to an arbitrary constant.
-    rank_terms = [
-        f'DENSE_RANK() OVER (ORDER BY "{col}") - 1 AS _r{j}' for j, col in enumerate(columns)
-    ]
-    span_terms = [f"GREATEST(MAX(_r{j}) OVER (), 1) AS _span{j}" for j in range(k)]
-
-    # Proportional scale into [0, max_code]. Integer division after multiplying
-    # keeps this exact for the endpoints and monotonic in between.
-    scale_terms = [f"CAST(_r{j} * {max_code} / _span{j} AS BIGINT) AS _c{j}" for j in range(k)]
-
-    interleave = " + ".join(
-        f"(((_c{j} >> {i}) & 1) << {i * k + j})" for i in range(precision_bits) for j in range(k)
-    )
-
-    projection = (
-        "SELECT *, "
-        f"({interleave}) AS _zamboni_zkey "
-        "FROM (SELECT *, "
-        + ", ".join(scale_terms)
-        + " FROM (SELECT *, "
-        + ", ".join(span_terms)
-        + " FROM (SELECT *, "
-        + ", ".join(rank_terms)
-        + " FROM {relation}) _z_ranked) _z_spanned) _z_scaled"
-    )
-
-    return ZOrderSQL(projection=projection, key_column="_zamboni_zkey")
+    return ZOrderSQL(columns=tuple(columns), precision_bits=precision_bits)
 
 
 def zorder_key(values: list[int], precision_bits: int) -> int:
