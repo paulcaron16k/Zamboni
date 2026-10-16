@@ -21,6 +21,27 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### Fixed
+
+- **A plain `pip install iceberg-zamboni` could not compact** (ZMBNI-213; 0.5.1
+  and 0.6.0 behave the same). Two of the safety probes build a table on a
+  SQLite catalog to observe what the installed PyIceberg does, and that needs
+  SQLAlchemy, which only the `sql` extra installed. Without it the probes could
+  not run, and a build that cannot be observed is assumed unsafe. So
+  `zamboni doctor` reported `usable: False`, and compact, rewrite-manifests and
+  remove-dangling-deletes refused with exit 3. The reason given never mentioned
+  the extra, and the README's quickstart installs with no extras. SQLAlchemy is
+  now a base dependency, through `pyiceberg[sql-sqlite]`. A no-extras install
+  grows from 322 MB to 352 MB (measured). The `sql` extra still exists and
+  installs the same thing, so existing install lines are unaffected.
+
+  **One cost: Zamboni no longer installs into an Airflow 2 interpreter.**
+  Airflow 2.10.5 requires `sqlalchemy<2.0` and PyIceberg's SQL catalog requires
+  2.x, so an in-process `@task` install that resolved against a REST catalog
+  before now fails to resolve. Run it as a `BashOperator` from its own venv
+  instead, which docs/user_guide.md already preferred. Airflow 3
+  (`apache-airflow-core` 3.3.2, `sqlalchemy>=2.0.50`) is unaffected.
+
 ## [0.6.0] - 2026-10-16
 
 ### Added
