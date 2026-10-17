@@ -21,6 +21,30 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### BREAKING
+
+- **`table-config.json` now holds the newest partitions by default** (#216).
+  `skip_partitions_newer_than_windows` was documented, and defaulted in the CLI
+  and library, as `1`, but a table-config that left the key out parsed it as
+  `null`, so no partition was held. After upgrading, compaction stops rewriting
+  each temporal table's open window and the one before it (today and yesterday on
+  a day-partitioned table) until they leave the hold, and a loader writing into
+  them stops paying for rewritten files. To keep the old behaviour, set
+  `"skip_partitions_newer_than_windows": null` in `defaults` or in a table's
+  block. Unpartitioned tables, and tables partitioned only on `identity`,
+  `bucket` or `truncate`, are unaffected.
+- **`defaults.min_input_files` now reaches every table** (#216). It was
+  compared against the built-in `2` per table and ignored whenever a table had a
+  block of its own, which in a config is every table. A fleet that set it now
+  gets that threshold: partitions below it are skipped, and above it compacted.
+- **A table's `null` now overrides `defaults`** for `target_file_size_bytes`
+  and `skip_partitions_newer_than_windows` (#216). The three sizing keys are
+  inherited by whether the table's block contains them, not by comparing them to
+  the built-in default; see `docs/table-config.md#inheritance`. The sections
+  (`retention`, `ordering`, `partition`, `partition_evolution`) merge as before.
+  `zamboni table-config summary` now prints each table's compaction settings, so
+  the result can be checked before a run.
+
 ### Fixed
 
 - **A partition held by `skip_partitions_newer_than_windows` could be left

@@ -154,6 +154,31 @@ level where you can.
 table that declares `ordering` replaces the default ordering entirely rather than having
 individual keys blended, so what you read in one block is what applies.
 
+The three [sizing](#sizing) keys are inherited **key by key, by presence**. A key the
+table's block contains wins, whatever its value; a key it leaves out comes from
+`defaults`, and from the built-in default when `defaults` leaves it out too:
+
+| `defaults` | table block | The table gets |
+|---|---|---|
+| `"min_input_files": 4` | no `min_input_files` | 4 |
+| `"min_input_files": 4` | `"min_input_files": 2` | 2, even though 2 is the built-in default |
+| `"skip_partitions_newer_than_windows": 3` | `"skip_partitions_newer_than_windows": null` | no hold |
+| no `skip_partitions_newer_than_windows` | no `skip_partitions_newer_than_windows` | 1, the built-in default |
+
+So `null` in a table's block is an override, not "unset": it turns the hold off, or
+returns the target size to the table property, for that table alone. Up to 0.6.1 these
+keys were compared against the built-in default instead, which meant `defaults.min_input_files`
+never reached a table that had a block of its own, and a table could not write `null` over
+a `defaults` value (#216).
+
+The sections (`partition`, `partition_evolution`, `ordering`, `retention`) still merge by
+comparison: a section equal to the built-in one counts as left out. Files written by
+`zamboni from-catalog` spell out every table's `retention` in full, and merged by presence
+each would start overriding `defaults.retention` in configs nobody had edited.
+
+`zamboni table-config summary` prints what each table ends up with, which is the quickest
+way to check a merge.
+
 There is deliberately no namespace-level `defaults` yet. `namespaces.<name>` is an object
 rather than a bare table map precisely so one can be added without another format change.
 
@@ -383,7 +408,10 @@ choosing `sort` or `zorder`.
 |---|---|---|
 | `target_file_size_bytes` | table property, else 128 MiB | Falls back to `write.parquet.target-file-size-bytes`, then `write.target-file-size-bytes` |
 | `min_input_files` | 2 | A partition is only compacted with at least this many candidates |
-| `skip_partitions_newer_than_windows` | 1 | Hold the open partition window plus this many recently closed ones, so compaction does not rewrite data a loader is still writing (which inflates every later copy-on-write update). Temporal partitions only |
+| `skip_partitions_newer_than_windows` | 1 | Hold the open partition window plus this many recently closed ones, so compaction does not rewrite data a loader is still writing (which inflates every later copy-on-write update). Temporal partitions only. `null` turns the hold off. Up to 0.6.1 a config that left this key out got no hold at all (#216) |
+
+A table block inherits each of these from `defaults` unless it contains the key; see
+[Inheritance](#inheritance).
 
 ---
 
