@@ -587,6 +587,7 @@ internal and may move in a patch release. The entry points you need:
 | **`maintain(session, ...)`** | **the whole run — every operation, every table, one call. The CLI's `maintenance` verb is a printing adapter over it** |
 | `MaintenanceReport` / `Outcome` | what it returns: per-operation results, `failures`, `counters`, and `exit_code` — the same number the CLI would exit with |
 | `RunCounters` | how much of the run had anything to act on: `considered`, `skipped`, `maintained`, `failed`, `skip_rate` |
+| `Stopped` | `report.stopped` on a run cut short by `should_stop` or a raising `observer`: the `reason`, and `not_run`, every (table, operation) never started. `None` when the run went to the end |
 | `get_maintainer(name)` | one engine, when you need a single operation: `"local"`, `"trino"`, `"spark"` |
 | `Operation` | the six operations, as an enum |
 | `MaintenanceRequest` | engine-neutral inputs — retention plus overrides |
@@ -775,6 +776,44 @@ Four things that used to be the caller's problem and are not any more:
   `MaintenanceAborted`.
 - **The worst exit code wins, not the last.** A run where compaction was blocked
   and everything after it succeeded still reports 3.
+
+### Stopping a run part way
+
+`maintain(should_stop=...)` takes a callable that answers "stop now?". It is
+asked before each table, before each operation and, on the local engine,
+between compaction's rewrite groups — never during a commit, so a stop never
+leaves one half done. Trino and Spark run each operation as one statement, so
+there it is asked between operations only. Once it answers true nothing more
+starts, and `maintain()` returns the report:
+
+```python
+import time
+
+deadline = time.monotonic() + 3600
+report = maintain(session, table_config=path, commit=True,
+                  should_stop=lambda: time.monotonic() > deadline)
+if report.stopped:
+    log.warning("%s: %s", warehouse, report.stopped.describe())
+```
+
+- **What completed is in the report**; `report.stopped.not_run` lists every
+  (table, operation) never started. Nothing more is needed to resume: the next
+  run starts them as usual.
+- **Compaction stopped between groups commits what it already rewrote** —
+  in the default mode, as one snapshot — and its outcome says how many groups it
+  did not reach. The commit is marked unfinished, so the next run compacts the
+  rest even if nothing has been written since.
+- **Once compaction has committed on a table, a stop waits for that table's
+  `remove-dangling-deletes` and `rewrite-manifests`** (and `apply-properties`,
+  which runs between them). They clean up after the compaction; stopped before
+  them, the next run would read compaction's commit as "nothing written since"
+  and skip them, on a quiet table indefinitely.
+- **A stop is not a failure.** It leaves `exit_code` alone, and work never
+  started is not counted in `report.counters`.
+- **An exception from `observer` stops the run the same way**, and is logged;
+  `report.stopped.reason` names it. Up to 0.6.1 it propagated out of `maintain()`
+  and the outcomes collected so far were lost. An exception from `should_stop`
+  is read as "stop".
 
 `report.exit_code` is the number `zamboni maintenance` would have exited with —
 `test_the_cli_and_the_api_agree_on_the_exit_code` pins that, because two paths

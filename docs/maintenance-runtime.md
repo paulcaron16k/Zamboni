@@ -167,13 +167,44 @@ A queued entry is resolved against the fleet **when a worker takes it**, so an
 update changes every decision not yet started and none in flight, and a table
 removed by an update leaves the queue silently.
 
-### 3.3 Deadlines
+### 3.3 Deadlines and stopping
 
 A candidate may carry `not_after`. **A worker never starts a table after its
 deadline**; the entry is dropped and reported as `deadline` (exit 0 — a window
 closing is not a failure). A table already running finishes: maintenance is
 never interrupted to honour a window, because stopping a rewrite mid-flight buys
 nothing and wastes the work.
+
+A **stop** — `request_stop`, or `maintain(should_stop=…)` for a caller without
+a runtime (#201) — reaches further than a deadline, into a running table, so it
+needs rules for what a table stopped part way looks like. One set, for both:
+
+- **It is acted on only between whole commits:** before a table, before an
+  operation, and between compaction's rewrite groups on the local engine. Never
+  inside a commit, and never inside one engine statement on Trino or Spark.
+- **Compaction stopped between groups commits what it already rewrote**, marked
+  unfinished (`zamboni.compact.incomplete`, #196), so the next run compacts the
+  rest without waiting for a write.
+- **Once compaction has committed on a table, the stop waits for that table's
+  `remove-dangling-deletes` and `rewrite-manifests`.** Stopped before them, the
+  next run reads compaction's commit as "nothing written since" and skips them;
+  on a quiet table, indefinitely. Waiting costs those two operations; the
+  alternative, never skipping them while compaction's stamp is newest, re-runs
+  them on every pass of a table where they commit nothing.
+- **What completed is reported, and a stop is not a failure.** The report
+  carries every outcome that finished plus `stopped` (the reason and each
+  table and operation never started). `exit_code` is unchanged, as for a
+  deadline drop, and work never started is not counted in `RunCounters`.
+- **An exception from an observer is a stop, not a crash**, and is logged. A
+  runtime observer is a *destination* (§8) and must not stop the runtime;
+  `maintain()`'s single `observer` callback was its callers' only stop lever
+  before `should_stop`, which is why the two differ.
+
+A deadline only stops a table from starting; a stop also takes effect between
+operations within a running table. `request_stop(force=True)` is the exception
+to all of the above: like `zamboni serve`'s second stop signal today
+(`Service.request_stop`), it kills in-flight workers, and relies on every
+Iceberg commit being atomic rather than on these rules.
 
 ### 3.4 Priorities
 

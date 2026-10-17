@@ -45,6 +45,28 @@ Two categories beyond the usual set, because this tool deletes files:
   `zamboni table-config summary` now prints each table's compaction settings, so
   the result can be checked before a run.
 
+### Added
+
+- **`maintain(should_stop=…)` stops a run part way and returns what it
+  completed** (#201, asked for in ELT-605). The callable is asked before each
+  table, before each operation and, on the local engine, between compaction's
+  rewrite groups; never inside a commit. A stopped run's report carries every
+  completed outcome plus `report.stopped` (`Stopped`: the reason, and each table
+  and operation never started; also under `"stopped"` in `as_dict()`). A stop
+  does not change `exit_code`, and work never started is not counted.
+  Compaction stopped between groups commits the groups it already rewrote, marked
+  unfinished so the next run compacts the rest; its result gains
+  `groups_not_reached`. Once compaction has committed on a table, a stop waits
+  for that table's `remove-dangling-deletes` and `rewrite-manifests`, which
+  clean up after it. See the user guide, "Stopping a run part way".
+- **An exception from `maintain(observer=…)` now stops the run instead of
+  escaping it** (#201). Raising from the observer was the only way to stop a run,
+  and it discarded every outcome collected so far. It still stops the run, is
+  logged, and the report is returned with `stopped.reason` naming the exception.
+  A caller that relied on the exception propagating no longer sees it.
+  `TableCompactor.execute` gains a `should_stop` keyword, which `maintain()`
+  passes: a subclass overriding `execute` must accept it.
+
 ### Fixed
 
 - **A partition held by `skip_partitions_newer_than_windows` could be left
@@ -64,7 +86,9 @@ Two categories beyond the usual set, because this tool deletes files:
   written by earlier releases read as finished, as before. Reading them
   otherwise would re-plan every quiet table on every run, because a run with
   nothing to do commits nothing that could replace the old stamp. The other two
-  operations skip exactly as before.
+  operations skip exactly as before, except in a run whose compaction commits:
+  `remove-dangling-deletes` and `rewrite-manifests` then run after it rather than
+  being skipped by a check made before it wrote (#201).
 
 ## [0.6.1] - 2026-10-16
 
