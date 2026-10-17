@@ -51,6 +51,7 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers and editors only
         MaintenanceReport,
         Outcome,
         RunCounters,
+        Stopped,
         maintain,
         validate_policy,
     )
@@ -154,6 +155,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     "Severity": (".profile", "Severity"),
     "SnapshotExpirer": (".expire", "SnapshotExpirer"),
     "SpillLimitExceeded": (".backends.base", "SpillLimitExceeded"),
+    "Stopped": (".maintenance", "Stopped"),
     "StorageCredentialsRequired": (".session", "StorageCredentialsRequired"),
     "Support": (".maintainers", "Support"),
     "TableCompactor": (".compactor", "TableCompactor"),
@@ -341,6 +343,7 @@ __all__ = [
     "Severity",
     "SnapshotExpirer",
     "SpillLimitExceeded",
+    "Stopped",
     "StorageCredentialsRequired",
     "Support",
     "TableCompactor",

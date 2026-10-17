@@ -255,7 +255,7 @@ def test_a_refused_compaction_is_tried_again_without_a_write(session, tmp_path, 
     daily_table(session, {5: 3})
     path = config(tmp_path)
 
-    def refuses(self, *, dry_run):
+    def refuses(self, *, dry_run, should_stop=None):
         raise CompactionBlocked("cannot compact db.daily: this build is unsafe")
 
     real = TableCompactor.execute

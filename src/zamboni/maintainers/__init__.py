@@ -39,7 +39,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from ..config import CompactionConfig
     from ..session import CatalogSession
@@ -257,6 +257,12 @@ class MaintenanceRequest:
     #: :data:`zamboni.health.COMPACT_INCOMPLETE` -- the newest stamp is the one
     #: the next run reads, and is normally not compaction's (ZMBNI-196).
     compaction_unfinished: str | None = None
+    #: Asked between units of work that each end in a whole commit, never during
+    #: one; true means start nothing more. Set by
+    #: :func:`zamboni.maintenance.maintain` from its ``should_stop``. The local
+    #: engine asks it between compaction's rewrite groups; an engine that runs
+    #: an operation as one statement has nothing to ask it between (ZMBNI-201).
+    should_stop: Callable[[], bool] | None = field(default=None, compare=False, repr=False)
 
 
 class Maintainer(ABC):

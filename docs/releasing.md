@@ -27,6 +27,7 @@ them is breaking:
 | **Defaults that decide what gets deleted** | lowering `older_than_days`, raising `max_snapshot_age_days`, enabling a reclaim step that was off | changing a default that only affects performance, e.g. `target_file_size_bytes` |
 | **What is refused** | allowing an operation previously blocked as unsafe | blocking something newly discovered to be unsafe (see below) |
 | **`as_dict()` keys** | removing a key, renaming one, or changing what a key *counts* | adding a key, changing `describe()`'s wording, adding an operation with its own keys |
+| **Stopping a run** (`maintain(should_stop=…)`, a raising `observer`) | asking `should_stop` inside a commit, losing completed outcomes from the report, letting a stop change `exit_code`, stopping between a committed compaction and its `remove-dangling-deletes` / `rewrite-manifests` | asking at more points that each fall between whole commits |
 | **Published schemas** (`src/zamboni/*_spec.json`) | moving or renaming the file, or dropping it from the release assets — producers fetch it by path (#183) | adding a schema; a `write.completed` minor version, which only adds optional fields |
 
 **The fourth row is the one worth the effort of writing this down.** A release
