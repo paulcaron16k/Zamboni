@@ -133,6 +133,14 @@ If the watermark cannot be read for any reason the table is maintained as
 before, because a skip must never be the thing that stops a table being
 maintained.
 
+**`compact` is not skipped when the last run left it work**, even with nothing
+written since. A partition held by `skip_partitions_newer_than_windows`, a group
+a group-by-group run never reached, a refused or failed compaction: the run
+records each as `zamboni.compact.incomplete` on every snapshot it commits, and
+`zamboni health db.events` prints it as `left for later`. So a table that runs
+`compact` every night while nothing writes to it is either still releasing
+held partitions or still being refused. The `compact` line says which.
+
 The word after "since" is the operation that last stamped the table. Tables
 maintained by a Zamboni older than the stamp fix will say `compaction` where
 newer ones say `compact`; they are the same thing.
