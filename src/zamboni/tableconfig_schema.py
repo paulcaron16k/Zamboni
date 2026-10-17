@@ -106,8 +106,12 @@ JSON_NAME: dict[tuple[type, str], str] = {
 #: by that flag rather than by name. ``source`` is the path the config was read
 #: from, set by the loader, and has no spelling in the file at all -- the root's
 #: own ``_reject_unknown`` set is the proof: ``{"version", "warehouse",
-#: "defaults", "namespaces"}``.
-NOT_AUTHORED: frozenset[tuple[type, str]] = frozenset({(tc.TableConfig, "source")})
+#: "defaults", "namespaces"}``. ``TableSettings.authored`` is the same: which
+#: keys a block contained, recorded by the loader so the merge can tell a key
+#: left out from one set to its default.
+NOT_AUTHORED: frozenset[tuple[type, str]] = frozenset(
+    {(tc.TableConfig, "source"), (tc.TableSettings, "authored")}
+)
 
 #: Container fields the loader reads as ``raw.get(key) or <empty>``, so an
 #: explicit ``null`` is accepted and means "empty".
@@ -156,6 +160,11 @@ DESCRIPTIONS: dict[tuple[type, str], str] = {
         "tables by a dotted string and left the split to be guessed."
     ),
     (tc.TableConfig, "defaults"): "Applied to every table unless the table overrides the section.",
+    (tc.TableSettings, "skip_partitions_newer_than_windows"): (
+        "Partition windows compaction leaves alone: the open one plus this many "
+        "recently closed ones. 1 if omitted; null turns the hold off. In a table's "
+        "block, omitting it inherits defaults, while null or a number overrides them."
+    ),
     (tc.EvolutionRule, "older_than_days"): (
         "Measured from the end of the partition window, so a partition is left "
         "alone until every row it could contain is at least this old."

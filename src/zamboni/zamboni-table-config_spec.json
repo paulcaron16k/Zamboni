@@ -269,7 +269,8 @@
           "type": [
             "integer",
             "null"
-          ]
+          ],
+          "description": "Partition windows compaction leaves alone: the open one plus this many recently closed ones. 1 if omitted; null turns the hold off. In a table's block, omitting it inherits defaults, while null or a number overrides them."
         },
         "description": {
           "type": [
@@ -546,7 +547,8 @@
                   "type": [
                     "integer",
                     "null"
-                  ]
+                  ],
+                  "description": "Partition windows compaction leaves alone: the open one plus this many recently closed ones. 1 if omitted; null turns the hold off. In a table's block, omitting it inherits defaults, while null or a number overrides them."
                 },
                 "description": {
                   "type": [

@@ -340,8 +340,28 @@ class TableSettings:
     retention: Retention = field(default_factory=Retention)
     target_file_size_bytes: int | None = None
     min_input_files: int = 2
-    skip_partitions_newer_than_windows: int | None = None
+    #: On by default: hold the open window and the one before it (docs/table-config.md).
+    #: ``None`` turns the hold off -- so it has to be told apart from "not set",
+    #: which inherits `defaults`; see :attr:`authored`.
+    skip_partitions_newer_than_windows: int | None = 1
     description: str | None = None
+    #: Which of :data:`_INHERITED` the file's block actually contained, or
+    #: ``None`` for settings built in code. Not authored itself: the parser
+    #: records it, because only the parser can see the difference between a key
+    #: left out and a key set to its default or to ``null`` (ZMBNI-216).
+    authored: frozenset[str] | None = field(default=None, compare=False, repr=False)
+
+    def sets(self, name: str) -> bool:
+        """Did this block set ``name``, rather than leave it to `defaults`?
+
+        From the file, presence decides, so an explicit ``null`` or an explicit
+        default still overrides. Built in code there is no file to ask, and a
+        value that differs from the field's own default is the evidence of
+        intent -- which is how every one of these merged before.
+        """
+        if self.authored is not None:
+            return name in self.authored
+        return bool(getattr(self, name) != _FIELD_DEFAULTS[name])
 
     def validate(self, where: str) -> None:
         for i, pf in enumerate(self.partition):
@@ -384,6 +404,23 @@ DEFAULT_PARTITION_EVOLUTION = PartitionEvolution(
 )
 
 DEFAULT_SETTINGS = TableSettings(partition_evolution=DEFAULT_PARTITION_EVOLUTION)
+
+#: The settings a table block inherits from `defaults` key by key, by presence.
+#:
+#: Only the single-value ones. Comparing against the built-in default could not
+#: tell "left out" from "set to the default", so `defaults.min_input_files` was
+#: ignored by every table with a block of its own -- which in a config is every
+#: table -- and an explicit ``null`` could not turn the hold off where `defaults`
+#: turned it on (ZMBNI-216).
+#:
+#: The sections are deliberately not here, though they share the flaw. Files
+#: written by `zamboni from-catalog` (`TableConfig.dump`) spell out every table's
+#: `retention` and `partition_evolution` in full; merged by presence, each would
+#: start overriding `defaults.retention` -- turning expiry or orphan removal off,
+#: or on, in configs nobody has edited. That needs a migration, not a merge rule.
+_INHERITED = ("target_file_size_bytes", "min_input_files", "skip_partitions_newer_than_windows")
+
+_FIELD_DEFAULTS = {name: getattr(TableSettings(), name) for name in _INHERITED}
 
 
 @dataclass(frozen=True)
@@ -460,9 +497,11 @@ class TableConfig:
     def for_table(self, identifier: str) -> TableSettings:
         """Settings for ``identifier``, with defaults filled in.
 
-        The merge is per-section: a table that declares ``ordering`` replaces
+        The sections merge whole: a table that declares ``ordering`` replaces
         the default ordering wholesale rather than having individual keys
-        blended, so what an author reads in one block is what applies.
+        blended, so what an author reads in one block is what applies. The
+        single-value settings in `_INHERITED` merge key by key, by presence --
+        see the comment there for why the two rules differ.
         """
         override = self.tables.get(identifier)
         if override is None:
@@ -476,24 +515,15 @@ class TableConfig:
             ordering=(
                 override.ordering if override.ordering.mode != "none" else self.defaults.ordering
             ),
-            target_file_size_bytes=(
-                override.target_file_size_bytes
-                if override.target_file_size_bytes is not None
-                else self.defaults.target_file_size_bytes
-            ),
             retention=(
                 override.retention if override.retention != Retention() else self.defaults.retention
             ),
-            min_input_files=override.min_input_files,
-            # Same shape as target_file_size_bytes: an unset table block inherits
-            # the default rather than silently meaning "no floor", which would
-            # make `defaults` unable to express a fleet-wide contention policy.
-            skip_partitions_newer_than_windows=(
-                override.skip_partitions_newer_than_windows
-                if override.skip_partitions_newer_than_windows is not None
-                else self.defaults.skip_partitions_newer_than_windows
-            ),
             description=override.description,
+            authored=None,
+            **{
+                name: getattr(override if override.sets(name) else self.defaults, name)
+                for name in _INHERITED
+            },
         )
 
     def validate(self) -> None:
@@ -773,9 +803,15 @@ def _settings_from_dict(raw: dict[str, Any], where: str) -> TableSettings:
         ),
         min_input_files=_value(raw, "min_input_files", where, expect=int, default=2),
         skip_partitions_newer_than_windows=_value(
-            raw, "skip_partitions_newer_than_windows", where, expect=int, nullable=True
+            raw,
+            "skip_partitions_newer_than_windows",
+            where,
+            expect=int,
+            nullable=True,
+            default=_FIELD_DEFAULTS["skip_partitions_newer_than_windows"],
         ),
         description=_value(raw, "description", where, expect=str, nullable=True),
+        authored=frozenset(raw) & frozenset(_INHERITED),
     )
 
 
@@ -994,10 +1030,11 @@ def _settings_to_dict(s: TableSettings) -> dict[str, Any]:
             if v is not None
         },
     }
-    if s.target_file_size_bytes is not None:
-        out["target_file_size_bytes"] = s.target_file_size_bytes
-    if s.min_input_files != 2:
-        out["min_input_files"] = s.min_input_files
+    # Whatever the block set, and nothing else: a key written out is an override
+    # when read back, so writing an inherited value would stop it inheriting.
+    for name in _INHERITED:
+        if s.sets(name):
+            out[name] = getattr(s, name)
     return out
 
 

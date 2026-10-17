@@ -643,3 +643,78 @@ def test_every_documented_crontab_line_spreads_the_load_and_guards_overlap():
         assert line.index("sleep") < line.index("flock"), (
             f"{doc}: sleep before flock, so tonight's sleeping copy does not hold the lock: {line}"
         )
+
+
+def _markdown_rows(doc: str, heading: str) -> list[list[str]]:
+    """The body rows of every table under `heading`, up to the next heading."""
+    text = (DOCS / doc).read_text(encoding="utf-8")
+    section = text.split(f"\n{heading}\n", 1)[1].split("\n## ", 1)[0]
+    return [
+        [cell.strip() for cell in line.strip().strip("|").split("|")]
+        for line in section.splitlines()
+        if line.startswith("|") and not line.startswith("|---")
+    ][1:]
+
+
+def test_the_documented_sizing_defaults_are_the_code_defaults():
+    """#216 was a default documented as 1 that the config path resolved to off.
+    The table in table-config.md is where an operator reads the default, so it
+    is checked against the value a table with no sizing keys actually gets --
+    through `for_table`, not the dataclass, since the dataclass was right all
+    along and the merge was not."""
+    from zamboni.config import DEFAULT_TARGET_FILE_SIZE_BYTES
+    from zamboni.tableconfig import TableConfig
+
+    rows = _markdown_rows("table-config.md", "## Sizing")
+    documented = {row[0].strip("`"): row[1] for row in rows if len(row) == 3}
+    assert set(documented) == {
+        "target_file_size_bytes",
+        "min_input_files",
+        "skip_partitions_newer_than_windows",
+    }, "the Sizing table's rows changed; update this check with them"
+
+    config = TableConfig.from_dict(
+        {"version": 2, "warehouse": "acme", "namespaces": {"db": {"tables": {"t": {}}}}}
+    )
+    got = config.for_table("db.t")
+    assert documented["min_input_files"] == str(got.min_input_files)
+    assert documented["skip_partitions_newer_than_windows"] == str(
+        got.skip_partitions_newer_than_windows
+    )
+    assert got.target_file_size_bytes is None
+    assert documented["target_file_size_bytes"].endswith(
+        f"else {DEFAULT_TARGET_FILE_SIZE_BYTES // 2**20} MiB"
+    )
+
+
+def test_the_documented_inheritance_examples_resolve_as_documented():
+    """Each row of table-config.md's inheritance table is a config fragment and
+    a claimed result. Run it, so the table cannot keep describing the merge
+    #216 replaced."""
+    import json
+
+    from zamboni.tableconfig import TableConfig
+
+    def block(cell: str) -> tuple[str, dict]:
+        key = re.search(r"`\"?([a-z_]+)", cell)
+        assert key, f"no key in inheritance cell {cell!r}"
+        if cell.startswith("no "):
+            return key.group(1), {}
+        return key.group(1), json.loads("{" + cell.strip("`") + "}")
+
+    rows = _markdown_rows("table-config.md", "## Inheritance")
+    assert len(rows) >= 4, "the inheritance table lost its rows, or the extraction stopped matching"
+    for defaults_cell, table_cell, claim in rows:
+        name, defaults = block(defaults_cell)
+        _, table = block(table_cell)
+        config = TableConfig.from_dict(
+            {
+                "version": 2,
+                "warehouse": "acme",
+                "defaults": defaults,
+                "namespaces": {"db": {"tables": {"t": table}}},
+            }
+        )
+        got = getattr(config.for_table("db.t"), name)
+        expected = None if claim == "no hold" else int(claim.split()[0].rstrip(","))
+        assert got == expected, f"inheritance row {defaults_cell} | {table_cell}: got {got!r}"

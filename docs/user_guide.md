@@ -1349,7 +1349,10 @@ planner builds them like this:
 
 **Defaults to `1`**, which on a day-partitioned table holds **today and
 yesterday**. Set `0` to hold only the open window, or `null` to disable the
-floor entirely.
+floor entirely. In `table-config.json`, a table's `null` overrides a value in
+`defaults` ([inheritance](table-config.md#inheritance)). Up to 0.6.1 a
+table-config that left the key out got no hold at all — only the CLI flag and
+library default were `1` ([#216](https://github.com/paulcaron16k/Zamboni/issues/216)).
 
 Why two partitions and not one: a loader that extracts *yesterday's* data at
 02:00 writes it into **yesterday's** partition, not today's — the partition
@@ -1390,10 +1393,6 @@ Where a spec carries **more than one** temporal field, the partition is held if
 any of them is still inside the floor. If a row's `updated_at` window is
 current, that partition is receiving writes whatever its `created_at` says.
 
-It does **not** stop a commit being refused when a writer is active elsewhere in
-the table: Zamboni's pre-commit check compares the table's snapshot id, not the
-files being replaced, so any concurrent commit trips it. Tracked separately.
-
 **It does not, on its own, stop the commit from being refused.** Measured
 against a live catalog with an append-only writer: with the floor set so that
 only a 30-day-old partition was planned, compaction was *still* refused on every
@@ -1419,13 +1418,10 @@ partition held on a table whose writes then stopped was never compacted
 with too few files to merge is not counted, because it would have nothing to do
 when the hold lifts.
 
-It only applies where the spec has exactly one temporal partition field
-(`hour`, `day`, `month`, `year`). Where a partition cannot be dated — no
-temporal field, more than one, or a missing value — the partition is **skipped
-with the reason in the plan** rather than compacted. The instruction was not to
-touch partitions that may still be receiving rows; where that cannot be
-established, it has not been established. Nothing is silent: run `zamboni plan`
-and the reason is printed.
+A temporal field whose value is `null` — rows with no timestamp — has no window,
+so that field does not hold the partition; another temporal field in the same
+spec still can. A held partition is never silent: `zamboni plan` prints which
+field held it and how many windows ago it closed.
 
 This does not make contention impossible. A copy-on-write upsert can migrate a
 row between partitions and so rewrite an *old* one, which is why a lost race is
