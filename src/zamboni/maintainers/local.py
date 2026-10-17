@@ -313,7 +313,7 @@ class LocalMaintainer(Maintainer):
             compactor = TableCompactor.from_table_config(
                 self._session, table, request.table_config, base=request.compaction
             )
-        return compactor.execute(dry_run=dry_run)
+        return compactor.execute(dry_run=dry_run, should_stop=request.should_stop)
 
     def _expire(self, table: str, request: MaintenanceRequest, dry_run: bool) -> Reportable:
         from ..expire import RetentionPolicy, SnapshotExpirer

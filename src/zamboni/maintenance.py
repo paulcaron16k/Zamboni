@@ -221,6 +221,31 @@ class RunCounters:
 
 
 @dataclass(frozen=True)
+class Stopped:
+    """Why a run stopped before the end, and what it did not run (ZMBNI-201).
+
+    `not_run` lists every (table, operation) pair the run never started, in the
+    order it would have run them. Compaction stopped *between its groups* is not
+    in it: that operation ran and committed what it rewrote, and its outcome
+    says how many groups it did not reach. Either way the next run picks the
+    work up -- the pairs because they are simply run again, the groups because
+    compaction's commit is marked unfinished (ZMBNI-196).
+    """
+
+    reason: str
+    not_run: tuple[tuple[str, Operation], ...] = ()
+
+    def describe(self) -> str:
+        return f"stopped early ({self.reason}); {len(self.not_run)} operation(s) not started"
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "reason": self.reason,
+            "not_run": [{"table": t, "operation": o.value} for t, o in self.not_run],
+        }
+
+
+@dataclass(frozen=True)
 class MaintenanceReport:
     outcomes: tuple[Outcome, ...] = ()
     #: The warehouse this run maintained, from the table config. Carried so that
@@ -232,6 +257,10 @@ class MaintenanceReport:
     #: beside when it was measured and how long the run took.
     started_at: datetime | None = None
     ended_at: datetime | None = None
+    #: Set when the run stopped before the end. ``None`` for a run that went
+    #: to completion. A stop is not a failure, so it does not touch
+    #: :attr:`exit_code`; an integrator that needs to know reads this.
+    stopped: Stopped | None = None
 
     @property
     def duration_seconds(self) -> float | None:
@@ -317,12 +346,15 @@ class MaintenanceReport:
             "tables": list(self.tables),
             "failures": len(self.failures),
             "counters": self.counters.as_dict(),
+            "stopped": self.stopped.as_dict() if self.stopped is not None else None,
             "outcomes": [o.as_dict() for o in self.outcomes],
         }
 
     def describe(self) -> str:
         lines = [o.describe() for o in self.outcomes]
         lines.append(self.counters.describe())
+        if self.stopped is not None:
+            lines.append(self.stopped.describe())
         if self.failures:
             lines.append(f"{len(self.failures)} operation(s) failed")
         return "\n".join(lines)
@@ -401,6 +433,7 @@ def maintain(
     warehouse: str | None = None,
     observer: Callable[[Outcome], None] | None = None,
     reporter: MetricsReporter | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> MaintenanceReport:
     """Run every operation, in order, over every configured table.
 
@@ -420,13 +453,23 @@ def maintain(
         warehouse: Checked against the config's own ``warehouse``. Pass it and a
             file describing a different warehouse stops the run.
         observer: Called with each :class:`Outcome` as it happens, for progress
-            on a long run. The report is returned either way.
+            on a long run. **An exception from it stops the run** as
+            ``should_stop`` would, and is logged: raising from the observer was
+            the only stop lever before ``should_stop`` existed, so it keeps
+            working, and now returns the report instead of discarding it.
         reporter: Where to send Iceberg-shaped metrics. ``None`` emits nothing,
             which is the default: telemetry is opt-in, and a deployment that
             wants none pays for none. See :mod:`zamboni.reporters`. Costs one
             extra metadata load per *committing* operation, because a
             `CommitReport` is built from the snapshot's own summary and the run
             loop does not otherwise hold the table afterwards.
+        should_stop: Asked before each table, before each operation, and -- on
+            the local engine -- between compaction's rewrite groups; never
+            during a commit. Once it answers true, nothing more is started and
+            the report comes back with what completed and
+            :attr:`~MaintenanceReport.stopped` naming what did not. An exception
+            from it counts as true: a caller asking to be able to stop is better
+            served by a stop than by a traceback that loses the report.
 
     The report carries :attr:`~MaintenanceReport.counters` -- how many tables
     were considered, and how many of them had nothing to do -- which is the
@@ -444,22 +487,60 @@ def maintain(
 
     started_at = datetime.now(UTC)
     outcomes: list[Outcome] = []
+    # Why the run is to stop, once something has said so. The observer can set
+    # it as well as `should_stop`, and both are only acted on at the checks.
+    stop_reason: str | None = None
+    # Whether a check acted on it. A reason set by the observer's last call,
+    # with nothing left to start, stopped nothing and is not reported as a stop.
+    stop_seen = False
+
+    def stopping() -> bool:
+        nonlocal stop_reason, stop_seen
+        if stop_reason is None and should_stop is not None:
+            try:
+                if should_stop():
+                    stop_reason = "should_stop() returned true"
+            except Exception as exc:
+                logger.warning("should_stop raised; stopping the run", exc_info=True)
+                stop_reason = f"should_stop() raised {type(exc).__name__}: {exc}"
+        stop_seen = stop_seen or stop_reason is not None
+        return stop_reason is not None
 
     def record(outcome: Outcome) -> None:
+        nonlocal stop_reason
         outcomes.append(outcome)
-        if observer is not None:
+        if observer is None:
+            return
+        try:
             observer(outcome)
+        except Exception as exc:
+            # Not re-raised: that discarded every outcome already collected,
+            # which is the half of ZMBNI-201 a stop must not lose.
+            logger.warning("observer raised; stopping the run", exc_info=True)
+            stop_reason = stop_reason or f"observer raised {type(exc).__name__}: {exc}"
 
-    for table in wanted:
+    not_run: list[tuple[str, Operation]] = []
+    for position, table in enumerate(wanted):
+        if stopping():
+            not_run += [(t, o) for t in wanted[position:] for o in order]
+            break
         settings = config.for_table(table)
         request = MaintenanceRequest(
             retention=settings.retention,
             compaction=config_from_table_settings(settings, base_config),
             table_config=config,
+            should_stop=stopping,
         )
         unchanged = _unchanged_since_maintenance(session, table) or {}
         done: set[Operation] = set()
-        for operation in order:
+        # Operations a stop must wait for: the clean-up after a compaction that
+        # committed (see _AFTER_COMPACTION).
+        owed: set[Operation] = set()
+        for step, operation in enumerate(order):
+            if not owed and stopping():
+                not_run += [(table, o) for o in order[step:]]
+                not_run += [(t, o) for t in wanted[position + 1 :] for o in order]
+                break
             started_ns = time.perf_counter_ns()
             outcome = _run(
                 maintainer,
@@ -472,8 +553,15 @@ def maintain(
                 unchanged=unchanged.get(operation),
             )
             record(outcome)
+            owed.discard(operation)
             if operation is Operation.COMPACT:
                 request = replace(request, compaction_unfinished=_compaction_unfinished(outcome))
+                if commit and _compaction_wrote(outcome):
+                    # The due-check ran before compaction did, so its "nothing
+                    # written since" is stale now: compaction just wrote.
+                    for follow in _AFTER_COMPACTION:
+                        unchanged.pop(follow, None)
+                    owed = set(_AFTER_COMPACTION) & set(order[step + 1 :])
             if reporter is not None and outcome.result is not None:
                 _report(
                     reporter, session, table, outcome.result, time.perf_counter_ns() - started_ns
@@ -490,13 +578,43 @@ def maintain(
                     )
                 )
                 break
+        if not_run:
+            break
 
     return MaintenanceReport(
         tuple(outcomes),
         warehouse=config.warehouse,
         started_at=started_at,
         ended_at=datetime.now(UTC),
+        stopped=Stopped(stop_reason, tuple(not_run)) if stop_seen and stop_reason else None,
     )
+
+
+#: What compaction leaves for the operations after it: delete files its rewrite
+#: left dangling, and manifests its commit added.
+#:
+#: Both are owed once compaction has committed, for two reasons. The due-check is
+#: made once per table, before compaction runs, so on a run that compacts because
+#: the last one left work (ZMBNI-196) -- with nothing else written -- it would
+#: skip both as "nothing written since". And **a stop waits for them** (ZMBNI-201):
+#: stopped in between, the next run reads compaction's stamp as "nothing written
+#: since" and skips them too, on a quiet table indefinitely. Waiting costs the
+#: two operations; the alternative, not skipping them while compaction's stamp is
+#: newest, re-runs them on every pass of a table where they find nothing to commit.
+_AFTER_COMPACTION = frozenset({Operation.REMOVE_DANGLING_DELETES, Operation.REWRITE_MANIFESTS})
+
+
+def _compaction_wrote(outcome: Outcome) -> bool:
+    """Whether compaction may have committed. Unsure answers yes.
+
+    The local result says exactly. Another engine's result does not, and the
+    safe direction is the one that runs the clean-up rather than skipping it.
+    """
+    if outcome.result is None:
+        return False
+    if isinstance(outcome.result, CompactionResult):
+        return bool(outcome.result.groups or outcome.result.evolved)
+    return True
 
 
 #: Operations whose input is *new data*, and which therefore have nothing to do

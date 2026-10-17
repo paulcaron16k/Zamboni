@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
 from pyiceberg.manifest import DataFile
@@ -64,6 +65,9 @@ class CompactionResult:
     #: Partitions held by `skip_partitions_newer_than_windows` that would
     #: otherwise have been compacted -- work this run left for a later one.
     held: int = 0
+    #: Rewrite groups a stop request left unrewritten -- work this run gave up
+    #: for a later one, like `held` (ZMBNI-201).
+    not_reached: int = 0
     #: Whether this was a preview. Every other operation's result carried this
     #: and compaction's did not, which mattered once `as_dict()` made the
     #: counters machine-readable: they are what *would* happen, so without this
@@ -74,7 +78,7 @@ class CompactionResult:
     @property
     def unfinished(self) -> str | None:
         """What this run left for a later one, or ``None`` if it finished."""
-        return _unfinished(held=self.held, remaining=0)
+        return _unfinished(held=self.held, remaining=self.not_reached)
 
     def describe(self) -> str:
         # Count both kinds of work: reporting only compaction groups reads as
@@ -107,6 +111,11 @@ class CompactionResult:
                 "remove-dangling-deletes will drop them"
             )
         lines += [f"  skipped {part}: {reason}" for part, reason in self.skipped]
+        if self.not_reached:
+            lines.append(
+                f"  stopped on request: {self.not_reached} group(s) not reached; "
+                "the next run compacts them"
+            )
         lines += [f"  warning: {w}" for w in self.warnings]
         return "\n".join(lines)
 
@@ -128,6 +137,7 @@ class CompactionResult:
             "groups_rewritten": len(self.groups),
             "groups_evolved": len(self.evolved),
             "groups_skipped": len(self.skipped),
+            "groups_not_reached": self.not_reached,
             "dangling_delete_files": self.dangling_delete_files,
             "warnings": list(self.warnings),
             "dry_run": self.dry_run,
@@ -193,7 +203,17 @@ class TableCompactor:
 
     # -- execution -------------------------------------------------------
 
-    def execute(self, *, dry_run: bool = False) -> CompactionResult:
+    def execute(
+        self, *, dry_run: bool = False, should_stop: Callable[[], bool] | None = None
+    ) -> CompactionResult:
+        """Compact the table, or preview it.
+
+        Args:
+            should_stop: Asked before each group is rewritten, never during a
+                rewrite or a commit. Once it answers true no further group is
+                started; what was already rewritten is still committed, and
+                :attr:`CompactionResult.not_reached` counts the rest (ZMBNI-201).
+        """
         assert_supported_pyiceberg()
 
         # Before any rewrite work, because the alternative is finding out
@@ -274,15 +294,18 @@ class TableCompactor:
             ensure_specs(tbl, needed)
             tbl = self._session.table(self._identifier)
 
+        stop = should_stop or _never
         if self._config.partial_progress:
-            self._run_incrementally(tbl, evolution_plan, plan, result)
+            self._run_incrementally(tbl, evolution_plan, plan, result, stop)
         else:
-            self._run_atomically(tbl, evolution_plan, plan, result)
+            self._run_atomically(tbl, evolution_plan, plan, result, stop)
         return result
 
     # -- the two commit strategies ---------------------------------------
 
-    def _run_atomically(self, tbl, evolution_plan: EvolutionPlan, plan, result) -> None:
+    def _run_atomically(
+        self, tbl, evolution_plan: EvolutionPlan, plan, result, stop: Callable[[], bool]
+    ) -> None:
         """Rewrite everything, then commit it in one snapshot.
 
         The default, and Iceberg's: "The default is false, which produces a
@@ -295,25 +318,39 @@ class TableCompactor:
         committed, so a failure leaves more to clean up. That cleanup is
         best-effort and its leftovers are ordinary orphans, which is a storage
         cost rather than a correctness one.
+
+        **A stop commits what is already rewritten.** The groups are independent
+        -- the same property `partial_progress` relies on -- so the rewritten
+        ones are committed as one snapshot marked with what was not reached,
+        rather than discarded. Throwing away finished rewrites would make a stop
+        cost exactly the work it was meant to save, and leave orphans besides.
         """
         removed: list[DataFile] = []
         added: list[DataFile] = []
         pending: list[tuple[GroupResult, bool]] = []
+        evolved_labels: list[str] = []
+        total = len(evolution_plan.groups) + len(plan.groups)
 
         try:
             for group in evolution_plan.groups:
+                if stop():
+                    break
                 output = self._rewrite_evolution_group(tbl, group)
                 removed += [f.data_file for f in group.files]
                 added += output.data_files
+                evolved_labels.append(group.label)
                 pending.append(
                     (_group_result(f"evolution {group.label}", group.files, output), True)
                 )
-
-            for group in plan.groups:
-                output = self._rewrite_group(tbl, group)
-                removed += [f.data_file for f in group.files]
-                added += output.data_files
-                pending.append((_group_result(group.describe(), group.files, output), False))
+            else:
+                for group in plan.groups:
+                    if stop():
+                        break
+                    output = self._rewrite_group(tbl, group)
+                    removed += [f.data_file for f in group.files]
+                    added += output.data_files
+                    pending.append((_group_result(group.describe(), group.files, output), False))
+            result.not_reached = total - len(pending)
 
             if not added and not removed:
                 return
@@ -326,8 +363,8 @@ class TableCompactor:
                 snapshot_operation=self._config.snapshot_operation,
                 producer_cls=MultiSpecReplaceFiles,
                 snapshot_properties={
-                    **_evolution_labels(evolution_plan),
-                    **_left_for_later(held=plan.held, remaining=0),
+                    **_evolution_labels(evolved_labels),
+                    **_left_for_later(held=plan.held, remaining=result.not_reached),
                 },
             )
             outcome = committer.commit(tbl, removed=removed, added=added)
@@ -343,7 +380,9 @@ class TableCompactor:
             result.rewritten_bytes += group_result.rewritten_bytes
             result.added_bytes += group_result.added_bytes
 
-    def _run_incrementally(self, tbl, evolution_plan: EvolutionPlan, plan, result) -> None:
+    def _run_incrementally(
+        self, tbl, evolution_plan: EvolutionPlan, plan, result, stop: Callable[[], bool]
+    ) -> None:
         """Commit each group as it completes.
 
         Opt-in. Preferable on a table large enough that redoing the whole rewrite
@@ -354,10 +393,14 @@ class TableCompactor:
         Every commit but the last says how many groups are still to come
         (`health.COMPACT_INCOMPLETE`). A run that dies part way leaves that as
         its newest stamp, so the next run does not read the groups it never
-        reached as done.
+        reached as done. A stop leaves the same stamp, for the same reason: the
+        last commit before it already counts the groups after it.
         """
         remaining = len(evolution_plan.groups) + len(plan.groups)
         for group in evolution_plan.groups:
+            if stop():
+                result.not_reached = remaining
+                return
             output = self._rewrite_evolution_group(tbl, group)
             remaining -= 1
             committer = ReplaceCommitter(
@@ -377,6 +420,9 @@ class TableCompactor:
             tbl = self._session.table(self._identifier)
 
         for group in plan.groups:
+            if stop():
+                result.not_reached = remaining
+                return
             output = self._rewrite_group(tbl, group)
             remaining -= 1
             committer = ReplaceCommitter(
@@ -495,14 +541,18 @@ def _accumulate(result: CompactionResult, files, output: RewriteOutput) -> None:
     result.added_bytes += sum(f.file_size_in_bytes for f in output.data_files)
 
 
-def _evolution_labels(evolution_plan: EvolutionPlan) -> dict[str, str]:
+def _evolution_labels(labels: list[str]) -> dict[str, str]:
     """One snapshot property naming every evolved group in an atomic commit.
 
     Per-group commits get one label each; a single commit covering several has to
-    name them all or the snapshot loses the record of what it did.
+    name them all or the snapshot loses the record of what it did. Only the
+    groups actually rewritten: a stop can leave planned ones out (ZMBNI-201).
     """
-    labels = [g.label for g in evolution_plan.groups]
     return {"zamboni.evolution": ", ".join(labels)} if labels else {}
+
+
+def _never() -> bool:
+    return False
 
 
 def _left_for_later(*, held: int, remaining: int) -> dict[str, str]:

@@ -38,6 +38,7 @@ PROMISED = {
         "groups_rewritten",
         "groups_evolved",
         "groups_skipped",
+        "groups_not_reached",
         "dangling_delete_files",
         "warnings",
         "snapshot_ids",
