@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from pyiceberg.manifest import (
@@ -275,8 +276,15 @@ class DanglingDeleteCleaner:
     and orphan removal are what free the bytes.
     """
 
-    def __init__(self, *, dry_run: bool = False) -> None:
+    def __init__(self, *, dry_run: bool = False, stamp: Mapping[str, str] | None = None) -> None:
+        """
+        Args:
+            stamp: Further snapshot properties, written beside this operation's
+                own -- which win on a clash, so nothing passed here can relabel
+                the commit.
+        """
         self._dry_run = dry_run
+        self._stamp = dict(stamp or {})
 
     def run(self, tbl: Table) -> DeleteCleanupResult:
         report = find_dangling(tbl)
@@ -307,6 +315,7 @@ class DanglingDeleteCleaner:
             )
 
         properties = {
+            **self._stamp,
             OPERATION_STAMP: REMOVE_DANGLING_DELETES_STAMP,
             "zamboni.removed-delete-files": str(len(report.removable)),
         }

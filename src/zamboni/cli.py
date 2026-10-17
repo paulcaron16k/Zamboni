@@ -1140,19 +1140,26 @@ def _health(session: CatalogSession, args: argparse.Namespace) -> int:
             continue
         health = table_health(table)
         mark = maintenance_watermark(table)
-        due += bool(mark.written_since)
-        verdict = "due" if mark.written_since else "not due"
-        reason = (
-            f"{mark.snapshots_since} snapshot(s) written since maintenance"
-            if mark.written_since
-            else "nothing has written since maintenance last ran"
-        )
-        print(f"{health.identifier}: {verdict} -- {reason}")
+        # Due on either count: a write since the last run, or a last run that
+        # said it left compaction work. The second needs no write to become
+        # doable -- a held partition is released by the clock (ZMBNI-196).
+        if mark.written_since:
+            reason = f"{mark.snapshots_since} snapshot(s) written since maintenance"
+        elif mark.incomplete:
+            reason = f"the last run left compaction work: {mark.incomplete}"
+        else:
+            reason = "nothing has written since maintenance last ran"
+        is_due = mark.written_since or mark.incomplete is not None
+        due += is_due
+        print(f"{health.identifier}: {'due' if is_due else 'not due'} -- {reason}")
         print(mark.describe())
         print(health.describe())
         record = dataclasses.asdict(health)
         record.pop("unseen")  # a constant about the method, not the table
-        signals[name] = record | {"written_since": mark.written_since}
+        signals[name] = record | {
+            "written_since": mark.written_since,
+            "incomplete": mark.incomplete,
+        }
 
     if args.json:
         doc = {

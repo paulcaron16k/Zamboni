@@ -64,6 +64,11 @@ class CompactionPlan:
     groups: list[FileGroup] = field(default_factory=list)
     #: Partitions examined but not selected, with the reason.
     skipped: list[tuple[str, str]] = field(default_factory=list)
+    #: How many of those were held by `skip_partitions_newer_than_windows`. Kept
+    #: apart from `skipped` because it is the one skip only the clock releases --
+    #: the others wait for a write -- so it is the one that must be stamped
+    #: (`health.COMPACT_INCOMPLETE`), and a count is sturdier than parsing reasons.
+    held: int = 0
 
     @property
     def is_empty(self) -> bool:
@@ -133,22 +138,22 @@ class CompactionPlanner:
                     (label, f"unchanged since the last maintenance ({changed.source})")
                 )
                 continue
-            # Checked before min_input_files so the reported reason is the
-            # specific one: "we deliberately left this alone" reads very
-            # differently from "not enough files yet".
+            too_few = self._too_few(files)
+            # Reported before min_input_files so the reason is the specific
+            # one: "we deliberately left this alone" reads very differently from
+            # "not enough files yet".
             if floor is not None and (reason := _still_open(tbl, spec_id, partition, now, floor)):
                 plan.skipped.append((label, reason))
+                # Counted only where the hold is all that stands in the way. A
+                # held partition of one file has nothing for compaction to do
+                # when the hold lifts, so stamping it as left work would make
+                # every run re-plan a quiet table for nothing, until its next
+                # write -- which on a closed period is never.
+                if too_few is None:
+                    plan.held += 1
                 continue
-            if not self._config.rewrite_all and len(files) < self._config.min_input_files:
-                reason = (
-                    f"{len(files)} candidate file(s) < "
-                    f"min_input_files={self._config.min_input_files}"
-                )
-                plan.skipped.append((label, reason))
-                continue
-            if len(files) == 1 and not self._config.rewrite_all:
-                # Rewriting one file into one file changes nothing but the path.
-                plan.skipped.append((label, "single candidate file"))
+            if too_few is not None:
+                plan.skipped.append((label, too_few))
                 continue
             plan.groups.append(
                 FileGroup(
@@ -160,6 +165,19 @@ class CompactionPlanner:
             )
 
         return plan
+
+    def _too_few(self, files: list[LiveFile]) -> str | None:
+        """Why this partition has too little to rewrite, or ``None``."""
+        if self._config.rewrite_all:
+            return None
+        if len(files) < self._config.min_input_files:
+            return (
+                f"{len(files)} candidate file(s) < min_input_files={self._config.min_input_files}"
+            )
+        if len(files) == 1:
+            # Rewriting one file into one file changes nothing but the path.
+            return "single candidate file"
+        return None
 
 
 def _path_for(tbl: Table, spec_id: int, partition: Record, label: str) -> str:

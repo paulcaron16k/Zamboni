@@ -251,6 +251,12 @@ class MaintenanceRequest:
     min_snapshots_to_keep: int | None = None
     older_than_days: int | None = None
     min_input_manifests: int | None = None
+    #: What compaction left undone earlier in this run, or ``None`` if it
+    #: finished. Set by :func:`zamboni.maintenance.maintain` after compaction, so
+    #: a maintainer that stamps its commits can record it on them as
+    #: :data:`zamboni.health.COMPACT_INCOMPLETE` -- the newest stamp is the one
+    #: the next run reads, and is normally not compaction's (ZMBNI-196).
+    compaction_unfinished: str | None = None
 
 
 class Maintainer(ABC):

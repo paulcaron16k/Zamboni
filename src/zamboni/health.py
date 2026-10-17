@@ -86,6 +86,26 @@ REMOVE_DANGLING_DELETES_STAMP = "remove-dangling-deletes"
 #: so that a reader grouping a long history knows the two are the same thing.
 LEGACY_COMPACT_STAMP = "compaction"
 
+#: Written beside :data:`OPERATION_STAMP`, on any stamp, when compaction did
+#: not finish in the run that wrote it: partitions held by
+#: `skip_partitions_newer_than_windows`, groups still to commit when committing
+#: group by group, or a compaction that was refused or failed. The value says
+#: which, for a reader; only its presence is acted on.
+#:
+#: Without it a stamp read as "compaction had nothing left", and the write-driven
+#: skip believed it -- but a hold lifts with the clock, not with a write, so on a
+#: table whose writes had stopped the held partitions were skipped forever
+#: (ZMBNI-196). Every stamp the run writes carries it, not only compaction's:
+#: the newest stamp is normally `rewrite-manifests'`, which runs later, and on a
+#: quiet table `expire` soon removes compaction's own. The newest stamp is the one
+#: that survives, so it is the one that has to say so.
+#:
+#: Absent means finished, which is also how every stamp written before it reads --
+#: deliberately. Reading an old stamp as unfinished would make compaction run on
+#: every quiet table on every run, forever: a run with nothing to do commits
+#: nothing, so nothing would ever replace that stamp.
+COMPACT_INCOMPLETE = "zamboni.compact.incomplete"
+
 #: Iceberg's own summary keys. Spelled here rather than inlined so a rename
 #: upstream is one edit and a grep finds every use.
 TOTAL_DATA_FILES = "total-data-files"
@@ -287,6 +307,9 @@ class Watermark:
     #: Snapshots committed after that one. They are writers by construction:
     #: anything Zamboni committed later would itself be the newest stamp.
     snapshots_since: int = 0
+    #: What compaction left undone in the run that wrote that stamp, from
+    #: :data:`COMPACT_INCOMPLETE`, or ``None`` if it finished.
+    incomplete: str | None = None
 
     @property
     def maintained(self) -> bool:
@@ -300,10 +323,13 @@ class Watermark:
         if self.timestamp_ms is not None:
             at = dt.datetime.fromtimestamp(self.timestamp_ms / 1000, dt.UTC)
             when = f", {at:%Y-%m-%d %H:%M} UTC"
-        return (
+        lines = (
             f"  {'last maintenance':<24} {self.operation}{when}\n"
             f"  {'written since':<24} {self.snapshots_since} snapshot(s)"
         )
+        if self.incomplete:
+            lines += f"\n  {'left for later':<24} {self.incomplete}"
+        return lines
 
     def as_dict(self) -> dict[str, object]:
         """Counters an integrator can trend. See :class:`~zamboni.maintainers.Reportable`."""
@@ -315,6 +341,7 @@ class Watermark:
             "snapshots_since": self.snapshots_since,
             "maintained": self.maintained,
             "written_since": self.written_since,
+            "incomplete": self.incomplete,
         }
 
     @property
@@ -361,26 +388,29 @@ def maintenance_watermark(tbl: Table) -> Watermark:
     """
     snapshots = commit_order(tbl.metadata.snapshots)
 
-    newest_stamped: tuple[int, int, int, str] | None = None
+    newest: tuple[int, Snapshot, str] | None = None
     for position, snapshot in enumerate(snapshots):
-        summary = snapshot.summary
-        if summary is None:
-            continue
-        operation = summary.additional_properties.get(OPERATION_STAMP)
-        if operation is not None:
-            newest_stamped = (position, snapshot.snapshot_id, snapshot.timestamp_ms, operation)
+        if (operation := _stamp(snapshot)) is not None:
+            newest = (position, snapshot, operation)
 
     identifier = ".".join(tbl.name())
-    if newest_stamped is None:
+    if newest is None:
         # Never maintained, or the stamp has been expired away. Either way every
         # snapshot present counts as unreviewed work.
         return Watermark(identifier=identifier, snapshots_since=len(snapshots))
 
-    position, snapshot_id, timestamp_ms, operation = newest_stamped
+    position, snapshot, operation = newest
+    summary = snapshot.summary
     return Watermark(
         identifier=identifier,
-        snapshot_id=snapshot_id,
+        snapshot_id=snapshot.snapshot_id,
         operation=operation,
-        timestamp_ms=timestamp_ms,
+        timestamp_ms=snapshot.timestamp_ms,
         snapshots_since=len(snapshots) - position - 1,
+        incomplete=summary.additional_properties.get(COMPACT_INCOMPLETE) if summary else None,
     )
+
+
+def _stamp(snapshot: Snapshot) -> str | None:
+    summary = snapshot.summary
+    return None if summary is None else summary.additional_properties.get(OPERATION_STAMP)

@@ -21,6 +21,27 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### Fixed
+
+- **A partition held by `skip_partitions_newer_than_windows` could be left
+  uncompacted forever** (ZMBNI-196; every release since the skip shipped in
+  #108). `maintenance` skips `compact`, `rewrite-manifests` and
+  `remove-dangling-deletes` when nothing has been written since the newest
+  `zamboni.operation` stamp, and it read that stamp as "compaction finished". A
+  hold is released by the clock, not by a write. So once compaction held a
+  partition and any later commit stamped the table (normally
+  `rewrite-manifests`, which runs afterwards), every later run skipped the
+  partition until someone wrote again. On a table whose writes had stopped, that
+  was never. Each commit in a run where compaction did not finish now carries
+  `zamboni.compact.incomplete`, naming what was left: held partitions, groups a
+  `partial_progress` run never reached, or a refusal or failure. `compact` is
+  not skipped while the newest stamp carries it, `--only-changed-partitions`
+  considers every partition, and `zamboni health` reports the table due. Stamps
+  written by earlier releases read as finished, as before. Reading them
+  otherwise would re-plan every quiet table on every run, because a run with
+  nothing to do commits nothing that could replace the old stamp. The other two
+  operations skip exactly as before.
+
 ## [0.6.1] - 2026-10-16
 
 ### Fixed

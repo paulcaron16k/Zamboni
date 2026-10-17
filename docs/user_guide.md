@@ -1408,6 +1408,17 @@ It is measured from the **end** of the partition window, the same as
 `day=2026-09-14` partition is not one day old the moment the 15th begins — rows
 timestamped 23:59 are still arriving — so a floor of `1` still holds it.
 
+**A held partition is compacted when the hold lifts, with no write needed.** The
+hold is released by the clock, so the run that holds a partition says so on
+every snapshot it commits: `zamboni.compact.incomplete` sits beside
+`zamboni.operation`, naming what was left. The next run sees it and compacts
+instead of skipping as "nothing written since". `zamboni health` reports such a
+table as due. Up to 0.6.1 that skip read any stamp as "finished", so a
+partition held on a table whose writes then stopped was never compacted
+([#196](https://github.com/paulcaron16k/Zamboni/issues/196)). A held partition
+with too few files to merge is not counted, because it would have nothing to do
+when the hold lifts.
+
 It only applies where the spec has exactly one temporal partition field
 (`hour`, `day`, `month`, `year`). Where a partition cannot be dated — no
 temporal field, more than one, or a missing value — the partition is **skipped
@@ -1561,7 +1572,9 @@ recorded and the manifest route is the only one available.
 
 **Where the changed set cannot be derived, every candidate is considered, exactly
 as before.** That covers an unpartitioned table, a table never maintained, a
-watermark that has aged out, and any metadata this cannot read. Unknown is not
+watermark that has aged out, a last run that left compaction work (a held
+partition was written *before* that run, so the writes since cannot name it),
+and any metadata this cannot read. Unknown is not
 the empty set: it means "compact whatever you would have compacted anyway", and
 being wrong in the other direction would leave a partition uncompacted.
 

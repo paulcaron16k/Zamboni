@@ -43,6 +43,8 @@ if TYPE_CHECKING:  # pragma: no cover
     from pyiceberg.table import Table
     from pyiceberg.typedef import Record
 
+    from .health import Watermark
+
 logger = logging.getLogger(__name__)
 
 #: Snapshot-summary keys PyIceberg writes when `write.summary.partition-limit`
@@ -95,7 +97,7 @@ class ChangedPartitions:
 UNKNOWN = ChangedPartitions()
 
 
-def _snapshots_since_watermark(tbl: Table) -> list | None:
+def _snapshots_since_watermark(tbl: Table, mark: Watermark) -> list | None:
     """The snapshots committed after maintenance last ran, or ``None``.
 
     ``None`` where the question has no answer: a table never maintained, or one
@@ -108,7 +110,6 @@ def _snapshots_since_watermark(tbl: Table) -> list | None:
     random subset on Lakekeeper, so compaction could miss written partitions
     (ZMBNI-192).
     """
-    mark = maintenance_watermark(tbl)
     if not mark.maintained or mark.snapshot_id is None:
         return None
 
@@ -199,11 +200,18 @@ def changed_partitions(tbl: Table) -> ChangedPartitions:
         return ChangedPartitions(source="table is not partitioned")
 
     try:
-        snapshots = _snapshots_since_watermark(tbl)
+        mark = maintenance_watermark(tbl)
+        snapshots = _snapshots_since_watermark(tbl, mark)
     except Exception:  # pragma: no cover - any metadata trouble means "widen"
         logger.debug("could not read the watermark; considering every partition", exc_info=True)
         return UNKNOWN
 
+    if mark.incomplete:
+        # What compaction left -- a held partition, a group it never reached --
+        # was written *before* the watermark, so the writes since it cannot name
+        # it. Narrowing to them would skip exactly the partitions the last run
+        # said it still owed (ZMBNI-196).
+        return ChangedPartitions(source=f"the last run left compaction work: {mark.incomplete}")
     if snapshots is None:
         return ChangedPartitions(source="never maintained, or the watermark aged out")
     if not snapshots:
