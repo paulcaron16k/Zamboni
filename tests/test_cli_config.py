@@ -339,6 +339,56 @@ def test_summary_marks_which_values_came_from_the_file(tmp_path, capsys):
     assert "30 (default)" not in out, "a value written in the file is not a default"
 
 
+def _compact_line(out: str, table: str) -> str:
+    block = out.split(f"{table}   [")[1]
+    return next(ln for ln in block.splitlines() if ln.lstrip().startswith("compact "))
+
+
+def test_summary_shows_the_compaction_settings_a_table_ends_up_with(tmp_path, capsys):
+    """#216: the hold and `min_input_files` were invisible here, which is how a
+    hold that was off for every table-config user went unnoticed. The line
+    shows what `for_table` resolves, so a default reaching a table and a table's
+    `null` overriding one are both visible before a run."""
+    from zamboni.config import DEFAULT_TARGET_FILE_SIZE_BYTES, TARGET_FILE_SIZE_PROPERTIES
+    from zamboni.tableconfig import DEFAULT_SETTINGS
+
+    config = tmp_path / "tc.json"
+    config.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "warehouse": "acme",
+                "defaults": {"min_input_files": 4},
+                "namespaces": {
+                    "db": {
+                        "tables": {
+                            "events": {},
+                            "raw": {
+                                "skip_partitions_newer_than_windows": None,
+                                "target_file_size_bytes": 1_000_000,
+                            },
+                        }
+                    }
+                },
+            }
+        )
+    )
+
+    assert main(["table-config", "summary", str(config)]) == 0
+    out = capsys.readouterr().out
+
+    events = _compact_line(out, "db.events")
+    assert f"plus {DEFAULT_SETTINGS.skip_partitions_newer_than_windows} (default) closed" in events
+    assert "at least 4 file(s)" in events, "defaults.min_input_files must reach the table"
+    for prop in TARGET_FILE_SIZE_PROPERTIES:
+        assert prop in events
+    assert str(DEFAULT_TARGET_FILE_SIZE_BYTES) in events
+
+    raw = _compact_line(out, "db.raw")
+    assert "hold off" in raw
+    assert "target 1000000 bytes" in raw
+
+
 def test_summary_warns_when_apply_properties_would_have_nothing_to_do(tmp_path, capsys):
     """`apply-properties` raises when neither metadata knob is set. Better to
     learn that from a summary than from a maintenance run's exit code."""

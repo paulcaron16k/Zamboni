@@ -69,7 +69,9 @@ def daily_table(session, files: dict[int, int]):
 
 
 def config(tmp_path):
-    """The hold set explicitly: table-config does not apply it by default."""
+    """The hold set explicitly. It is the default since #216, but these tests
+    are about what a hold leaves behind, not about the default, so they keep
+    holding if it changes again."""
     path = tmp_path / "table-config.json"
     path.write_text(
         json.dumps(

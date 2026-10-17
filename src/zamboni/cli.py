@@ -57,7 +57,12 @@ from . import capabilities, maintainers, settings
 from .capabilities import detect
 from .catalog_import import config_from_catalog, load_catalog
 from .compactor import CompactionBlocked, TableCompactor
-from .config import CompactionConfig, MemoryMode
+from .config import (
+    DEFAULT_TARGET_FILE_SIZE_BYTES,
+    TARGET_FILE_SIZE_PROPERTIES,
+    CompactionConfig,
+    MemoryMode,
+)
 from .entry import PROBE_COMMANDS, add_global_options, add_probe_commands, run_probe_command
 from .entry import run_dir as probe_run_dir
 from .maintainers import (
@@ -2217,6 +2222,13 @@ def _lacking(feature: LayoutFeature) -> str:
 #: lives in expire.py.
 _UNSET_AGE = "unset -> history.expire.max-snapshot-age-ms, else 5"
 _UNSET_KEEP = "unset -> history.expire.min-snapshots-to-keep, else 1"
+#: Built from the constants `resolve_target_file_size` reads, so the summary
+#: cannot name a property or a fallback the resolution does not use.
+_UNSET_TARGET = (
+    "unset -> "
+    + ", ".join(TARGET_FILE_SIZE_PROPERTIES)
+    + f", else {DEFAULT_TARGET_FILE_SIZE_BYTES}"
+)
 
 
 def _table_config_summary(args: argparse.Namespace) -> int:
@@ -2273,6 +2285,19 @@ def _table_config_summary(args: argparse.Namespace) -> int:
         if s.ordering.mode == "zorder" and s.ordering.zorder:
             columns = ", ".join(s.ordering.zorder.columns)
             print(f"             zorder columns {columns}{_lacking(LayoutFeature.ZORDER)}")
+        hold = (
+            "hold off -- partitions still being written are compacted"
+            if s.skip_partitions_newer_than_windows is None
+            else "hold the open window(s) plus "
+            + mark(s.skip_partitions_newer_than_windows, d.skip_partitions_newer_than_windows)
+            + " closed"
+        )
+        print(
+            "  compact    target "
+            + mark(s.target_file_size_bytes, d.target_file_size_bytes, unset=_UNSET_TARGET)
+            + f" bytes, at least {mark(s.min_input_files, d.min_input_files)} file(s) "
+            f"per partition, {hold}"
+        )
 
         r = s.retention
         expire = "on" if r.expire_snapshots.enabled else "OFF"

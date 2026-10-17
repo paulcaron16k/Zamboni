@@ -6,10 +6,12 @@ import json
 
 import pytest
 
+from zamboni.config import config_from_table_settings
 from zamboni.tableconfig import (
     DEFAULT_PARTITION_EVOLUTION,
     SPEC_VERSION,
     EvolutionRule,
+    NamespaceSettings,
     Ordering,
     PartitionEvolution,
     TableConfig,
@@ -435,3 +437,111 @@ def test_a_wrong_typed_value_is_refused_with_its_path(settings, message):
 )
 def test_null_still_means_unset_where_it_always_did(settings):
     TableConfig.from_dict(v2({"a.b": settings})).validate()
+
+
+# -- what a table inherits, and what it overrides (ZMBNI-216) -------------------
+
+
+def effective(defaults: dict, table: dict, *, key: str = "skip_partitions_newer_than_windows"):
+    """What one table resolves to, read where the run reads it."""
+    config = TableConfig.from_dict(v2({"a.b": table}, defaults=defaults))
+    config.validate()
+    return getattr(config_from_table_settings(config.for_table("a.b")), key)
+
+
+@pytest.mark.parametrize(
+    ("defaults", "table", "expected"),
+    [
+        ({}, {}, 1),
+        ({}, {"skip_partitions_newer_than_windows": None}, None),
+        ({"skip_partitions_newer_than_windows": None}, {}, None),
+        ({"skip_partitions_newer_than_windows": 3}, {}, 3),
+        (
+            {"skip_partitions_newer_than_windows": 3},
+            {"skip_partitions_newer_than_windows": None},
+            None,
+        ),
+        (
+            {"skip_partitions_newer_than_windows": None},
+            {"skip_partitions_newer_than_windows": 0},
+            0,
+        ),
+    ],
+    ids=[
+        "unset-everywhere-holds-one-window",
+        "table-null-turns-it-off",
+        "defaults-null-turns-it-off-fleet-wide",
+        "table-unset-inherits-defaults",
+        "table-null-beats-a-default-number",
+        "table-number-beats-a-default-null",
+    ],
+)
+def test_the_hold_is_inherited_by_presence_not_by_value(defaults, table, expected):
+    """Unset inherits; a number or null overrides. A config with no key holds one window.
+
+    Before ZMBNI-216 the first case was None -- no hold at all, against the
+    documented 1 -- and the fifth inherited 3, so the documented way to turn the
+    hold off could not.
+    """
+    assert effective(defaults, table) == expected
+
+
+def test_a_default_min_input_files_reaches_a_table_with_a_block_of_its_own():
+    """Was ignored by every table with a block -- in a config, every table."""
+    assert effective({"min_input_files": 5}, {}, key="min_input_files") == 5
+    assert effective({"min_input_files": 5}, {"min_input_files": 2}, key="min_input_files") == 2
+
+
+def test_a_table_null_target_size_overrides_a_default_one():
+    """null is "use the table's own property", and a table must be able to say so."""
+    defaults = {"target_file_size_bytes": 1000}
+    assert effective(defaults, {}, key="target_file_size_bytes") == 1000
+    assert (
+        effective(defaults, {"target_file_size_bytes": None}, key="target_file_size_bytes") is None
+    )
+
+
+def test_what_a_table_set_survives_a_dump_and_reload(tmp_path):
+    """A key written out is an override when read back, so only the set ones are."""
+    doc = v2(
+        {
+            "a.off": {"skip_partitions_newer_than_windows": None, "min_input_files": 2},
+            "a.inherits": {},
+        },
+        defaults={"skip_partitions_newer_than_windows": 3, "min_input_files": 5},
+    )
+    path = tmp_path / "table-config.json"
+    TableConfig.from_dict(doc).dump(path)
+    reloaded = TableConfig.load(path)
+
+    off, inherits = reloaded.for_table("a.off"), reloaded.for_table("a.inherits")
+    assert (off.skip_partitions_newer_than_windows, off.min_input_files) == (None, 2)
+    assert (inherits.skip_partitions_newer_than_windows, inherits.min_input_files) == (3, 5)
+
+
+def test_settings_built_in_code_override_where_they_differ_from_the_default():
+    """No file to ask, so a value other than the field's default is the intent."""
+    config = TableConfig(
+        warehouse="acme",
+        defaults=TableSettings(skip_partitions_newer_than_windows=3, min_input_files=5),
+        namespaces={
+            "a": NamespaceSettings(
+                tables={
+                    "off": TableSettings(skip_partitions_newer_than_windows=None),
+                    "plain": TableSettings(),
+                }
+            )
+        },
+    )
+    assert config.for_table("a.off").skip_partitions_newer_than_windows is None
+    assert config.for_table("a.plain").skip_partitions_newer_than_windows == 3
+    assert config.for_table("a.plain").min_input_files == 5
+
+
+def test_a_spelled_out_default_retention_still_inherits_the_fleet_one():
+    """Sections keep the old merge on purpose: `from-catalog` writes every table's
+    retention in full, and merging those by presence would override `defaults` in
+    configs nobody edited. Pinned so that changing it is a decision."""
+    fleet = {"expire_snapshots": {"enabled": True, "max_snapshot_age_days": 3}}
+    config = TableConfig.from_dict(v2({"a.b": {"retention": {}}}, defaults={"retention": fleet}))
+    assert config.for_table("a.b").retention.expire_snapshots.max_snapshot_age_days == 3
