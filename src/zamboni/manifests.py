@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from pyiceberg.manifest import (
@@ -333,9 +334,17 @@ class ManifestRewriter:
         *,
         min_input_manifests: int = DEFAULT_MIN_INPUT_MANIFESTS,
         dry_run: bool = False,
+        stamp: Mapping[str, str] | None = None,
     ) -> None:
+        """
+        Args:
+            stamp: Further snapshot properties, written beside this operation's
+                own -- which win on a clash, so nothing passed here can relabel
+                the commit.
+        """
         self._min_input_manifests = min_input_manifests
         self._dry_run = dry_run
+        self._stamp = dict(stamp or {})
 
     def run(self, tbl: Table) -> RewriteResult:
         plan = plan_rewrite(tbl, min_input_manifests=self._min_input_manifests)
@@ -376,6 +385,7 @@ class ManifestRewriter:
             )
 
         properties = {
+            **self._stamp,
             OPERATION_STAMP: REWRITE_MANIFESTS_STAMP,
             "zamboni.manifests-replaced": str(len(plan.replaced)),
             "zamboni.manifests-created": str(len(plan.bins)),

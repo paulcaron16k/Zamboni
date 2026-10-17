@@ -18,6 +18,7 @@ from .config import (
     config_from_table_settings,
 )
 from .evolution import EvolutionPlan, MultiSpecReplaceFiles, ensure_specs, plan_evolution
+from .health import COMPACT_INCOMPLETE
 from .planner import CompactionPlan, CompactionPlanner, FileGroup
 from .profile import Severity, TableProfile, profile_table
 from .session import CatalogSession
@@ -60,12 +61,20 @@ class CompactionResult:
     skipped: list[tuple[str, str]] = field(default_factory=list)
     dangling_delete_files: int = 0
     warnings: list[str] = field(default_factory=list)
+    #: Partitions held by `skip_partitions_newer_than_windows` that would
+    #: otherwise have been compacted -- work this run left for a later one.
+    held: int = 0
     #: Whether this was a preview. Every other operation's result carried this
     #: and compaction's did not, which mattered once `as_dict()` made the
     #: counters machine-readable: they are what *would* happen, so without this
     #: a consumer cannot tell a preview's `bytes_rewritten` from a real one's
     #: (ZMBNI-32).
     dry_run: bool = False
+
+    @property
+    def unfinished(self) -> str | None:
+        """What this run left for a later one, or ``None`` if it finished."""
+        return _unfinished(held=self.held, remaining=0)
 
     def describe(self) -> str:
         # Count both kinds of work: reporting only compaction groups reads as
@@ -236,6 +245,7 @@ class TableCompactor:
             plan = _without_files(plan, claimed)
 
         result.skipped = list(plan.skipped) + list(evolution_plan.skipped)
+        result.held = plan.held
         if dry_run:
             logger.info("dry run:\n%s\n%s", evolution_plan.describe(), plan.describe())
             # Report what the plan would rewrite. Returning the empty result
@@ -315,7 +325,10 @@ class TableCompactor:
                 branch=self._config.branch,
                 snapshot_operation=self._config.snapshot_operation,
                 producer_cls=MultiSpecReplaceFiles,
-                snapshot_properties=_evolution_labels(evolution_plan),
+                snapshot_properties={
+                    **_evolution_labels(evolution_plan),
+                    **_left_for_later(held=plan.held, remaining=0),
+                },
             )
             outcome = committer.commit(tbl, removed=removed, added=added)
         except Exception:
@@ -337,14 +350,24 @@ class TableCompactor:
         after one failure is worse than living with a mixed state -- which, per
         Iceberg, is not a correctness problem: "file groups can be compacted
         independently".
+
+        Every commit but the last says how many groups are still to come
+        (`health.COMPACT_INCOMPLETE`). A run that dies part way leaves that as
+        its newest stamp, so the next run does not read the groups it never
+        reached as done.
         """
+        remaining = len(evolution_plan.groups) + len(plan.groups)
         for group in evolution_plan.groups:
             output = self._rewrite_evolution_group(tbl, group)
+            remaining -= 1
             committer = ReplaceCommitter(
                 branch=self._config.branch,
                 snapshot_operation=self._config.snapshot_operation,
                 producer_cls=MultiSpecReplaceFiles,
-                snapshot_properties={"zamboni.evolution": group.label},
+                snapshot_properties={
+                    "zamboni.evolution": group.label,
+                    **_left_for_later(held=plan.held, remaining=remaining),
+                },
             )
             outcome = self._commit_one(tbl, committer, group.files, output)
             result.evolved.append(
@@ -353,12 +376,14 @@ class TableCompactor:
             _accumulate(result, group.files, output)
             tbl = self._session.table(self._identifier)
 
-        committer = ReplaceCommitter(
-            branch=self._config.branch,
-            snapshot_operation=self._config.snapshot_operation,
-        )
         for group in plan.groups:
             output = self._rewrite_group(tbl, group)
+            remaining -= 1
+            committer = ReplaceCommitter(
+                branch=self._config.branch,
+                snapshot_operation=self._config.snapshot_operation,
+                snapshot_properties=_left_for_later(held=plan.held, remaining=remaining),
+            )
             outcome = self._commit_one(tbl, committer, group.files, output)
             result.groups.append(
                 _group_result(group.describe(), group.files, output, outcome.snapshot_id)
@@ -478,6 +503,24 @@ def _evolution_labels(evolution_plan: EvolutionPlan) -> dict[str, str]:
     """
     labels = [g.label for g in evolution_plan.groups]
     return {"zamboni.evolution": ", ".join(labels)} if labels else {}
+
+
+def _left_for_later(*, held: int, remaining: int) -> dict[str, str]:
+    """The stamp that says this commit is not the end of compaction's work.
+
+    Empty when it is, so a finished run's snapshot reads exactly as before.
+    """
+    unfinished = _unfinished(held=held, remaining=remaining)
+    return {COMPACT_INCOMPLETE: unfinished} if unfinished else {}
+
+
+def _unfinished(*, held: int, remaining: int) -> str | None:
+    left = []
+    if remaining:
+        left.append(f"{remaining} group(s) still to commit")
+    if held:
+        left.append(f"{held} partition(s) held by skip_partitions_newer_than_windows")
+    return "; ".join(left) or None
 
 
 def _without_files(plan: CompactionPlan, claimed: set[str]) -> CompactionPlan:

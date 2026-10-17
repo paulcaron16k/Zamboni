@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -33,7 +33,7 @@ from pyiceberg.exceptions import CommitFailedException, ValidationException
 
 from .backends.base import SpillLimitExceeded
 from .committer import ConcurrentModification, UnsupportedPyIceberg
-from .compactor import CompactionBlocked
+from .compactor import CompactionBlocked, CompactionResult
 from .config import CompactionConfig, config_from_table_settings
 from .maintainers import (
     EngineConfigProblem,
@@ -457,7 +457,7 @@ def maintain(
             compaction=config_from_table_settings(settings, base_config),
             table_config=config,
         )
-        unchanged = _unchanged_since_maintenance(session, table)
+        unchanged = _unchanged_since_maintenance(session, table) or {}
         done: set[Operation] = set()
         for operation in order:
             started_ns = time.perf_counter_ns()
@@ -469,9 +469,11 @@ def maintain(
                 settings,
                 done,
                 commit=commit,
-                unchanged=unchanged,
+                unchanged=unchanged.get(operation),
             )
             record(outcome)
+            if operation is Operation.COMPACT:
+                request = replace(request, compaction_unfinished=_compaction_unfinished(outcome))
             if reporter is not None and outcome.result is not None:
                 _report(
                     reporter, session, table, outcome.result, time.perf_counter_ns() - started_ns
@@ -514,19 +516,48 @@ WRITE_DRIVEN = frozenset(
 )
 
 
-def _unchanged_since_maintenance(session: CatalogSession, table: str) -> str | None:
-    """Why this table is untouched since maintenance last ran, or ``None``.
+def _compaction_unfinished(outcome: Outcome) -> str | None:
+    """What compaction left undone in this run, for the commits after it to stamp.
+
+    A refusal or a failure counts as well as a hold. Both can clear without a
+    write -- a PyIceberg build fixed by an upgrade, a spill limit raised -- and
+    without the marker the next run would read this run's later stamps as
+    "nothing written since" and never try again. A skip is not left work: it
+    means there was nothing to do.
+    """
+    if isinstance(outcome.result, CompactionResult):
+        return outcome.result.unfinished
+    if not outcome.ok:
+        reason = outcome.detail.strip().splitlines()[0] if outcome.detail.strip() else ""
+        return f"compaction did not finish (exit {outcome.exit_code}): {reason}"
+    return None
+
+
+def _unchanged_since_maintenance(
+    session: CatalogSession, table: str
+) -> dict[Operation, str] | None:
+    """Which :data:`WRITE_DRIVEN` operations have nothing to do here, and why.
 
     One metadata load per table, ~20-38 ms measured -- against ~400 ms to profile
     a table and ~2,035 ms for a full orphan scan, so asking is around 2% of the
     cost of the cheapest thing it can save.
 
-    **Any doubt answers ``None``.** A catalog that will not load the table, a
-    watermark that cannot be read: the run proceeds and the operations decide for
-    themselves, exactly as before. A skip is an optimisation and must never be
-    the thing that stops a table being maintained -- and this function sits in
-    front of every operation in the run, so the safe direction is the one where
-    it is wrong.
+    **Compaction also asks whether the last run finished it** (ZMBNI-196).
+    "Nothing written since" is enough for the other two: neither leaves work for
+    later, and both run after compaction, so a stamp from this run already covers
+    what compaction added. It was not enough for compaction. The partitions
+    `skip_partitions_newer_than_windows` holds are released by the clock, not by
+    a write, so a stamp written after a hold read as "finished" and the held
+    partitions waited for the next write -- on a table whose writes had stopped,
+    forever. A run that leaves compaction work says so on every stamp it writes
+    (:data:`~zamboni.health.COMPACT_INCOMPLETE`), and that keeps compaction running.
+
+    **Any doubt answers ``None``, which skips nothing.** A catalog that will not
+    load the table, a watermark that cannot be read: the run proceeds and the
+    operations decide for themselves, exactly as before. A skip is an
+    optimisation and must never be the thing that stops a table being maintained
+    -- and this function sits in front of every operation in the run, so the safe
+    direction is the one where it is wrong.
     """
     from .health import maintenance_watermark
 
@@ -537,8 +568,12 @@ def _unchanged_since_maintenance(session: CatalogSession, table: str) -> str | N
         return None
 
     if mark.written_since or not mark.maintained:
-        return None
-    return f"nothing written since {mark.operation}"
+        return {}
+    unchanged = f"nothing written since {mark.operation}"
+    skips = dict.fromkeys(WRITE_DRIVEN, unchanged)
+    if mark.incomplete:
+        del skips[Operation.COMPACT]
+    return skips
 
 
 def _run(
@@ -561,9 +596,9 @@ def _run(
     none of them ran anything.
 
     Args:
-        unchanged: Why this table is untouched since the last maintenance, or
-            ``None`` if it is not. Only :data:`WRITE_DRIVEN` operations are
-            skipped for it.
+        unchanged: Why this operation has nothing to do on this table, from
+            :func:`_unchanged_since_maintenance`, or ``None`` if it may. Only
+            :data:`WRITE_DRIVEN` operations are skipped for it.
     """
     flag = _ENABLED_BY.get(operation)
     if flag is not None and not getattr(request.retention, flag).enabled:

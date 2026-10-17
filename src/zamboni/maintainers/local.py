@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ..capabilities import detect
+from ..health import COMPACT_INCOMPLETE
 from . import (
     EngineConfigProblem,
     LayoutFeature,
@@ -357,7 +358,9 @@ class LocalMaintainer(Maintainer):
     ) -> Reportable:
         from ..deletes import DanglingDeleteCleaner
 
-        return DanglingDeleteCleaner(dry_run=dry_run).run(self._session.table(table))
+        return DanglingDeleteCleaner(dry_run=dry_run, stamp=_left_by_compaction(request)).run(
+            self._session.table(table)
+        )
 
     def _rewrite_manifests(
         self, table: str, request: MaintenanceRequest, dry_run: bool
@@ -370,9 +373,9 @@ class LocalMaintainer(Maintainer):
             if request.min_input_manifests is not None
             else settings.min_input_manifests
         )
-        return ManifestRewriter(min_input_manifests=minimum, dry_run=dry_run).run(
-            self._session.table(table)
-        )
+        return ManifestRewriter(
+            min_input_manifests=minimum, dry_run=dry_run, stamp=_left_by_compaction(request)
+        ).run(self._session.table(table))
 
     def _apply_properties(
         self, table: str, request: MaintenanceRequest, dry_run: bool
@@ -382,3 +385,13 @@ class LocalMaintainer(Maintainer):
         return apply_metadata_properties(
             self._session.table(table), request.retention.metadata, dry_run=dry_run
         )
+
+
+def _left_by_compaction(request: MaintenanceRequest) -> dict[str, str]:
+    """The marker this run's later commits carry when compaction did not finish.
+
+    Every stamp the run writes says so, not only compaction's own: the next run
+    reads the *newest* stamp, which is normally one of these (ZMBNI-196).
+    """
+    unfinished = request.compaction_unfinished
+    return {COMPACT_INCOMPLETE: unfinished} if unfinished else {}
