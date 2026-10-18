@@ -150,33 +150,44 @@ level where you can.
 
 ## Inheritance
 
-`defaults` applies to every table. A table's own block overrides it **per section**: a
-table that declares `ordering` replaces the default ordering entirely rather than having
-individual keys blended, so what you read in one block is what applies.
+The point of `defaults` is that a table block writes **only what differs**. One rule,
+for every key at every depth:
 
-The three [sizing](#sizing) keys are inherited **key by key, by presence**. A key the
-table's block contains wins, whatever its value; a key it leaves out comes from
-`defaults`, and from the built-in default when `defaults` leaves it out too:
+- **A key the table's block contains wins**, whatever its value — `null`, `false`, `[]`,
+  or a value equal to the built-in.
+- **A key it leaves out comes from `defaults`**, and from the built-in when `defaults`
+  leaves it out too. `defaults` is itself a block over the built-in.
+- **Objects merge key by key; lists replace whole.** Setting one retention key keeps the
+  rest of `defaults.retention`; a table's `partition` or `partition_evolution.rules`
+  replaces the default list rather than mixing with it.
+- **`ordering` replaces whole.** It is one choice — a mode and that mode's keys — so a
+  table that writes `ordering` takes none of the default ordering. Merged key by key, a
+  table choosing `zorder` under a `defaults` that sorts would carry both.
+- **`description` is not inherited**; it describes one table.
 
 | `defaults` | table block | The table gets |
 |---|---|---|
-| `"min_input_files": 4` | no `min_input_files` | 4 |
-| `"min_input_files": 4` | `"min_input_files": 2` | 2, even though 2 is the built-in default |
-| `"skip_partitions_newer_than_windows": 3` | `"skip_partitions_newer_than_windows": null` | no hold |
-| no `skip_partitions_newer_than_windows` | no `skip_partitions_newer_than_windows` | 1, the built-in default |
+| `"min_input_files": 4` | nothing | `min_input_files = 4` |
+| `"min_input_files": 4` | `"min_input_files": 2` | `min_input_files = 2`, though 2 is the built-in |
+| `"skip_partitions_newer_than_windows": 3` | `"skip_partitions_newer_than_windows": null` | `skip_partitions_newer_than_windows = null`: no hold |
+| nothing | nothing | `skip_partitions_newer_than_windows = 1`, the built-in |
+| `"retention": {"expire_snapshots": {"max_snapshot_age_days": 30}}` | `"retention": {"remove_orphan_files": {"older_than_days": 7}}` | `retention.expire_snapshots.max_snapshot_age_days = 30`, beside its own 7 |
+| `"retention": {"remove_orphan_files": {"older_than_days": 10}}` | `"retention": {"remove_orphan_files": {"older_than_days": 3}}` | `retention.remove_orphan_files.older_than_days = 3`, though 3 is the built-in |
+| `"partition": [{"column": "ts", "transform": "day"}]` | `"partition": []` | `partition = []`: unpartitioned |
+| `"ordering": {"mode": "sort", "sort": [{"column": "a"}]}` | `"ordering": {"mode": "none"}` | `ordering.mode = "none"` |
 
-So `null` in a table's block is an override, not "unset": it turns the hold off, or
-returns the target size to the table property, for that table alone. Up to 0.6.1 these
-keys were compared against the built-in default instead, which meant `defaults.min_input_files`
-never reached a table that had a block of its own, and a table could not write `null` over
-a `defaults` value (#216).
+Validation runs on the merged result, so a table block is checked against what it inherits:
+an evolution rule may name the `day` transform of a `partition` set in `defaults`.
 
-The sections (`partition`, `partition_evolution`, `ordering`, `retention`) still merge by
-comparison: a section equal to the built-in one counts as left out. Files written by
-`zamboni from-catalog` spell out every table's `retention` in full, and merged by presence
-each would start overriding `defaults.retention` in configs nobody had edited.
+Up to 0.6.1 a section (`partition`, `partition_evolution`, `ordering`, `retention`) was taken
+whole from either the table or `defaults`, and a section equal to the built-in counted as
+left out. So changing one retention key meant re-spelling the rest of `defaults.retention`,
+`"partition": []` and `"ordering": {"mode": "none"}` could not override `defaults`, and a
+table could not ask for a built-in value back (#220). The sizing keys moved to this rule in
+#216.
 
-`zamboni table-config summary` prints what each table ends up with, which is the quickest
+`zamboni table-config generate` writes each table as its partition alone, and
+`zamboni table-config summary` marks every value with the block it came from — the quickest
 way to check a merge.
 
 There is deliberately no namespace-level `defaults` yet. `namespaces.<name>` is an object
@@ -410,8 +421,8 @@ choosing `sort` or `zorder`.
 | `min_input_files` | 2 | A partition is only compacted with at least this many candidates |
 | `skip_partitions_newer_than_windows` | 1 | Hold the open partition window plus this many recently closed ones, so compaction does not rewrite data a loader is still writing (which inflates every later copy-on-write update). Temporal partitions only. `null` turns the hold off. Up to 0.6.1 a config that left this key out got no hold at all (#216) |
 
-A table block inherits each of these from `defaults` unless it contains the key; see
-[Inheritance](#inheritance).
+A table block inherits each of these from `defaults` unless it contains the key, like every
+other key; see [Inheritance](#inheritance).
 
 ---
 

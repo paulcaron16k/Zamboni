@@ -71,8 +71,9 @@ Arrow stream from PyIceberg's scan, which is why the local SQL catalog and a
 Lakekeeper REST catalog behave identically.
 
 **`table-config.json` (`tableconfig.py`)** is the authored surface: declarative
-layout and retention per table, `defaults` shallow-merged with a table's own
-block. It never describes actions — the tool derives the work. `catalog_import.py`
+layout and retention per table. A table block writes only what differs from
+`defaults`: every key is inherited by presence at every depth (`_merge`; lists and
+`ordering` replace whole), and each block keeps what it wrote in `TableSettings.block`. It never describes actions — the tool derives the work. `catalog_import.py`
 generates one from a Meltano/Singer catalog.
 
 **The maintainer seam (`maintainers/`)** is the central abstraction. Six

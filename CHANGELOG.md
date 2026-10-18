@@ -37,13 +37,31 @@ Two categories beyond the usual set, because this tool deletes files:
   compared against the built-in `2` per table and ignored whenever a table had a
   block of its own, which in a config is every table. A fleet that set it now
   gets that threshold: partitions below it are skipped, and above it compacted.
-- **A table's `null` now overrides `defaults`** for `target_file_size_bytes`
-  and `skip_partitions_newer_than_windows` (#216). The three sizing keys are
-  inherited by whether the table's block contains them, not by comparing them to
-  the built-in default; see `docs/table-config.md#inheritance`. The sections
-  (`retention`, `ordering`, `partition`, `partition_evolution`) merge as before.
-  `zamboni table-config summary` now prints each table's compaction settings, so
-  the result can be checked before a run.
+- **Every `table-config.json` key is inherited from `defaults` by presence, at
+  every depth** (#216, #220). A key a table's block contains wins whatever its
+  value -- `null`, `false`, `[]` or the built-in value; a key it leaves out comes
+  from `defaults`, then from the built-in. Objects merge key by key; lists, and
+  `ordering`, replace whole. Before, the sizing keys and every section were
+  compared with the built-in, so: setting one `retention` key dropped the rest of
+  `defaults.retention`; `"partition": []` and `"ordering": {"mode": "none"}` could
+  not override `defaults`; a table's `null` could not override a `defaults`
+  value; `defaults.min_input_files` reached no table with a block of its own; and
+  a `defaults` block that mentioned anything lost the built-in day-to-month
+  evolution rule. See `docs/table-config.md#inheritance`.
+
+  **What to do:** a block that spells out a section now overrides `defaults`
+  with every key it writes. Files from earlier `zamboni from-catalog` and
+  `table-config generate` runs wrote every table's `retention` and
+  `partition_evolution` in full, so each table would stop following
+  `defaults.retention` -- regenerate them. `generate` now writes each table as
+  its partition alone. Validation runs on each table's merged settings rather
+  than on its block alone.
+
+  Library: a `TableSettings` built in code has no record of what was left out,
+  so it counts as setting every key; build a sparse block with
+  `TableSettings.from_dict({...})`. `TableConfig.source_of()` says which block a
+  value came from, and `zamboni table-config summary` marks every value with it
+  (it now also prints each table's compaction settings).
 
 ### Added
 
