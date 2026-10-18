@@ -106,11 +106,11 @@ JSON_NAME: dict[tuple[type, str], str] = {
 #: by that flag rather than by name. ``source`` is the path the config was read
 #: from, set by the loader, and has no spelling in the file at all -- the root's
 #: own ``_reject_unknown`` set is the proof: ``{"version", "warehouse",
-#: "defaults", "namespaces"}``. ``TableSettings.authored`` is the same: which
-#: keys a block contained, recorded by the loader so the merge can tell a key
-#: left out from one set to its default.
+#: "defaults", "namespaces"}``. ``TableSettings.block`` is the same: the block
+#: as the file wrote it, kept by the loader so the merge can tell a key left
+#: out from one set to its default.
 NOT_AUTHORED: frozenset[tuple[type, str]] = frozenset(
-    {(tc.TableConfig, "source"), (tc.TableSettings, "authored")}
+    {(tc.TableConfig, "source"), (tc.TableSettings, "block")}
 )
 
 #: Container fields the loader reads as ``raw.get(key) or <empty>``, so an

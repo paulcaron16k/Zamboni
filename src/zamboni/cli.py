@@ -2122,7 +2122,7 @@ def _table_config_generate(session: CatalogSession, args: argparse.Namespace) ->
     from pyiceberg.exceptions import NoSuchTableError
 
     from .orphans import _all_table_identifiers
-    from .tableconfig import DEFAULT_SETTINGS, PartitionField, TableConfig
+    from .tableconfig import DEFAULT_SETTINGS, TableConfig
 
     if not args.warehouse:
         print(
@@ -2157,16 +2157,20 @@ def _table_config_generate(session: CatalogSession, args: argparse.Namespace) ->
         if tbl.metadata.format_version < 2:
             skipped.append((name, "format version 1, which Zamboni refuses"))
             continue
-        partition = tuple(
-            PartitionField(
-                column=tbl.schema().find_column_name(f.source_id) or "?", transform=str(f.transform)
-            )
+        partition = [
+            {
+                "column": tbl.schema().find_column_name(f.source_id) or "?",
+                "transform": str(f.transform),
+            }
             for f in tbl.spec().fields
-        )
+        ]
         # The catalog hands the namespace back as a tuple, so the split is known
         # rather than recovered from a string. That is the point of the shape.
-        grouped.setdefault(".".join(identifier[:-1]), {})[identifier[-1]] = replace(
-            DEFAULT_SETTINGS, partition=partition
+        #
+        # Only the partition: it is what the catalog says about this table, and
+        # every other key is left to inherit from `defaults` (ZMBNI-220).
+        grouped.setdefault(".".join(identifier[:-1]), {})[identifier[-1]] = TableSettings.from_dict(
+            {"partition": partition}, name
         )
 
     namespaces = {ns: NamespaceSettings(tables=t) for ns, t in sorted(grouped.items())}
@@ -2238,7 +2242,7 @@ def _table_config_summary(args: argparse.Namespace) -> int:
     actually has before a run that deletes files: which operations are on, what
     windows they use, and where a value came from when it is not in the file.
     """
-    from .tableconfig import DEFAULT_SETTINGS, TableConfig
+    from .tableconfig import TableConfig
 
     config = TableConfig.load(args.config)
     names = sorted(config.tables)
@@ -2256,74 +2260,90 @@ def _table_config_summary(args: argparse.Namespace) -> int:
         f"{args.config}: version {config.version}, warehouse {config.warehouse!r}, "
         f"{len(config.namespaces)} namespace(s), {len(config.tables)} table(s)"
     )
-    print("Values not written in the file are marked (default).\n")
-
-    def mark(value, fallback, *, unset: str = "") -> str:
-        """Render a setting, saying where it came from.
-
-        `None` is not "no value": it means the knob was left out, and expiry
-        then falls back to the Iceberg table property and only then to the spec
-        default. A bare `None` told an operator nothing and read like a bug --
-        naming the fallback is the whole point of a summary.
-        """
-        if value is None:
-            return unset or "unset"
-        return f"{value}" if value != fallback else f"{value} (default)"
+    print(
+        "Where a value comes from: unmarked is the table's own block, (defaults) the "
+        "defaults block, (built-in) neither.\n"
+    )
 
     for name in names:
         s = config.for_table(name)
-        d = DEFAULT_SETTINGS
+
+        def mark(value, *path: str, unset: str = "", table: str = name) -> str:
+            """Render a setting, saying which block it came from.
+
+            Asked of the config (`TableConfig.source_of`), which knows what each
+            block wrote. Comparing the value with the built-in -- what this did
+            before ZMBNI-220 -- marked a table's explicit built-in value
+            "(default)" and an inherited non-default value as the table's own.
+
+            `None` is not "no value": the knob is unset, and expiry then falls
+            back to the Iceberg table property and only then to the spec default.
+            A bare `None` told an operator nothing and read like a bug -- naming
+            the fallback is the whole point of a summary.
+            """
+            shown = (unset or "unset") if value is None else f"{value}"
+            source = config.source_of(table, *path)
+            return shown if source == "table" else f"{shown} ({source})"
+
         namespace = config.namespace_of(name)
         nested = "  -- nested" + _lacking_nested() if len(namespace) > 1 else ""
         print(f"{name}   [namespace {'.'.join(namespace)}, table {name.split('.')[-1]}]{nested}")
         parts = (
-            "partition [" + ", ".join(f"{pf.column}:{pf.transform}" for pf in s.partition) + "]"
+            "[" + ", ".join(f"{pf.column}:{pf.transform}" for pf in s.partition) + "]"
             if s.partition
-            else "unpartitioned"
+            else "none"
         )
-        print(f"  layout     {parts}, ordering {mark(s.ordering.mode, d.ordering.mode)}")
+        print(
+            f"  layout     partition {mark(parts, 'partition')}, "
+            f"ordering {mark(s.ordering.mode, 'ordering')}"
+        )
         if s.ordering.mode == "zorder" and s.ordering.zorder:
             columns = ", ".join(s.ordering.zorder.columns)
             print(f"             zorder columns {columns}{_lacking(LayoutFeature.ZORDER)}")
+        hold_path = "skip_partitions_newer_than_windows"
         hold = (
-            "hold off -- partitions still being written are compacted"
+            "hold " + mark("off", hold_path) + " -- partitions still being written are compacted"
             if s.skip_partitions_newer_than_windows is None
             else "hold the open window(s) plus "
-            + mark(s.skip_partitions_newer_than_windows, d.skip_partitions_newer_than_windows)
+            + mark(s.skip_partitions_newer_than_windows, hold_path)
             + " closed"
         )
         print(
             "  compact    target "
-            + mark(s.target_file_size_bytes, d.target_file_size_bytes, unset=_UNSET_TARGET)
-            + f" bytes, at least {mark(s.min_input_files, d.min_input_files)} file(s) "
+            + mark(s.target_file_size_bytes, "target_file_size_bytes", unset=_UNSET_TARGET)
+            + f" bytes, at least {mark(s.min_input_files, 'min_input_files')} file(s) "
             f"per partition, {hold}"
         )
 
         r = s.retention
-        expire = "on" if r.expire_snapshots.enabled else "OFF"
-        de = d.retention.expire_snapshots
+        expire_path = ("retention", "expire_snapshots")
         print(
-            f"  expire     {expire}, "
-            "keep "
+            "  expire     "
+            + mark("on" if r.expire_snapshots.enabled else "OFF", *expire_path, "enabled")
+            + ", keep "
             + mark(
                 r.expire_snapshots.max_snapshot_age_days,
-                de.max_snapshot_age_days,
+                *expire_path,
+                "max_snapshot_age_days",
                 unset=_UNSET_AGE,
             )
             + " day(s), minimum "
             + mark(
                 r.expire_snapshots.min_snapshots_to_keep,
-                de.min_snapshots_to_keep,
+                *expire_path,
+                "min_snapshots_to_keep",
                 unset=_UNSET_KEEP,
             )
             + " snapshot(s)"
         )
-        orphans = "on" if r.remove_orphan_files.enabled else "OFF"
-        do = d.retention.remove_orphan_files
+        orphans_path = ("retention", "remove_orphan_files")
         print(
-            f"  orphans    {orphans}, files older than "
-            f"{mark(r.remove_orphan_files.older_than_days, do.older_than_days)} day(s) "
-            "-- this deletes storage; the guard is what stands between it and a live write"
+            "  orphans    "
+            + mark("on" if r.remove_orphan_files.enabled else "OFF", *orphans_path, "enabled")
+            + ", files older than "
+            + mark(r.remove_orphan_files.older_than_days, *orphans_path, "older_than_days")
+            + " day(s) -- this deletes storage; the guard is what stands between it and a "
+            "live write"
         )
         dangling = "on" if r.remove_dangling_deletes.enabled else "OFF"
         print(f"  dangling   {dangling}")

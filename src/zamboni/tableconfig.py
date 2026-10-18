@@ -10,10 +10,12 @@ Design notes worth knowing before editing:
 
 * Everything is declarative and describes a *target*, never an action. The
   compactor decides what work that implies.
-* ``defaults`` applies to every table; a table's own block overrides it
-  key-by-key (a shallow merge per section, not a deep merge, so a table that
-  declares ``partition_evolution`` owns it entirely and is not silently mixed
-  with the default rules).
+* A table block writes only what differs from ``defaults``. Every key is
+  inherited by presence, at every depth: a key the block contains wins whatever
+  its value, ``null`` included; a key it leaves out comes from ``defaults``, and
+  from the built-in when ``defaults`` leaves it out too. Lists are values and
+  replace whole, so a table's ``partition_evolution.rules`` are never mixed
+  with the default rules, and so is ``ordering`` (see :func:`_merge`).
 * ``ordering.mode`` is a closed choice because sort and z-order both define row
   order and cannot both apply. Making it an enum rather than "whichever field is
   present" means a config with both is rejected at load time, not silently
@@ -25,7 +27,9 @@ Design notes worth knowing before editing:
 
 from __future__ import annotations
 
+import copy
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -341,27 +345,49 @@ class TableSettings:
     target_file_size_bytes: int | None = None
     min_input_files: int = 2
     #: On by default: hold the open window and the one before it (docs/table-config.md).
-    #: ``None`` turns the hold off -- so it has to be told apart from "not set",
-    #: which inherits `defaults`; see :attr:`authored`.
+    #: ``None`` turns the hold off.
     skip_partitions_newer_than_windows: int | None = 1
     description: str | None = None
-    #: Which of :data:`_INHERITED` the file's block actually contained, or
-    #: ``None`` for settings built in code. Not authored itself: the parser
-    #: records it, because only the parser can see the difference between a key
-    #: left out and a key set to its default or to ``null`` (ZMBNI-216).
-    authored: frozenset[str] | None = field(default=None, compare=False, repr=False)
+    #: The block as written in the file -- only the keys it contains -- or
+    #: ``None`` for settings built in code, which then count as setting every
+    #: key. Inheritance is decided on this, not on the field values: a value
+    #: cannot say whether it was written or left out, and comparing it with the
+    #: built-in default could not tell, so a written default and an omitted key
+    #: merged alike (ZMBNI-216, ZMBNI-220).
+    block: Mapping[str, Any] | None = field(default=None, compare=False, repr=False)
 
-    def sets(self, name: str) -> bool:
-        """Did this block set ``name``, rather than leave it to `defaults`?
+    @classmethod
+    def from_dict(cls, block: Mapping[str, Any], where: str = "<block>") -> TableSettings:
+        """Parse one block as it would appear in the file, keeping what it set.
 
-        From the file, presence decides, so an explicit ``null`` or an explicit
-        default still overrides. Built in code there is no file to ask, and a
-        value that differs from the field's own default is the evidence of
-        intent -- which is how every one of these merged before.
+        The way to build a table's settings in code that still inherit from
+        ``defaults``: a block ``{"partition": [...]}`` sets the partition and
+        nothing else. Constructing :class:`TableSettings` directly sets
+        everything.
         """
-        if self.authored is not None:
-            return name in self.authored
-        return bool(getattr(self, name) != _FIELD_DEFAULTS[name])
+        return _settings_from_dict(dict(block), where)
+
+    def as_block(self) -> dict[str, Any]:
+        """What this block sets, as the file would spell it."""
+        return copy.deepcopy(dict(self.block)) if self.block is not None else _full_block(self)
+
+    def sets(self, *path: str) -> bool:
+        """Does this block set the key at ``path``, e.g. ``("retention",
+        "expire_snapshots", "enabled")``? Settings built in code set every key.
+
+        A key under a block that replaces whole (`ordering`) is set when the
+        block is: the merge takes all of it or none of it.
+        """
+        if self.block is None:
+            return True
+        node: Any = self.block
+        for key in path:
+            if not isinstance(node, Mapping) or key not in node:
+                return False
+            if key in _REPLACED_WHOLE:
+                return True
+            node = node[key]
+        return True
 
     def validate(self, where: str) -> None:
         for i, pf in enumerate(self.partition):
@@ -405,22 +431,34 @@ DEFAULT_PARTITION_EVOLUTION = PartitionEvolution(
 
 DEFAULT_SETTINGS = TableSettings(partition_evolution=DEFAULT_PARTITION_EVOLUTION)
 
-#: The settings a table block inherits from `defaults` key by key, by presence.
-#:
-#: Only the single-value ones. Comparing against the built-in default could not
-#: tell "left out" from "set to the default", so `defaults.min_input_files` was
-#: ignored by every table with a block of its own -- which in a config is every
-#: table -- and an explicit ``null`` could not turn the hold off where `defaults`
-#: turned it on (ZMBNI-216).
-#:
-#: The sections are deliberately not here, though they share the flaw. Files
-#: written by `zamboni from-catalog` (`TableConfig.dump`) spell out every table's
-#: `retention` and `partition_evolution` in full; merged by presence, each would
-#: start overriding `defaults.retention` -- turning expiry or orphan removal off,
-#: or on, in configs nobody has edited. That needs a migration, not a merge rule.
-_INHERITED = ("target_file_size_bytes", "min_input_files", "skip_partitions_newer_than_windows")
 
-_FIELD_DEFAULTS = {name: getattr(TableSettings(), name) for name in _INHERITED}
+#: Objects that are one value rather than a set of settings; see :func:`_merge`.
+_REPLACED_WHOLE = frozenset({"ordering"})
+
+
+def _merge(base: Mapping[str, Any], over: Mapping[str, Any]) -> dict[str, Any]:
+    """``over`` on top of ``base``, by presence, at every depth.
+
+    A key ``over`` contains wins whatever its value -- ``null``, ``false``,
+    ``[]``, or a value equal to the built-in. Objects merge key by key; lists
+    and scalars replace.
+
+    **``ordering`` replaces whole.** It is one choice, a mode and that mode's
+    keys, not a set of independent settings: merged key by key, a table choosing
+    ``zorder`` under a ``defaults`` that sorts would inherit the sort keys as
+    well, which `Ordering.validate` rightly refuses.
+    """
+    out = copy.deepcopy(dict(base))
+    for key, value in over.items():
+        if (
+            isinstance(value, Mapping)
+            and isinstance(out.get(key), Mapping)
+            and key not in _REPLACED_WHOLE
+        ):
+            out[key] = _merge(out[key], value)
+        else:
+            out[key] = copy.deepcopy(value)
+    return out
 
 
 @dataclass(frozen=True)
@@ -495,36 +533,27 @@ class TableConfig:
         raise KeyError(identifier)
 
     def for_table(self, identifier: str) -> TableSettings:
-        """Settings for ``identifier``, with defaults filled in.
+        """The settings ``identifier`` runs with: its block over ``defaults``
+        over the built-in, by presence at every depth (:func:`_merge`).
 
-        The sections merge whole: a table that declares ``ordering`` replaces
-        the default ordering wholesale rather than having individual keys
-        blended, so what an author reads in one block is what applies. The
-        single-value settings in `_INHERITED` merge key by key, by presence --
-        see the comment there for why the two rules differ.
+        A table the file does not name gets ``defaults`` alone.
         """
         override = self.tables.get(identifier)
-        if override is None:
-            return self.defaults
-        return replace(
-            self.defaults,
-            partition=override.partition or self.defaults.partition,
-            partition_evolution=override.partition_evolution
-            if override.partition_evolution != PartitionEvolution()
-            else self.defaults.partition_evolution,
-            ordering=(
-                override.ordering if override.ordering.mode != "none" else self.defaults.ordering
-            ),
-            retention=(
-                override.retention if override.retention != Retention() else self.defaults.retention
-            ),
-            description=override.description,
-            authored=None,
-            **{
-                name: getattr(override if override.sets(name) else self.defaults, name)
-                for name in _INHERITED
-            },
-        )
+        merged = _merge(_BUILT_IN_BLOCK, self.defaults.as_block())
+        if override is not None:
+            merged = _merge(merged, override.as_block())
+        # `description` describes one table, so it is the one key not inherited.
+        merged["description"] = override.description if override is not None else None
+        return _settings_from_dict(merged, identifier if override is not None else "defaults")
+
+    def source_of(self, identifier: str, *path: str) -> Literal["table", "defaults", "built-in"]:
+        """Which block the value at ``path`` comes from for ``identifier``."""
+        override = self.tables.get(identifier)
+        if override is not None and override.sets(*path):
+            return "table"
+        if self.defaults.sets(*path):
+            return "defaults"
+        return "built-in"
 
     def validate(self) -> None:
         if self.version != SPEC_VERSION:
@@ -539,7 +568,7 @@ class TableConfig:
                 "config copied into the wrong directory is an error rather than a "
                 "run against the wrong tenant."
             )
-        self.defaults.validate("defaults")
+        self.for_table("").validate("defaults")  # no table is named ""
         for namespace, block in self.namespaces.items():
             where = f"namespaces.{namespace}"
             if not namespace:
@@ -551,7 +580,7 @@ class TableConfig:
                 )
             if not block.tables:
                 raise TableConfigError(f"{where}: declares no tables")
-            for name, settings in block.tables.items():
+            for name in block.tables:
                 if not name:
                     raise TableConfigError(f"{where}.tables: a table name cannot be empty")
                 if "." in name:
@@ -561,7 +590,11 @@ class TableConfig:
                         "ambiguity this format exists to remove -- move the prefix into "
                         "the namespace."
                     )
-                settings.validate(f"{where}.tables.{name}")
+                # The merged result, not the block: a block is a fragment, and
+                # whether it makes sense depends on what it inherits -- a
+                # partition_evolution rule names a transform `defaults` may
+                # declare.
+                self.for_table(f"{namespace}.{name}").validate(f"{where}.tables.{name}")
 
     # -- serialisation ----------------------------------------------------
 
@@ -590,10 +623,12 @@ class TableConfig:
                 "generate`, or see docs/table-config.md."
             )
         _reject_unknown(raw, {"version", "warehouse", "defaults", "namespaces"}, "<root>")
-        defaults = (
-            _settings_from_dict(raw["defaults"], "defaults")
-            if "defaults" in raw
-            else DEFAULT_SETTINGS
+        # Parsed alone first, for its errors; then resolved against the built-in,
+        # so `defaults` holds the values a table inherits, while `block` keeps
+        # only what the file wrote -- an absent `defaults` writes nothing.
+        written = _settings_from_dict(raw.get("defaults", {}), "defaults").as_block()
+        defaults = replace(
+            _settings_from_dict(_merge(_BUILT_IN_BLOCK, written), "defaults"), block=written
         )
         namespaces = {}
         for namespace, block in (
@@ -621,12 +656,11 @@ class TableConfig:
         return {
             "version": self.version,
             "warehouse": self.warehouse,
-            "defaults": _settings_to_dict(self.defaults),
+            "defaults": self.defaults.as_block(),
             "namespaces": {
                 namespace: {
                     "tables": {
-                        name: _settings_to_dict(settings)
-                        for name, settings in sorted(block.tables.items())
+                        name: settings.as_block() for name, settings in sorted(block.tables.items())
                     }
                 }
                 for namespace, block in sorted(self.namespaces.items())
@@ -808,10 +842,10 @@ def _settings_from_dict(raw: dict[str, Any], where: str) -> TableSettings:
             where,
             expect=int,
             nullable=True,
-            default=_FIELD_DEFAULTS["skip_partitions_newer_than_windows"],
+            default=TableSettings.skip_partitions_newer_than_windows,
         ),
         description=_value(raw, "description", where, expect=str, nullable=True),
-        authored=frozenset(raw) & frozenset(_INHERITED),
+        block=copy.deepcopy(raw),
     )
 
 
@@ -969,73 +1003,71 @@ def _retention_from_dict(raw: dict[str, Any], where: str) -> Retention:
     )
 
 
-def _settings_to_dict(s: TableSettings) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    if s.description:
-        out["description"] = s.description
-    if s.partition:
-        out["partition"] = [_partition_field_to_dict(pf) for pf in s.partition]
-    out["partition_evolution"] = {
-        "enabled": s.partition_evolution.enabled,
-        "rules": [
-            {
-                "from": r.from_transform,
-                "to": r.to_transform,
-                "older_than_days": r.older_than_days,
-            }
-            for r in s.partition_evolution.rules
-        ],
-    }
-    if s.ordering.mode != "none":
-        ordering: dict[str, Any] = {"mode": s.ordering.mode}
-        if s.ordering.mode == "sort":
-            ordering["sort"] = [
-                {"column": k.column, "direction": k.direction, "nulls": k.nulls}
-                for k in s.ordering.sort
-            ]
-        elif s.ordering.zorder:
-            ordering["zorder"] = {
-                "columns": list(s.ordering.zorder.columns),
-                "precision_bits": s.ordering.zorder.precision_bits,
-            }
-        out["ordering"] = ordering
-    out["retention"] = {
-        "expire_snapshots": {
-            k: v
-            for k, v in {
+def _full_block(s: TableSettings) -> dict[str, Any]:
+    """Every key, as the file would spell it -- the block for settings built in
+    code, which count as setting everything. Unset values are written as
+    ``null`` rather than left out, because a key left out would inherit."""
+    out: dict[str, Any] = {
+        "description": s.description,
+        "partition": [_partition_field_to_dict(pf) for pf in s.partition],
+        "partition_evolution": {
+            "enabled": s.partition_evolution.enabled,
+            "rules": [
+                {
+                    "from": r.from_transform,
+                    "to": r.to_transform,
+                    "older_than_days": r.older_than_days,
+                }
+                for r in s.partition_evolution.rules
+            ],
+        },
+        "ordering": _ordering_to_dict(s.ordering),
+        "retention": {
+            "expire_snapshots": {
                 "enabled": s.retention.expire_snapshots.enabled,
                 "max_snapshot_age_days": s.retention.expire_snapshots.max_snapshot_age_days,
                 "min_snapshots_to_keep": s.retention.expire_snapshots.min_snapshots_to_keep,
                 "max_ref_age_days": s.retention.expire_snapshots.max_ref_age_days,
-            }.items()
-            if v is not None
-        },
-        "remove_orphan_files": {
-            "enabled": s.retention.remove_orphan_files.enabled,
-            "older_than_days": s.retention.remove_orphan_files.older_than_days,
-        },
-        "remove_dangling_deletes": {
-            "enabled": s.retention.remove_dangling_deletes.enabled,
-        },
-        "rewrite_manifests": {
-            "enabled": s.retention.rewrite_manifests.enabled,
-            "min_input_manifests": s.retention.rewrite_manifests.min_input_manifests,
-        },
-        "metadata": {
-            k: v
-            for k, v in {
+            },
+            "remove_orphan_files": {
+                "enabled": s.retention.remove_orphan_files.enabled,
+                "older_than_days": s.retention.remove_orphan_files.older_than_days,
+            },
+            "remove_dangling_deletes": {"enabled": s.retention.remove_dangling_deletes.enabled},
+            "rewrite_manifests": {
+                "enabled": s.retention.rewrite_manifests.enabled,
+                "min_input_manifests": s.retention.rewrite_manifests.min_input_manifests,
+            },
+            "metadata": {
                 "previous_versions_max": s.retention.metadata.previous_versions_max,
                 "delete_after_commit": s.retention.metadata.delete_after_commit,
-            }.items()
-            if v is not None
+            },
         },
+        "target_file_size_bytes": s.target_file_size_bytes,
+        "min_input_files": s.min_input_files,
+        "skip_partitions_newer_than_windows": s.skip_partitions_newer_than_windows,
     }
-    # Whatever the block set, and nothing else: a key written out is an override
-    # when read back, so writing an inherited value would stop it inheriting.
-    for name in _INHERITED:
-        if s.sets(name):
-            out[name] = getattr(s, name)
     return out
+
+
+def _ordering_to_dict(o: Ordering) -> dict[str, Any]:
+    out: dict[str, Any] = {"mode": o.mode}
+    if o.sort:
+        out["sort"] = [
+            {"column": k.column, "direction": k.direction, "nulls": k.nulls} for k in o.sort
+        ]
+    if o.zorder is not None:
+        out["zorder"] = {
+            "columns": list(o.zorder.columns),
+            "precision_bits": o.zorder.precision_bits,
+        }
+    return out
+
+
+#: The built-in settings as a complete block: the base every merge starts from,
+#: so a key neither the table nor ``defaults`` writes takes the built-in value
+#: (`DEFAULT_SETTINGS`) rather than whatever the parser assumes for a missing key.
+_BUILT_IN_BLOCK = _full_block(DEFAULT_SETTINGS)
 
 
 def _partition_field_to_dict(pf: PartitionField) -> dict[str, Any]:
