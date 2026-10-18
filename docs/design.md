@@ -407,8 +407,9 @@ wrong tenant's directory is an error before anything is touched.
 | `target_file_size_bytes` | Output size | table property, else 128 MiB |
 | `min_input_files` | Compaction threshold | 2 |
 
-`defaults` applies to every table; a table's block overrides it **per section**, so what you
-read in one block is what applies. Unknown keys are rejected. `namespaces.<ns>` is an object
+`defaults` applies to every table, and a table's block writes only what differs: every key
+is inherited by presence, objects merging key by key and lists and `ordering` replacing whole
+([table-config.md](table-config.md#inheritance)). Unknown keys are rejected. `namespaces.<ns>` is an object
 wrapping `tables` so namespace-level defaults can be added without a further version bump.
 
 ---

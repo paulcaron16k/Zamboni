@@ -244,6 +244,25 @@ def test_generate_describes_the_catalog_as_it_is(tmp_path, capsys):
     assert config.tables["acme.plain"].partition == ()
 
 
+def test_generate_writes_each_table_as_the_partition_alone(tmp_path):
+    """Everything else is left to `defaults`, so editing `defaults` changes every
+    generated table and the file stays as small as the catalog's facts. Before
+    ZMBNI-220 each table spelled out every section, which under presence
+    inheritance would override `defaults` everywhere."""
+    from zamboni.cli import main
+
+    _local_catalog(tmp_path)
+    out = tmp_path / "tc.json"
+    args = ["table-config", "generate", "--db", "acme", "-o", str(out)]
+    assert main([*args, "--local-warehouse", str(tmp_path)]) == 0
+
+    tables = json.loads(out.read_text())["namespaces"]["acme"]["tables"]
+    assert tables == {
+        "events": {"partition": [{"column": "ts", "transform": "day"}]},
+        "plain": {"partition": []},
+    }
+
+
 def test_generate_refuses_to_overwrite_without_force(tmp_path, capsys):
     """The file being overwritten is the one that says what may be deleted."""
     from zamboni.cli import main
@@ -306,6 +325,38 @@ def test_summary_names_the_fallback_instead_of_printing_none(tmp_path, capsys):
     assert "history.expire.max-snapshot-age-ms, else 5" in out
     assert "history.expire.min-snapshots-to-keep, else 1" in out
     assert "None" not in out
+
+
+def test_summary_names_the_block_each_value_came_from(tmp_path, capsys):
+    """By what each block wrote, not by comparing values (ZMBNI-220): a table's
+    explicit 3 days equals the built-in and is still the table's, and the
+    fleet's 30 days is marked as the fleet's on a table that wrote nothing."""
+    from zamboni.cli import main
+
+    config = tmp_path / "tc.json"
+    config.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "warehouse": "acme",
+                "defaults": {"retention": {"expire_snapshots": {"max_snapshot_age_days": 30}}},
+                "namespaces": {
+                    "db": {
+                        "tables": {
+                            "events": {"retention": {"remove_orphan_files": {"older_than_days": 3}}}
+                        }
+                    }
+                },
+            }
+        )
+    )
+
+    assert main(["table-config", "summary", str(config)]) == 0
+    out = capsys.readouterr().out
+
+    assert "keep 30 (defaults) day(s)" in out
+    assert "files older than 3 day(s)" in out, "written by the table, so unmarked"
+    assert "orphans    on (built-in)" in out
 
 
 def test_summary_marks_which_values_came_from_the_file(tmp_path, capsys):
@@ -378,8 +429,10 @@ def test_summary_shows_the_compaction_settings_a_table_ends_up_with(tmp_path, ca
     out = capsys.readouterr().out
 
     events = _compact_line(out, "db.events")
-    assert f"plus {DEFAULT_SETTINGS.skip_partitions_newer_than_windows} (default) closed" in events
-    assert "at least 4 file(s)" in events, "defaults.min_input_files must reach the table"
+    assert f"plus {DEFAULT_SETTINGS.skip_partitions_newer_than_windows} (built-in) closed" in events
+    assert "at least 4 (defaults) file(s)" in events, (
+        "defaults.min_input_files must reach the table"
+    )
     for prop in TARGET_FILE_SIZE_PROPERTIES:
         assert prop in events
     assert str(DEFAULT_TARGET_FILE_SIZE_BYTES) in events

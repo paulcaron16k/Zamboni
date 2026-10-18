@@ -688,33 +688,38 @@ def test_the_documented_sizing_defaults_are_the_code_defaults():
 
 
 def test_the_documented_inheritance_examples_resolve_as_documented():
-    """Each row of table-config.md's inheritance table is a config fragment and
-    a claimed result. Run it, so the table cannot keep describing the merge
-    #216 replaced."""
+    """Each row of table-config.md's inheritance table is two config fragments
+    and a claimed `path = value`. Run it, so the table cannot keep describing a
+    merge that #216 and #220 replaced.
+
+    The claim is read off the merged block (`for_table(...).as_block()`), in the
+    file's own spelling, so `null` and `[]` compare as the doc writes them."""
     import json
 
     from zamboni.tableconfig import TableConfig
 
-    def block(cell: str) -> tuple[str, dict]:
-        key = re.search(r"`\"?([a-z_]+)", cell)
-        assert key, f"no key in inheritance cell {cell!r}"
-        if cell.startswith("no "):
-            return key.group(1), {}
-        return key.group(1), json.loads("{" + cell.strip("`") + "}")
+    def block(cell: str) -> dict:
+        if cell == "nothing":
+            return {}
+        assert cell.startswith("`") and cell.endswith("`"), f"not a fragment: {cell!r}"
+        return json.loads("{" + cell.strip("`") + "}")
 
     rows = _markdown_rows("table-config.md", "## Inheritance")
-    assert len(rows) >= 4, "the inheritance table lost its rows, or the extraction stopped matching"
+    assert len(rows) >= 8, "the inheritance table lost its rows, or the extraction stopped matching"
     for defaults_cell, table_cell, claim in rows:
-        name, defaults = block(defaults_cell)
-        _, table = block(table_cell)
+        found = re.match(r"`([a-z_.]+) = (.+?)`", claim)
+        assert found, f"no `path = value` in inheritance claim {claim!r}"
+        path, expected = found.group(1).split("."), json.loads(found.group(2))
         config = TableConfig.from_dict(
             {
                 "version": 2,
                 "warehouse": "acme",
-                "defaults": defaults,
-                "namespaces": {"db": {"tables": {"t": table}}},
+                "defaults": block(defaults_cell),
+                "namespaces": {"db": {"tables": {"t": block(table_cell)}}},
             }
         )
-        got = getattr(config.for_table("db.t"), name)
-        expected = None if claim == "no hold" else int(claim.split()[0].rstrip(","))
+        config.validate()
+        got = config.for_table("db.t").as_block()
+        for key in path:
+            got = got[key]
         assert got == expected, f"inheritance row {defaults_cell} | {table_cell}: got {got!r}"

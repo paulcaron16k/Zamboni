@@ -519,29 +519,148 @@ def test_what_a_table_set_survives_a_dump_and_reload(tmp_path):
     assert (inherits.skip_partitions_newer_than_windows, inherits.min_input_files) == (3, 5)
 
 
-def test_settings_built_in_code_override_where_they_differ_from_the_default():
-    """No file to ask, so a value other than the field's default is the intent."""
+def resolved(defaults: dict, table: dict) -> TableSettings:
+    config = TableConfig.from_dict(v2({"a.b": table}, defaults=defaults))
+    config.validate()
+    return config.for_table("a.b")
+
+
+# -- the same rule at every depth (ZMBNI-220) ----------------------------------
+
+
+def test_one_retention_key_leaves_the_rest_of_defaults_retention_in_place():
+    """The reason inheritance exists: a table writes what differs and no more.
+    Before ZMBNI-220 the table took `retention` whole, and lost the fleet's 30
+    days to the built-in's unset."""
+    s = resolved(
+        {"retention": {"expire_snapshots": {"max_snapshot_age_days": 30}}},
+        {"retention": {"remove_orphan_files": {"older_than_days": 7}}},
+    )
+    assert s.retention.expire_snapshots.max_snapshot_age_days == 30
+    assert s.retention.remove_orphan_files.older_than_days == 7
+
+
+def test_one_key_inside_a_retention_block_inherits_its_siblings():
+    s = resolved(
+        {"retention": {"remove_orphan_files": {"enabled": False, "older_than_days": 10}}},
+        {"retention": {"remove_orphan_files": {"older_than_days": 7}}},
+    )
+    assert s.retention.remove_orphan_files.enabled is False
+    assert s.retention.remove_orphan_files.older_than_days == 7
+
+
+def test_an_empty_partition_list_makes_a_table_unpartitioned():
+    s = resolved({"partition": [{"column": "ts", "transform": "day"}]}, {"partition": []})
+    assert s.partition == ()
+
+
+def test_ordering_none_turns_off_a_default_sort():
+    s = resolved(
+        {"ordering": {"mode": "sort", "sort": [{"column": "a"}]}},
+        {"ordering": {"mode": "none"}},
+    )
+    assert s.ordering.mode == "none"
+
+
+def test_a_value_equal_to_the_built_in_still_overrides_defaults():
+    """Presence decides, not comparison with the built-in -- so a table can ask
+    for the built-in back."""
+    s = resolved(
+        {"retention": {"remove_orphan_files": {"older_than_days": 10}}},
+        {"retention": {"remove_orphan_files": {"older_than_days": 3}}},
+    )
+    assert s.retention.remove_orphan_files.older_than_days == 3
+
+
+def test_ordering_is_replaced_whole_not_merged():
+    """A mode and its keys are one choice. Merged key by key, z-order would
+    inherit the default sort keys too, and validation would refuse it."""
+    s = resolved(
+        {"ordering": {"mode": "sort", "sort": [{"column": "a"}]}},
+        {"ordering": {"mode": "zorder", "zorder": {"columns": ["a", "b"]}}},
+    )
+    assert s.ordering.mode == "zorder"
+    assert s.ordering.sort == ()
+
+
+def test_evolution_rules_are_a_list_and_replace_whole():
+    s = resolved(
+        {"partition": [{"column": "ts", "transform": "day"}]},
+        {"partition_evolution": {"rules": [{"from": "day", "to": "year", "older_than_days": 400}]}},
+    )
+    assert [(r.from_transform, r.to_transform) for r in s.partition_evolution.rules] == [
+        ("day", "year")
+    ]
+    assert s.partition_evolution.enabled is True, "inherited from the built-in"
+
+
+def test_a_defaults_block_inherits_the_built_in_where_it_is_silent():
+    """`defaults` is itself a block over the built-in. Before ZMBNI-220 a
+    `defaults` that mentioned anything at all lost the built-in evolution rule,
+    because the parser's empty default stood in for every key it left out."""
+    with_defaults = resolved({"min_input_files": 4}, {})
+    without = TableConfig.from_dict(v2({"a.b": {}})).for_table("a.b")
+    assert with_defaults.partition_evolution == without.partition_evolution
+    assert with_defaults.partition_evolution.rules, "the built-in day-to-month rule"
+
+
+def test_validation_sees_the_merged_table_not_the_fragment():
+    """An evolution rule in a table block names a transform the table inherits."""
+    resolved(
+        {"partition": [{"column": "ts", "transform": "day"}]},
+        {"partition_evolution": {"rules": [{"from": "day", "to": "month", "older_than_days": 9}]}},
+    )
+    with pytest.raises(TableConfigError, match="no partition field uses transform 'hour'"):
+        resolved(
+            {"partition": [{"column": "ts", "transform": "day"}]},
+            {
+                "partition_evolution": {
+                    "rules": [{"from": "hour", "to": "day", "older_than_days": 1}]
+                }
+            },
+        )
+
+
+def test_a_dump_writes_only_what_each_block_set(tmp_path):
+    """Files stay small after a round trip, and nothing a block left out comes
+    back as an override."""
+    doc = v2(
+        {"a.b": {"retention": {"remove_orphan_files": {"older_than_days": 7}}}},
+        defaults={"retention": {"expire_snapshots": {"max_snapshot_age_days": 30}}},
+    )
+    path = tmp_path / "table-config.json"
+    TableConfig.from_dict(doc).dump(path)
+    written = json.loads(path.read_text())
+
+    assert written["namespaces"]["a"]["tables"]["b"] == {
+        "retention": {"remove_orphan_files": {"older_than_days": 7}}
+    }
+    assert written["defaults"] == doc["defaults"]
+    again = TableConfig.load(path).for_table("a.b")
+    assert again.retention.expire_snapshots.max_snapshot_age_days == 30
+
+
+def test_settings_built_in_code_set_every_key():
+    """A `TableSettings` object has no record of what was left out, so it counts
+    as setting everything; `TableSettings.from_dict` is the sparse form."""
     config = TableConfig(
         warehouse="acme",
-        defaults=TableSettings(skip_partitions_newer_than_windows=3, min_input_files=5),
+        defaults=TableSettings(min_input_files=5),
         namespaces={
             "a": NamespaceSettings(
                 tables={
-                    "off": TableSettings(skip_partitions_newer_than_windows=None),
-                    "plain": TableSettings(),
+                    "whole": TableSettings(),
+                    "sparse": TableSettings.from_dict({"min_input_files": 3}),
+                    "empty": TableSettings.from_dict({}),
                 }
             )
         },
     )
-    assert config.for_table("a.off").skip_partitions_newer_than_windows is None
-    assert config.for_table("a.plain").skip_partitions_newer_than_windows == 3
-    assert config.for_table("a.plain").min_input_files == 5
+    assert config.for_table("a.whole").min_input_files == 2
+    assert config.for_table("a.sparse").min_input_files == 3
+    assert config.for_table("a.empty").min_input_files == 5
 
 
-def test_a_spelled_out_default_retention_still_inherits_the_fleet_one():
-    """Sections keep the old merge on purpose: `from-catalog` writes every table's
-    retention in full, and merging those by presence would override `defaults` in
-    configs nobody edited. Pinned so that changing it is a decision."""
-    fleet = {"expire_snapshots": {"enabled": True, "max_snapshot_age_days": 3}}
-    config = TableConfig.from_dict(v2({"a.b": {"retention": {}}}, defaults={"retention": fleet}))
-    assert config.for_table("a.b").retention.expire_snapshots.max_snapshot_age_days == 3
+def test_description_belongs_to_one_table():
+    s = resolved({"description": "fleet"}, {})
+    assert s.description is None
