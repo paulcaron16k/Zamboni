@@ -21,6 +21,8 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-18
+
 ### BREAKING
 
 - **`table-config.json` now holds the newest partitions by default** (#216).
@@ -48,6 +50,16 @@ Two categories beyond the usual set, because this tool deletes files:
   value; `defaults.min_input_files` reached no table with a block of its own; and
   a `defaults` block that mentioned anything lost the built-in day-to-month
   evolution rule. See `docs/table-config.md#inheritance`.
+
+  **What a nightly run deletes can change.** A table whose block set any
+  `retention` key used to take the *built-in* value for every retention key it
+  left out -- including the other operations' (a table setting only
+  `expire_snapshots.min_snapshots_to_keep` got a 3-day `remove_orphan_files`
+  age, not `defaults`' 14). It now takes `defaults.retention`'s. Where
+  `defaults.retention` is shorter than the built-in, such a table now expires
+  snapshots and removes orphan files sooner; where longer, later. Before
+  upgrading, run `zamboni table-config summary` and look at each retention value
+  marked `(defaults)`.
 
   **What to do:** a block that spells out a section now overrides `defaults`
   with every key it writes. Files from earlier `zamboni from-catalog` and
