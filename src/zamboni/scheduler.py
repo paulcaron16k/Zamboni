@@ -213,6 +213,11 @@ class CandidateQueue:
     def in_flight(self) -> frozenset[tuple[str, str]]:
         return frozenset(self._in_flight)
 
+    @property
+    def queued(self) -> tuple[tuple[str, str], ...]:
+        """The queued tables, in the order they will be taken."""
+        return tuple(self._queued)
+
     def offer(self, candidate: Candidate) -> bool:
         """Queue ``candidate``; ``False`` if it coalesced into existing work."""
         key = candidate.key
