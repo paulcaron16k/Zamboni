@@ -149,6 +149,18 @@ endpoint teaches an operator to distrust the exit code. `otel.py` is imported
 only when an OTel reporter is constructed, which is what keeps the base
 `opentelemetry-api` dependency free at runtime.
 
+**`runtime.py`** is *when*, for every deployment that is not cron: one
+`MaintenanceRuntime` owns an asyncio loop running the scheduler, the event feeds,
+the pressure checks and the take-and-run loop over `scheduler.CandidateQueue` and
+`pool.WorkerPool`. Its control surface (`offer`, `update_fleet`, `state`,
+`request_stop`) is the only part another thread may touch; each call is handed to
+the loop with `call_soon_threadsafe`. `service.py` is `zamboni serve` assembled
+from it — a `reload.FileFleetProvider`, the capability check, signals, and the
+state file and run log fed through the private `_Hooks` until the public
+`Observer` (#166) replaces them. Nothing in it decides whether a table needs
+work; that is still `maintain()`'s due-check, run in each worker.
+docs/maintenance-runtime.md is the design and §12 the stories still to build.
+
 **`runlog.py`** is the other end of `maintenance --json`: it reads a series of
 run summaries back and aggregates them per warehouse, behind `zamboni runs`. It
 is deliberately tolerant — a log written by a cron line on a machine nobody
