@@ -21,6 +21,25 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### Added
+
+- **`zamboni.runtime.MaintenanceRuntime`: the scheduler, event feeds, pressure
+  checks, queue and worker pool of `zamboni serve`, as a library** (#162, R1 of
+  [docs/maintenance-runtime.md](docs/maintenance-runtime.md)). An application
+  can run the same runtime `serve` runs, on a thread of its own with
+  `start_in_thread`, and drive it from any thread through `offer()`,
+  `update_fleet()`, `state()` and `request_stop()`. `offer()` returns an
+  `OfferReceipt` saying, per table, whether it was queued, merged into work
+  already queued or running, or not in the warehouse's table config.
+  `RuntimeHandle.stop(grace=…)` lets the tables in flight finish and returns
+  `True`, or kills their workers once the grace has passed and returns `False`.
+  `StaticFleet` is the fleet source for an application that pushes each fleet
+  change itself. **Provisional**: this is new public API and may change before
+  the release after this one; claims (#167), observers (#166) and the `manual`
+  and `reclaim` reasons (#163) are not in it yet. `zamboni serve` is now built
+  on it and behaves as before, with one log line reworded: a second stop request
+  logs `stop forced: killing in-flight workers`.
+
 ## [0.7.0] - 2026-10-18
 
 ### BREAKING

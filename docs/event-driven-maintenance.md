@@ -525,7 +525,9 @@ is what the limit must cover.
 filesystem, or `temp_directory` pointed somewhere mounted.
 
 Implemented by `zamboni serve`, `zamboni service-status` and `zamboni.service`
-(ZMBNI-122); the deployment procedure is [devops.md §8](devops.md). What it
+(ZMBNI-122), which since #162 assembles `serve` from the library runtime in
+`zamboni.runtime` ([maintenance-runtime.md §3](maintenance-runtime.md)); the
+deployment procedure is [devops.md §8](devops.md). What it
 settles, each tested in `tests/test_service.py`:
 
 - **The state file** is written atomically on every tick, result and reload:

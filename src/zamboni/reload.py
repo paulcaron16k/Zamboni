@@ -151,17 +151,18 @@ async def watch(
     watcher: FleetWatcher,
     stop: asyncio.Event,
     *,
-    on_reload: Callable[[FleetConfig], None],
+    on_reload: Callable[[FleetConfig], object],
     on_error: Callable[[str], None] | None = None,
     hangup: asyncio.Event | None = None,
     interval: float = POLL_SECONDS,
 ) -> None:
     """Poll until ``stop``; a set ``hangup`` forces an immediate load.
 
-    ``on_reload`` receives each adopted fleet -- the service passes one that
-    calls ``Scheduler.rearm``. It runs between ticks on the same loop, so a
-    reload is never observed half-applied. ``on_error`` receives a refused
-    reload's reason, on every poll that still sees the bad file.
+    ``on_reload`` receives each adopted fleet -- :class:`FileFleetProvider`
+    passes the runtime's, which calls ``Scheduler.rearm``. It runs between
+    ticks on the same loop, so a reload is never observed half-applied.
+    ``on_error`` receives a refused reload's reason, on every poll that still
+    sees the bad file.
     """
     hangup = hangup or asyncio.Event()
     while not stop.is_set():
@@ -183,6 +184,45 @@ async def watch(
                 on_reload(outcome.fleet)
             except Exception:  # the old schedule keeps running; say so
                 logger.exception("applying fleet generation %d", watcher.generation)
+
+
+class FileFleetProvider:
+    """The fleet file as a runtime's `~zamboni.runtime.FleetProvider`: ``zamboni serve``'s.
+
+    Loads the file on construction, so an invalid one raises
+    :class:`~zamboni.fleet.FleetConfigError` before anything starts, and then
+    polls it every ``interval`` seconds -- or at once when ``hangup`` is set.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        interval: float = POLL_SECONDS,
+        hangup: asyncio.Event | None = None,
+    ) -> None:
+        self.watcher = FleetWatcher(path)
+        self.interval = interval
+        self.hangup = hangup or asyncio.Event()
+
+    @property
+    def fleet(self) -> FleetConfig:
+        return self.watcher.fleet
+
+    async def run(
+        self,
+        adopt: Callable[[FleetConfig], int],
+        refused: Callable[[str], None],
+        stop: asyncio.Event,
+    ) -> None:
+        await watch(
+            self.watcher,
+            stop,
+            on_reload=adopt,
+            on_error=refused,
+            hangup=self.hangup,
+            interval=self.interval,
+        )
 
 
 def install_hangup(loop: asyncio.AbstractEventLoop, hangup: asyncio.Event) -> None:

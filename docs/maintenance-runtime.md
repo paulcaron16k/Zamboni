@@ -1,8 +1,16 @@
 # One maintenance runtime, three ways to run it
 
-**Status: design, approved 2026-10-07. Not yet built.** The plan of work is at the
+**Status: design, approved 2026-10-07; being built.** The plan of work is at the
 end (§12). Where this document and the code disagree, the code has not caught up
 yet or this document is wrong, and either way it is a defect.
+
+**Built so far: R1 (#162), unreleased.** `zamboni.runtime.MaintenanceRuntime`
+exists with the §3 control surface, `start_in_thread` and `RuntimeHandle`, and
+`zamboni serve` is an assembly of it. Until the stories after it land, the
+constructor has no `claims` (R4), `observers` (R6) or `settings`, and `offer`
+accepts the three reasons that existed before it — `schedule`, `event` and
+`pressure` — not `manual` or `reclaim` (R2). `serve` keeps its state file and run
+log through private hooks that R6 replaces with observers.
 
 **What this settles.** Zamboni decides *how* to maintain a table safely. Since
 [event-driven maintenance](event-driven-maintenance.md) it also decides *when*,
@@ -128,6 +136,16 @@ runtime; another process — a web tier — reaches it through requests (§9.2).
 `zamboni serve` becomes an assembly: a `FleetWatcher` as the provider, a NATS
 source when `nats:` is configured, the state file and run log as observers, and
 signal handlers calling `request_stop`. Its behaviour does not change.
+
+As built in R1: the file-backed provider is `zamboni.reload.FileFleetProvider`;
+an application that pushes every fleet change through `update_fleet` passes
+`StaticFleet(fleet)`. Before `run` starts and after it returns there is no loop,
+and a control-surface call is applied in the caller's thread under a lock — so an
+offer made before start is queued and runs once the runtime does, and an offer
+after stop is refused. `state()`, `update_fleet` and `offer` wait for the loop to
+*apply* the call, which is what lets `offer` return an `OfferReceipt` saying, per
+table, whether it was queued, merged into existing work, or not in the warehouse's
+table config. `request_stop` does not wait. A runtime runs once.
 
 ### 3.1 Reasons, and what each runs
 

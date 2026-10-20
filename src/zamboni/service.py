@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``zamboni serve``: the scheduler, the pool and the reload watcher, as one process.
+"""``zamboni serve``: a maintenance runtime built from files, as one process.
 
 ::
 
-  fleet file ─▶ FleetWatcher ─rearm─▶ Scheduler ─offer─▶ CandidateQueue ─▶ run_workers ─▶ WorkerPool
-                  (#119)              (#120, #144)          (#120)          (#121, #147)
-                                                                                           │
-                       state file, run log  ◀──────────── per-table results ◀─────────────┘
+  fleet file ─▶ FileFleetProvider ─▶ MaintenanceRuntime ─▶ per-table results ─▶ state file, run log
+                  (#119)              (zamboni.runtime, #162)                     (#122)
 
-Three loops on one asyncio event loop, sharing one ``stop`` event. Nothing here
-decides whether a table needs work -- that is still ``maintain()``'s due-check,
-reached through the CLI each worker runs -- so this module is assembly: what it
-owns is the **lifecycle** (start, run, stop) and **what an operator can see**
-(the state file, the run log, the probes). docs/event-driven-maintenance.md §7.
+The scheduling -- schedules, event feeds, pressure checks, the queue and the
+worker pool -- is :class:`~zamboni.runtime.MaintenanceRuntime`'s, shared with
+any application that embeds Zamboni (docs/maintenance-runtime.md §3). This
+module is the assembly ``serve`` makes of it: what it owns is the
+**lifecycle** (refusing to start, signals, the single-instance lock) and **what
+an operator can see** (the state file, the run log, the probes).
+docs/event-driven-maintenance.md §7.
 
 **Shutdown is the requirement with teeth.** On the first SIGTERM or SIGINT the
 scheduler and the watcher stop, the queue stops being taken from, and tables
@@ -37,22 +37,21 @@ import logging
 import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .fleet import FleetConfig, FleetWarehouse
-from .pool import ItemResult, PoolSize, WorkerConfig, WorkerPool, run_workers
-from .reload import POLL_SECONDS, FleetWatcher, watch, write_pid_file
-from .scheduler import (
-    MAX_SLEEP,
-    PRESSURE,
-    Candidate,
-    CandidateQueue,
-    PressureCheck,
-    Scheduler,
-    run_scheduler,
+from .fleet import FleetConfig
+from .pool import ItemResult, PoolSize, WorkerConfig, WorkerPool
+from .reload import POLL_SECONDS, FileFleetProvider, write_pid_file
+from .runtime import (
+    MaintenanceRuntime,
+    _Hooks,
+    now_utc,
+    pressure_offers,  # noqa: F401 -- moved to zamboni.runtime; imported from here too
+    run_pressure_checks,  # noqa: F401 -- likewise
 )
+from .scheduler import MAX_SLEEP
 
 logger = logging.getLogger(__name__)
 
@@ -70,10 +69,6 @@ STATE_VERSION = 1
 EVENTS_OBSERVE_SECONDS = 1.0
 
 PROBES = ("liveness", "readiness", "startup")
-
-
-def now_utc() -> datetime:
-    return datetime.now(UTC)
 
 
 def _iso(moment: datetime | None) -> str | None:
@@ -335,107 +330,12 @@ def single_instance(pid_file: Path):
         handle.close()
 
 
-# -- delete pressure (#175) -------------------------------------------------------
-
-
-def pressure_offers(warehouse: FleetWarehouse, record: dict[str, Any] | None) -> dict[str, Any]:
-    """What one warehouse's check found: which tables are over, and why.
-
-    ``record`` is the ``health --json`` line the worker wrote, or ``None`` if
-    the worker died. Pure, so the decision is tested without a pool.
-    """
-    over: dict[str, str] = {}
-    errors: dict[str, str] = {}
-    settings = warehouse.pressure
-    tables = (record or {}).get("tables") or {}
-    if record is None:
-        errors["*"] = "the check wrote no record"
-    for table, signals in tables.items():
-        if "error" in signals:
-            errors[table] = signals["error"]
-        elif settings is not None and (why := settings.triggered(signals)):
-            over[table] = why
-    return {"over": over, "errors": errors, "checked": len(tables)}
-
-
-async def run_pressure_checks(
-    fleet: Callable[[], FleetConfig],
-    pool: Any,
-    offer: Callable[[Candidate], bool],
-    stop: asyncio.Event,
-    *,
-    clock: Callable[[], datetime] = now_utc,
-    on_check: Callable[[str, dict[str, Any]], None] | None = None,
-    wait: Callable[[asyncio.Event, float], Any] | None = None,
-) -> None:
-    """Measure each warehouse every ``check_every_minutes`` and offer what is over.
-
-    The first check of a warehouse is one interval after it appears -- at
-    start or by reload -- so a restart is not a burst of checks on top of
-    whatever the schedule fires. One check at a time: each takes a worker for
-    one metadata load per table (~25 ms on the dev stack), and a fleet's checks
-    queuing behind each other cost latency, not correctness. A check that fails
-    is reported and retried at the next interval; the schedule still maintains
-    every table.
-    """
-    from .scheduler import _wait
-
-    wait = wait or _wait
-    due: dict[str, datetime] = {}
-    while not stop.is_set():
-        now = clock()
-        current = fleet()
-        for warehouse in current.warehouses:
-            if warehouse.pressure is None:
-                due.pop(warehouse.name, None)
-                continue
-            soonest = now + timedelta(minutes=warehouse.pressure.check_every_minutes)
-            # A reload that shortened the interval takes effect now, not after
-            # the old, longer one.
-            if warehouse.name not in due or due[warehouse.name] > soonest:
-                due[warehouse.name] = soonest
-        for name in set(due) - set(current.names):
-            del due[name]
-
-        for name in sorted(n for n, at in due.items() if at <= now):
-            if stop.is_set():
-                break
-            warehouse = current[name]
-            result = await pool.run(
-                PressureCheck(warehouse.name, warehouse.table_config, warehouse.uri)
-            )
-            found = pressure_offers(warehouse, result.record)
-            offered = 0
-            for table, why in sorted(found["over"].items()):
-                accepted = offer(Candidate(name, table, PRESSURE))
-                offered += accepted
-                logger.info(
-                    "pressure: %s/%s: %s; %s",
-                    name,
-                    table,
-                    why,
-                    "offered" if accepted else "already queued or running",
-                )
-            if found["errors"]:
-                logger.warning("pressure check of %s could not read: %s", name, found["errors"])
-            if on_check is not None:
-                on_check(name, {**found, "offered": offered, "exit_code": result.exit_code})
-            if warehouse.pressure is not None:
-                interval = timedelta(minutes=warehouse.pressure.check_every_minutes)
-                due[name] = clock() + interval
-
-        upcoming = min(due.values(), default=None)
-        seconds = MAX_SLEEP.total_seconds()
-        if upcoming is not None:
-            seconds = min(max((upcoming - clock()).total_seconds(), 0.0), seconds)
-        await wait(stop, seconds)
-
-
 # -- the service ------------------------------------------------------------------
 
 
 class Service:
-    """One ``zamboni serve``."""
+    """One ``zamboni serve``: a :class:`~zamboni.runtime.MaintenanceRuntime` built
+    from the fleet file, plus the state file, the run log and the capability check."""
 
     def __init__(
         self,
@@ -468,16 +368,21 @@ class Service:
         #: Told what each feed does (`zamboni.events.feed.FeedObserver`) -- the
         #: OpenTelemetry one under `serve --metrics otel` (#181).
         self.feed_observer = feed_observer
-        self.feeds: list[Any] = []
         self.state = ServiceState(
             fleet_path=str(self.fleet_path),
             dry_run=not worker_config.commit,
             workers=size.workers,
         )
-        self.pool: Any = None
+        #: Built by :meth:`run`, once the fleet file has loaded and PyIceberg passed.
+        self.runtime: MaintenanceRuntime | None = None
+        #: Set once the runtime is stopping; ends the event-state loop.
         self.stop = asyncio.Event()
         self.hangup = asyncio.Event()
-        self._forced = False
+        self._stop_requests = 0
+
+    @property
+    def feeds(self) -> list[Any]:
+        return self.runtime.feeds if self.runtime is not None else []
 
     def _write(self) -> None:
         try:
@@ -496,14 +401,9 @@ class Service:
 
     def request_stop(self) -> None:
         """First call: graceful. Second: kill the in-flight tables' workers too."""
-        if self.stop.is_set():
-            if not self._forced and self.pool is not None and hasattr(self.pool, "kill"):
-                self._forced = True
-                logger.warning("second stop signal: killing in-flight workers")
-                self.pool.kill()
-            return
-        logger.info("stopping: no new tables; letting %d in flight finish", self.state.busy)
-        self.stop.set()
+        self._stop_requests += 1
+        if self.runtime is not None:
+            self.runtime.request_stop()
 
     async def run(self) -> int:
         """Run until stopped. 0 on a clean stop; 2 if it could not start."""
@@ -511,8 +411,9 @@ class Service:
         self._write()
 
         # The fleet first -- it is the cheap check and the likely mistake.
-        watcher = FleetWatcher(self.fleet_path)  # raises FleetConfigError: exit 2
-        self.state.generation = watcher.generation
+        provider = FileFleetProvider(  # raises FleetConfigError: exit 2
+            self.fleet_path, interval=self.poll_seconds, hangup=self.hangup
+        )
 
         reason = await asyncio.to_thread(self.capability_check)
         if reason is not None:
@@ -521,61 +422,78 @@ class Service:
             logger.error("cannot maintain anything with this PyIceberg: %s", reason)
             return 2
 
-        scheduler = Scheduler(watcher.fleet, self.clock())
-        queue = CandidateQueue()
-        self.pool = self.pool_factory(self.size, self.worker_config)
-        self.state.phase = "running"
-        self._write()
-        if self.state.dry_run:
-            logger.warning("dry run: no --yes, so every table previews and nothing is committed")
+        self.runtime = runtime = MaintenanceRuntime(
+            fleet=provider,
+            pool=self.size,
+            worker=self.worker_config,
+            events=self.events,
+            feed_observer=self.feed_observer,
+            clock=self.clock,
+            pool_factory=self.pool_factory,
+            wait=self.scheduler_wait,
+            _hooks=self._hooks(),
+        )
+        self.state.generation = runtime.state().generation
+        # A stop that arrived while starting still counts, and so does a second.
+        for _ in range(self._stop_requests):
+            runtime.request_stop()
+        self._observe_events()
 
-        def on_tick(at: datetime) -> None:
+        watching = asyncio.create_task(self._watch_events()) if self.feeds else None
+        try:
+            await runtime.run()
+        finally:
+            self.stop.set()
+            if watching is not None:
+                await watching
+            self.state.phase, self.state.busy = "stopped", 0
+            self._write()
+        return 0
+
+    def _hooks(self) -> _Hooks:
+        def busy() -> int:
+            assert self.runtime is not None
+            return self.runtime.state().busy
+
+        def running() -> None:
+            self.state.phase = "running"
+            self._write()
+            if self.state.dry_run:
+                logger.warning(
+                    "dry run: no --yes, so every table previews and nothing is committed"
+                )
+
+        def tick(at: datetime) -> None:
             self.state.last_tick = at
-            self.state.busy = len(queue.in_flight)
+            self.state.busy = busy()
             self._observe_events()
             self._write()
 
-        def on_fired(at: datetime, fired: list[str]) -> None:
-            # Called in the same loop step as the tick, so `in_flight` is
-            # exactly what the queue refused these offers for.
-            for name in fired:
-                busy = {table for wh, table in queue.in_flight if wh == name}
-                asked = sorted(set(scheduler.fleet[name].table_config.tables) - busy)
-                self.state.fired(name, asked, at)
+        def fired(at: datetime, asked: dict[str, list[str]]) -> None:
+            for name, tables in asked.items():
+                self.state.fired(name, tables, at)
 
-        def on_result(result: ItemResult) -> None:
+        def finished(result: ItemResult) -> None:
             self.state.finished(result, self.clock())
             # Still counts the table reporting here; it is released just after.
-            self.state.busy = len(queue.in_flight)
+            self.state.busy = busy()
             if self.run_log is not None:
                 with self.run_log.open("a") as out:
                     out.write(json.dumps(run_record(result), default=str) + "\n")
             self._write()
 
-        def on_reload(fleet: FleetConfig) -> None:
-            scheduler.rearm(fleet, self.clock())
+        def fleet_changed(generation: int, fleet: FleetConfig) -> None:
             self.state.adopt(fleet, self.clock())
-            self.state.generation = watcher.generation
+            self.state.generation = generation
             self.state.reload_error = None
             self._write()
 
-        def on_reload_error(reason: str) -> None:
+        def fleet_refused(reason: str) -> None:
             if reason != self.state.reload_error:
                 self.state.reload_error = reason
                 self._write()
 
-        async def observe_events() -> None:
-            last = None
-            while not self.stop.is_set():
-                self._observe_events()
-                seen = (self.state.nats_connected, json.dumps(self.state.events, sort_keys=True))
-                if seen != last:
-                    last = seen
-                    self._write()
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self.stop.wait(), EVENTS_OBSERVE_SECONDS)
-
-        def on_pressure_check(name: str, found: dict[str, Any]) -> None:
+        def pressure_checked(name: str, found: dict[str, Any]) -> None:
             self.state.warehouses.setdefault(name, {})["pressure"] = {
                 "checked_at": _iso(self.clock()),
                 "tables": found["checked"],
@@ -585,65 +503,33 @@ class Service:
             }
             self._write()
 
-        async def mark_stopping() -> None:
-            await self.stop.wait()
+        def stopping() -> None:
             self.state.phase = "stopping"
             self._write()
+            self.stop.set()
 
-        if self.events:
-            from .events.feed import EventFeed
+        return _Hooks(
+            running=running,
+            tick=tick,
+            fired=fired,
+            finished=finished,
+            fleet_changed=fleet_changed,
+            fleet_refused=fleet_refused,
+            pressure_checked=pressure_checked,
+            stopping=stopping,
+        )
 
-            self.feeds = [
-                EventFeed(
-                    source,
-                    fleet=lambda: scheduler.fleet,
-                    offer=queue.offer,
-                    observer=self.feed_observer,
-                )
-                for source in self.events
-            ]
-        self._observe_events()
-
-        try:
-            await asyncio.gather(
-                *(feed.run(self.stop) for feed in self.feeds),
-                run_scheduler(
-                    scheduler,
-                    queue,
-                    self.stop,
-                    clock=self.clock,
-                    on_tick=on_tick,
-                    on_fired=on_fired,
-                    wait=self.scheduler_wait,
-                ),
-                run_workers(
-                    queue, lambda: scheduler.fleet, self.pool, self.stop, on_result=on_result
-                ),
-                watch(
-                    watcher,
-                    self.stop,
-                    on_reload=on_reload,
-                    on_error=on_reload_error,
-                    hangup=self.hangup,
-                    interval=self.poll_seconds,
-                ),
-                mark_stopping(),
-                *([observe_events()] if self.feeds else []),
-                run_pressure_checks(
-                    lambda: scheduler.fleet,
-                    self.pool,
-                    queue.offer,
-                    self.stop,
-                    clock=self.clock,
-                    on_check=on_pressure_check,
-                ),
-            )
-        finally:
-            if hasattr(self.pool, "close"):
-                await self.pool.close()
-            self.state.phase, self.state.busy = "stopped", 0
-            self._write()
-        return 0
+    async def _watch_events(self) -> None:
+        """Write the state file when an event source's connection or counters change."""
+        last = None
+        while not self.stop.is_set():
+            self._observe_events()
+            seen = (self.state.nats_connected, json.dumps(self.state.events, sort_keys=True))
+            if seen != last:
+                last = seen
+                self._write()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.stop.wait(), EVENTS_OBSERVE_SECONDS)
 
 
 def _capabilities_unsupported() -> str | None:
