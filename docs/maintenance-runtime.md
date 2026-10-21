@@ -4,13 +4,15 @@
 end (§12). Where this document and the code disagree, the code has not caught up
 yet or this document is wrong, and either way it is a defect.
 
-**Built so far: R1 (#162), unreleased.** `zamboni.runtime.MaintenanceRuntime`
-exists with the §3 control surface, `start_in_thread` and `RuntimeHandle`, and
-`zamboni serve` is an assembly of it. Until the stories after it land, the
-constructor has no `claims` (R4), `observers` (R6) or `settings`, and `offer`
-accepts the three reasons that existed before it — `schedule`, `event` and
-`pressure` — not `manual` or `reclaim` (R2). `serve` keeps its state file and run
-log through private hooks that R6 replaces with observers.
+**Built so far: R1 (#162) and R2 (#163), unreleased.**
+`zamboni.runtime.MaintenanceRuntime` exists with the §3 control surface,
+`start_in_thread` and `RuntimeHandle`, and `zamboni serve` is an assembly of it.
+Every reason in §3.1 is accepted, offers merge as §3.2 says, and `offer` takes a
+`not_after` deadline (§3.3). Until the stories after them land, the constructor
+has no `claims` (R4), `observers` (R6) or `settings`, and nothing yet offers with
+a deadline but an application's own `offer` call: a schedule's window arrives
+with `WindowSchedule` (R3). `serve` keeps its state file and run log through
+private hooks that R6 replaces with observers.
 
 **What this settles.** Zamboni decides *how* to maintain a table safely. Since
 [event-driven maintenance](event-driven-maintenance.md) it also decides *when*,
@@ -165,21 +167,32 @@ The `event` and `pressure` sets are the write-driven operations: `expire` and
 `remove-orphans` answer to the clock, not to writes, and stay with the schedule
 (`WRITE_DRIVEN` in `zamboni.maintenance` records why).
 
+The table is declared once, as `zamboni.scheduler.REASON_OPERATIONS`, and the
+tests derive from it rather than copying it. A reason it does not name is
+refused where it enters — an offer, a candidate, a work item, a worker's argv —
+because a lookup that defaulted would read it as "every operation" (ZMBNI-195).
+
 ### 3.2 Coalescing
 
 The queue holds one entry per `(warehouse, table)`. A second offer for a queued
 table **merges** into it rather than queueing twice:
 
-- **operations**: the union, run in runbook order;
+- **operations**: the union, run in runbook order. The sets do not nest —
+  `reclaim` and `event` share no operation — so keeping one offer's set would
+  drop the other's;
 - **deadline**: none if either has none, otherwise the later of the two;
-- **reason** reported: the one whose operation set is larger (`manual` and
-  `schedule` over `reclaim` over `event` and `pressure`); the others are kept as
-  `also` for reporting.
+- **reason** reported: the first of `manual`, `schedule`, `reclaim`, `event`,
+  `pressure` among those merged; the others are kept as `also`. This is a
+  reporting order only — what runs is the union above.
 
-An offer for a table **in flight** is not queued behind it. It marks the table
-*dirty*; when the run finishes, the table is offered once more with the merged
-reasons of every offer that arrived meanwhile. The due-check makes a dirty
-re-run that finds nothing new cost one metadata load.
+An offer for a table **in flight** is not queued behind it. If the run in flight
+already does every operation the offer asks for, the offer is dropped: a tick
+during a scheduled run, a pressure check during any run that compacts. Otherwise
+it marks the table *dirty*, and when the run finishes the table is offered once
+more with every such offer merged. An `event` always marks it dirty, because the
+run may have read the table before the write it reports (#110, 2026-10-06); any
+other reason does so only for operations the run is not doing (#163). The
+due-check makes a dirty re-run that finds nothing new cost one metadata load.
 
 A queued entry is resolved against the fleet **when a worker takes it**, so an
 update changes every decision not yet started and none in flight, and a table
@@ -192,6 +205,14 @@ deadline**; the entry is dropped and reported as `deadline` (exit 0 — a window
 closing is not a failure). A table already running finishes: maintenance is
 never interrupted to honour a window, because stopping a rewrite mid-flight buys
 nothing and wastes the work.
+
+The deadline is checked with a worker already free — the last moment before the
+table would start — so a table offered in time that waited out its window behind
+others is dropped, not started late. It must carry a time zone; a naive one is
+refused at the offer. `zamboni serve` writes a drop to its run log as a line with
+`"dropped": "deadline"`, the deadline, exit 0 and no unit of work in any counter,
+the way #201 leaves work a stop never started out of the counts, and the state
+file's `last_sweep` counts it under `dropped`.
 
 A **stop** — `request_stop`, or `maintain(should_stop=…)` for a caller without
 a runtime (#201) — reaches further than a deadline, into a running table, so it

@@ -11,6 +11,7 @@ SIGTERM -- because the claims about signals are claims about a process.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import signal
@@ -257,6 +258,39 @@ def test_a_dead_worker_still_leaves_a_record_runs_counts_as_failed():
     summary = summarise([record])
     assert summary.failed_runs == 1
     assert summary.worst_exit_code == 1
+
+
+def deadline_drop(table: str, not_after: datetime) -> ItemResult:
+    item = dataclasses.replace(work(table), not_after=not_after)
+    return ItemResult(item, 0, None, "", None, 0.0, dropped="deadline")
+
+
+def test_a_table_dropped_at_its_deadline_is_a_run_that_did_no_work():
+    """#163: exit 0, named as a drop, and no unit of work in any bucket, as #201
+    leaves work a stop never started out of the counts."""
+    record = run_record(deadline_drop("raw.a", T0))
+    assert (record["exit_code"], record["dropped"]) == (0, "deadline")
+    assert record["not_after"] == "2026-10-02T02:00:00Z"
+    assert "died" not in record and "failures" not in record
+    counters = record["counters"]
+    assert counters["considered"] == 0
+    assert (
+        counters["considered"] == counters["skipped"] + counters["maintained"] + counters["failed"]
+    )
+
+    summary = summarise([record, run_record(result("raw.b"))])
+    assert summary.failed_runs == 0 and summary.worst_exit_code == 0
+    assert summary.counters.considered == 0
+
+
+def test_a_deadline_drop_answers_its_sweep_and_is_counted_there():
+    state = ServiceState(fleet_path="f", dry_run=True, workers=1)
+    state.fired("acme", ["raw.a", "raw.b"], T0)
+    state.finished(result("raw.a"), T0 + timedelta(minutes=1))
+    state.finished(deadline_drop("raw.b", T0), T0 + timedelta(minutes=2))
+    sweep = state.warehouses["acme"]["last_sweep"]
+    assert (sweep["tables"], sweep["failures"], sweep["dropped"]) == (2, 0, 1)
+    assert state.last_error is None, "a window closing is not a failure"
 
 
 # -- the single-instance lock -----------------------------------------------------

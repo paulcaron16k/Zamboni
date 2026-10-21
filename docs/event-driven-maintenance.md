@@ -110,12 +110,16 @@ Implemented by `zamboni.scheduler` (ZMBNI-120). What it settles, each tested in
   every decision not yet started and none in flight, and a warehouse a reload
   removed drops out of the queue without being cancelled. The key includes the
   warehouse because a table identifier is not unique across a fleet.
-- **A table in flight is not re-enqueued** by a tick or a pressure check: the
-  run in flight *is* the work asked for. **An event re-runs it once when it
-  finishes** (#110, 2026-10-06), because the run may have read its watermark
-  before the write the event reports; the due-check makes a re-run that finds
-  nothing new cheap. Tested by
-  `test_a_schedule_tick_or_pressure_during_a_run_is_dropped`.
+- **A table in flight is not re-enqueued** by an offer whose operations the run
+  in flight already does — a tick during a scheduled run, a pressure check
+  during any run: that run *is* the work asked for. **An event re-runs it once
+  when it finishes** (#110, 2026-10-06), because the run may have read its
+  watermark before the write the event reports; so, since #163, does any offer
+  asking for an operation the run is not doing, such as a tick during an
+  event-driven run. The due-check makes a re-run that finds nothing new cheap.
+  Tested by `test_a_schedule_tick_or_pressure_during_a_run_is_dropped` and,
+  over every pair of reasons,
+  `test_an_offer_during_a_run_reruns_the_table_only_if_it_adds_work`.
 - **A missed firing fires once, late** — a suspended host does not lose the
   night's run, nor replay six of them. **A fresh start waits for the next
   firing**, as cron does, so a rollout is not a fleet-wide sweep.

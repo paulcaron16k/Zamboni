@@ -52,7 +52,7 @@ from .scheduler import (
     PressureCheck,
     Scheduler,
     _wait,
-    operations_for,
+    check_offer,
     run_scheduler,
 )
 
@@ -350,17 +350,24 @@ class MaintenanceRuntime:
     # -- the control surface: safe from any thread ---------------------------------
 
     def offer(
-        self, warehouse: str, tables: Sequence[str] | None = None, *, reason: str
+        self,
+        warehouse: str,
+        tables: Sequence[str] | None = None,
+        *,
+        reason: str,
+        not_after: datetime | None = None,
     ) -> OfferReceipt:
         """Offer ``tables`` of ``warehouse`` -- every table when ``None`` -- for ``reason``.
 
         An offer is not a decision: each table still runs only the operations
-        its reason names and that the due-check finds work for. An unknown
-        ``reason`` is refused here, in the caller's thread.
+        its reason names and that the due-check finds work for. A table not
+        started by ``not_after`` (time-zone aware) is dropped and reported as
+        ``deadline`` (docs/maintenance-runtime.md §3.3). An unknown ``reason``
+        or a naive ``not_after`` is refused here, in the caller's thread.
         """
-        operations_for(reason)
+        check_offer(reason, not_after=not_after)
         wanted = None if tables is None else tuple(tables)
-        return self._call(self._offer, warehouse, wanted, reason)
+        return self._call(self._offer, warehouse, wanted, reason, not_after)
 
     def update_fleet(self, fleet: FleetConfig) -> int:
         """Adopt ``fleet``; the new generation.
@@ -411,7 +418,13 @@ class MaintenanceRuntime:
 
     # -- applied on the loop --------------------------------------------------------
 
-    def _offer(self, warehouse: str, tables: tuple[str, ...] | None, reason: str) -> OfferReceipt:
+    def _offer(
+        self,
+        warehouse: str,
+        tables: tuple[str, ...] | None,
+        reason: str,
+        not_after: datetime | None,
+    ) -> OfferReceipt:
         if self._stop.is_set():
             return OfferReceipt(warehouse, reason, refused="the runtime is stopping")
         try:
@@ -424,7 +437,7 @@ class MaintenanceRuntime:
         for table in sorted(known) if tables is None else dict.fromkeys(tables):
             if table not in known:
                 unknown.append(table)
-            elif self._queue.offer(Candidate(warehouse, table, reason)):
+            elif self._queue.offer(Candidate(warehouse, table, reason, not_after=not_after)):
                 queued.append(table)
             else:
                 coalesced.append(table)
@@ -493,6 +506,7 @@ class MaintenanceRuntime:
                     self._pool,
                     self._stop,
                     on_result=self._hooks.finished,
+                    clock=self._clock,
                 ),
                 self._provider.run(self._adopt, self._hooks.fleet_refused, self._stop),
                 self._stopping(),

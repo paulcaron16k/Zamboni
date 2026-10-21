@@ -36,7 +36,15 @@ from zamboni.runtime import (
     _Hooks,
     start_in_thread,
 )
-from zamboni.scheduler import EVENT, SCHEDULE, UnknownReasonError, WorkItem
+from zamboni.scheduler import (
+    EVENT,
+    MANUAL,
+    RECLAIM,
+    SCHEDULE,
+    UnknownReasonError,
+    WorkItem,
+    operations_of,
+)
 from zamboni.tableconfig import NamespaceSettings, TableConfig, TableSettings
 
 #: An hour after the 02:00 firing: the next is tomorrow, so nothing fires.
@@ -72,11 +80,13 @@ class FakePool:
             self.release.set()
         #: ``(table, the thread it ran on)``.
         self.ran: list[tuple[str, str]] = []
+        self.items: list[WorkItem] = []
         self.killed = False
         self.closed = False
 
     async def run(self, item: WorkItem) -> ItemResult:
         self.ran.append((item.table, threading.current_thread().name))
+        self.items.append(item)
         while not (self.release.is_set() or self.killed):
             await asyncio.sleep(0.005)
         if self.killed:
@@ -319,6 +329,67 @@ def test_an_unknown_reason_is_refused_in_the_callers_thread(tmp_path):
     try:
         with pytest.raises(UnknownReasonError):
             handle.runtime.offer("acme", ["raw.a"], reason="because")
+        assert handle.runtime.state().queued == ()
+    finally:
+        assert handle.stop(grace=timedelta(seconds=5))
+    assert pools[0].ran == []
+
+
+@pytest.mark.parametrize("reason", [MANUAL, RECLAIM])
+def test_manual_and_reclaim_are_offered_from_another_thread(tmp_path, reason):
+    pools: list[FakePool] = []
+    handle = start_in_thread(runtime(tmp_path, pools=pools))
+    try:
+        assert handle.runtime.offer("acme", ["raw.a"], reason=reason).queued == ("raw.a",)
+        eventually(lambda: bool(pools[0].items))
+    finally:
+        assert handle.stop(grace=timedelta(seconds=5))
+    (item,) = pools[0].items
+    assert item.reasons == {reason}
+    assert item.operations == operations_of([reason])
+
+
+def test_offers_merged_before_a_worker_takes_them_run_every_operation(tmp_path):
+    pools: list[FakePool] = []
+    rt = runtime(tmp_path, pools=pools)
+    rt.offer("acme", ["raw.a"], reason=EVENT)
+    assert rt.offer("acme", ["raw.a"], reason=RECLAIM).coalesced == ("raw.a",)
+    handle = start_in_thread(rt)
+    try:
+        eventually(lambda: bool(pools[0].items))
+    finally:
+        assert handle.stop(grace=timedelta(seconds=5))
+    (item,) = pools[0].items
+    assert (item.reason, item.also) == (RECLAIM, frozenset({EVENT}))
+    assert item.operations == operations_of([EVENT, RECLAIM])
+
+
+def test_a_deadline_offered_from_another_thread_is_honoured(tmp_path):
+    """The runtime's clock stands at QUIET: one table's deadline has passed, the
+    other's has not."""
+    finished: list[ItemResult] = []
+    pools: list[FakePool] = []
+    handle = start_in_thread(runtime(tmp_path, pools=pools, hooks=_Hooks(finished=finished.append)))
+    rt = handle.runtime
+    try:
+        rt.offer("acme", ["raw.a"], reason=SCHEDULE, not_after=QUIET - timedelta(minutes=1))
+        rt.offer("acme", ["raw.b"], reason=SCHEDULE, not_after=QUIET + timedelta(minutes=1))
+        eventually(lambda: len(finished) == 2)
+    finally:
+        assert handle.stop(grace=timedelta(seconds=5))
+    assert [table for table, _ in pools[0].ran] == ["raw.b"]
+    assert {r.item.table: r.dropped for r in finished} == {"raw.a": "deadline", "raw.b": None}
+    assert all(r.exit_code == 0 for r in finished)
+
+
+def test_a_naive_deadline_is_refused_in_the_callers_thread(tmp_path):
+    pools: list[FakePool] = []
+    handle = start_in_thread(runtime(tmp_path, pools=pools))
+    try:
+        with pytest.raises(ValueError, match="time zone"):
+            handle.runtime.offer(
+                "acme", ["raw.a"], reason=SCHEDULE, not_after=datetime(2026, 10, 2, 4, 0)
+            )
         assert handle.runtime.state().queued == ()
     finally:
         assert handle.stop(grace=timedelta(seconds=5))

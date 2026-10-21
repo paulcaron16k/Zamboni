@@ -56,12 +56,13 @@ import traceback
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from multiprocessing import connection, get_context
 from pathlib import Path
 from typing import Any
 
 from .fleet import FleetConfig
-from .scheduler import Candidate, CandidateQueue, PressureCheck, WorkItem, operations_for
+from .scheduler import CandidateQueue, PressureCheck, WorkItem
 
 logger = logging.getLogger(__name__)
 
@@ -354,9 +355,10 @@ def worker_argv(item: Job, config: WorkerConfig, table_config: Path, record: Pat
             "--threads",
             str(config.threads),
         ]
-        # Not `.get`: a reason missing from the table would read as None, which
-        # means every operation, reclaim included (ZMBNI-195).
-        if (operations := operations_for(item.reason)) is not None:
+        # Every merged reason's operations. Each reason is looked up, never
+        # `.get`: one missing from the table would read as None, which means
+        # every operation, reclaim included (ZMBNI-195).
+        if (operations := item.operations) is not None:
             argv += ["--operations", ",".join(operations)]
         if config.duckdb_memory_bytes is not None:
             argv += ["--duckdb-memory-limit-bytes", str(config.duckdb_memory_bytes)]
@@ -443,6 +445,10 @@ class ItemResult:
     #: Set only when the worker process itself died.
     died: str | None
     seconds: float
+    #: Why the table was never started, with exit 0: ``"deadline"`` when its
+    #: ``not_after`` had passed by the time a worker was free (§3.3). ``None``
+    #: for a table that ran.
+    dropped: str | None = None
 
 
 class _Slot:
@@ -583,6 +589,7 @@ async def run_workers(
     stop: asyncio.Event,
     *,
     on_result: Callable[[ItemResult], None] | None = None,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> None:
     """Take from ``queue`` into ``pool`` until ``stop``; then let in-flight tables finish.
 
@@ -596,6 +603,11 @@ async def run_workers(
     worker dying under it -- reaches ``on_result`` and the loop carries on.
     ``queue.finish`` runs however a table ends, or a table whose worker died
     would be refused by the queue forever.
+
+    **A table is never started after its deadline** (docs/maintenance-runtime.md
+    §3.3). It is checked with a worker already free, the last moment before
+    the table would start, and reported with ``dropped="deadline"`` and exit 0:
+    a window closing is not a failure.
     """
     free = asyncio.Semaphore(pool.size.workers)
     running: set[asyncio.Task[None]] = set()
@@ -603,7 +615,16 @@ async def run_workers(
     async def one(item: WorkItem) -> None:
         try:
             try:
-                result = await pool.run(item)
+                if item.not_after is not None and clock() > item.not_after:
+                    logger.info(
+                        "not starting %s/%s: its deadline %s has passed",
+                        item.warehouse,
+                        item.table,
+                        item.not_after.isoformat(),
+                    )
+                    result = ItemResult(item, 0, None, "", None, 0.0, dropped="deadline")
+                else:
+                    result = await pool.run(item)
             except Exception as exc:  # one table's failure, not the loop's
                 logger.exception("running %s/%s", item.warehouse, item.table)
                 result = ItemResult(item, 1, None, "", f"pool error: {exc!r}", 0.0)
@@ -629,7 +650,7 @@ async def run_workers(
                 # Taken in the same instant stop arrived. Put back rather than
                 # dropped, so a stop never loses a table from the queue.
                 queue.finish(work)
-                queue.offer(Candidate(work.warehouse, work.table, work.reason))
+                queue.offer(work.candidate())
             break
         task = asyncio.create_task(one(work))
         running.add(task)

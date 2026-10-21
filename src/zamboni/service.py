@@ -51,7 +51,7 @@ from .runtime import (
     pressure_offers,  # noqa: F401 -- moved to zamboni.runtime; imported from here too
     run_pressure_checks,  # noqa: F401 -- likewise
 )
-from .scheduler import MAX_SLEEP
+from .scheduler import MAX_SLEEP, WorkItem
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +95,8 @@ class _Sweep:
     tables: int
     worst_exit_code: int = 0
     failures: int = 0
+    #: Answered without running: the table's deadline passed first (§3.3).
+    dropped: int = 0
 
 
 @dataclass
@@ -146,6 +148,7 @@ class ServiceState:
                 sweep.pending.discard(result.item.table)
                 sweep.worst_exit_code = max(sweep.worst_exit_code, result.exit_code)
                 sweep.failures += bool(result.exit_code)
+                sweep.dropped += result.dropped is not None
         self._close_finished(warehouse, at)
 
     def adopt(self, fleet: FleetConfig, at: datetime) -> None:
@@ -175,6 +178,7 @@ class ServiceState:
             "finished_at": _iso(at),
             "tables": latest.tables,
             "failures": latest.failures,
+            "dropped": latest.dropped,
             "worst_exit_code": latest.worst_exit_code,
         }
         self._sweeps[warehouse] = [s for s in sweeps if s.pending]
@@ -269,10 +273,37 @@ def run_record(result: ItemResult) -> dict[str, Any]:
     unit of work, because the per-operation counts died with it and counting
     the table as considered-and-failed keeps ``considered == skipped +
     maintained + failed`` true across the series.
+
+    A table dropped at its deadline never started, so it did no work: exit 0,
+    ``dropped`` and the deadline, and no unit in any bucket -- as #201 leaves
+    work a stop never started out of the counts. ``zamboni runs`` reads it as
+    a run of that table with nothing considered.
     """
     if result.record is not None:
         return {**result.record, "source": "serve"}
     ended = now_utc()
+    if result.dropped is not None:
+        not_after = result.item.not_after if isinstance(result.item, WorkItem) else None
+        return {
+            "source": "serve",
+            "warehouse": result.item.warehouse,
+            "tables": [result.item.table],
+            "exit_code": result.exit_code,
+            "dropped": result.dropped,
+            "not_after": _iso(not_after),
+            "started_at": _iso(ended),
+            "ended_at": _iso(ended),
+            "duration_seconds": 0.0,
+            "counters": {
+                "tables": 1,
+                "considered": 0,
+                "skipped": 0,
+                "maintained": 0,
+                "failed": 0,
+                "skip_rate": 0.0,
+            },
+            "outcomes": [],
+        }
     return {
         "source": "serve",
         "warehouse": result.item.warehouse,

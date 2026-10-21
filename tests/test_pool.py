@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -412,6 +413,80 @@ def test_a_failing_result_hook_does_not_stop_maintenance():
     assert len(results) == 2
 
 
+T0 = datetime(2026, 10, 2, 3, 0, tzinfo=UTC)
+
+
+def test_a_table_is_never_started_after_its_deadline():
+    """§3.3: dropped, reported with exit 0 and ``dropped="deadline"``, and never
+    handed to the pool. A deadline still ahead, and none at all, both run."""
+    current = fleet_of("late", "early", "free")
+    queue = CandidateQueue()
+    queue.offer(Candidate("acme", "raw.late", not_after=T0 - timedelta(seconds=1)))
+    queue.offer(Candidate("acme", "raw.early", not_after=T0 + timedelta(hours=1)))
+    queue.offer(Candidate("acme", "raw.free"))
+    pool = FakePool(1)
+    results: list[ItemResult] = []
+
+    async def scenario():
+        stop = asyncio.Event()
+
+        def on_result(result: ItemResult) -> None:
+            results.append(result)
+            if len(results) == 3:
+                stop.set()
+
+        await asyncio.wait_for(
+            run_workers(queue, lambda: current, pool, stop, on_result=on_result, clock=lambda: T0),
+            5,
+        )
+
+    asyncio.run(scenario())
+    assert pool.started == ["raw.early", "raw.free"], "the late table never reached the pool"
+    outcome = {r.item.table: (r.exit_code, r.dropped) for r in results}
+    assert outcome == {"raw.late": (0, "deadline"), "raw.early": (0, None), "raw.free": (0, None)}
+    assert queue.in_flight == frozenset(), "a dropped table is released like any other"
+
+
+def test_the_deadline_is_checked_when_a_worker_is_free_not_when_offered():
+    """Offered in time, but its deadline passes while it waits behind a table
+    holding the only worker: it is dropped, not started late."""
+    current = fleet_of("first", "waits")
+    queue = CandidateQueue()
+    queue.offer(Candidate("acme", "raw.first"))
+    queue.offer(Candidate("acme", "raw.waits", not_after=T0 + timedelta(minutes=5)))
+    now = [T0]
+    results: list[ItemResult] = []
+
+    async def scenario():
+        hold = asyncio.Event()
+        pool = FakePool(1, hold=hold)
+        stop = asyncio.Event()
+
+        def on_result(result: ItemResult) -> None:
+            results.append(result)
+            if len(results) == 2:
+                stop.set()
+
+        task = asyncio.create_task(
+            run_workers(
+                queue, lambda: current, pool, stop, on_result=on_result, clock=lambda: now[0]
+            )
+        )
+        while not pool.started:
+            await asyncio.sleep(0)
+        now[0] = T0 + timedelta(minutes=6)
+        hold.set()
+        await asyncio.wait_for(task, 5)
+        return pool
+
+    pool = asyncio.run(scenario())
+    assert pool.started == ["raw.first"]
+    assert [(r.item.table, r.dropped) for r in results] == [
+        ("raw.first", None),
+        ("raw.waits", "deadline"),
+    ]
+
+
 def test_items_wait_in_the_queue_until_a_worker_is_free():
     """Taken eagerly, they would stop coalescing. With one worker busy, the rest
     stay queued, and a re-offer of one of them still coalesces."""
@@ -701,6 +776,20 @@ def test_an_event_item_runs_only_the_write_driven_operations(tmp_path):
         argv = worker_argv(work, WorkerConfig(workdir=tmp_path), tmp_path / "t", tmp_path / "r")
         args = _build_parser().parse_args(argv)
         assert args.operations == REASON_OPERATIONS[reason]
+
+
+def test_a_merged_item_runs_every_reasons_operations_in_runbook_order(tmp_path):
+    """An event merged with a reclaim: five operations, none of which either
+    reason alone would run all of. Derived from the declarations."""
+    from zamboni.cli import _build_parser
+    from zamboni.maintenance import RUNBOOK_ORDER
+    from zamboni.scheduler import EVENT, REASON_OPERATIONS, RECLAIM
+
+    work = WorkItem("acme", "raw.events", EVENT, table_config("events"), also=frozenset({RECLAIM}))
+    argv = worker_argv(work, WorkerConfig(workdir=tmp_path), tmp_path / "t", tmp_path / "r")
+    operations = _build_parser().parse_args(argv).operations
+    union = set(REASON_OPERATIONS[EVENT] or ()) | set(REASON_OPERATIONS[RECLAIM] or ())
+    assert list(operations) == [op.value for op in RUNBOOK_ORDER if op.value in union]
 
 
 def test_a_scheduled_item_runs_everything_the_profile_enables(tmp_path):
