@@ -24,11 +24,14 @@ after it returns, there is no loop and the call is applied in the caller's
 thread under a lock. Nothing else on the runtime is thread-safe, and nothing
 else needs to be: every other part runs on the loop.
 
-**Provisional (0.8.0).** The constructor, the control surface and
-:func:`start_in_thread` are new public API, marked provisional until the first
-embedding application has adopted them. Claims (§6, #167) and the public
-``Observer`` protocol (§8, #166) are not here yet; ``zamboni serve`` reaches its
-state file and run log through private hooks until #166 replaces them.
+**What it does is told to observers** (`zamboni.observe`, §8), on the loop, and
+:meth:`MaintenanceRuntime.state` returns everything ``zamboni serve``'s state
+file carries (`zamboni.runstate`).
+
+**Provisional (0.8.0).** The constructor, the control surface, the observers
+and :func:`start_in_thread` are new public API, marked provisional until the
+first embedding application has adopted them. Claims (§6, #167) are not here
+yet.
 """
 
 from __future__ import annotations
@@ -43,7 +46,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, TypeVar
 
 from .fleet import FleetConfig, FleetWarehouse
+from .observe import Observers
 from .pool import ItemResult, PoolSize, WorkerConfig, WorkerPool, run_workers
+from .runstate import Ledger, RuntimeState
 from .scheduler import (
     MAX_SLEEP,
     PRESSURE,
@@ -51,6 +56,7 @@ from .scheduler import (
     CandidateQueue,
     PressureCheck,
     Scheduler,
+    WorkItem,
     _wait,
     check_offer,
     run_scheduler,
@@ -128,32 +134,6 @@ class OfferReceipt:
     refused: str | None = None
 
 
-@dataclass(frozen=True)
-class RuntimeState:
-    """A consistent snapshot of the runtime, taken on its loop.
-
-    #166 widens it to everything ``zamboni serve``'s state file carries.
-    """
-
-    phase: str
-    generation: int
-    workers: int
-    last_tick: datetime | None
-    #: ``(warehouse, table)``, in the order they will be taken.
-    queued: tuple[tuple[str, str], ...]
-    in_flight: tuple[tuple[str, str], ...]
-    #: In flight, and offered again by an event meanwhile: re-offered when done.
-    dirty: tuple[tuple[str, str], ...]
-
-    @property
-    def busy(self) -> int:
-        return len(self.in_flight)
-
-
-def _ignore(*_: Any) -> None:
-    return None
-
-
 def _settle(
     done: concurrent.futures.Future[T], fn: Callable[..., T], args: tuple[Any, ...]
 ) -> None:
@@ -161,33 +141,6 @@ def _settle(
         done.set_result(fn(*args))
     except BaseException as exc:
         done.set_exception(exc)
-
-
-@dataclass(frozen=True)
-class _Hooks:
-    """What ``zamboni serve`` needs to keep its state file and run log.
-
-    **Private until #166**, which replaces it with the public ``Observer``
-    protocol (docs/maintenance-runtime.md §8). Called on the runtime's loop.
-    Failures propagate exactly where the loops they sit in let them: a
-    ``finished`` or ``fleet_changed`` that raises is logged and the runtime
-    carries on, as before the extraction.
-    """
-
-    #: The pool exists and the loops are about to start.
-    running: Callable[[], None] = _ignore
-    #: Every scheduler step, fired or not: the liveness signal.
-    tick: Callable[[datetime], None] = _ignore
-    #: Per warehouse a step fired: the tables it asked for, excluding any in flight.
-    fired: Callable[[datetime, dict[str, list[str]]], None] = _ignore
-    #: A table's result, before the queue releases it.
-    finished: Callable[[ItemResult], None] = _ignore
-    fleet_changed: Callable[[int, FleetConfig], None] = _ignore
-    #: A candidate fleet the provider did not adopt, and why.
-    fleet_refused: Callable[[str], None] = _ignore
-    pressure_checked: Callable[[str, dict[str, Any]], None] = _ignore
-    #: The first stop request has arrived.
-    stopping: Callable[[], None] = _ignore
 
 
 # -- delete pressure (#175) -------------------------------------------------------
@@ -290,6 +243,7 @@ async def run_pressure_checks(
 class MaintenanceRuntime:
     """Schedules, events, pressure checks, the queue and the worker pool, on one loop.
 
+    ``observers`` are told what the runtime does (`zamboni.observe.Observer`).
     ``pool_factory`` builds the pool when :meth:`run` starts (a test passes a
     fake); ``wait`` replaces the scheduler's sleep, for a test driving
     ``clock``. ``feed_observer`` is told what each event feed does
@@ -303,11 +257,11 @@ class MaintenanceRuntime:
         pool: PoolSize,
         worker: WorkerConfig,
         events: Sequence[Any] = (),
+        observers: Sequence[Any] = (),
         feed_observer: Any = None,
         clock: Callable[[], datetime] = now_utc,
         pool_factory: Callable[[PoolSize, WorkerConfig], Any] = WorkerPool,
         wait: Callable[[asyncio.Event, float], Awaitable[None]] | None = None,
-        _hooks: _Hooks | None = None,
     ) -> None:
         self._provider = fleet
         self._fleet = fleet.fleet
@@ -316,7 +270,8 @@ class MaintenanceRuntime:
         self._clock = clock
         self._pool_factory = pool_factory
         self._wait = wait
-        self._hooks = _hooks or _Hooks()
+        self._observers = Observers(observers)
+        self._ledger = Ledger()
         self._events = tuple(events)
         self._queue = CandidateQueue()
         self._stop = asyncio.Event()
@@ -327,7 +282,7 @@ class MaintenanceRuntime:
         self._pool: Any = None
         self._forced = False
         # Guards the loop's arrival and departure, and every call made while
-        # there is no loop. Re-entrant: a hook may read `state()`.
+        # there is no loop. Re-entrant: an observer may read `state()`.
         self._lock = threading.RLock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: int | None = None
@@ -367,7 +322,7 @@ class MaintenanceRuntime:
         """
         check_offer(reason, not_after=not_after)
         wanted = None if tables is None else tuple(tables)
-        return self._call(self._offer, warehouse, wanted, reason, not_after)
+        return self._call(self._offered, warehouse, wanted, reason, not_after)
 
     def update_fleet(self, fleet: FleetConfig) -> int:
         """Adopt ``fleet``; the new generation.
@@ -418,6 +373,11 @@ class MaintenanceRuntime:
 
     # -- applied on the loop --------------------------------------------------------
 
+    def _offered(self, *args: Any) -> OfferReceipt:
+        receipt = self._offer(*args)
+        self._observers.notify("offered", receipt)
+        return receipt
+
     def _offer(
         self,
         warehouse: str,
@@ -448,8 +408,15 @@ class MaintenanceRuntime:
         self._generation += 1
         if self._scheduler is not None:
             self._scheduler.rearm(fleet, self._clock())
-        self._hooks.fleet_changed(self._generation, fleet)
+        self._ledger.adopted(fleet, self._clock())
+        self._observers.notify("fleet_changed", self._generation, fleet)
         return self._generation
+
+    def _refused(self, reason: str) -> None:
+        # Told once per new refusal: a provider polling a bad file reports it
+        # on every poll.
+        if self._ledger.refused(reason):
+            self._observers.notify("refused", "fleet", reason)
 
     def _snapshot(self) -> RuntimeState:
         return RuntimeState(
@@ -460,6 +427,13 @@ class MaintenanceRuntime:
             queued=self._queue.queued,
             in_flight=tuple(sorted(self._queue.in_flight)),
             dirty=tuple(sorted(self._queue.dirty)),
+            last_error=self._ledger.last_error,
+            reload_error=self._ledger.reload_error,
+            warehouses=self._ledger.warehouses,
+            events={f.source.name: f.counters.as_dict() for f in self.feeds},
+            sources_connected=(
+                all(bool(s.connected) for s in self._events) if self._events else None
+            ),
         )
 
     def _request_stop(self, force: bool) -> None:
@@ -487,7 +461,7 @@ class MaintenanceRuntime:
         try:
             self._scheduler = Scheduler(self._fleet, self._clock())
             self._pool = self._pool_factory(self._size, self._worker)
-            self._hooks.running()
+            self._observers.notify("phase_changed", RUNNING)
             self._started.set()
             await asyncio.gather(
                 *(feed.run(self._stop) for feed in self.feeds),
@@ -505,10 +479,11 @@ class MaintenanceRuntime:
                     lambda: self._fleet,
                     self._pool,
                     self._stop,
-                    on_result=self._hooks.finished,
+                    on_result=self._finished,
                     clock=self._clock,
+                    on_start=self._started_table,
                 ),
-                self._provider.run(self._adopt, self._hooks.fleet_refused, self._stop),
+                self._provider.run(self._adopt, self._refused, self._stop),
                 self._stopping(),
                 run_pressure_checks(
                     lambda: self._fleet,
@@ -516,36 +491,55 @@ class MaintenanceRuntime:
                     self._queue.offer,
                     self._stop,
                     clock=self._clock,
-                    on_check=self._hooks.pressure_checked,
+                    on_check=self._pressure_checked,
                 ),
             )
         finally:
-            if hasattr(self._pool, "close"):
-                await self._pool.close()
-            with self._lock:
-                self._loop = self._loop_thread = None
-                self._phase = STOPPED
-            # A control call queued just before the loop left is still in the
-            # loop's ready queue; one step runs it, so no caller waits forever.
-            await asyncio.sleep(0)
+            try:
+                if hasattr(self._pool, "close"):
+                    await self._pool.close()
+            finally:
+                # Even past a pool that failed to close: observers -- `serve`'s
+                # state file among them -- are told the runtime stopped.
+                with self._lock:
+                    self._loop = self._loop_thread = None
+                    self._phase = STOPPED
+                # A control call queued just before the loop left is still in
+                # the loop's ready queue; one step runs it, so no caller waits
+                # forever.
+                await asyncio.sleep(0)
+                self._observers.notify("phase_changed", STOPPED)
+                self._observers.close()
 
     def _ticked(self, at: datetime) -> None:
         self._last_tick = at
-        self._hooks.tick(at)
+        self._observers.notify("ticked", at)
 
     def _fired(self, at: datetime, fired: list[str]) -> None:
         # Called in the same loop step as the tick, so `in_flight` is exactly
         # what the queue refused these offers for.
-        asked = {}
         for name in fired:
             busy = {table for wh, table in self._queue.in_flight if wh == name}
-            asked[name] = sorted(set(self._fleet[name].table_config.tables) - busy)
-        self._hooks.fired(at, asked)
+            asked = sorted(set(self._fleet[name].table_config.tables) - busy)
+            self._ledger.fired(name, asked, at)
+            self._observers.notify("fired", name, at, asked)
+
+    def _started_table(self, item: WorkItem) -> None:
+        self._observers.notify("started", item)
+
+    def _finished(self, result: ItemResult) -> None:
+        # Before the queue releases the table, so `state()` still counts it.
+        self._ledger.finished(result, self._clock())
+        self._observers.notify("finished", result)
+
+    def _pressure_checked(self, warehouse: str, found: dict[str, Any]) -> None:
+        self._ledger.pressure_checked(warehouse, found, self._clock())
+        self._observers.notify("pressure_checked", warehouse, found)
 
     async def _stopping(self) -> None:
         await self._stop.wait()
         self._phase = STOPPING
-        self._hooks.stopping()
+        self._observers.notify("phase_changed", STOPPING)
 
 
 # -- running it beside other work -------------------------------------------------

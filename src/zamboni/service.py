@@ -31,22 +31,24 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import fcntl
 import json
 import logging
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .fleet import FleetConfig
 from .pool import ItemResult, PoolSize, WorkerConfig, WorkerPool
 from .reload import POLL_SECONDS, FileFleetProvider, write_pid_file
+from .runstate import RuntimeState, WarehouseState
 from .runtime import (
+    CREATED,
+    STOPPED,
     MaintenanceRuntime,
-    _Hooks,
     now_utc,
     pressure_offers,  # noqa: F401 -- moved to zamboni.runtime; imported from here too
     run_pressure_checks,  # noqa: F401 -- likewise
@@ -62,9 +64,10 @@ LIVENESS_STALE = MAX_SLEEP * 3
 
 STATE_VERSION = 1
 #: How often an event source's connection and counters are checked for a change
-#: worth writing. The scheduler writes the state file only when it ticks, up to
-#: MAX_SLEEP apart, which would leave readiness a minute behind a broker outage
-#: -- and a fresh start unready for a minute after it connected. A write happens
+#: worth writing. The runtime reports no event for either, so on a quiet service
+#: the file would wait for the next tick, up to MAX_SLEEP away -- readiness a
+#: minute behind a broker outage, and a fresh start unready for a minute after
+#: it connected. A write happens
 #: only on a change, so a quiet service costs one comparison a second.
 EVENTS_OBSERVE_SECONDS = 1.0
 
@@ -77,137 +80,94 @@ def _iso(moment: datetime | None) -> str | None:
 
 # -- what an operator sees ------------------------------------------------------
 
-
-@dataclass
-class _Sweep:
-    """The tables one firing asked for, until every one of them has a result.
-
-    **Only the tables the firing actually asked for.** A table already being
-    maintained when the schedule fires is not in it: the queue refused that
-    offer, and the run in flight started before the firing, so no result will
-    ever answer it. A table still *queued* is in it, and its one run answers
-    every firing that coalesced into it. Each firing is its own sweep, so a
-    schedule faster than a sweep cannot keep one open forever.
-    """
-
-    fired_at: datetime
-    pending: set[str]
-    tables: int
-    worst_exit_code: int = 0
-    failures: int = 0
-    #: Answered without running: the table's deadline passed first (§3.3).
-    dropped: int = 0
+#: The runtime's phases as the state file names them: a runtime not yet running
+#: is a service still starting.
+_SERVE_PHASE = {CREATED: "starting"}
 
 
-@dataclass
+def _plain(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return _iso(value)
+    if isinstance(value, Mapping):
+        return {key: _plain(item) for key, item in value.items()}
+    return value
+
+
+def _warehouse(state: WarehouseState) -> dict[str, Any]:
+    """Only what has happened: a field still ``None`` is left out, not written null."""
+    return {
+        key: _plain(value) for key, value in dataclasses.asdict(state).items() if value is not None
+    }
+
+
+@dataclass(frozen=True)
 class ServiceState:
-    """Everything ``service-status`` reads. Written whole, atomically."""
+    """``serve``'s own part of the state file ``service-status`` reads.
+
+    Everything else in the file is the runtime's :class:`RuntimeState`
+    (#166): this adds only what the runtime cannot know -- the process, the
+    fleet file, whether ``--yes`` was given.
+    """
 
     fleet_path: str
     dry_run: bool
-    workers: int
     pid: int = field(default_factory=os.getpid)
     started_at: datetime = field(default_factory=now_utc)
-    #: ``starting`` -> ``running`` -> ``stopping`` -> ``stopped``.
-    phase: str = "starting"
-    last_tick: datetime | None = None
-    generation: int = 0
-    busy: int = 0
-    #: Whether every configured event source is connected. ``None`` says "no
-    #: source configured" rather than "disconnected", so readiness does not
-    #: wait for one that was never asked for.
-    nats_connected: bool | None = None
-    #: Per event source: received, offered, coalesced, duplicates, unmapped,
-    #: rejected, errors.
-    events: dict[str, dict[str, int]] = field(default_factory=dict)
-    last_error: str | None = None
-    #: The last reload that was refused. The running config is still valid.
-    reload_error: str | None = None
-    warehouses: dict[str, dict[str, Any]] = field(default_factory=dict)
-    _sweeps: dict[str, list[_Sweep]] = field(default_factory=dict, repr=False)
 
-    def fired(self, warehouse: str, tables: list[str], at: datetime) -> None:
-        """A firing that asked for ``tables`` -- excluding any already in flight."""
-        entry = self.warehouses.setdefault(warehouse, {})
-        entry["last_fired"] = _iso(at)
-        if tables:
-            self._sweeps.setdefault(warehouse, []).append(_Sweep(at, set(tables), len(tables)))
-        entry["open_sweeps"] = len(self._sweeps.get(warehouse, []))
-
-    def finished(self, result: ItemResult, at: datetime) -> None:
-        warehouse = result.item.warehouse
-        entry = self.warehouses.setdefault(warehouse, {})
-        entry["last_result"] = _iso(at)
-        entry["last_exit_code"] = result.exit_code
-        if result.exit_code:
-            self.last_error = f"{warehouse}/{result.item.table}: " + (
-                result.died or f"exit {result.exit_code}"
-            )
-        for sweep in self._sweeps.get(warehouse, []):
-            if result.item.table in sweep.pending:
-                sweep.pending.discard(result.item.table)
-                sweep.worst_exit_code = max(sweep.worst_exit_code, result.exit_code)
-                sweep.failures += bool(result.exit_code)
-                sweep.dropped += result.dropped is not None
-        self._close_finished(warehouse, at)
-
-    def adopt(self, fleet: FleetConfig, at: datetime) -> None:
-        """A reload: forget what the new fleet no longer has."""
-        for name in list(self._sweeps):
-            try:
-                tables = set(fleet[name].table_config.tables)
-            except KeyError:
-                del self._sweeps[name]
-                continue
-            for sweep in self._sweeps[name]:
-                sweep.pending &= tables
-            self._close_finished(name, at)
-        for name in list(self.warehouses):
-            if name not in fleet.names:
-                del self.warehouses[name]
-
-    def _close_finished(self, warehouse: str, at: datetime) -> None:
-        sweeps = self._sweeps.get(warehouse, [])
-        done = [s for s in sweeps if not s.pending]
-        if not done:
-            return
-        latest = max(done, key=lambda s: s.fired_at)
-        entry = self.warehouses.setdefault(warehouse, {})
-        entry["last_sweep"] = {
-            "fired_at": _iso(latest.fired_at),
-            "finished_at": _iso(at),
-            "tables": latest.tables,
-            "failures": latest.failures,
-            "dropped": latest.dropped,
-            "worst_exit_code": latest.worst_exit_code,
-        }
-        self._sweeps[warehouse] = [s for s in sweeps if s.pending]
-        entry["open_sweeps"] = len(self._sweeps[warehouse])
-
-    def as_dict(self) -> dict[str, Any]:
+    def as_dict(self, state: RuntimeState) -> dict[str, Any]:
         return {
             "version": STATE_VERSION,
             "pid": self.pid,
             "fleet_path": self.fleet_path,
             "dry_run": self.dry_run,
-            "phase": self.phase,
+            "phase": _SERVE_PHASE.get(state.phase, state.phase),
             "started_at": _iso(self.started_at),
-            "last_tick": _iso(self.last_tick),
-            "generation": self.generation,
-            "workers": self.workers,
-            "busy": self.busy,
-            "nats_connected": self.nats_connected,
-            "events": self.events,
-            "last_error": self.last_error,
-            "reload_error": self.reload_error,
-            "warehouses": self.warehouses,
+            "last_tick": _iso(state.last_tick),
+            "generation": state.generation,
+            "workers": state.workers,
+            "busy": state.busy,
+            "nats_connected": state.sources_connected,
+            "events": _plain(state.events),
+            "last_error": state.last_error,
+            "reload_error": state.reload_error,
+            "warehouses": {name: _warehouse(w) for name, w in state.warehouses.items()},
         }
 
-    def write(self, path: Path) -> None:
+    def write(self, path: Path, state: RuntimeState) -> None:
         """Atomically: a probe reads the old file or the new one, never half."""
         tmp = path.with_name(f".{path.name}.{os.getpid()}")
-        tmp.write_text(json.dumps(self.as_dict(), indent=2, sort_keys=True) + "\n")
+        tmp.write_text(json.dumps(self.as_dict(state), indent=2, sort_keys=True) + "\n")
         tmp.replace(path)
+
+
+class StateFileObserver:
+    """Rewrites the state file whenever the runtime reports a change to it.
+
+    Called on the runtime's loop, as before #166: a write is one small file,
+    and a probe must see each phase as it happens. ``offered`` is not a change
+    to the file -- the queue is not in it -- so it is not observed.
+    """
+
+    def __init__(
+        self, path: Path, service: ServiceState, state: Callable[[], RuntimeState]
+    ) -> None:
+        self.path = path
+        self.service = service
+        self._state = state
+
+    def write(self, state: RuntimeState | None = None) -> None:
+        try:
+            self.service.write(self.path, self._state() if state is None else state)
+        except OSError:
+            # The state file is for observers. Failing to write it must not stop
+            # maintenance; liveness will notice the staleness, which is right.
+            logger.exception("could not write the state file %s", self.path)
+
+    def _changed(self, *_: Any) -> None:
+        self.write()
+
+    phase_changed = ticked = fired = started = finished = _changed
+    fleet_changed = refused = pressure_checked = _changed
 
 
 def read_state(path: str | Path) -> dict[str, Any]:
@@ -326,6 +286,21 @@ def run_record(result: ItemResult) -> dict[str, Any]:
     }
 
 
+class RunLogObserver:
+    """Appends each table's :func:`run_record` to the run log ``zamboni runs`` reads.
+
+    A write that fails is logged and the runtime carries on: a run that did its
+    work does not fail over its reporting (`zamboni.observe`).
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def finished(self, result: ItemResult) -> None:
+        with self.path.open("a") as out:
+            out.write(json.dumps(run_record(result), default=str) + "\n")
+
+
 # -- the single-instance lock -----------------------------------------------------
 
 
@@ -366,7 +341,8 @@ def single_instance(pid_file: Path):
 
 class Service:
     """One ``zamboni serve``: a :class:`~zamboni.runtime.MaintenanceRuntime` built
-    from the fleet file, plus the state file, the run log and the capability check."""
+    from the fleet file, observed by the state file and the run log, behind the
+    capability check."""
 
     def __init__(
         self,
@@ -387,8 +363,6 @@ class Service:
         self.fleet_path = Path(fleet_path)
         self.size = size
         self.worker_config = worker_config
-        self.state_path = Path(state_path)
-        self.run_log = Path(run_log) if run_log else None
         self.poll_seconds = poll_seconds
         self.pool_factory = pool_factory
         self.clock = clock
@@ -399,14 +373,26 @@ class Service:
         #: Told what each feed does (`zamboni.events.feed.FeedObserver`) -- the
         #: OpenTelemetry one under `serve --metrics otel` (#181).
         self.feed_observer = feed_observer
-        self.state = ServiceState(
-            fleet_path=str(self.fleet_path),
-            dry_run=not worker_config.commit,
-            workers=size.workers,
+        self.state_file = StateFileObserver(
+            Path(state_path),
+            ServiceState(fleet_path=str(self.fleet_path), dry_run=not worker_config.commit),
+            self._state,
         )
+        self.run_log = RunLogObserver(Path(run_log)) if run_log else None
         #: Built by :meth:`run`, once the fleet file has loaded and PyIceberg passed.
         self.runtime: MaintenanceRuntime | None = None
-        #: Set once the runtime is stopping; ends the event-state loop.
+        #: What the state file says before there is a runtime to ask.
+        self._unstarted = RuntimeState(
+            phase=CREATED,
+            generation=0,
+            workers=size.workers,
+            last_tick=None,
+            queued=(),
+            in_flight=(),
+            dirty=(),
+        )
+        #: Set once the runtime has stopped. Ends the event-state loop, so the
+        #: file stays current through a drain.
         self.stop = asyncio.Event()
         self.hangup = asyncio.Event()
         self._stop_requests = 0
@@ -415,20 +401,8 @@ class Service:
     def feeds(self) -> list[Any]:
         return self.runtime.feeds if self.runtime is not None else []
 
-    def _write(self) -> None:
-        try:
-            self.state.write(self.state_path)
-        except OSError:
-            # The state file is for observers. Failing to write it must not stop
-            # maintenance; liveness will notice the staleness, which is right.
-            logger.exception("could not write the state file %s", self.state_path)
-
-    def _observe_events(self) -> None:
-        """Copy each source's connection and each feed's counters into state."""
-        if not self.events:
-            return
-        self.state.nats_connected = all(bool(s.connected) for s in self.events)
-        self.state.events = {f.source.name: f.counters.as_dict() for f in self.feeds}
+    def _state(self) -> RuntimeState:
+        return self.runtime.state() if self.runtime is not None else self._unstarted
 
     def request_stop(self) -> None:
         """First call: graceful. Second: kill the in-flight tables' workers too."""
@@ -438,8 +412,7 @@ class Service:
 
     async def run(self) -> int:
         """Run until stopped. 0 on a clean stop; 2 if it could not start."""
-        self.state.phase = "starting"
-        self._write()
+        self.state_file.write()
 
         # The fleet first -- it is the cheap check and the likely mistake.
         provider = FileFleetProvider(  # raises FleetConfigError: exit 2
@@ -448,117 +421,51 @@ class Service:
 
         reason = await asyncio.to_thread(self.capability_check)
         if reason is not None:
-            self.state.phase, self.state.last_error = "stopped", reason
-            self._write()
+            self._unstarted = dataclasses.replace(self._unstarted, phase=STOPPED, last_error=reason)
+            self.state_file.write()
             logger.error("cannot maintain anything with this PyIceberg: %s", reason)
             return 2
 
+        observers: list[Any] = [self.state_file]
+        if self.run_log is not None:
+            observers.insert(0, self.run_log)
         self.runtime = runtime = MaintenanceRuntime(
             fleet=provider,
             pool=self.size,
             worker=self.worker_config,
             events=self.events,
+            observers=observers,
             feed_observer=self.feed_observer,
             clock=self.clock,
             pool_factory=self.pool_factory,
             wait=self.scheduler_wait,
-            _hooks=self._hooks(),
         )
-        self.state.generation = runtime.state().generation
         # A stop that arrived while starting still counts, and so does a second.
         for _ in range(self._stop_requests):
             runtime.request_stop()
-        self._observe_events()
 
+        if not self.worker_config.commit:
+            logger.warning("dry run: no --yes, so every table previews and nothing is committed")
         watching = asyncio.create_task(self._watch_events()) if self.feeds else None
         try:
+            # The state file is written as the runtime reports, through
+            # `stopped` -- told even when the run raises.
             await runtime.run()
         finally:
             self.stop.set()
             if watching is not None:
                 await watching
-            self.state.phase, self.state.busy = "stopped", 0
-            self._write()
         return 0
-
-    def _hooks(self) -> _Hooks:
-        def busy() -> int:
-            assert self.runtime is not None
-            return self.runtime.state().busy
-
-        def running() -> None:
-            self.state.phase = "running"
-            self._write()
-            if self.state.dry_run:
-                logger.warning(
-                    "dry run: no --yes, so every table previews and nothing is committed"
-                )
-
-        def tick(at: datetime) -> None:
-            self.state.last_tick = at
-            self.state.busy = busy()
-            self._observe_events()
-            self._write()
-
-        def fired(at: datetime, asked: dict[str, list[str]]) -> None:
-            for name, tables in asked.items():
-                self.state.fired(name, tables, at)
-
-        def finished(result: ItemResult) -> None:
-            self.state.finished(result, self.clock())
-            # Still counts the table reporting here; it is released just after.
-            self.state.busy = busy()
-            if self.run_log is not None:
-                with self.run_log.open("a") as out:
-                    out.write(json.dumps(run_record(result), default=str) + "\n")
-            self._write()
-
-        def fleet_changed(generation: int, fleet: FleetConfig) -> None:
-            self.state.adopt(fleet, self.clock())
-            self.state.generation = generation
-            self.state.reload_error = None
-            self._write()
-
-        def fleet_refused(reason: str) -> None:
-            if reason != self.state.reload_error:
-                self.state.reload_error = reason
-                self._write()
-
-        def pressure_checked(name: str, found: dict[str, Any]) -> None:
-            self.state.warehouses.setdefault(name, {})["pressure"] = {
-                "checked_at": _iso(self.clock()),
-                "tables": found["checked"],
-                "over": len(found["over"]),
-                "offered": found["offered"],
-                "errors": len(found["errors"]),
-            }
-            self._write()
-
-        def stopping() -> None:
-            self.state.phase = "stopping"
-            self._write()
-            self.stop.set()
-
-        return _Hooks(
-            running=running,
-            tick=tick,
-            fired=fired,
-            finished=finished,
-            fleet_changed=fleet_changed,
-            fleet_refused=fleet_refused,
-            pressure_checked=pressure_checked,
-            stopping=stopping,
-        )
 
     async def _watch_events(self) -> None:
         """Write the state file when an event source's connection or counters change."""
         last = None
         while not self.stop.is_set():
-            self._observe_events()
-            seen = (self.state.nats_connected, json.dumps(self.state.events, sort_keys=True))
+            state = self._state()
+            seen = (state.sources_connected, json.dumps(_plain(state.events), sort_keys=True))
             if seen != last:
                 last = seen
-                self._write()
+                self.state_file.write(state)
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self.stop.wait(), EVENTS_OBSERVE_SECONDS)
 

@@ -590,6 +590,7 @@ async def run_workers(
     *,
     on_result: Callable[[ItemResult], None] | None = None,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    on_start: Callable[[WorkItem], None] | None = None,
 ) -> None:
     """Take from ``queue`` into ``pool`` until ``stop``; then let in-flight tables finish.
 
@@ -624,6 +625,11 @@ async def run_workers(
                     )
                     result = ItemResult(item, 0, None, "", None, 0.0, dropped="deadline")
                 else:
+                    if on_start is not None:
+                        try:
+                            on_start(item)
+                        except Exception:  # a reporting hook never stops maintenance
+                            logger.exception("on_start for %s/%s", item.warehouse, item.table)
                     result = await pool.run(item)
             except Exception as exc:  # one table's failure, not the loop's
                 logger.exception("running %s/%s", item.warehouse, item.table)

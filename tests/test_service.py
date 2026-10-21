@@ -25,8 +25,11 @@ import pytest
 import yaml
 
 from zamboni.cli import main
+from zamboni.fleet import CronSchedule, FleetConfig, FleetWarehouse
 from zamboni.pool import ItemResult, PoolSize, WorkerConfig
 from zamboni.runlog import summarise
+from zamboni.runstate import Ledger, RuntimeState, WarehouseState
+from zamboni.runtime import CREATED, RUNNING, STOPPING
 from zamboni.scheduler import WorkItem
 from zamboni.service import (
     LIVENESS_STALE,
@@ -81,42 +84,7 @@ def fleet_file(tmp_path: Path, *tables: str, schedule: str = "* * * * *") -> Pat
     return path
 
 
-# -- sweeps -----------------------------------------------------------------------
-
-
-def test_a_sweep_closes_when_every_table_it_offered_has_a_result():
-    state = ServiceState(fleet_path="f", dry_run=True, workers=2)
-    state.fired("acme", ["raw.a", "raw.b"], T0)
-    state.finished(result("raw.a"), T0 + timedelta(minutes=1))
-    assert "last_sweep" not in state.warehouses["acme"]
-
-    state.finished(result("raw.b", code=3), T0 + timedelta(minutes=2))
-    sweep = state.warehouses["acme"]["last_sweep"]
-    assert sweep["tables"] == 2
-    assert sweep["failures"] == 1
-    assert sweep["worst_exit_code"] == 3
-    assert sweep["finished_at"] == "2026-10-02T02:02:00Z"
-
-
-def test_each_firing_is_its_own_sweep_and_one_run_answers_both():
-    """Two firings while a table is still queued coalesce into one run, and that
-    run answers both. A schedule faster than a sweep cannot hold one open."""
-    state = ServiceState(fleet_path="f", dry_run=True, workers=1)
-    state.fired("acme", ["raw.a"], T0)
-    state.fired("acme", ["raw.a"], T0 + timedelta(minutes=1))
-    assert state.warehouses["acme"]["open_sweeps"] == 2
-    state.finished(result("raw.a"), T0 + timedelta(minutes=2))
-    entry = state.warehouses["acme"]
-    assert entry["open_sweeps"] == 0
-    assert entry["last_sweep"]["fired_at"] == "2026-10-02T02:01:00Z"
-
-
-def test_a_firing_that_asked_for_nothing_opens_no_sweep():
-    """Every table was already in flight: the service passes an empty list."""
-    state = ServiceState(fleet_path="f", dry_run=True, workers=1)
-    state.fired("acme", [], T0)
-    assert state.warehouses["acme"]["open_sweeps"] == 0
-    assert "last_sweep" not in state.warehouses["acme"]
+# -- sweeps (the rest are test_runstate.py's) ----------------------------------------
 
 
 def test_a_table_in_flight_at_the_firing_is_not_in_its_sweep(tmp_path):
@@ -142,34 +110,32 @@ def test_a_table_in_flight_at_the_firing_is_not_in_its_sweep(tmp_path):
     assert asyncio.run(scenario()) == 0
 
 
-def test_a_reload_that_removes_a_pending_table_closes_the_sweep():
-    """Otherwise a sweep waiting on a table the fleet no longer has never ends."""
-    from zamboni.fleet import CronSchedule, FleetConfig, FleetWarehouse
-
-    state = ServiceState(fleet_path="f", dry_run=True, workers=1)
-    state.fired("acme", ["raw.a", "raw.gone"], T0)
-    state.finished(result("raw.a"), T0)
-    fleet = FleetConfig(
-        warehouses=(FleetWarehouse("acme", CronSchedule("0 2 * * *"), work("raw.a").table_config),)
-    )
-    state.adopt(fleet, T0 + timedelta(minutes=1))
-    assert state.warehouses["acme"]["last_sweep"]["tables"] == 2
-
-
-def test_a_failure_is_the_last_error():
-    state = ServiceState(fleet_path="f", dry_run=True, workers=1)
-    state.finished(result("raw.a", code=1, died="worker died (killed by signal 9)"), T0)
-    assert state.last_error == "acme/raw.a: worker died (killed by signal 9)"
-
-
 # -- the state file and the probes ----------------------------------------------
+
+
+def unstarted() -> RuntimeState:
+    return RuntimeState(
+        phase=CREATED,
+        generation=0,
+        workers=3,
+        last_tick=None,
+        queued=(),
+        in_flight=(),
+        dirty=(),
+    )
 
 
 def test_the_state_file_is_written_whole_and_reads_back(tmp_path):
     path = tmp_path / "serve.state.json"
-    state = ServiceState(fleet_path="fleet.yaml", dry_run=False, workers=3)
-    state.phase, state.generation, state.last_tick = "running", 2, T0
-    state.write(path)
+    serve = ServiceState(fleet_path="fleet.yaml", dry_run=False)
+    state = dataclasses.replace(
+        unstarted(),
+        phase=RUNNING,
+        generation=2,
+        last_tick=T0,
+        warehouses={"acme": WarehouseState(last_fired=T0, open_sweeps=1)},
+    )
+    serve.write(path, state)
     assert list(tmp_path.iterdir()) == [path], "no temporary left behind"
     doc = read_state(path)
     assert (doc["phase"], doc["generation"], doc["workers"], doc["dry_run"]) == (
@@ -180,6 +146,60 @@ def test_the_state_file_is_written_whole_and_reads_back(tmp_path):
     )
     assert doc["last_tick"] == "2026-10-02T02:00:00Z"
     assert doc["nats_connected"] is None
+    assert doc["warehouses"] == {
+        "acme": {"last_fired": "2026-10-02T02:00:00Z", "open_sweeps": 1}
+    }, "what has not happened yet is absent, not null"
+
+
+def test_a_runtime_not_yet_running_is_a_service_starting(tmp_path):
+    """The probes know four phases; the runtime's ``created`` is ``starting``."""
+    doc = ServiceState(fleet_path="f", dry_run=True).as_dict(unstarted())
+    assert doc["phase"] == "starting"
+
+
+GOLDEN = Path(__file__).parent / "fixtures" / "serve" / "state-golden.json"
+
+
+def test_the_state_file_reads_as_it_did_before_the_runtime_kept_it(tmp_path):
+    """#166 moved the per-warehouse record into the runtime (`Ledger`). The
+    fixture was written by the code before that move, for this same sequence
+    of events; the file an operator's tooling reads must not change by a byte.
+    """
+    m = lambda n: T0 + timedelta(minutes=n)  # noqa: E731
+    ledger = Ledger()
+    ledger.fired("acme", ["raw.a", "raw.b", "raw.c"], m(0))
+    ledger.fired("globex", ["raw.x"], m(0))
+    ledger.finished(result("raw.a"), m(1))
+    ledger.finished(result("raw.b", code=3), m(2))
+    ledger.finished(deadline_drop("raw.c", m(1)), m(3))
+    died = ItemResult(
+        work("raw.x", warehouse="globex"), 1, None, "", "worker died (killed by signal 9)", 4.0
+    )
+    ledger.finished(died, m(4))
+    ledger.fired("acme", ["raw.a"], m(5))
+    found = {"checked": 3, "over": {"raw.a": "over"}, "offered": 1, "errors": {}}
+    ledger.pressure_checked("acme", found, m(6))
+    assert ledger.refused("fleet.yaml: warehouses[0].schedule: bad cron")
+    acme = FleetWarehouse("acme", CronSchedule("0 2 * * *"), work("raw.a").table_config)
+    ledger.adopted(FleetConfig(warehouses=(acme,)), m(7))
+
+    state = RuntimeState(
+        phase=STOPPING,
+        generation=2,
+        workers=2,
+        last_tick=m(8),
+        queued=(),
+        in_flight=(("acme", "raw.a"),),
+        dirty=(),
+        last_error=ledger.last_error,
+        reload_error=ledger.reload_error,
+        warehouses=ledger.warehouses,
+    )
+    serve = ServiceState(
+        fleet_path="fleet.yaml", dry_run=False, pid=4242, started_at=T0 - timedelta(minutes=5)
+    )
+    serve.write(tmp_path / "state.json", state)
+    assert (tmp_path / "state.json").read_bytes() == GOLDEN.read_bytes()
 
 
 def alive(tmp_path: Path, pid: int = 4242) -> Path:
@@ -281,16 +301,6 @@ def test_a_table_dropped_at_its_deadline_is_a_run_that_did_no_work():
     summary = summarise([record, run_record(result("raw.b"))])
     assert summary.failed_runs == 0 and summary.worst_exit_code == 0
     assert summary.counters.considered == 0
-
-
-def test_a_deadline_drop_answers_its_sweep_and_is_counted_there():
-    state = ServiceState(fleet_path="f", dry_run=True, workers=1)
-    state.fired("acme", ["raw.a", "raw.b"], T0)
-    state.finished(result("raw.a"), T0 + timedelta(minutes=1))
-    state.finished(deadline_drop("raw.b", T0), T0 + timedelta(minutes=2))
-    sweep = state.warehouses["acme"]["last_sweep"]
-    assert (sweep["tables"], sweep["failures"], sweep["dropped"]) == (2, 0, 1)
-    assert state.last_error is None, "a window closing is not a failure"
 
 
 # -- the single-instance lock -----------------------------------------------------
