@@ -35,10 +35,9 @@ Two categories beyond the usual set, because this tool deletes files:
   `True`, or kills their workers once the grace has passed and returns `False`.
   `StaticFleet` is the fleet source for an application that pushes each fleet
   change itself. **Provisional**: this is new public API and may change before
-  the release after this one; claims (#167), observers (#166) and the `manual`
-  and `reclaim` reasons (#163) are not in it yet. `zamboni serve` is now built
-  on it and behaves as before, with one log line reworded: a second stop request
-  logs `stop forced: killing in-flight workers`.
+  the release after this one; claims (#167) are not in it yet. `zamboni serve`
+  is now built on it and behaves as before, with one log line reworded: a
+  second stop request logs `stop forced: killing in-flight workers`.
 - **Two more reasons, and deadlines, for `MaintenanceRuntime.offer()`** (#163,
   R2). `manual` runs every operation, like a schedule; `reclaim` runs `expire`
   and `remove-orphans`. `offer(..., not_after=)` sets a deadline (time-zone
@@ -46,6 +45,17 @@ Two categories beyond the usual set, because this tool deletes files:
   dropped and reported with exit 0 and `dropped="deadline"` rather than started
   late. Two offers for one table now run the **union** of their operations,
   under the later deadline or none. Provisional, with the rest of the runtime.
+- **Observers, and a `state()` that carries everything the `serve` state file
+  does** (#166, R6). `MaintenanceRuntime(observers=[…])` takes any object with
+  some of `zamboni.observe.Observer`'s methods — `phase_changed`, `ticked`,
+  `fired`, `offered`, `started`, `finished`, `fleet_changed`, `refused`,
+  `pressure_checked` — and calls them on the runtime's loop. One that raises is
+  logged and ignored; `handed_off(observer)` runs a slow one on its own thread,
+  in order. `state()` now also returns the last error, the last refused fleet,
+  each event source's counters and connection, and per warehouse the last
+  firing, result, sweep and pressure check (`zamboni.runstate`). `zamboni
+  serve`'s state file and run log are now two such observers. Provisional,
+  with the rest of the runtime.
 
 ### Changed
 
@@ -60,6 +70,13 @@ Two categories beyond the usual set, because this tool deletes files:
   for that were never started because their deadline passed. Always 0 until a
   schedule carries a window (R3); a table dropped this way is written to the run
   log as a run that did no work, with exit 0.
+- **The `serve` state file is rewritten as things happen** (#166). It was
+  written at each scheduler tick, up to a minute apart, so `busy` and the
+  event-source counters could be that old; it is now also written when a
+  schedule fires and when a table starts, from the runtime's `state()`. Its
+  format is unchanged, checked byte for byte against a file the previous code
+  wrote. Event-source status keeps being written while a stopping service
+  drains, rather than ending at the stop request.
 
 ## [0.7.0] - 2026-10-18
 

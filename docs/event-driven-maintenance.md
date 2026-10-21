@@ -532,9 +532,11 @@ Implemented by `zamboni serve`, `zamboni service-status` and `zamboni.service`
 (ZMBNI-122), which since #162 assembles `serve` from the library runtime in
 `zamboni.runtime` ([maintenance-runtime.md §3](maintenance-runtime.md)); the
 deployment procedure is [devops.md §8](devops.md). What it
-settles, each tested in `tests/test_service.py`:
+settles, each tested in `tests/test_service.py` (the sweeps, since #166 kept by
+the runtime, in `tests/test_runstate.py`):
 
-- **The state file** is written atomically on every tick, result and reload:
+- **The state file** is written atomically from the runtime's `state()` on
+  every tick, firing, table started or finished, reload and phase change:
   pid, phase (`starting` → `running` → `stopping` → `stopped`), last tick,
   config generation, workers and busy, `nats_connected` (`null` until #110),
   last error, the last refused reload, and per warehouse the last firing, the

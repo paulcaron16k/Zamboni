@@ -156,9 +156,14 @@ the pressure checks and the take-and-run loop over `scheduler.CandidateQueue` an
 `request_stop`) is the only part another thread may touch; each call is handed to
 the loop with `call_soon_threadsafe`. `service.py` is `zamboni serve` assembled
 from it — a `reload.FileFleetProvider`, the capability check, signals, and the
-state file and run log fed through the private `_Hooks` until the public
-`Observer` (#166) replaces them. Nothing in it decides whether a table needs
-work; that is still `maintain()`'s due-check, run in each worker.
+state file and run log as two `observe.Observer`s. What the runtime does is told
+to observers on its loop, and one that raises is logged and ignored;
+`observe.handed_off` moves a slow one to its own thread. `state()` carries the
+whole state file's content: the per-warehouse record (sweeps, last result,
+pressure) is kept by `runstate.Ledger`, so the state file is `state()` plus
+serve's pid, fleet path and `--yes`, and `tests/fixtures/serve/state-golden.json`
+holds it to the byte. Nothing in it decides whether a table needs work; that is
+still `maintain()`'s due-check, run in each worker.
 docs/maintenance-runtime.md is the design and §12 the stories still to build.
 
 **`runlog.py`** is the other end of `maintenance --json`: it reads a series of

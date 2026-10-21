@@ -4,15 +4,15 @@
 end (§12). Where this document and the code disagree, the code has not caught up
 yet or this document is wrong, and either way it is a defect.
 
-**Built so far: R1 (#162) and R2 (#163), unreleased.**
+**Built so far: R1 (#162), R2 (#163) and R6 (#166), unreleased.**
 `zamboni.runtime.MaintenanceRuntime` exists with the §3 control surface,
 `start_in_thread` and `RuntimeHandle`, and `zamboni serve` is an assembly of it.
 Every reason in §3.1 is accepted, offers merge as §3.2 says, and `offer` takes a
-`not_after` deadline (§3.3). Until the stories after them land, the constructor
-has no `claims` (R4), `observers` (R6) or `settings`, and nothing yet offers with
-a deadline but an application's own `offer` call: a schedule's window arrives
-with `WindowSchedule` (R3). `serve` keeps its state file and run log through
-private hooks that R6 replaces with observers.
+`not_after` deadline (§3.3). Observers and the full `state()` are as §8
+describes, and `serve`'s state file and run log are two of those observers.
+Until the stories after them land, the constructor has no `claims` (R4) or
+`settings`, and nothing yet offers with a deadline but an application's own
+`offer` call: a schedule's window arrives with `WindowSchedule` (R3).
 
 **What this settles.** Zamboni decides *how* to maintain a table safely. Since
 [event-driven maintenance](event-driven-maintenance.md) it also decides *when*,
@@ -686,26 +686,56 @@ Notes that decide the implementation:
 ## 8. Observing
 
 ```python
-class Observer(Protocol):
-    def fired(self, warehouse: str, firing: Firing, tables: Sequence[str]) -> None: ...
-    def offered(self, receipt: OfferReceipt) -> None: ...
-    def started(self, item: WorkItem, claim: Claim) -> None: ...
-    def finished(self, item: WorkItem, record: dict) -> None: ...
+class Observer:                                   # zamboni.observe; every method a no-op
+    def phase_changed(self, phase: str) -> None: ...       # running, stopping, stopped
+    def ticked(self, at: datetime) -> None: ...             # every scheduler step: liveness
+    def fired(self, warehouse: str, at: datetime, tables: Sequence[str]) -> None: ...
+    def offered(self, receipt: OfferReceipt) -> None: ...   # each call to offer()
+    def started(self, item: WorkItem) -> None: ...          # gains the claim with R4
+    def finished(self, result: ItemResult) -> None: ...     # ran, failed, died, or dropped
     def fleet_changed(self, generation: int, fleet: FleetConfig) -> None: ...
-    def refused(self, kind: str, detail: str) -> None: ...   # a bad fleet, an unparseable event
+    def refused(self, kind: str, detail: str) -> None: ...  # "fleet": a candidate not adopted
+    def pressure_checked(self, warehouse: str, found: Mapping[str, Any]) -> None: ...
+
+def handed_off(observer, *, name: str | None = None) -> HandedOff: ...
 ```
 
+Subclassing is optional: the runtime calls whichever of these methods an object
+has, so an object defining only `finished` is an observer. `fired` names the
+tables a firing asked for, which excludes any already in flight. `started` is
+not called for a table dropped at its deadline; `finished` is, with
+`result.dropped == "deadline"`. `refused` is told once per new reason, not on
+every poll of a fleet file that is still bad. An unparseable event is the
+feed's to report (`FeedObserver`, event-driven-maintenance.md §8), not a
+runtime observer's.
+
 Observers are called **on the runtime's loop thread** and must return quickly:
-anything slow — a database write, an HTTP call — is handed to the observer's own
-thread or queue. **An observer that raises is logged and ignored**; a run that
-did its work never fails over its reporting.
+anything slow — a database write, an HTTP call — delays the next firing and the
+next table taken. **`handed_off(observer)` makes any observer safe to be slow**:
+each call is queued and made, in order, on a thread of its own, and a stopping
+runtime waits up to `CLOSE_TIMEOUT_SECONDS` (10 s, chosen rather than measured)
+for each one to deliver what it has queued. The runtime never calls an
+observer's own `close()`, which may mean anything to the application. **An
+observer that raises is logged and ignored**, inline or handed off; a run that
+did its work never fails over its reporting, and no observer can stop the
+runtime. `test_a_raising_observer_changes_nothing` and
+`test_a_handed_off_observer_does_not_delay_a_firing` hold both.
 
-`zamboni serve`'s state file and `--json` run log become two observers. A
-Lakehouse App's run history, dashboard and audit trail are a third.
+`zamboni serve`'s state file and `--json` run log are two observers
+(`zamboni.service.StateFileObserver`, `RunLogObserver`). A Lakehouse App's run
+history, dashboard and audit trail are a third.
 
-`state()` returns a `RuntimeState` snapshot — the fields the state file carries
-today, per warehouse and per table in flight — so a UI can render the present
-without keeping its own copy.
+`state()` returns a `RuntimeState` snapshot (`zamboni.runstate`) carrying
+everything the state file does: the phase, generation and workers, the queue
+and what is in flight, the last error and the last refused fleet, each event
+source's counters and whether every source is connected, and per warehouse the
+last firing, last result, last completed sweep and last pressure check. The
+state file is `state()` plus what only `serve` knows — its pid, its fleet file,
+whether `--yes` was given — and reads byte for byte as it did before the move
+(`test_the_state_file_reads_as_it_did_before_the_runtime_kept_it`). A table is
+never both queued and in flight in one snapshot
+(`test_state_never_shows_a_table_both_queued_and_in_flight`), so a UI can
+render the present without keeping its own copy.
 
 ---
 
