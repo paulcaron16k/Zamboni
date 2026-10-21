@@ -39,6 +39,27 @@ Two categories beyond the usual set, because this tool deletes files:
   and `reclaim` reasons (#163) are not in it yet. `zamboni serve` is now built
   on it and behaves as before, with one log line reworded: a second stop request
   logs `stop forced: killing in-flight workers`.
+- **Two more reasons, and deadlines, for `MaintenanceRuntime.offer()`** (#163,
+  R2). `manual` runs every operation, like a schedule; `reclaim` runs `expire`
+  and `remove-orphans`. `offer(..., not_after=)` sets a deadline (time-zone
+  aware, or the offer is refused): a table no worker has started by then is
+  dropped and reported with exit 0 and `dropped="deadline"` rather than started
+  late. Two offers for one table now run the **union** of their operations,
+  under the later deadline or none. Provisional, with the rest of the runtime.
+
+### Changed
+
+- **`zamboni serve` re-runs a table when a schedule fires while an event-driven
+  run of it is in flight** (#163). The schedule's offer used to be dropped
+  because the table was busy, so `expire` and `remove-orphans`, which an
+  event-driven run does not do, waited for the next firing. A table is now
+  re-run afterwards whenever an offer asks for an operation the run in flight
+  is not doing; a tick during a scheduled run, and a pressure check during any
+  run, are still dropped.
+- **The `serve` state file's `last_sweep` gains `dropped`**: the tables a firing asked
+  for that were never started because their deadline passed. Always 0 until a
+  schedule carries a window (R3); a table dropped this way is written to the run
+  log as a run that did no work, with exit 0.
 
 ## [0.7.0] - 2026-10-18
 
