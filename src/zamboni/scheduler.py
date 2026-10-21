@@ -34,11 +34,12 @@ import asyncio
 import contextlib
 import logging
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from .fleet import FleetConfig, FleetWarehouse
+from .settings import DEFAULT_OPERATIONS
 from .tableconfig import TableConfig
 
 logger = logging.getLogger(__name__)
@@ -52,32 +53,40 @@ MAX_SLEEP = timedelta(seconds=60)
 SCHEDULE = "schedule"
 EVENT = "event"
 PRESSURE = "pressure"
+MANUAL = "manual"
+RECLAIM = "reclaim"
 
 #: Which operations each reason runs (docs/maintenance-runtime.md §3.1). `None`
 #: is "every operation the profile enables". Names, not `Operation` members, so
 #: this module stays free of the engine; a test checks them against
-#: `zamboni.maintenance.WRITE_DRIVEN`. The due-check still decides, within these,
-#: whether each operation has anything to do.
+#: `zamboni.maintenance.WRITE_DRIVEN` and `RUNBOOK_ORDER`. The due-check still
+#: decides, within these, whether each operation has anything to do.
 #:
-#: The sets nest -- schedule >= event >= pressure -- which is what makes merging
-#: two offers for one table "keep the stronger reason" rather than a set union
-#: the worker would have to be told about. A test holds the nesting.
+#: The sets do not nest -- `reclaim` and `event` share nothing -- so two offers
+#: for one table merge by **unioning** their operations (:func:`operations_of`),
+#: never by keeping one reason's set.
 REASON_OPERATIONS: dict[str, tuple[str, ...] | None] = {
     SCHEDULE: None,
     EVENT: ("compact", "remove-dangling-deletes", "rewrite-manifests"),
     PRESSURE: ("compact", "remove-dangling-deletes"),
+    MANUAL: None,
+    RECLAIM: ("expire", "remove-orphans"),
 }
 
-#: Strongest first: when two offers for one table merge, the stronger is kept.
-_STRENGTH = {SCHEDULE: 2, EVENT: 1, PRESSURE: 0}
+#: The reason a merged candidate *reports*, first wins (§3.2). Reporting only:
+#: what runs is the union of every merged reason's operations. `manual` leads
+#: because an operator asked; `reclaim` outranks the write-driven pair because it
+#: deletes, and a log line should say so.
+_REPORT_ORDER = (MANUAL, SCHEDULE, RECLAIM, EVENT, PRESSURE)
 
-#: Reasons that mark a table in flight to be run once more when it finishes.
-#: Only an event, which reports a new write the run in flight may have read the
-#: table before. A schedule tick during a run is dropped: the run in flight *is*
-#: the tick's work, and re-running it would repeat `expire` and the orphan scan
-#: for nothing. Pressure during a run is dropped for the same reason (#175):
-#: every reason compacts, so the run in flight is what relieves the pressure,
-#: and the next check measures the table it left.
+#: Reasons that run a table in flight once more when it finishes even if the run
+#: in flight covers their operations. Only an event: it reports a new write the
+#: run in flight may have read the table before. Any other offer is re-run only
+#: for operations the run in flight is not doing (:meth:`CandidateQueue.offer`).
+#: So a schedule tick during a scheduled run is dropped -- that run *is* the
+#: tick's work, and re-running it would repeat `expire` and the orphan scan for
+#: nothing -- and pressure during any run is dropped (#175): every run that
+#: pressure asks for compacts, and the next check measures the table it left.
 _REOFFER_AFTER_RUN = frozenset({EVENT})
 
 
@@ -104,15 +113,49 @@ def operations_for(reason: str) -> tuple[str, ...] | None:
         ) from None
 
 
+def operations_of(reasons: Iterable[str]) -> tuple[str, ...] | None:
+    """The union of ``reasons``' operations, in runbook order; ``None`` is every one.
+
+    Runbook order because `maintain()` runs operations in the order given, and
+    the gaps between them are load-bearing (docs/runbook-dev.md §1).
+    """
+    wanted: set[str] = set()
+    for reason in reasons:
+        operations = operations_for(reason)
+        if operations is None:
+            return None
+        wanted.update(operations)
+    return tuple(op for op in DEFAULT_OPERATIONS if op in wanted)
+
+
+def covers(running: tuple[str, ...] | None, asked: tuple[str, ...] | None) -> bool:
+    """Whether a run of ``running`` does every operation ``asked`` names."""
+    if running is None:
+        return True
+    return asked is not None and set(asked) <= set(running)
+
+
 def stronger(a: str, b: str) -> str:
-    """The reason whose operations include the other's.
+    """The reason a merge of ``a`` and ``b`` reports (:data:`_REPORT_ORDER`).
 
     An unknown reason is refused, not ranked: it used to rank as a schedule,
     the strongest, and so win every merge.
     """
     for reason in (a, b):
         operations_for(reason)
-    return a if _STRENGTH[a] >= _STRENGTH[b] else b
+    return min(a, b, key=_REPORT_ORDER.index)
+
+
+def check_offer(
+    reason: str, also: frozenset[str] = frozenset(), not_after: datetime | None = None
+) -> None:
+    """Refuse an offer that names an unknown reason or a naive deadline."""
+    for each in (reason, *also):
+        operations_for(each)
+    if not_after is not None and not_after.utcoffset() is None:
+        # Compared with an aware clock on the loop, a naive deadline raises
+        # there -- in the take-and-run loop -- rather than here, at the offer.
+        raise ValueError(f"not_after must carry a time zone: {not_after!r}")
 
 
 @dataclass(frozen=True)
@@ -121,16 +164,31 @@ class Candidate:
 
     warehouse: str
     table: str
-    #: Why it was offered: ``"schedule"``, ``"event"`` or ``"pressure"``. Decides
-    #: which operations run (:data:`REASON_OPERATIONS`), never whether.
+    #: Why it was offered (:data:`REASON_OPERATIONS`). Decides which operations
+    #: run, never whether. After a merge, the reason reported (:func:`stronger`).
     reason: str = SCHEDULE
+    #: The other reasons merged into this candidate, for reporting; their
+    #: operations run too.
+    also: frozenset[str] = frozenset()
+    #: A worker does not start this table after this instant (§3.3). ``None``:
+    #: no deadline.
+    not_after: datetime | None = None
 
     def __post_init__(self) -> None:
-        operations_for(self.reason)
+        check_offer(self.reason, self.also, self.not_after)
 
     @property
     def key(self) -> tuple[str, str]:
         return (self.warehouse, self.table)
+
+    @property
+    def reasons(self) -> frozenset[str]:
+        return self.also | {self.reason}
+
+    @property
+    def operations(self) -> tuple[str, ...] | None:
+        """What a run for this candidate does: every merged reason's operations."""
+        return operations_of(self.reasons)
 
 
 @dataclass(frozen=True)
@@ -148,13 +206,28 @@ class WorkItem:
     table_config: TableConfig
     #: The warehouse's own catalog URI, or ``None`` for the profile's.
     uri: str | None = None
+    #: As on :class:`Candidate`.
+    also: frozenset[str] = frozenset()
+    not_after: datetime | None = None
 
     def __post_init__(self) -> None:
-        operations_for(self.reason)
+        check_offer(self.reason, self.also, self.not_after)
 
     @property
     def key(self) -> tuple[str, str]:
         return (self.warehouse, self.table)
+
+    @property
+    def reasons(self) -> frozenset[str]:
+        return self.also | {self.reason}
+
+    @property
+    def operations(self) -> tuple[str, ...] | None:
+        return operations_of(self.reasons)
+
+    def candidate(self) -> Candidate:
+        """This item as the offer it was taken from, to put back in the queue."""
+        return Candidate(self.warehouse, self.table, self.reason, self.also, self.not_after)
 
 
 #: The ``reason`` a :class:`PressureCheck` reports, for logs and run records.
@@ -188,21 +261,24 @@ class PressureCheck:
 class CandidateQueue:
     """FIFO over tables, coalesced per table.
 
-    * Offering a table already queued **merges**: fifty events during one load
-      are one candidate, and an event merged into a queued schedule offer runs
-      under the schedule's (larger) set of operations.
-    * Offering a table **being maintained** never queues it behind itself. A
-      schedule tick or a pressure offer is dropped -- the run in flight is the
-      work it asked for. An event marks the table **dirty** instead, and when
-      the run finishes the table is offered once more: the run in flight may
-      have read the table before the write the event reports (decided on
-      #110, 2026-10-06). The due-check makes a re-run that finds nothing new
-      cost one metadata load.
+    * Offering a table already queued **merges** (:func:`_merged`): fifty
+      events during one load are one candidate, which runs the union of every
+      merged reason's operations, under the later deadline or none.
+    * Offering a table **being maintained** never queues it behind itself. An
+      offer whose operations the run in flight already does is dropped -- a
+      schedule tick during a scheduled run, pressure during any run that
+      compacts. Any other offer marks the table **dirty**, and when the run
+      finishes the table is offered once more with every such offer merged:
+      an event because the run in flight may have read the table before the
+      write it reports (decided on #110, 2026-10-06), anything else for the
+      operations the run in flight is not doing (#163). The due-check makes a
+      re-run that finds nothing new cost one metadata load.
     """
 
     def __init__(self) -> None:
         self._queued: OrderedDict[tuple[str, str], Candidate] = OrderedDict()
-        self._in_flight: set[tuple[str, str]] = set()
+        #: Each table in flight, and what its run does.
+        self._in_flight: dict[tuple[str, str], tuple[str, ...] | None] = {}
         self._dirty: dict[tuple[str, str], Candidate] = {}
         self._ready = asyncio.Event()
 
@@ -222,13 +298,14 @@ class CandidateQueue:
         """Queue ``candidate``; ``False`` if it coalesced into existing work."""
         key = candidate.key
         if key in self._in_flight:
-            if candidate.reason in _REOFFER_AFTER_RUN:
+            if candidate.reasons & _REOFFER_AFTER_RUN or not covers(
+                self._in_flight[key], candidate.operations
+            ):
                 earlier = self._dirty.get(key)
                 self._dirty[key] = candidate if earlier is None else _merged(earlier, candidate)
             return False
         if key in self._queued:
-            # Merge in place: the entry keeps its position, and the stronger
-            # reason -- the larger set of operations -- wins.
+            # Merge in place: the entry keeps its position.
             self._queued[key] = _merged(self._queued[key], candidate)
             return False
         self._queued[key] = candidate
@@ -249,7 +326,7 @@ class CandidateQueue:
                     "dropping %s/%s: no longer in the fleet", candidate.warehouse, candidate.table
                 )
                 continue
-            self._in_flight.add(key)
+            self._in_flight[key] = item.operations
             if not self._queued:
                 self._ready.clear()
             return item
@@ -266,7 +343,7 @@ class CandidateQueue:
 
     def finish(self, item: WorkItem) -> None:
         """The worker is done with ``item``; re-offer it once if it went dirty."""
-        self._in_flight.discard(item.key)
+        self._in_flight.pop(item.key, None)
         dirty = self._dirty.pop(item.key, None)
         if dirty is not None:
             self.offer(dirty)
@@ -277,7 +354,17 @@ class CandidateQueue:
 
 
 def _merged(a: Candidate, b: Candidate) -> Candidate:
-    return a if stronger(a.reason, b.reason) == a.reason else b
+    """One candidate doing everything ``a`` and ``b`` asked for (§3.2).
+
+    Operations: the union. Deadline: none if either has none -- one offer that
+    may run at any time is not narrowed by another's window -- else the later.
+    """
+    reasons = a.reasons | b.reasons
+    reason = stronger(a.reason, b.reason)
+    not_after = (
+        None if a.not_after is None or b.not_after is None else max(a.not_after, b.not_after)
+    )
+    return Candidate(a.warehouse, a.table, reason, reasons - {reason}, not_after)
 
 
 def _resolve(candidate: Candidate, fleet: FleetConfig) -> WorkItem | None:
@@ -293,6 +380,8 @@ def _resolve(candidate: Candidate, fleet: FleetConfig) -> WorkItem | None:
         reason=candidate.reason,
         table_config=warehouse.table_config,
         uri=warehouse.uri,
+        also=candidate.also,
+        not_after=candidate.not_after,
     )
 
 

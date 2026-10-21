@@ -20,16 +20,19 @@ import pytest
 from zamboni.fleet import CronSchedule, FleetConfig, FleetWarehouse
 from zamboni.scheduler import (
     EVENT,
+    MANUAL,
     MAX_SLEEP,
     PRESSURE,
     PRESSURE_CHECK,
     REASON_OPERATIONS,
+    RECLAIM,
     SCHEDULE,
     Candidate,
     CandidateQueue,
     Scheduler,
     UnknownReasonError,
     WorkItem,
+    operations_of,
     run_scheduler,
     stronger,
 )
@@ -190,15 +193,21 @@ def test_candidates_a_reload_removed_are_dropped():
 def test_a_work_item_is_config_that_pickles():
     """#121 sends these to another process. A CatalogSession cannot go; this must."""
     queue = CandidateQueue()
-    queue.offer(Candidate("acme", "raw.events"))
+    queue.offer(Candidate("acme", "raw.events", not_after=at("2026-10-02T03:00")))
+    queue.offer(Candidate("acme", "raw.events", RECLAIM, not_after=at("2026-10-02T04:00")))
     item = queue.take(fleet(warehouse("acme", uri="https://c/catalog")))
+    assert item is not None and item.also and item.not_after is not None
     assert pickle.loads(pickle.dumps(item)) == item
+    # `also` and `not_after` narrow or report; neither can widen a run past what
+    # its reasons' operations declare, nor skip the due-check.
     assert {f.name for f in dataclasses.fields(WorkItem)} == {
         "warehouse",
         "table",
         "reason",
         "table_config",
         "uri",
+        "also",
+        "not_after",
     }, "a new WorkItem field must be serialisable config, and must not bypass the due-check"
 
 
@@ -443,14 +452,44 @@ def test_an_event_runs_exactly_the_write_driven_operations():
     assert REASON_OPERATIONS[SCHEDULE] is None, "a schedule runs everything enabled"
 
 
-def test_the_reason_sets_nest_so_merging_keeps_the_stronger():
-    """schedule >= event >= pressure. If a future table breaks the nesting,
-    "keep the stronger reason" would silently drop operations; this fails first."""
+def runs(*reasons: str) -> set[str]:
+    """What a run for ``reasons`` does, derived from the declarations alone."""
     from zamboni.maintenance import RUNBOOK_ORDER
 
     everything = {op.value for op in RUNBOOK_ORDER}
-    event, pressure = set(REASON_OPERATIONS[EVENT]), set(REASON_OPERATIONS[PRESSURE])
-    assert pressure <= event <= everything
+    declared = [REASON_OPERATIONS[r] for r in reasons]
+    if None in declared:
+        return everything
+    return {op for operations in declared if operations for op in operations}
+
+
+def test_every_declared_operation_is_a_runbook_operation_and_runs_in_runbook_order():
+    """`operations_of` orders by `settings.DEFAULT_OPERATIONS`; the runbook order
+    is `RUNBOOK_ORDER`. Over every pair of reasons, so the two copies cannot
+    drift without this failing."""
+    from zamboni.maintenance import RUNBOOK_ORDER
+
+    order = [op.value for op in RUNBOOK_ORDER]
+    for a in REASON_OPERATIONS:
+        for b in REASON_OPERATIONS:
+            operations = operations_of([a, b])
+            if operations is None:
+                assert runs(a, b) == set(order)
+                continue
+            assert set(operations) == runs(a, b)
+            assert list(operations) == [op for op in order if op in operations]
+
+
+def test_reclaim_runs_exactly_the_operations_an_event_does_not():
+    """The two reclaim operations answer to the clock, not to writes, and are
+    what is left of the runbook once the write-driven set and the property sync
+    are taken out."""
+    from zamboni.maintainers import Operation
+    from zamboni.maintenance import RUNBOOK_ORDER, WRITE_DRIVEN
+
+    rest = set(RUNBOOK_ORDER) - WRITE_DRIVEN - {Operation.APPLY_PROPERTIES}
+    assert set(REASON_OPERATIONS[RECLAIM] or ()) == {op.value for op in rest}
+    assert REASON_OPERATIONS[MANUAL] is None, "a manual run is everything enabled"
 
 
 #: Reasons nobody declared: near misses, the pressure *check*'s reason (a job
@@ -471,21 +510,97 @@ def test_an_unknown_reason_is_refused_where_it_enters(reason):
             stronger(*pair)
 
 
-def test_the_stronger_of_two_reasons_runs_everything_the_other_does():
+def test_every_reason_has_a_place_in_the_report_order():
     """Over every declared pair, so a reason added to REASON_OPERATIONS without
-    a strength fails here rather than ranking by accident."""
-    from zamboni.maintenance import RUNBOOK_ORDER
-
-    def runs(reason):
-        operations = REASON_OPERATIONS[reason]
-        return {op.value for op in RUNBOOK_ORDER} if operations is None else set(operations)
-
+    a rank fails here rather than raising mid-merge."""
     for a in REASON_OPERATIONS:
         Candidate("acme", "raw.events", a)
         for b in REASON_OPERATIONS:
-            winner = stronger(a, b)
-            loser = b if winner == a else a
-            assert runs(loser) <= runs(winner)
+            assert stronger(a, b) == stronger(b, a) in (a, b)
+
+
+@pytest.mark.parametrize("first", list(REASON_OPERATIONS))
+@pytest.mark.parametrize("second", list(REASON_OPERATIONS))
+def test_a_merge_runs_every_operation_either_offer_asked_for(first, second):
+    """The sets do not nest -- reclaim and event share nothing -- so keeping one
+    reason's set would drop the other's operations. The merge is the union."""
+    queue, current = CandidateQueue(), fleet()
+    queue.offer(Candidate("acme", "raw.events", first))
+    queue.offer(Candidate("acme", "raw.events", second))
+    item = queue.take(current)
+    assert item is not None
+    assert item.reasons == {first, second}
+    assert item.reason == stronger(first, second), "the reason reported"
+    assert set(item.operations or runs(SCHEDULE)) == runs(first, second)
+
+
+def test_a_merge_keeps_the_later_deadline_or_none():
+    early, late = at("2026-10-02T03:00"), at("2026-10-02T05:00")
+    cases = [
+        ((early, late), late),
+        ((late, early), late),
+        ((early, None), None),
+        ((None, late), None),
+    ]
+    for (a, b), expected in cases:
+        queue = CandidateQueue()
+        queue.offer(Candidate("acme", "raw.events", SCHEDULE, not_after=a))
+        queue.offer(Candidate("acme", "raw.events", EVENT, not_after=b))
+        item = queue.take(fleet())
+        assert item is not None and item.not_after == expected, (a, b)
+
+
+def test_a_naive_deadline_is_refused_at_the_offer():
+    with pytest.raises(ValueError, match="time zone"):
+        Candidate("acme", "raw.events", not_after=datetime(2026, 10, 2, 3, 0))
+
+
+@pytest.mark.parametrize("running", list(REASON_OPERATIONS))
+@pytest.mark.parametrize("offered", list(REASON_OPERATIONS))
+def test_an_offer_during_a_run_reruns_the_table_only_if_it_adds_work(running, offered):
+    """Decided on #163: an event always re-runs (a new write the run may have
+    missed); any other offer re-runs only for operations the run is not doing.
+    The expectation is derived from the declarations, over every pair."""
+    queue, current = CandidateQueue(), fleet()
+    queue.offer(Candidate("acme", "raw.events", running))
+    item = queue.take(current)
+    assert item is not None
+    assert not queue.offer(Candidate("acme", "raw.events", offered)), "never queued behind itself"
+
+    rerun_expected = offered == EVENT or not runs(offered) <= runs(running)
+    assert (queue.dirty == {("acme", "raw.events")}) == rerun_expected
+    queue.finish(item)
+    rerun = queue.take(current)
+    assert (rerun is not None) == rerun_expected
+    if rerun is not None:
+        assert rerun.reasons == {offered}
+
+
+def test_a_reclaim_during_an_event_run_is_not_lost():
+    """The case the old rule -- only an event re-runs -- got wrong once reclaim
+    existed: the event run does neither of reclaim's operations."""
+    queue, current = CandidateQueue(), fleet()
+    queue.offer(Candidate("acme", "raw.events", EVENT))
+    item = queue.take(current)
+    queue.offer(Candidate("acme", "raw.events", RECLAIM))
+    queue.offer(Candidate("acme", "raw.events", PRESSURE))  # covered: dropped
+    queue.finish(item)
+    rerun = queue.take(current)
+    assert rerun is not None and rerun.reasons == {RECLAIM}
+    assert rerun.operations == REASON_OPERATIONS[RECLAIM]
+
+
+def test_a_table_put_back_after_a_stop_keeps_every_merged_reason_and_its_deadline():
+    queue = CandidateQueue()
+    deadline = at("2026-10-02T05:00")
+    queue.offer(Candidate("acme", "raw.events", EVENT, not_after=deadline))
+    queue.offer(Candidate("acme", "raw.events", RECLAIM, not_after=deadline))
+    item = queue.take(fleet())
+    assert item is not None
+    queue.finish(item)
+    assert queue.offer(item.candidate())
+    again = queue.take(fleet())
+    assert again == item
 
 
 def test_offers_for_a_queued_table_merge_into_the_stronger_reason():
