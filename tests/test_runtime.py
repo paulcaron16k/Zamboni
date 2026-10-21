@@ -18,8 +18,10 @@ import asyncio
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -33,7 +35,6 @@ from zamboni.runtime import (
     OfferReceipt,
     RuntimeHandle,
     StaticFleet,
-    _Hooks,
     start_in_thread,
 )
 from zamboni.scheduler import (
@@ -106,7 +107,7 @@ def runtime(
     workers: int = 1,
     hold: bool = False,
     pools: list[FakePool] | None = None,
-    hooks: _Hooks | None = None,
+    observers: Sequence[Any] = (),
     clock: Callable[[], datetime] = lambda: QUIET,
     wait=None,
 ) -> MaintenanceRuntime:
@@ -124,7 +125,7 @@ def runtime(
         clock=clock,
         pool_factory=factory,
         wait=wait,
-        _hooks=hooks,
+        observers=observers,
     )
 
 
@@ -218,11 +219,11 @@ def test_state_from_another_thread_is_the_loops_view(tmp_path):
 
 def test_update_fleet_from_another_thread_is_adopted_on_the_loop(tmp_path):
     changed: list[tuple[int, str]] = []
-    hooks = _Hooks(
+    observer = SimpleNamespace(
         fleet_changed=lambda gen, _: changed.append((gen, threading.current_thread().name))
     )
     pools: list[FakePool] = []
-    handle = start_in_thread(runtime(tmp_path, pools=pools, hooks=hooks))
+    handle = start_in_thread(runtime(tmp_path, pools=pools, observers=[observer]))
     rt = handle.runtime
     try:
         assert rt.offer("acme", ["raw.d"], reason=SCHEDULE).unknown == ("raw.d",)
@@ -369,7 +370,9 @@ def test_a_deadline_offered_from_another_thread_is_honoured(tmp_path):
     other's has not."""
     finished: list[ItemResult] = []
     pools: list[FakePool] = []
-    handle = start_in_thread(runtime(tmp_path, pools=pools, hooks=_Hooks(finished=finished.append)))
+    handle = start_in_thread(
+        runtime(tmp_path, pools=pools, observers=[SimpleNamespace(finished=finished.append)])
+    )
     rt = handle.runtime
     try:
         rt.offer("acme", ["raw.a"], reason=SCHEDULE, not_after=QUIET - timedelta(minutes=1))
@@ -403,7 +406,9 @@ def test_stop_within_the_grace_lets_tables_in_flight_finish(tmp_path):
     finished: list[ItemResult] = []
     pools: list[FakePool] = []
     handle = start_in_thread(
-        runtime(tmp_path, pools=pools, hold=True, hooks=_Hooks(finished=finished.append))
+        runtime(
+            tmp_path, pools=pools, hold=True, observers=[SimpleNamespace(finished=finished.append)]
+        )
     )
     handle.runtime.offer("acme", ["raw.a"], reason=SCHEDULE)
     eventually(lambda: bool(pools[0].ran))
@@ -423,7 +428,9 @@ def test_stop_past_the_grace_kills_tables_in_flight(tmp_path):
     finished: list[ItemResult] = []
     pools: list[FakePool] = []
     handle = start_in_thread(
-        runtime(tmp_path, pools=pools, hold=True, hooks=_Hooks(finished=finished.append))
+        runtime(
+            tmp_path, pools=pools, hold=True, observers=[SimpleNamespace(finished=finished.append)]
+        )
     )
     handle.runtime.offer("acme", ["raw.a", "raw.b"], reason=SCHEDULE)
     eventually(lambda: bool(pools[0].ran))
@@ -458,4 +465,28 @@ def test_start_in_thread_raises_if_the_runtime_fails_while_starting(tmp_path, ca
     ):
         start_in_thread(rt)
     assert "no workdir" in caplog.text
+    assert rt.state().phase == STOPPED
+
+
+def test_observers_are_told_it_stopped_even_when_the_pool_fails_to_close(tmp_path):
+    """`zamboni serve`'s state file is an observer: without `stopped`, a
+    service that has exited would read as one still stopping."""
+
+    class BrokenClose(FakePool):
+        async def close(self) -> None:
+            raise OSError("close failed")
+
+    phases: list[str] = []
+    rt = MaintenanceRuntime(
+        fleet=StaticFleet(fleet()),
+        pool=PoolSize(1, 1, "test"),
+        worker=WorkerConfig(workdir=tmp_path),
+        clock=lambda: QUIET,
+        pool_factory=BrokenClose,
+        observers=[SimpleNamespace(phase_changed=phases.append)],
+    )
+    rt.request_stop()  # before the loop: applied at once, so the run stops on starting
+    with pytest.raises(OSError, match="close failed"):
+        asyncio.run(rt.run())
+    assert phases[-1] == STOPPED
     assert rt.state().phase == STOPPED
