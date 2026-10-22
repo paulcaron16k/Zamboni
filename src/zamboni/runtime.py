@@ -28,10 +28,12 @@ else needs to be: every other part runs on the loop.
 :meth:`MaintenanceRuntime.state` returns everything ``zamboni serve``'s state
 file carries (`zamboni.runstate`).
 
-**Provisional (0.8.0).** The constructor, the control surface, the observers
-and :func:`start_in_thread` are new public API, marked provisional until the
-first embedding application has adopted them. Claims (§6, #167) are not here
-yet.
+**A table runs only while this runtime holds its claim** (`zamboni.claims`,
+§6), so two runtimes sharing a claim store never maintain one table at once.
+
+**Provisional (0.8.0).** The constructor, the control surface, the observers,
+the claims and :func:`start_in_thread` are new public API, marked provisional
+until the first embedding application has adopted them.
 """
 
 from __future__ import annotations
@@ -45,6 +47,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, TypeVar
 
+from .claims import Claim, Claimer, ClaimStore, LocalClaimStore, new_holder
 from .fleet import FleetConfig, FleetWarehouse
 from .observe import Observers
 from .pool import ItemResult, PoolSize, WorkerConfig, WorkerPool, run_workers
@@ -132,6 +135,24 @@ class OfferReceipt:
     #: Why nothing was offered -- the runtime is stopping, or the warehouse is
     #: not in the fleet. ``None`` when the offer was considered table by table.
     refused: str | None = None
+
+
+@dataclass(frozen=True)
+class RuntimeSettings:
+    """How the runtime behaves (docs/maintenance-runtime.md §3.5).
+
+    Only the settings built so far; the rest of §3.5 arrives with its stories.
+    """
+
+    #: How long a table's claim lasts unless renewed (§6).
+    claim_lease: timedelta = timedelta(minutes=10)
+    #: How often a running table's claim is renewed; ``None`` is a third of
+    #: the lease. Must be under two-thirds of it, where an unrenewed table is killed.
+    claim_renew_every: timedelta | None = None
+
+    @property
+    def renew_every(self) -> timedelta:
+        return self.claim_renew_every or self.claim_lease / 3
 
 
 def _settle(
@@ -243,7 +264,11 @@ async def run_pressure_checks(
 class MaintenanceRuntime:
     """Schedules, events, pressure checks, the queue and the worker pool, on one loop.
 
-    ``observers`` are told what the runtime does (`zamboni.observe.Observer`).
+    ``claims`` is where table claims live (§6): a store every runtime that may
+    maintain the same tables shares. The default, a :class:`LocalClaimStore`
+    of this runtime's own, excludes nothing beyond what its queue already does
+    -- right for one replica. ``observers`` are told what the runtime does
+    (`zamboni.observe.Observer`).
     ``pool_factory`` builds the pool when :meth:`run` starts (a test passes a
     fake); ``wait`` replaces the scheduler's sleep, for a test driving
     ``clock``. ``feed_observer`` is told what each event feed does
@@ -256,8 +281,10 @@ class MaintenanceRuntime:
         fleet: FleetProvider,
         pool: PoolSize,
         worker: WorkerConfig,
+        claims: ClaimStore | None = None,
         events: Sequence[Any] = (),
         observers: Sequence[Any] = (),
+        settings: RuntimeSettings | None = None,
         feed_observer: Any = None,
         clock: Callable[[], datetime] = now_utc,
         pool_factory: Callable[[PoolSize, WorkerConfig], Any] = WorkerPool,
@@ -271,6 +298,17 @@ class MaintenanceRuntime:
         self._pool_factory = pool_factory
         self._wait = wait
         self._observers = Observers(observers)
+        self.settings = settings or RuntimeSettings()
+        #: Whose claims this runtime's are: unique to it, and names where it runs.
+        self.holder = new_holder()
+        # Built here, so a renewal cadence the lease cannot honour is refused
+        # by the constructor rather than at the first table.
+        self._claimer = Claimer(
+            LocalClaimStore() if claims is None else claims,
+            holder=self.holder,
+            lease=self.settings.claim_lease,
+            renew_every=self.settings.renew_every,
+        )
         self._ledger = Ledger()
         self._events = tuple(events)
         self._queue = CandidateQueue()
@@ -482,6 +520,7 @@ class MaintenanceRuntime:
                     on_result=self._finished,
                     clock=self._clock,
                     on_start=self._started_table,
+                    claims=self._claimer,
                 ),
                 self._provider.run(self._adopt, self._refused, self._stop),
                 self._stopping(),
@@ -524,8 +563,9 @@ class MaintenanceRuntime:
             self._ledger.fired(name, asked, at)
             self._observers.notify("fired", name, at, asked)
 
-    def _started_table(self, item: WorkItem) -> None:
-        self._observers.notify("started", item)
+    def _started_table(self, item: WorkItem, claim: Claim | None) -> None:
+        assert claim is not None, "this runtime starts a table only once it is claimed"
+        self._observers.notify("started", item, claim)
 
     def _finished(self, result: ItemResult) -> None:
         # Before the queue releases the table, so `state()` still counts it.

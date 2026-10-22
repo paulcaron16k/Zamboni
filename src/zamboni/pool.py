@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import io
 import json
 import logging
@@ -61,6 +62,7 @@ from multiprocessing import connection, get_context
 from pathlib import Path
 from typing import Any
 
+from .claims import Claim, Claimer
 from .fleet import FleetConfig
 from .scheduler import CandidateQueue, PressureCheck, WorkItem
 
@@ -442,11 +444,13 @@ class ItemResult:
     record: dict[str, Any] | None
     #: What the run printed, stdout and stderr together.
     output: str
-    #: Set only when the worker process itself died.
+    #: Why the table failed without a run record: its worker died -- killed for
+    #: a lost claim among the ways -- or the pool or the claim store failed.
     died: str | None
     seconds: float
     #: Why the table was never started, with exit 0: ``"deadline"`` when its
-    #: ``not_after`` had passed by the time a worker was free (§3.3). ``None``
+    #: ``not_after`` had passed by the time a worker was free (§3.3);
+    #: ``"claimed elsewhere"`` when another holder had its claim (§6). ``None``
     #: for a table that ran.
     dropped: str | None = None
 
@@ -456,6 +460,10 @@ class _Slot:
         self.process: Any = None
         self.conn: connection.Connection | None = None
         self.tables = 0
+        #: What the worker is running now, so one table's worker can be killed.
+        self.job: Job | None = None
+        #: ``job`` must not run: :meth:`WorkerPool.kill_table` was called for it.
+        self.doomed = False
 
 
 class WorkerPool:
@@ -481,9 +489,11 @@ class WorkerPool:
     async def run(self, item: Job) -> ItemResult:
         """Maintain one table on the next free worker."""
         slot = await self._idle.get()
+        slot.job = item
         try:
             return await asyncio.to_thread(self._run_blocking, slot, item)
         finally:
+            slot.job, slot.doomed = None, False
             self._idle.put_nowait(slot)
 
     def _run_blocking(self, slot: _Slot, item: Job) -> ItemResult:
@@ -503,6 +513,10 @@ class WorkerPool:
             if slot.process is None:
                 self._spawn(slot)
             assert slot.conn is not None
+            if slot.doomed:
+                # Killed before it was sent: the kill may have landed on the
+                # previous process, which the check above then replaced.
+                return ItemResult(item, 1, None, "", "worker killed before the table started", 0.0)
             # Any failure on the pipe is the worker dying, whichever call sees
             # it. A worker that dies during startup surfaces as
             # ConnectionResetError, not EOFError, because it exits with our job
@@ -569,8 +583,29 @@ class WorkerPool:
     def kill(self) -> None:
         """SIGKILL every live worker: a forced stop. Their tables report as died."""
         for slot in self._slots:
-            if slot.process is not None and slot.process.is_alive():
-                slot.process.kill()
+            # Read once: the slot's thread may replace or clear it meanwhile.
+            process = slot.process
+            if process is not None and process.is_alive():
+                process.kill()
+
+    def kill_table(self, item: Job) -> bool:
+        """Stop ``item`` for good: it reports as died. ``False`` if it was not running.
+
+        Its worker is SIGKILLed, and the slot is marked so that ``item`` is
+        never sent to a worker if the kill landed first -- otherwise a slot
+        replacing a worker it found dead would run the table after all.
+        Marked before the kill, and checked after the worker is spawned, so
+        one of the two always catches it.
+        """
+        for slot in self._slots:
+            if slot.job is item:
+                slot.doomed = True
+                # Read once: the slot's thread may replace or clear it meanwhile.
+                process = slot.process
+                if process is not None and process.is_alive():
+                    process.kill()
+                return True
+        return False
 
     async def close(self) -> None:
         """Retire every worker. Call when nothing is in flight."""
@@ -590,7 +625,8 @@ async def run_workers(
     *,
     on_result: Callable[[ItemResult], None] | None = None,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
-    on_start: Callable[[WorkItem], None] | None = None,
+    on_start: Callable[[WorkItem, Claim | None], None] | None = None,
+    claims: Claimer | None = None,
 ) -> None:
     """Take from ``queue`` into ``pool`` until ``stop``; then let in-flight tables finish.
 
@@ -609,9 +645,42 @@ async def run_workers(
     §3.3). It is checked with a worker already free, the last moment before
     the table would start, and reported with ``dropped="deadline"`` and exit 0:
     a window closing is not a failure.
+
+    **With ``claims``, a table starts only once its claim is acquired** (§6),
+    and the claim is held, renewed and released around its run. One held by
+    another replica drops the table as ``"claimed elsewhere"``, exit 0; a claim
+    store that cannot answer fails it, exit 1, because an unclaimed table must
+    not start. A claim lost while the table runs kills its worker
+    (``pool.kill_table``), and the result says why.
     """
     free = asyncio.Semaphore(pool.size.workers)
     running: set[asyncio.Task[None]] = set()
+
+    async def start(item: WorkItem, claim: Claim | None) -> ItemResult:
+        if on_start is not None:
+            try:
+                on_start(item, claim)
+            except Exception:  # a reporting hook never stops maintenance
+                logger.exception("on_start for %s/%s", item.warehouse, item.table)
+        result: ItemResult = await pool.run(item)
+        return result
+
+    async def claimed(item: WorkItem, claims: Claimer) -> ItemResult:
+        try:
+            holding = await claims.acquire(item.warehouse, item.table, reason=item.reason)
+        except Exception as exc:
+            logger.exception("claiming %s/%s", item.warehouse, item.table)
+            return ItemResult(item, 1, None, "", f"claim store error: {exc!r}", 0.0)
+        if holding is None:
+            logger.info("not starting %s/%s: claimed elsewhere", item.warehouse, item.table)
+            return ItemResult(item, 0, None, "", None, 0.0, dropped="claimed elsewhere")
+        async with claims.kept(holding, kill=lambda: pool.kill_table(item)):
+            result = await start(item, holding.claim)
+        if holding.lost is not None and result.died is not None:
+            result = dataclasses.replace(
+                result, died=f"claim lost ({holding.lost}); worker killed: {result.died}"
+            )
+        return result
 
     async def one(item: WorkItem) -> None:
         try:
@@ -624,13 +693,10 @@ async def run_workers(
                         item.not_after.isoformat(),
                     )
                     result = ItemResult(item, 0, None, "", None, 0.0, dropped="deadline")
+                elif claims is None:
+                    result = await start(item, None)
                 else:
-                    if on_start is not None:
-                        try:
-                            on_start(item)
-                        except Exception:  # a reporting hook never stops maintenance
-                            logger.exception("on_start for %s/%s", item.warehouse, item.table)
-                    result = await pool.run(item)
+                    result = await claimed(item, claims)
             except Exception as exc:  # one table's failure, not the loop's
                 logger.exception("running %s/%s", item.warehouse, item.table)
                 result = ItemResult(item, 1, None, "", f"pool error: {exc!r}", 0.0)

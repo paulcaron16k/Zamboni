@@ -35,7 +35,7 @@ Two categories beyond the usual set, because this tool deletes files:
   `True`, or kills their workers once the grace has passed and returns `False`.
   `StaticFleet` is the fleet source for an application that pushes each fleet
   change itself. **Provisional**: this is new public API and may change before
-  the release after this one; claims (#167) are not in it yet. `zamboni serve`
+  the release after this one. `zamboni serve`
   is now built on it and behaves as before, with one log line reworded: a
   second stop request logs `stop forced: killing in-flight workers`.
 - **Two more reasons, and deadlines, for `MaintenanceRuntime.offer()`** (#163,
@@ -55,6 +55,20 @@ Two categories beyond the usual set, because this tool deletes files:
   each event source's counters and connection, and per warehouse the last
   firing, result, sweep and pressure check (`zamboni.runstate`). `zamboni
   serve`'s state file and run log are now two such observers. Provisional,
+  with the rest of the runtime.
+- **Per-table claims** (#167, R4). A table runs only while its runtime holds
+  its claim in a `zamboni.claims.ClaimStore`, so runtimes sharing one store
+  never maintain the same table at once — orphan removal on one could otherwise
+  delete a compaction's uncommitted files on another.
+  `MaintenanceRuntime(claims=…, settings=RuntimeSettings(claim_lease=…,
+  claim_renew_every=…))`; the default is a `LocalClaimStore` of the runtime's
+  own, which is what `zamboni serve` uses, so `serve` is still one replica. A
+  table held elsewhere is dropped with exit 0 and `dropped="claimed
+  elsewhere"`; a store that cannot answer fails it unstarted. A claim not
+  renewed by two-thirds of its lease SIGKILLs that table's worker.
+  `zamboni.conformance.claim_store_conformance` is the suite a store must pass;
+  the PostgreSQL schema in docs/maintenance-runtime.md §6.1 passes it. The
+  observer method `started` now also receives the table's claim. Provisional,
   with the rest of the runtime.
 
 ### Changed
