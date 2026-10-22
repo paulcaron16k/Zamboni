@@ -4,15 +4,16 @@
 end (§12). Where this document and the code disagree, the code has not caught up
 yet or this document is wrong, and either way it is a defect.
 
-**Built so far: R1 (#162), R2 (#163) and R6 (#166), unreleased.**
+**Built so far: R1 (#162), R2 (#163), R4 (#167) and R6 (#166), unreleased.**
 `zamboni.runtime.MaintenanceRuntime` exists with the §3 control surface,
 `start_in_thread` and `RuntimeHandle`, and `zamboni serve` is an assembly of it.
 Every reason in §3.1 is accepted, offers merge as §3.2 says, and `offer` takes a
 `not_after` deadline (§3.3). Observers and the full `state()` are as §8
 describes, and `serve`'s state file and run log are two of those observers.
-Until the stories after them land, the constructor has no `claims` (R4) or
-`settings`, and nothing yet offers with a deadline but an application's own
-`offer` call: a schedule's window arrives with `WindowSchedule` (R3).
+A table runs only while its claim is held (§6). `RuntimeSettings` has only the
+two claim settings so far (§3.5), and nothing yet offers with a deadline but an
+application's own `offer` call: a schedule's window arrives with
+`WindowSchedule` (R3).
 
 **What this settles.** Zamboni decides *how* to maintain a table safely. Since
 [event-driven maintenance](event-driven-maintenance.md) it also decides *when*,
@@ -103,10 +104,10 @@ class MaintenanceRuntime:
         fleet: FleetProvider,
         pool: PoolSize,
         worker: WorkerConfig,                    # includes the worker entry, §7
-        claims: ClaimStore = LocalClaimStore(),  # §6
+        claims: ClaimStore | None = None,         # §6; None: a LocalClaimStore of its own
         events: Sequence[EventSource] = (),      # §5
         observers: Sequence[Observer] = (),      # §8
-        settings: RuntimeSettings = RuntimeSettings(),
+        settings: RuntimeSettings | None = None,  # None: every default, §3.5
         clock: Callable[[], datetime] = now_utc,
     ) -> None: ...
 
@@ -287,6 +288,11 @@ class first:
 | `priority_age_step` | 2 h | waiting time that raises an entry one class (§3.4) |
 | `worker_nice` | 10 | scheduling priority of workers; the runtime process is left at 0 |
 | `worker_oom_score_adj` | 900 | makes a worker the kernel's preferred OOM victim (§7.1) |
+
+Built so far: `claim_lease` and `claim_renew_every` (R4). The constructor
+refuses a `claim_renew_every` at or above two-thirds of `claim_lease` — every
+table would be killed before its first renewal
+(`test_a_renewal_cadence_the_lease_cannot_honour_is_refused_at_construction`).
 
 ---
 
@@ -508,20 +514,35 @@ class ClaimStore(Protocol):
 **What the runtime does with them:**
 
 - A worker starts a table only after `acquire` succeeds. A failed acquire drops
-  the entry as `claimed elsewhere` (exit 0).
+  the entry as `claimed elsewhere` (exit 0;
+  `test_a_table_claimed_elsewhere_is_dropped_without_running`). A store that
+  raises fails the table unstarted, exit 1 — an unclaimed table must not start
+  (`test_a_claim_store_that_cannot_answer_fails_the_table_unstarted`).
 - The runtime renews every `claim_renew_every` while the table runs.
-- **A claim that cannot be renewed stops its table.** If renewal has not
-  succeeded by two-thirds of the lease, the runtime SIGKILLs that table's worker
-  — before the lease can expire and another replica can claim it. A hard kill is
-  safe (a compaction commits once, at the end; its written files become orphans
-  for a later sweep); two replicas maintaining one table is not.
-- `release` runs however the table ends, including when its worker died.
+- **A claim that cannot be renewed stops its table.** A renewal answered `None`
+  means the claim is gone, and the worker is killed at once
+  (`test_a_claim_reported_gone_kills_its_worker_at_once`). A renewal that raises
+  or hangs is retried, at a quarter of the cadence (chosen, not measured); if
+  none has succeeded by two-thirds of the lease, the runtime SIGKILLs that
+  table's worker — before the lease can expire and another replica can claim it
+  (`test_a_claim_not_renewed_kills_its_worker_before_the_lease_expires`). A hard
+  kill is safe (a compaction commits once, at the end; its written files become
+  orphans for a later sweep); two replicas maintaining one table is not. The
+  result's `died` says the claim was lost and why.
+- `release` runs however the table ends, including when its worker died
+  (`test_a_claim_is_released_however_the_table_ends`).
 
 Zamboni ships `LocalClaimStore` (in-process; what `zamboni serve` uses, single
-replica) and a **conformance suite**, `zamboni.testing.claim_store_conformance`,
+replica) and a **conformance suite**, `zamboni.conformance.claim_store_conformance`,
 which every implementation must pass: concurrent acquires with exactly one
 winner, expiry and re-acquire, token monotonicity, foreign renew and release
-refused, store-clock expiry.
+refused, store-clock expiry. It is not in `zamboni.testing`, which imports
+private PyIceberg classes an implementer of a claim store has no use for. Each
+check is a plain function raising `ConformanceError` with the rule it found
+broken, so the suite runs under any test runner; `CLAIM_STORE_CHECKS` lets
+pytest report each by name. `LocalClaimStore` passes it
+(`test_local_claim_store_passes`), and every check is shown to reject a store
+broken its own way (`test_every_check_rejects_some_broken_store`).
 
 ### 6.1 Reference schema (PostgreSQL)
 
@@ -576,7 +597,10 @@ sequence value; gaps in tokens are expected and mean nothing.
   acquire);
 - **eight concurrent acquires of one free table produced exactly one winner.**
 
-The conformance suite (§6) turns these into tests every implementation runs.
+The conformance suite (§6) turns these into tests every implementation runs,
+and `test_the_postgres_reference_claim_store_passes` runs it against the dev
+stack's PostgreSQL with the statements above, read from this document by
+`tests/claims_postgres.py` — so an edit here is an edit to what is tested.
 
 ---
 
@@ -691,7 +715,7 @@ class Observer:                                   # zamboni.observe; every metho
     def ticked(self, at: datetime) -> None: ...             # every scheduler step: liveness
     def fired(self, warehouse: str, at: datetime, tables: Sequence[str]) -> None: ...
     def offered(self, receipt: OfferReceipt) -> None: ...   # each call to offer()
-    def started(self, item: WorkItem) -> None: ...          # gains the claim with R4
+    def started(self, item: WorkItem, claim: Claim) -> None: ...  # holding its claim, §6
     def finished(self, result: ItemResult) -> None: ...     # ran, failed, died, or dropped
     def fleet_changed(self, generation: int, fleet: FleetConfig) -> None: ...
     def refused(self, kind: str, detail: str) -> None: ...  # "fleet": a candidate not adopted
@@ -703,8 +727,8 @@ def handed_off(observer, *, name: str | None = None) -> HandedOff: ...
 Subclassing is optional: the runtime calls whichever of these methods an object
 has, so an object defining only `finished` is an observer. `fired` names the
 tables a firing asked for, which excludes any already in flight. `started` is
-not called for a table dropped at its deadline; `finished` is, with
-`result.dropped == "deadline"`. `refused` is told once per new reason, not on
+not called for a table dropped at its deadline or claimed elsewhere; `finished`
+is, with `result.dropped` set to `"deadline"` or `"claimed elsewhere"`. `refused` is told once per new reason, not on
 every poll of a fleet file that is still bad. An unparseable event is the
 feed's to report (`FeedObserver`, event-driven-maintenance.md §8), not a
 runtime observer's.
@@ -845,7 +869,7 @@ does not fit.
 
 An implementation is conformant when:
 
-1. its `ClaimStore` passes `zamboni.testing.claim_store_conformance`;
+1. its `ClaimStore` passes `zamboni.conformance.claim_store_conformance`;
 2. its worker entry passes the entry checks in `zamboni.testing` (importable
    when spawned, previews without `commit`, returns a run record, carries no
    secret in its inputs);

@@ -162,8 +162,14 @@ to observers on its loop, and one that raises is logged and ignored;
 whole state file's content: the per-warehouse record (sweeps, last result,
 pressure) is kept by `runstate.Ledger`, so the state file is `state()` plus
 serve's pid, fleet path and `--yes`, and `tests/fixtures/serve/state-golden.json`
-holds it to the byte. Nothing in it decides whether a table needs work; that is
-still `maintain()`'s due-check, run in each worker.
+holds it to the byte. A table runs only while the runtime holds its claim
+(`claims.py`): acquired before it starts, renewed by `Claimer`, and a claim that
+cannot be renewed by two-thirds of its lease SIGKILLs that table's worker
+(`WorkerPool.kill_table`) before another replica could take it. `serve` uses a
+`LocalClaimStore`; a shared store must pass `conformance.claim_store_conformance`,
+which `tests/claims_postgres.py` runs against §6.1's SQL read from the design doc.
+Nothing in the runtime decides whether a table needs work; that is still
+`maintain()`'s due-check, run in each worker.
 docs/maintenance-runtime.md is the design and §12 the stories still to build.
 
 **`runlog.py`** is the other end of `maintenance --json`: it reads a series of

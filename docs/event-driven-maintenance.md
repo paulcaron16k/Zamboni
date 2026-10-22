@@ -522,8 +522,11 @@ table.
 CPUs, not the container's quota. Memory matters more: `workers × memory_budget_bytes`
 is what the limit must cover.
 
-**One replica**, `strategy: Recreate`, until a claim protocol exists. A
-`RollingUpdate` briefly runs two pods, which is the case there is no interlock for.
+**One replica**, `strategy: Recreate`. `serve` holds its table claims in a
+`LocalClaimStore` of its own, which excludes nothing across pods, so a
+`RollingUpdate` briefly running two is still the case there is no interlock for.
+Several replicas take a `ClaimStore` both can reach, which an application
+embedding the runtime supplies ([maintenance-runtime.md §6](maintenance-runtime.md#6-claims)).
 
 **A writable spill directory** — an `emptyDir` at `/tmp` on a read-only root
 filesystem, or `temp_directory` pointed somewhere mounted.
@@ -856,7 +859,7 @@ capability the two config files do not already provide.
 | Partition targeting weakens §6.6 | orphan removal excluded by design; "targeted orphan removal" is a **non-goal** |
 | Ingestion grows a dependency on NATS | advisory and fire-and-forget; the test is that killing NATS leaves ingestion and maintenance working, only slower |
 | A long-running process holds credentials | the OAuth2 client-credentials path self-refreshes; a bearer token does not |
-| Two instances maintain one table | single-instance until a claim protocol exists |
+| Two instances maintain one table | `serve` is single-instance; replicas of an embedding application share a `ClaimStore` (maintenance-runtime.md §6) |
 | Event storm during a backfill | the queue coalesces per table and debounces |
 
 ## 11. Open questions
