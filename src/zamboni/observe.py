@@ -13,8 +13,7 @@ taken -- so anything slow (a database write, an HTTP call) is handed off.
 :func:`handed_off` does that for any observer: each call is queued and made, in
 order, on a thread of its own.
 
-**Provisional (0.8.0)**, with the rest of the runtime. ``started`` gains the
-table's claim with #167.
+**Provisional (0.8.0)**, with the rest of the runtime.
 """
 
 from __future__ import annotations
@@ -27,6 +26,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from .claims import Claim
     from .fleet import FleetConfig
     from .pool import ItemResult
     from .runtime import OfferReceipt
@@ -75,8 +75,12 @@ class Observer:
     def offered(self, receipt: OfferReceipt) -> None:
         """A call to :meth:`~zamboni.runtime.MaintenanceRuntime.offer`, and what it did."""
 
-    def started(self, item: WorkItem) -> None:
-        """A worker took ``item``. Not called for a table dropped at its deadline."""
+    def started(self, item: WorkItem, claim: Claim) -> None:
+        """A worker took ``item``, holding ``claim`` on its table (§6).
+
+        Not called for a table dropped -- at its deadline, or because another
+        holder had its claim.
+        """
 
     def finished(self, result: ItemResult) -> None:
         """A table ended: ran, failed, its worker died, or dropped at its deadline."""

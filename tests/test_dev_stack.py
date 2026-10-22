@@ -1139,3 +1139,61 @@ def test_the_watermark_and_changed_set_hold_on_every_load(session, table):
         changed = changed_partitions(tbl)
         assert changed.paths == frozenset({"category=c", "category=d"})
         assert changed.snapshots == 2
+
+
+# -- the PostgreSQL reference claim store (#167) ----------------------------------
+#
+# docs/maintenance-runtime.md §6.1's schema and statements, read from the
+# document, against the stack's own Postgres: the same conformance suite
+# `LocalClaimStore` passes in tests/test_claims.py. Each test gets a schema of
+# its own and drops it, so Lakekeeper's tables in the same database are never
+# touched.
+
+
+@pytest.fixture
+def claim_store():
+    from zamboni.conformance import ClaimStoreHarness
+
+    from .claims_postgres import PostgresClaimStore, psycopg
+
+    values = stack_env() or {}
+    keys = ("POSTGRES_PORT", "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB")
+    if not all(values.get(k) for k in keys):
+        unavailable(f"no Postgres settings in {ENV_FILE}")
+    conninfo = (
+        f"host=localhost port={values['POSTGRES_PORT']} dbname={values['POSTGRES_DB']} "
+        f"user={values['POSTGRES_USER']} password={values['POSTGRES_PASSWORD']} connect_timeout=3"
+    )
+    try:
+        psycopg.connect(conninfo).close()
+    except psycopg.OperationalError as exc:
+        unavailable(f"the dev stack's Postgres is not reachable: {exc}")
+
+    schemas: list[str] = []
+
+    def make_store() -> PostgresClaimStore:
+        schema = f"zamboni_claims_{uuid.uuid4().hex[:12]}"
+        with psycopg.connect(conninfo, autocommit=True) as conn:
+            conn.execute(f"CREATE SCHEMA {schema}")
+        schemas.append(schema)
+        store = PostgresClaimStore(conninfo, schema)
+        store.create_schema()
+        return store
+
+    try:
+        yield ClaimStoreHarness(make_store=make_store, now=lambda store: store.now())
+    finally:
+        with psycopg.connect(conninfo, autocommit=True) as conn:
+            for schema in schemas:
+                conn.execute(f"DROP SCHEMA {schema} CASCADE")
+
+
+def _claim_store_checks():
+    from zamboni.conformance import CLAIM_STORE_CHECKS
+
+    return CLAIM_STORE_CHECKS
+
+
+@pytest.mark.parametrize("check", _claim_store_checks(), ids=lambda c: c.__name__)
+def test_the_postgres_reference_claim_store_passes(claim_store, check):
+    check(claim_store)
