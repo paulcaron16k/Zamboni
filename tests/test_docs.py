@@ -13,6 +13,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
 TESTS = Path(__file__).resolve().parent
@@ -723,3 +725,113 @@ def test_the_documented_inheritance_examples_resolve_as_documented():
         for key in path:
             got = got[key]
         assert got == expected, f"inheritance row {defaults_cell} | {table_cell}: got {got!r}"
+
+
+# -- gh agile spellings ----------------------------------------------------------
+
+#: Every `gh agile` spelling gh-agile v0.4.0 retired (its docs/release-v0.4.0.md
+#: table, AGILE-200), with what replaced it. Copied rather than read because that
+#: repository is private and CI has no gh-agile installed. #228.
+RETIRED_GH_AGILE = (
+    (
+        (
+            r"gh agile (?:initiative|epic|story|task)\s+"
+            r"(?!(?:create|list|view|reconcile)\b|-h\b|--help\b)"
+        ),
+        "`<level> create -t TITLE` (a title is never positional)",
+    ),
+    (r"gh agile (?:move|set|fix|plan|hooks|setup)\b", "`issue move|edit|reconcile`, or `init`"),
+    (r"gh agile board show\b", "`board view`"),
+    (r"gh agile board create --name\b", "`board create NAME`"),
+    (
+        r"gh agile project (?:create|owner|sprint-template|title-prefix)\b",
+        "`init` or `project edit`",
+    ),
+    (r"gh agile key\b(?!\s+(?:list|add|delete)\b)", "`key list` / `key add K`"),
+    (r"gh agile validate --id\b", "`issue view N`"),
+    (
+        r"gh agile export[^\n`]*?(?:--csv\b|--state\s|--grain both)",
+        "`--format csv`, `--state-file`, `--grain issues,events`",
+    ),
+    (r"gh agile sync[^\n`]*?--query\b", "`sync --search`"),
+    (r"gh agile issue edit[^\n`]*?--number\b", "`--value N`"),
+    (r"gh agile[^\n`]*--add-assignee(?=[ \t]*(?:$|`|#|--|\)))", "`--add-assignee @me`"),
+)
+
+
+def gh_agile_documents() -> list[Path]:
+    """The documents that teach `gh agile`, less the frozen backlog: its commands
+    are history, and it is hash-pinned (`test_the_historical_backlog_is_frozen`)."""
+    frozen = DOCS / "tasks_historical.md"
+    return [p for p in all_docs() if p != frozen] + [ROOT / "CLAUDE.md"]
+
+
+def retired_gh_agile_spellings(text: str) -> list[str]:
+    found = []
+    for pattern, replacement in RETIRED_GH_AGILE:
+        for match in re.finditer(pattern, text, flags=re.M):
+            line = text.count("\n", 0, match.start()) + 1
+            found.append(f"line {line}: {match.group(0).strip()!r} -> {replacement}")
+    return found
+
+
+def test_no_document_spells_gh_agile_the_way_v0_4_0_retired():
+    """gh-agile v0.4.0 reshaped its CLI on `gh`'s rules, and every old spelling
+    now fails at argument parsing. CONTRIBUTING.md kept teaching them, which was
+    found only when the documented `gh agile move N --status Done --close` was
+    refused while closing #167. The release's hints naming each replacement go in
+    the release after it, so the next reader would get a bare usage error. #228.
+    """
+    offenders = {
+        doc.name: found
+        for doc in gh_agile_documents()
+        if (found := retired_gh_agile_spellings(doc.read_text()))
+    }
+    assert not offenders, f"retired gh agile spellings: {offenders}"
+
+
+@pytest.mark.parametrize(
+    "retired",
+    [
+        'gh agile story "What it is" --epic 3',
+        'gh agile epic "Snapshot expiry" --key AGILE',
+        "gh agile move 12 --status Done --close",
+        'gh agile set --issue 12 --field Sprint --value "0005 W42-2026"',
+        "gh agile hooks",
+        "gh agile setup",
+        "gh agile plan 12 --for 6w",
+        "gh agile board show backlog",
+        "gh agile board create --name Kanban",
+        "gh agile project sprint-template --template 2-week",
+        "`gh agile key` lists the keys",
+        "gh agile validate --id 12",
+        "gh agile export --csv",
+        "gh agile export --grain both",
+        "gh agile sync --query is:open",
+        "gh agile issue edit 12 --field FR --number 3",
+        "gh agile issue move 12 'In Progress' --add-assignee   # me",
+    ],
+)
+def test_each_retired_spelling_is_recognised(retired):
+    assert retired_gh_agile_spellings(retired), f"not caught: {retired}"
+
+
+@pytest.mark.parametrize(
+    "current",
+    [
+        'gh agile story create -t "What it is" --epic none',
+        "gh agile epic list",
+        "gh agile story --help",
+        "gh agile issue move 12 'In Progress' --add-assignee @me",
+        "gh agile issue close 12 --evidence -",
+        "gh agile issue edit 12 --field Sprint --value @current",
+        "gh agile board view backlog",
+        "gh agile key list",
+        "gh agile init",
+        "gh agile export --format csv --state-file s.json",
+        "gh agile sync --search is:open",
+        "claims an unassigned issue even without `--add-assignee`; name another login",
+    ],
+)
+def test_a_current_spelling_is_not_taken_for_a_retired_one(current):
+    assert not retired_gh_agile_spellings(current), f"false positive: {current}"

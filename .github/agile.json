@@ -29,7 +29,8 @@
     "issue_title_prefix": "key",
     "key": "ZMBNI",
     "name": "Zamboni",
-    "number": 23
+    "number": 23,
+    "owner": "paulcaron16k"
   },
   "sprint": {
     "ahead": 2,
