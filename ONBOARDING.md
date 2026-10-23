@@ -163,8 +163,11 @@ managed with the [`gh agile`](https://github.com/paulcaron16k/gh-agile) extensio
 ```bash
 gh extension install paulcaron16k/gh-agile
 gh agile validate                            # do the board's conventions hold?
-gh agile story "What it is" --epic <n> --intent "..." --acceptance "..."
+gh agile story create -t "What it is" --epic <n> --intent "..." --acceptance "..."
 ```
+
+These are gh-agile v0.4.0's spellings (`gh agile --version`); the whole workflow — picking up,
+finishing, the post-merge hook — is in [CONTRIBUTING.md](CONTRIBUTING.md#issue-management).
 
 That extension's repository is **private**, so the install works only if you have been given
 access. Without it, `gh issue create` and the board's web UI do the same job by hand; ask for

@@ -175,8 +175,10 @@ anywhere an issue number is, and `gh agile` resolves it. If your change does
 not fit an open issue, filing one is part of the change:
 
 ```bash
-gh agile story "What it is" --epic <n> --intent "..." --acceptance "..."
+gh agile story create -t "What it is" --epic <n> --intent "..." --acceptance "..."
 ```
+
+`--epic none` files a story that belongs to no epic.
 
 Epics and stories live on [board #23](https://github.com/users/paulcaron16k/projects/23).
 **Ids are GitHub's now.** Older
@@ -196,30 +198,62 @@ because it reads as current.
 ```bash
 gh extension install paulcaron16k/gh-agile     # once
 gh extension upgrade agile                     # thereafter
-gh extension list                              # confirm: gh agile  paulcaron16k/gh-agile  <sha>
+gh agile --version                             # confirm: gh-agile v0.4.0 or later
 ```
+
+**v0.4.0 (2026-10-22) changed how every command is spelled**, to follow `gh`'s
+own rules: a noun, then a verb, then the issue
+(`gh agile issue move <n> "In Progress"`, like `gh issue close <n>`), and titles
+as `-t`. An older spelling fails at once rather than doing something else, and
+for v0.4.0 only the error names its replacement.
+`test_no_document_spells_gh_agile_the_way_v0_4_0_retired` fails on any retired
+spelling in these docs.
 
 It needs a `gh` already authenticated against the repository and the project
 (`gh auth status`), and a token with `project` scope — `gh auth refresh -s project`
 if a command fails on permissions rather than on arguments.
 
 The board's own configuration lives in the profile the extension keeps; you do
-not need to create anything. `gh agile key` lists the repository keys, which is
-what makes `ZMBNI-123` work anywhere an issue number does.
+not need to create anything. `gh agile key list` lists the repository keys,
+which is what makes `ZMBNI-123` work anywhere an issue number does.
 
 ### Picking up an issue
 
-Choose from the backlog, then set three things — `move` does two of them:
+Choose from the backlog, then set three things — `issue move` does two of them:
 
 ```bash
-gh agile board show backlog                                        # pick one
-gh agile set --issue <n> --field Sprint --value "<sprint title>"   # a) sprint
-gh agile move <n> --status "In Progress" --add-assignee            # b) + c) assignee, status
+gh agile board view backlog                                  # pick one
+gh agile issue edit <n> --field Sprint --value @current      # a) sprint
+gh agile issue move <n> "In Progress" --add-assignee @me     # b) + c) assignee, status
 ```
 
-`--add-assignee` with no value means you, and moving to In Progress claims an
-unassigned issue anyway; pass it explicitly when the work belongs to someone
-else.
+Moving to In Progress claims an unassigned issue even without
+`--add-assignee`; name another login when the work belongs to someone else.
+`@current` names the current sprint according to `issue edit --help`; it has not
+yet been exercised on this board under v0.4.0 (under the old `set` it changed
+nothing), so if no `sprint:` label appears, pass the title `gh agile sprint list`
+shows.
+
+**A newly filed issue can be refused** with `is not on project 23`, although
+`gh issue view <n> --json projectItems` shows it on the board. `issue edit` and
+`issue move` read the project's item list, and GitHub can leave a new item out
+of that list even though the item exists:
+
+- 2026-10-15: the item appeared in the list after about 30 minutes.
+- 2026-10-22, #228: still missing after 70 minutes. Fetched by id, the item was
+  on project 23 and not archived, while all 139 items in the list excluded it.
+
+Removing it from the board and adding it again does not help. Writing the fields
+to the item directly does (#228), with the field ids from
+`gh project field-list 23 --owner paulcaron16k`. Add the `sprint:<start-date>`
+label by hand too, because only `gh agile` stamps it:
+
+```bash
+gh api graphql -f query='query{repository(owner:"paulcaron16k",name:"Zamboni"){
+  issue(number:<n>){projectItems(first:1){nodes{id}}}}}'      # the item id
+gh project item-edit --project-id <project id> --id <item id> --field-id <field id> \
+  --single-select-option-id <option id>                      # Status; --iteration-id for Sprint
+```
 
 **Step (a) needs a current sprint to exist, and its title is whatever
 `gh agile sprint list` says it is** — do not hardcode one, because the
@@ -229,15 +263,15 @@ convention has already changed once, from `ZMBNI Sprint 3` to `0004 W40-2026`.
 Check for it *before* starting rather than after finishing: `gh agile sprint
 backfill` derives the `sprint:` label from the Sprint *field*, so an issue
 worked while no sprint existed has nothing to backfill from and needs the label
-added by hand with `gh issue edit <n> --add-label "sprint:<start-date>"` —
-`gh agile set --field Sprint` reports success on a closed issue and changes
-nothing.
+added by hand with `gh issue edit <n> --add-label "sprint:<start-date>"`. Setting
+the Sprint field on a closed issue reported success and changed nothing before
+v0.4.0 (2026-09, with the old `set`); it has not been re-checked since.
 
 Optionally confirm the issue moved, which is worth doing after a batch:
 
 ```bash
-gh agile board show backlog    # it should be gone from here
-gh agile board show sprint     # and present here
+gh agile board view backlog    # it should be gone from here
+gh agile board view sprint     # and present here
 ```
 
 ### Finishing an issue
@@ -246,19 +280,27 @@ After the pull request is approved and the branch merged — **not when the code
 is written**:
 
 ```bash
-gh agile move <n> --status Done --close --evidence "Delivered in PR #<pr>. ..."
+gh agile issue close <n> --evidence "Delivered in PR #<pr>. ..."   # closed as completed, Status Done
+gh agile issue close <n> -r "not planned" -c "why"                 # a won't-do: no Evidence needed
 ```
 
-`--evidence` is required for Done and is written into the issue's Evidence
-section. Say what shipped and how it was verified: the PR, what the tests cover,
-what was measured. It is *silently discarded* for any other status, so record a
-Blocked or In Review rationale with `gh issue comment` instead.
+`issue close` takes `gh issue close`'s `-r` and `-c`, and in one call closes the
+issue, sets Status to Done and writes `--evidence` into the issue's Evidence
+section (#167 was closed this way). Evidence is required to close as completed.
+Say what shipped and how it was verified: the PR, what the tests cover, what
+was measured. `--evidence -` reads it from stdin, which avoids quoting a long
+one in the shell.
+
+**Close with `gh agile issue close`, not `gh issue close`.** The two look alike;
+the plain one sets neither Status nor Evidence, and no project automation fills
+them in any more (below). The issue then sits closed but not Done until someone
+finishes it.
 
 Then re-read the board, because several of these commands report success
 whether or not anything changed:
 
 ```bash
-gh agile board show backlog    # flags "closed, but Status is not Done", with the fix command
+gh agile board view backlog    # flags "closed, but Status is not Done", with the fix command
 gh agile validate              # missing sprint: labels, epics stamped into a sprint, and more
 ```
 
@@ -266,7 +308,7 @@ gh agile validate              # missing sprint: labels, epics stamped into a sp
 so install the post-merge hook once per clone:
 
 ```bash
-gh agile hooks                             # installs post-merge into this clone
+gh agile init                              # once per clone: installs post-merge (and converges the board)
 gh agile unfinished                        # what the hook runs: ORIG_HEAD..HEAD by default
 gh agile unfinished --range <a>..<b>       # or any range, after the fact
 ```
@@ -275,31 +317,46 @@ It names each issue the merge closed whose board state has not caught up, says
 what is missing, and prints the command to finish it. Run it against an older
 merge and it will find whatever was missed then, too.
 
+`init` is what v0.4.0 has instead of `hooks`, and it does more than install the
+hook. It is safe to run again; on this repository's existing profile it changes
+nothing that matters. Run on 2026-10-22, it:
+
+- kept the profile's settings, including the `ZMBNI-n` title prefix;
+- added `project.owner` to `.github/agile.json` (already committed, so you see no diff);
+- created the `type:task` label and reported the four boards as updated;
+- printed the current setting of every project automation.
+
+Run it from the main clone, not from a `git worktree`. In a worktree v0.4.0
+writes the hook into `.git/worktrees/<name>/hooks`, where git never runs it,
+while saying it is installed (AGILE-223). A hook installed from the main clone
+serves every worktree.
+
 ### Three things that catch everyone
 
 **Epics and initiatives are never in a sprint.** They span them, so they carry
 no Sprint value and no `sprint:` label. Strays clear with
 `gh agile sprint unstamp` (`--dry-run` first).
 
-**Board state is written by hand here, and the project automations that used
-to write it have been turned off.** Two were doing damage and are now disabled:
+**Board state is written by hand here.** Every project automation that changed
+an issue's Status is off, the last two since 2026-10-22:
 
 | Workflow | Why it is off |
 |---|---|
 | `Pull request linked to issue` | set a linked issue to *In Progress* when a PR naming `Closes #n` was opened — after `Item closed` had set Done, so an issue closed before its PR was raised finished closed but **not** Done. Ten issues drifted that way in September |
-| `Auto-close issue` | closed an issue when its Status became Done, racing `gh agile move --not-planned` and winning: closed as COMPLETED, and a close reason cannot be changed afterwards, so a "won't do" was recorded permanently as done |
+| `Auto-close issue` | closed an issue when its Status became Done, racing the tool's own not-planned close and winning: closed as COMPLETED, and a close reason cannot be changed afterwards, so a "won't do" was recorded permanently as done |
+| `Item closed` | wrote **Status and nothing else** — no Evidence, no closing `sprint:` label, no completed-or-not-planned — so an issue it touched read Done while unfinished, and the gap was invisible except to `gh agile validate` |
+| `Pull request merged` | acts on pull-request items, and this board holds only issues |
 
-`Item closed` is still on and is the one left to decide. It writes **Status and
-nothing else** — no Evidence, no closing `sprint:` label, no
-completed-or-not-planned — so an issue it touches reads Done while being
-unfinished, and the gap is invisible except to `gh agile validate`. With it off,
-a closed issue stays visibly unfinished on the backlog board until
-`gh agile move --status Done --evidence` writes all three. `gh agile validate`
-reports the current state of all of these, so check it rather than this table if
-they have moved again.
+Two stay on: `Item added to project` and `Auto-add sub-issues to project`. They
+put new issues on the board, and a new item starts at Todo (#228 did).
+
+So Status changes only through `gh agile issue move` and `gh agile issue close`.
+An issue closed any other way, including by a merged PR, stays visibly unfinished
+on the backlog board and in `gh agile unfinished` until one of them finishes it.
 
 None of these are reachable from the command line; they are switches in the
-project's settings.
+project's settings. `gh agile init` prints the current setting of each, so check
+that rather than this table if they have moved again.
 
 ## Non-obvious workarounds carry their reason
 
