@@ -1144,6 +1144,34 @@ def test_an_unknown_operation_is_a_usage_error(capsys):
     assert "unknown operation(s) ['defrag']" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("hours", ["0", "-3", "inf", "nan", "eighteen"])
+def test_a_minimum_interval_that_is_not_a_positive_number_is_a_usage_error(hours, capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["maintenance", "--min-interval-hours", hours])
+    assert exc.value.code == 2
+    assert "positive number of hours" in capsys.readouterr().err
+
+
+def test_due_anyway_without_an_interval_is_a_usage_error(devops_dir, session, capsys):
+    """Alone it would read as "run only these", which --operations already says."""
+    assert main(["maintenance", "--due-anyway", "compact"]) == 2
+    assert "--due-anyway needs --min-interval-hours" in capsys.readouterr().err
+
+
+def test_a_table_inside_its_minimum_interval_is_reported_not_due(devops_dir, session, capsys):
+    """What a worker runs when a window fires again inside the window."""
+    assert main(["maintenance", "--yes"]) == 0
+    capsys.readouterr()
+
+    assert (
+        main(["maintenance", "--yes", "--min-interval-hours", "18", "--due-anyway", "expire"]) == 0
+    )
+    out = capsys.readouterr().out
+    assert "expire: not due" not in out, "--due-anyway is not held back"
+    assert "compact: not due -- maintained by" in out
+    assert "18-hour minimum interval" in out
+
+
 def test_health_checks_every_table_in_a_config_and_writes_json(
     warehouse, tmp_path, unpartitioned, mor_table, capsys
 ):

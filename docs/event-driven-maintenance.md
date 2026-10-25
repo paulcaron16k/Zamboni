@@ -234,6 +234,15 @@ warehouses:
     random: false                           # exactly 03:30; spreading is on otherwise
     pressure: {delete_files: 20}            # this key over the defaults; false is off
     table_config: globex/table-config.json  # or a path, relative to this file
+  - name: initech
+    schedule:
+      window:                               # overnight in the owner's zone
+        timezone: America/Toronto
+        start_hour: 1                       # [01:00, 05:00) local
+        end_hour: 5
+        min_interval_hours: 18              # per table, from its own watermark
+    table_config:
+      namespaces: {raw: {tables: {events: {}}}}
 ```
 
 Implemented by `zamboni.fleet` (ZMBNI-118). The decisions it encodes, each
@@ -256,6 +265,13 @@ tested in `tests/test_fleet.py`:
 - **Schedules are crontab(5) five-field expressions in UTC**, with crontab's own
   rule that a restricted day-of-month *or* day-of-week matches. A schedule that
   can never fire (`0 0 30 2 *`) is refused rather than left to never run.
+- **Or a window in a named time zone** (ZMBNI-164,
+  [maintenance-runtime.md §4.2](maintenance-runtime.md#42-windowschedule--new)):
+  `[start_hour, end_hour)` local wall-clock, wrapping midnight, firing when it
+  opens with its close as the deadline. Spread is forward only, a window
+  already open when the service starts fires at once, and a table maintained
+  within `min_interval_hours` is reported `not due`. Tested in
+  `tests/test_window_schedule.py`.
 - **Firings are spread by default** (ZMBNI-144). A firing moves by up to
   ±`RANDOM_PCT` (5) percent of the gap to the next one, capped at
   ±`RANDOM_LIMIT_MINUTES` (30): a daily 02:00 lands between 01:30 and 02:30, a

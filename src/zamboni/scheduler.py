@@ -38,7 +38,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from .fleet import FleetConfig, FleetWarehouse
+from .fleet import Firing, FleetConfig, FleetWarehouse
 from .settings import DEFAULT_OPERATIONS
 from .tableconfig import TableConfig
 
@@ -209,6 +209,9 @@ class WorkItem:
     #: As on :class:`Candidate`.
     also: frozenset[str] = frozenset()
     not_after: datetime | None = None
+    #: The warehouse schedule's minimum interval per table, taken from the fleet
+    #: with the rest of the item; ``None`` for cron. See :attr:`interval_rule`.
+    min_interval: timedelta | None = None
 
     def __post_init__(self) -> None:
         check_offer(self.reason, self.also, self.not_after)
@@ -224,6 +227,24 @@ class WorkItem:
     @property
     def operations(self) -> tuple[str, ...] | None:
         return operations_of(self.reasons)
+
+    @property
+    def interval_rule(self) -> tuple[timedelta, tuple[str, ...]] | None:
+        """The minimum interval this run honours, and the operations it runs anyway.
+
+        The interval belongs to the *schedule* (docs/maintenance-runtime.md
+        §4.2 point 4), so it holds back only what the schedule asked for. An
+        event merged into a scheduled run still runs its operations on a table
+        maintained an hour ago -- the write it reports is newer than that -- and
+        a manual run, which asks for everything, is not held back at all.
+        """
+        if self.min_interval is None or SCHEDULE not in self.reasons:
+            return None
+        others = self.reasons - {SCHEDULE}
+        anyway = operations_of(others) if others else ()
+        if anyway is None:
+            return None
+        return self.min_interval, anyway
 
     def candidate(self) -> Candidate:
         """This item as the offer it was taken from, to put back in the queue."""
@@ -382,25 +403,22 @@ def _resolve(candidate: Candidate, fleet: FleetConfig) -> WorkItem | None:
         uri=warehouse.uri,
         also=candidate.also,
         not_after=candidate.not_after,
+        min_interval=warehouse.schedule.min_interval,
     )
 
 
-@dataclass(frozen=True)
-class _Armed:
-    #: The firing the cron expression names.
-    nominal: datetime
-    #: When it is actually offered: ``nominal`` plus the schedule's offset,
-    #: which is zero unless the schedule is ``random``.
-    due: datetime
+def _arm(warehouse: FleetWarehouse, after: datetime) -> Firing:
+    """The firing after one that has fired."""
+    return warehouse.schedule.firing_after(after, warehouse.name)
 
 
-def _arm(warehouse: FleetWarehouse, after: datetime) -> _Armed:
-    nominal = warehouse.schedule.next_after(after)
-    return _Armed(nominal, nominal + warehouse.schedule.offset(nominal, warehouse.name))
+def _arm_fresh(warehouse: FleetWarehouse, now: datetime) -> Firing:
+    """The firing a fresh start, a new warehouse or a changed schedule waits for."""
+    return warehouse.schedule.first_firing(now, warehouse.name)
 
 
 class Scheduler:
-    """Per-warehouse cron firings, as pure functions of the time it is given.
+    """Per-warehouse firings, cron or window, as pure functions of the time it is given.
 
     **A missed firing fires once, late, rather than never or many times.** If a
     tick arrives after two firings have passed -- the loop was busy, the host
@@ -414,7 +432,15 @@ class Scheduler:
     -- a rollout, a reschedule by Kubernetes -- a full fleet sweep. (With
     ``random``, a firing whose window has already opened -- started at 01:45,
     due at 01:35 for a nominal 02:00 -- is offered on the first tick: it is
-    this firing, not a missed one.)
+    this firing, not a missed one.) **A window is the exception**
+    (:class:`~zamboni.fleet.WindowSchedule`): one already open fires on the
+    first tick, because a window is a period during which work is wanted, and
+    a restart inside it should not forfeit it.
+
+    **A window's firing carries its close as a deadline**, so a table still
+    queued when the window closes is not started (§3.3). A window missed
+    entirely still fires once, late, and each of its tables is then dropped
+    at take time as past its deadline -- reported, rather than silently lost.
 
     **A firing moved early is still that firing.** The next one is armed from
     after the *nominal* time, so a 02:00 offered at 01:40 does not find 02:00
@@ -423,7 +449,7 @@ class Scheduler:
 
     def __init__(self, fleet: FleetConfig, now: datetime) -> None:
         self._fleet = fleet
-        self._armed: dict[str, _Armed] = {w.name: _arm(w, now) for w in fleet.warehouses}
+        self._armed: dict[str, Firing] = {w.name: _arm_fresh(w, now) for w in fleet.warehouses}
 
     @property
     def fleet(self) -> FleetConfig:
@@ -447,7 +473,7 @@ class Scheduler:
             fired.append(warehouse.name)
             self._armed[warehouse.name] = _arm(warehouse, max(now, armed.nominal))
             for table in sorted(warehouse.table_config.tables):
-                queue.offer(Candidate(warehouse.name, table, SCHEDULE))
+                queue.offer(Candidate(warehouse.name, table, SCHEDULE, not_after=armed.not_after))
         return fired
 
     def rearm(self, fleet: FleetConfig, now: datetime) -> None:
@@ -469,7 +495,7 @@ class Scheduler:
                 unchanged = self._fleet[name].schedule == warehouse.schedule
             except KeyError:
                 unchanged = False
-            armed[name] = self._armed[name] if unchanged else _arm(warehouse, now)
+            armed[name] = self._armed[name] if unchanged else _arm_fresh(warehouse, now)
         self._fleet = fleet
         self._armed = armed
 

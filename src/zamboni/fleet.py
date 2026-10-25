@@ -36,10 +36,12 @@ from __future__ import annotations
 
 import calendar
 import hashlib
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .pressure import PressureSettings
 from .settings import SECRET_PROFILE_KEYS, describe_yaml_error
@@ -102,6 +104,23 @@ RANDOM_PCT = 5
 #: ...and the cap on that, either way. A daily 02:00 is 5% of 24 h = 72 min,
 #: capped to 30: it lands between 01:30 and 02:30.
 RANDOM_LIMIT_MINUTES = 30
+
+
+@dataclass(frozen=True)
+class Firing:
+    """One moment a schedule offers its warehouse's tables (docs/maintenance-runtime.md §4).
+
+    Both schedule types produce these, so the scheduler arms, compares and
+    re-arms without knowing which one it holds.
+    """
+
+    #: What the schedule names: a cron minute, or the instant a window opens.
+    nominal: datetime
+    #: When the tables are actually offered: ``nominal`` plus the spread.
+    due: datetime
+    #: A worker does not start a table after this instant (§3.3): a window's
+    #: close. ``None`` for cron, which has no deadline.
+    not_after: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -257,12 +276,24 @@ class CronSchedule:
             return timedelta(0)
         gap = self.next_after(nominal) - _as_utc(nominal)
         span = min(gap * RANDOM_PCT / 100, timedelta(minutes=RANDOM_LIMIT_MINUTES))
-        firing = _as_utc(nominal).isoformat()
-        digest = hashlib.sha256(f"{seed}@{firing}".encode()).digest()
-        fraction = int.from_bytes(digest[:8], "big") / 2**63 - 1  # [-1, 1)
+        fraction = _draw(seed, nominal) / 2**63 - 1  # [-1, 1)
         # Whole seconds: nothing downstream is finer, and it keeps a due time
         # readable in a log or a state file.
         return timedelta(seconds=round(span.total_seconds() * fraction))
+
+    @property
+    def min_interval(self) -> None:
+        """Cron has no per-table minimum interval; see :class:`WindowSchedule`."""
+        return None
+
+    def firing_after(self, moment: datetime, seed: str) -> Firing:
+        """The first firing strictly after ``moment``, spread for ``seed``."""
+        nominal = self.next_after(moment)
+        return Firing(nominal, nominal + self.offset(nominal, seed))
+
+    def first_firing(self, now: datetime, seed: str) -> Firing:
+        """The firing a fresh start waits for: the next one, as cron would."""
+        return self.firing_after(now, seed)
 
     def _day_matches(self, t: datetime) -> bool:
         dom = t.day in self.days_of_month
@@ -325,6 +356,191 @@ def _first_of_next_month(t: datetime) -> datetime:
     return t.replace(year=year, month=month, day=1, hour=0, minute=0)
 
 
+def _draw(seed: str, nominal: datetime) -> int:
+    """A 64-bit number fixed by ``seed`` and the firing; see :meth:`CronSchedule.offset`."""
+    firing = _as_utc(nominal).isoformat()
+    digest = hashlib.sha256(f"{seed}@{firing}".encode()).digest()
+    return int.from_bytes(digest[:8], "big")
+
+
+#: How many local days either side of a moment :meth:`WindowSchedule._windows`
+#: looks at. One back finds a window that opened yesterday and wraps midnight;
+#: the rest forward cover the longest gap a zone has ever skipped --
+#: Pacific/Apia dropped the whole of 2011-12-30 -- with a day to spare.
+_WINDOW_DAYS = (-1, 0, 1, 2, 3)
+
+
+@dataclass(frozen=True)
+class WindowSchedule:
+    """ "Maintain me overnight, in my time zone" (docs/maintenance-runtime.md §4.2).
+
+    A half-open window ``[start_hour, end_hour)`` of local wall-clock time in
+    ``timezone``, every day. It may wrap midnight (``22`` to ``4``), and
+    ``start_hour == end_hour`` is the whole day. **It fires when the window
+    opens**, with the close as the firing's deadline, so a table not started
+    by then waits for the next window rather than running into the working day.
+
+    **Daylight saving, resolved one way** (§4.2 point 3): an hour that does not
+    exist that day resolves to the first instant after the gap, and an hour
+    that occurs twice to its first occurrence. A window is therefore an hour
+    shorter or longer on the two transition days. It never vanishes: one that
+    the gap would empty -- ``[2, 3)`` in America/Toronto on the spring day, both
+    ends resolving to 03:00 EDT -- closes its usual length after it opens.
+    That case is not in §4.2, which promises the window never vanishes without
+    saying how; this is the rule that keeps the promise.
+
+    **Spread is forward only.** With ``random`` the firing moves by
+    ``[0, min(RANDOM_PCT% of that day's window, RANDOM_LIMIT_MINUTES))``,
+    derived as cron's is, because a window that opens early runs during the
+    hours its owner excluded.
+
+    **A window already open fires at once** (:meth:`first_firing`), unlike
+    cron: a window is a period during which work is wanted, and a restart inside
+    it should not forfeit it.
+
+    ``min_interval_hours`` is how long a table must have gone since Zamboni last
+    maintained it before a firing runs it again, read from the table's own
+    watermark. It defaults to the window's length and may not be shorter: a
+    shorter one would allow two runs in one window, which is never what was
+    meant.
+    """
+
+    timezone: str
+    start_hour: int
+    end_hour: int
+    min_interval_hours: float | None = None
+    random: bool = True
+    zone: ZoneInfo = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        where = f"window {self.timezone!r} {self.start_hour}-{self.end_hour}"
+        if not isinstance(self.random, bool):
+            raise FleetConfigError(
+                f"{where}: random must be true or false, not {type(self.random).__name__}"
+            )
+        if not isinstance(self.timezone, str):
+            raise FleetConfigError(
+                f"{where}: timezone must be an IANA name such as 'America/Toronto', "
+                f"not {type(self.timezone).__name__}"
+            )
+        try:
+            zone = ZoneInfo(self.timezone)
+        except (ZoneInfoNotFoundError, ValueError, OSError):
+            # OSError: a key naming a directory of the database ("America").
+            raise FleetConfigError(
+                f"{where}: unknown time zone {self.timezone!r}; expected an IANA name "
+                "such as 'America/Toronto'"
+            ) from None
+        object.__setattr__(self, "zone", zone)
+        for key in ("start_hour", "end_hour"):
+            hour = getattr(self, key)
+            if not isinstance(hour, int) or isinstance(hour, bool) or not 0 <= hour <= 23:
+                raise FleetConfigError(f"{where}: {key} must be a whole hour, 0-23; got {hour!r}")
+        length = self.length / timedelta(hours=1)
+        interval = self.min_interval_hours
+        if interval is None:
+            object.__setattr__(self, "min_interval_hours", length)
+        elif (
+            not isinstance(interval, int | float)
+            or isinstance(interval, bool)
+            or not interval < float("inf")
+            or interval < length
+        ):
+            raise FleetConfigError(
+                f"{where}: min_interval_hours must be a number of hours no shorter than "
+                f"the {length:g}-hour window, or a table could run twice in one window; "
+                f"got {interval!r}"
+            )
+
+    @property
+    def length(self) -> timedelta:
+        """The window's length on a day without a daylight-saving transition."""
+        return timedelta(hours=(self.end_hour - self.start_hour) % 24 or 24)
+
+    @property
+    def min_interval(self) -> timedelta:
+        assert self.min_interval_hours is not None  # set in __post_init__
+        return timedelta(hours=self.min_interval_hours)
+
+    def next_after(self, moment: datetime) -> datetime:
+        """The first opening strictly after ``moment``, as an aware UTC datetime."""
+        return self._window_after(moment)[0]
+
+    def firing_after(self, moment: datetime, seed: str) -> Firing:
+        """The first window opening strictly after ``moment``, spread for ``seed``."""
+        return self._firing(*self._window_after(moment), seed)
+
+    def first_firing(self, now: datetime, seed: str) -> Firing:
+        """The window open at ``now``, whose ``due`` may be past; else the next one."""
+        now = _as_utc(now)
+        # In order of opening, the first window not yet closed either holds
+        # `now` or is the next to open.
+        for opens, closes in self._windows(now):
+            if now < closes:
+                return self._firing(opens, closes, seed)
+        raise AssertionError(f"{self!r} found no window around {now}")  # see _WINDOW_DAYS
+
+    def _window_after(self, moment: datetime) -> tuple[datetime, datetime]:
+        moment = _as_utc(moment)
+        for opens, closes in self._windows(moment):
+            if opens > moment:
+                return opens, closes
+        raise AssertionError(f"{self!r} found no window after {moment}")  # see _WINDOW_DAYS
+
+    def _firing(self, opens: datetime, closes: datetime, seed: str) -> Firing:
+        if not self.random:
+            return Firing(opens, opens, closes)
+        span = min((closes - opens) * RANDOM_PCT / 100, timedelta(minutes=RANDOM_LIMIT_MINUTES))
+        fraction = _draw(seed, opens) / 2**64  # [0, 1)
+        # Whole seconds, as cron's; truncated rather than rounded so the offset
+        # stays below the span.
+        return Firing(
+            opens, opens + timedelta(seconds=int(span.total_seconds() * fraction)), closes
+        )
+
+    def _windows(self, moment: datetime) -> Iterator[tuple[datetime, datetime]]:
+        """The windows of the local days around ``moment``, in order of opening."""
+        today = moment.astimezone(self.zone).date()
+        for days in _WINDOW_DAYS:
+            day = today + timedelta(days=days)
+            opens = self._instant(day, self.start_hour)
+            closes_on = day if self.end_hour > self.start_hour else day + timedelta(days=1)
+            closes = self._instant(closes_on, self.end_hour)
+            if closes <= opens:
+                # The spring gap emptied it; see the class docstring.
+                closes = opens + self.length
+            yield opens, closes
+
+    def _instant(self, day: date, hour: int) -> datetime:
+        """``hour`` o'clock on ``day`` in this zone, as UTC, under §4.2's DST rules."""
+        wall = datetime(day.year, day.month, day.day, hour)
+        # fold=0 is the first occurrence of an hour that occurs twice.
+        first = wall.replace(tzinfo=self.zone).astimezone(UTC)
+        if first.astimezone(self.zone).replace(tzinfo=None) == wall:
+            return first
+        # The hour does not exist: it is in the spring gap. PEP 495 maps it
+        # with the offset from before the gap (fold=0) and from after it
+        # (fold=1); the transition lies between the two. Bisect for it rather
+        # than trust fold=0 to land on it, which it does only when the hour is
+        # the gap's first.
+        earlier = wall.replace(tzinfo=self.zone, fold=1).astimezone(UTC)
+        before, after = min(first, earlier), max(first, earlier)
+        while after - before > timedelta(seconds=1):
+            middle = before + (after - before) / 2
+            if middle.astimezone(self.zone).replace(tzinfo=None) >= wall:
+                after = middle
+            else:
+                before = middle
+        return after.replace(microsecond=0)
+
+
+#: Either kind of schedule a warehouse may have.
+Schedule = CronSchedule | WindowSchedule
+
+_SCHEDULE_KEYS = frozenset({"window"})
+_WINDOW_KEYS = frozenset({"timezone", "start_hour", "end_hour", "min_interval_hours"})
+
+
 # -- the fleet ----------------------------------------------------------------
 
 
@@ -337,7 +553,7 @@ class FleetWarehouse:
     """
 
     name: str
-    schedule: CronSchedule
+    schedule: Schedule
     table_config: TableConfig
     #: The catalog URI, where this warehouse's differs from the profile's. One
     #: Lakekeeper serves many warehouses from one URI, so ``None`` -- use
@@ -351,10 +567,10 @@ class FleetWarehouse:
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
             raise FleetConfigError("a warehouse needs a non-empty 'name'")
-        if not isinstance(self.schedule, CronSchedule):
+        if not isinstance(self.schedule, CronSchedule | WindowSchedule):
             raise FleetConfigError(
-                f"warehouse {self.name!r}: schedule must be a CronSchedule; "
-                f"build one with CronSchedule({self.schedule!r})"
+                f"warehouse {self.name!r}: schedule must be a CronSchedule or a "
+                f"WindowSchedule; build one with CronSchedule({self.schedule!r})"
             )
         if self.uri is not None and (not isinstance(self.uri, str) or not self.uri):
             raise FleetConfigError(
@@ -573,7 +789,7 @@ def _warehouse_from_dict(
     try:
         warehouse = FleetWarehouse(
             name=name,
-            schedule=CronSchedule(raw["schedule"], random=raw.get("random", spread)),
+            schedule=_schedule_from(raw["schedule"], raw.get("random", spread), "schedule"),
             table_config=table_config,
             uri=raw.get("uri"),
             pressure=pressure,
@@ -581,6 +797,32 @@ def _warehouse_from_dict(
     except FleetConfigError as exc:
         raise FleetConfigError(f"{where}: {exc}") from exc
     return warehouse, read
+
+
+def _schedule_from(raw: Any, spread: Any, where: str) -> Schedule:
+    """A cron expression string, or ``{window: {...}}``."""
+    if isinstance(raw, str):
+        return CronSchedule(raw, random=spread)
+    if not isinstance(raw, dict):
+        raise FleetConfigError(
+            f"{where}: expected a cron expression string or a 'window' block, "
+            f"found {_json_name(raw)}"
+        )
+    _check_block(raw, _SCHEDULE_KEYS, where)
+    if "window" not in raw:
+        raise FleetConfigError(f"{where}: a schedule block needs 'window'")
+    window = raw["window"]
+    _check_block(window, _WINDOW_KEYS, f"{where}.window")
+    for key in ("timezone", "start_hour", "end_hour"):
+        if key not in window:
+            raise FleetConfigError(f"{where}.window: {key!r} is required")
+    return WindowSchedule(
+        timezone=window["timezone"],
+        start_hour=window["start_hour"],
+        end_hour=window["end_hour"],
+        min_interval_hours=window.get("min_interval_hours"),
+        random=spread,
+    )
 
 
 def _check_block(raw: Any, allowed: frozenset[str], where: str) -> None:

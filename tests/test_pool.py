@@ -797,6 +797,56 @@ def test_a_scheduled_item_runs_everything_the_profile_enables(tmp_path):
     assert "--operations" not in argv
 
 
+# -- a window's minimum interval reaches the worker (ZMBNI-164) ------------------------
+
+
+@pytest.mark.parametrize(
+    ("reason", "also", "held", "anyway"),
+    [
+        # Scheduled alone: everything is held back on a recently maintained table.
+        ("schedule", (), True, None),
+        # An event merged in: its operations are due anyway.
+        ("schedule", ("event",), True, "event"),
+        ("event", ("schedule",), True, "event"),
+        # A manual run asks for everything, so nothing is held back.
+        ("schedule", ("manual",), False, None),
+        # No schedule in the run: the interval is the schedule's, not the event's.
+        ("event", (), False, None),
+    ],
+)
+def test_the_interval_holds_back_only_what_the_schedule_asked_for(
+    tmp_path, reason, also, held, anyway
+):
+    """Built by the pool, parsed by the CLI's own parser, turned into what
+    `maintain()` takes -- so the three cannot disagree."""
+    from zamboni.cli import _build_parser, _min_interval
+    from zamboni.maintainers import Operation
+    from zamboni.scheduler import REASON_OPERATIONS
+
+    work = WorkItem(
+        "acme",
+        "raw.events",
+        reason,
+        table_config("events"),
+        also=frozenset(also),
+        min_interval=timedelta(hours=18),
+    )
+    argv = worker_argv(work, WorkerConfig(workdir=tmp_path), tmp_path / "t", tmp_path / "r")
+    rule = _min_interval(_build_parser().parse_args(argv))
+
+    if not held:
+        assert rule is None
+        return
+    assert rule is not None and rule.interval == timedelta(hours=18)
+    expected = REASON_OPERATIONS[anyway] if anyway else ()
+    assert rule.due_anyway == frozenset(Operation(o) for o in expected or ())
+
+
+def test_a_cron_warehouse_s_item_carries_no_interval(tmp_path):
+    argv = worker_argv(item(), WorkerConfig(workdir=tmp_path), tmp_path / "t", tmp_path / "r")
+    assert "--min-interval-hours" not in argv and "--due-anyway" not in argv
+
+
 @pytest.mark.parametrize("reason", ["Event", "evnt", "pressure-check"])
 def test_an_unknown_reason_never_reaches_a_worker_as_every_operation(tmp_path, reason):
     """ZMBNI-195. `WorkItem` refuses an unknown reason on construction, but a

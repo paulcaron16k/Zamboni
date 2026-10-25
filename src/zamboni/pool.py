@@ -57,7 +57,7 @@ import traceback
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from multiprocessing import connection, get_context
 from pathlib import Path
 from typing import Any
@@ -362,6 +362,11 @@ def worker_argv(item: Job, config: WorkerConfig, table_config: Path, record: Pat
         # every operation, reclaim included (ZMBNI-195).
         if (operations := item.operations) is not None:
             argv += ["--operations", ",".join(operations)]
+        if (rule := item.interval_rule) is not None:
+            interval, anyway = rule
+            argv += ["--min-interval-hours", str(interval / timedelta(hours=1))]
+            if anyway:
+                argv += ["--due-anyway", ",".join(anyway)]
         if config.duckdb_memory_bytes is not None:
             argv += ["--duckdb-memory-limit-bytes", str(config.duckdb_memory_bytes)]
     if item.uri:

@@ -198,8 +198,11 @@ def test_a_work_item_is_config_that_pickles():
     item = queue.take(fleet(warehouse("acme", uri="https://c/catalog")))
     assert item is not None and item.also and item.not_after is not None
     assert pickle.loads(pickle.dumps(item)) == item
+    windowed = dataclasses.replace(item, min_interval=timedelta(hours=18))
+    assert pickle.loads(pickle.dumps(windowed)) == windowed
     # `also` and `not_after` narrow or report; neither can widen a run past what
-    # its reasons' operations declare, nor skip the due-check.
+    # its reasons' operations declare, nor skip the due-check. `min_interval`
+    # (ZMBNI-164) only holds work back, and only in the worker's own due-check.
     assert {f.name for f in dataclasses.fields(WorkItem)} == {
         "warehouse",
         "table",
@@ -208,6 +211,7 @@ def test_a_work_item_is_config_that_pickles():
         "uri",
         "also",
         "not_after",
+        "min_interval",
     }, "a new WorkItem field must be serialisable config, and must not bypass the due-check"
 
 

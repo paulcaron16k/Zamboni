@@ -10,7 +10,7 @@ mostly about the decisions a caller no longer has to make.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pyarrow as pa
 import pytest
@@ -21,7 +21,7 @@ from pyiceberg.types import IntegerType, NestedField
 from zamboni import CatalogSession, maintain
 from zamboni.committer import ConcurrentModification
 from zamboni.maintainers import Operation
-from zamboni.maintenance import RUNBOOK_ORDER, WRITE_DRIVEN, Outcome
+from zamboni.maintenance import RUNBOOK_ORDER, WRITE_DRIVEN, MinimumInterval, Outcome
 from zamboni.tableconfig import TableConfigError
 
 SCHEMA = Schema(NestedField(1, "id", IntegerType(), required=False))
@@ -635,3 +635,96 @@ def test_a_report_with_no_timestamps_still_serialises():
 
     assert doc["started_at"] is None and doc["duration_seconds"] is None
     assert json.loads(json.dumps(doc)) == doc
+
+
+# -- a window schedule's minimum interval (ZMBNI-164) ------------------------------
+
+
+def test_a_table_maintained_inside_the_interval_runs_nothing_and_says_not_due(warehouse, tmp_path):
+    """The restart-inside-a-window case: the first firing maintained the table,
+    the second finds it inside the interval and runs nothing at all -- `expire`
+    and `remove-orphans` included, which the write-driven skip would still run."""
+    path = config(tmp_path)
+    maintain(warehouse, table_config=path, commit=True)
+
+    second = maintain(
+        warehouse,
+        table_config=path,
+        commit=True,
+        min_interval=MinimumInterval(timedelta(hours=18)),
+    )
+
+    assert {o.operation for o in second.outcomes} == set(RUNBOOK_ORDER)
+    for outcome in second.outcomes:
+        assert outcome.exit_code == 0 and outcome.result is None, outcome
+        assert outcome.detail.startswith("not due"), outcome.detail
+        assert "18-hour minimum interval" in outcome.detail
+    assert second.counters.skipped == second.counters.considered
+
+
+def test_a_table_maintained_before_the_interval_is_due(warehouse, tmp_path):
+    path = config(tmp_path)
+    maintain(warehouse, table_config=path, commit=True)
+
+    second = maintain(
+        warehouse,
+        table_config=path,
+        commit=True,
+        min_interval=MinimumInterval(timedelta(microseconds=1)),
+    )
+
+    assert not any("not due" in (o.detail or "") for o in second.outcomes)
+    assert any(o.result is not None for o in second.outcomes)
+
+
+def test_a_table_never_maintained_is_due_whatever_the_interval(warehouse, tmp_path):
+    report = maintain(
+        warehouse,
+        table_config=config(tmp_path),
+        commit=True,
+        min_interval=MinimumInterval(timedelta(days=365)),
+    )
+    assert not any("not due" in (o.detail or "") for o in report.outcomes)
+
+
+def test_operations_due_anyway_run_on_a_table_not_yet_due(warehouse, tmp_path):
+    """An event merged into a scheduled run: its operations are not held back."""
+    path = config(tmp_path)
+    maintain(warehouse, table_config=path, commit=True)
+    anyway = frozenset({Operation.EXPIRE, Operation.REMOVE_ORPHANS})
+
+    second = maintain(
+        warehouse,
+        table_config=path,
+        commit=True,
+        min_interval=MinimumInterval(timedelta(hours=18), anyway),
+    )
+
+    for outcome in second.outcomes:
+        held = "not due" in (outcome.detail or "")
+        assert held is (outcome.operation not in anyway), outcome
+
+
+def test_an_unreadable_watermark_is_due(warehouse, tmp_path, monkeypatch):
+    """The interval holds work back, so any doubt runs the table."""
+
+    def unreadable(*args, **kwargs):
+        raise RuntimeError("catalog is having a day")
+
+    path = config(tmp_path)
+    maintain(warehouse, table_config=path, commit=True)
+    monkeypatch.setattr("zamboni.health.maintenance_watermark", unreadable)
+
+    second = maintain(
+        warehouse,
+        table_config=path,
+        commit=True,
+        min_interval=MinimumInterval(timedelta(hours=18)),
+    )
+    assert not any("not due" in (o.detail or "") for o in second.outcomes)
+
+
+@pytest.mark.parametrize("interval", [timedelta(0), timedelta(hours=-1), 18])
+def test_a_minimum_interval_must_be_a_positive_duration(interval):
+    with pytest.raises(ValueError, match="positive timedelta"):
+        MinimumInterval(interval)

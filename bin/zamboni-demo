@@ -52,7 +52,7 @@
 #     "trino==0.338.0",
 #     "typing-extensions==4.16.0",
 #     "typing-inspection==0.4.2",
-#     "tzdata==2026.3 ; sys_platform == 'win32'",
+#     "tzdata==2026.3",
 #     "tzlocal==5.4.4",
 #     "urllib3==2.7.0",
 #     "wrapt==2.3.0",

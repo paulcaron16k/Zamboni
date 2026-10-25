@@ -363,6 +363,37 @@ schedule:
 
 Cron stays UTC-only; the time-zone behaviour lives in the type that needs it.
 
+As built in R3 (`zamboni.fleet.WindowSchedule`, tested in
+`tests/test_window_schedule.py`), with three things this section left open:
+
+- **A window the spring gap would empty keeps its usual length.** `[2, 3)` in
+  America/Toronto on the spring day resolves both ends to 03:00 EDT; it opens
+  then and closes an hour later
+  (`test_a_window_the_gap_would_empty_keeps_its_usual_length`). A gap longer
+  than an hour is resolved to its end, not by `fold=0`, which lands an hour
+  late in Antarctica/Troll
+  (`test_an_hour_late_in_a_two_hour_gap_still_resolves_to_the_gap_s_end`).
+- **`min_interval_hours` defaults to the window's length**, the shortest value
+  point 5 accepts. A non-finite interval is refused with the rest.
+- **The interval is checked in the worker, not at offer time.** The runtime
+  process never loads a table, and reading the watermark is a metadata load,
+  so the item carries the interval (`WorkItem.min_interval`) and the worker
+  passes it to `maintain(min_interval=MinimumInterval(...))` — the same load
+  as the write-driven due-check, so it costs nothing more. A table inside it
+  reports every operation `not due` and runs nothing. The interval holds back
+  only what the *schedule* asked for: an event merged into the scheduled run
+  keeps its operations (`MinimumInterval.due_anyway`), and a merged `manual`
+  run is not held back at all
+  (`test_the_interval_holds_back_only_what_the_schedule_asked_for`). Any doubt —
+  a watermark that cannot be read, a table never maintained — is due. The
+  watermark moves only when Zamboni commits, so a table whose run found nothing
+  to commit is due again at a restart inside the same window; that run costs
+  its `expire` and orphan scan again, and commits nothing twice.
+
+Zone data comes from the host's database, or else from the `tzdata` package,
+which is a dependency for images that ship none
+(`test_a_window_needs_no_zone_database_on_the_host`).
+
 ---
 
 ## 5. Events

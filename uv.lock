@@ -1106,6 +1106,7 @@ dependencies = [
     { name = "pyiceberg-core" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
+    { name = "tzdata" },
 ]
 
 [package.optional-dependencies]
@@ -1178,6 +1179,7 @@ requires-dist = [
     { name = "s3fs", marker = "extra == 'cloud'", specifier = ">=2024.6.0" },
     { name = "s3fs", marker = "extra == 's3'", specifier = ">=2024.6.0" },
     { name = "trino", marker = "extra == 'trino'", specifier = ">=0.330.0" },
+    { name = "tzdata", specifier = ">=2024.1" },
 ]
 provides-extras = ["s3", "azure", "gcs", "cloud", "otel", "nats", "sql", "trino", "spark", "spark-lib"]
 
