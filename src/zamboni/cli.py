@@ -49,9 +49,9 @@ import os
 import sys
 from collections.abc import Iterator
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import capabilities, maintainers, settings
 from .capabilities import detect
@@ -83,6 +83,9 @@ from .tableconfig import (
     TableSettings,
 )
 from .workdir import describe_temp_directory
+
+if TYPE_CHECKING:
+    from .maintenance import MinimumInterval
 
 USAGE = """\
 getting started
@@ -573,6 +576,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="run only these operations, of those the profile enables -- never "
         "more. `zamboni serve` uses it so an event or pressure run does only the "
         "write-driven work. Order stays the runbook's.",
+    )
+    mt.add_argument(
+        "--min-interval-hours",
+        type=_positive_hours,
+        metavar="HOURS",
+        help="a table Zamboni maintained less than HOURS ago is not due: each "
+        "operation is reported 'not due' and runs nothing, except those named by "
+        "--due-anyway. Read from the table's own watermark. `zamboni serve` passes "
+        "a window schedule's min_interval_hours here.",
+    )
+    mt.add_argument(
+        "--due-anyway",
+        type=_operation_names,
+        metavar="OP[,OP...]",
+        help="with --min-interval-hours: operations that run even on a table not "
+        "yet due -- what an event merged into a scheduled run asked for.",
     )
     mt.add_argument("--max-snapshot-age-days", type=int)
     mt.add_argument("--min-snapshots-to-keep", type=int)
@@ -1487,6 +1506,29 @@ def _operation_names(text: str) -> tuple[str, ...]:
     return wanted
 
 
+def _positive_hours(text: str) -> float:
+    """``--min-interval-hours``' type: a positive, finite number of hours."""
+    try:
+        hours = float(text)
+    except ValueError:
+        hours = float("nan")
+    if not 0 < hours < float("inf"):
+        raise argparse.ArgumentTypeError(f"expected a positive number of hours, got {text!r}")
+    return hours
+
+
+def _min_interval(args: argparse.Namespace) -> MinimumInterval | None:
+    """``--min-interval-hours`` and ``--due-anyway`` as `maintain()` takes them."""
+    from .maintenance import MinimumInterval
+
+    hours = getattr(args, "min_interval_hours", None)
+    if hours is None:
+        return None
+    return MinimumInterval(
+        timedelta(hours=hours), frozenset(getattr(args, "due_anyway", None) or ())
+    )
+
+
 def _operations(profile, args: argparse.Namespace) -> list[Operation]:
     """The profile's operations, narrowed by ``--operations`` if given.
 
@@ -1513,6 +1555,10 @@ def _maintenance(session: CatalogSession, args: argparse.Namespace) -> int:
     """
     from .maintenance import maintain
 
+    if args.due_anyway and args.min_interval_hours is None:
+        # Alone it would read as "run only these", which is --operations.
+        print("--due-anyway needs --min-interval-hours", file=sys.stderr)
+        return 2
     profile = args.zamboni_profile
     tables = _tables_to_maintain(args, profile)
     if not tables:
@@ -1553,6 +1599,7 @@ def _maintenance(session: CatalogSession, args: argparse.Namespace) -> int:
             base_config=_operational_config(args),
             observer=show,
             reporter=reporter,
+            min_interval=_min_interval(args),
         )
 
     if before is not None:

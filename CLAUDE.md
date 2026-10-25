@@ -209,9 +209,10 @@ password key, because neither maintainer accepts one.
 - **Exit codes are a contract**: 0 success, 2 usage/config/consent, 3 the table
   is *blocked* (a refusal, not a failure), 4 a safety check aborted and nothing
   was deleted. Exit 4 also stops the rest of *that table*, because everything
-  after it reads state we just said we distrust. Three shapes of
-  not-a-failure — disabled, unsupported, fulfilled by another operation — all
-  exit 0 and ran nothing.
+  after it reads state we just said we distrust. Five shapes of
+  not-a-failure — disabled, not due (inside a window's minimum interval),
+  unsupported, fulfilled by another operation, unchanged since the last
+  maintenance — all exit 0 and ran nothing (`maintenance._run`).
 - **Capability probes, not version checks.** `capabilities.py` asks the
   *installed* PyIceberg what it can do — signatures, source inspection, and one
   behavioural probe that actually performs an overwrite on a transformed

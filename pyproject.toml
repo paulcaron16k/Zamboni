@@ -94,6 +94,14 @@ dependencies = [
     # is not paid either -- `zamboni/otel.py` imports it, and nothing imports
     # that module unless an OTel reporter is constructed.
     "opentelemetry-api>=1.30,<2",
+    # IANA zone data for `WindowSchedule` (ZMBNI-164). `zoneinfo` reads the
+    # host's database first and falls back to this package; an image with
+    # neither -- distroless, Alpine without `tzdata` -- refuses every window's
+    # zone, so its absence stops the tool doing its job (the rule on `cloud`).
+    # Measured 2026-10-24: 2.8 MB installed, 636 files, pure data, no
+    # dependencies. Reproduced with `PYTHONTZPATH=` and the package absent:
+    # `ZoneInfo("America/Toronto")` raises ZoneInfoNotFoundError.
+    "tzdata>=2024.1",
 ]
 
 [project.urls]

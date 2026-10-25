@@ -94,7 +94,8 @@ Three details in that line are load-bearing:
 `shuf` is GNU coreutils. Cron runs in the **daemon's** time zone, not UTC
 (crontab(5): "It currently does not support per-user timezones"), so the same
 line on two hosts in different zones runs at different instants — the service
-evaluates schedules in UTC precisely to avoid that.
+evaluates cron schedules in UTC precisely to avoid that, and a window schedule
+names its zone ([event-driven-maintenance.md §4](event-driven-maintenance.md#4-configuration)).
 
 **Under systemd, use a timer instead** — `RandomizedDelaySec=` is the same idea
 built in, drawn afresh "before each iteration" (systemd.timer(5)):

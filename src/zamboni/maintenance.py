@@ -25,9 +25,9 @@ import logging
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pyiceberg.exceptions import CommitFailedException, ValidationException
 
@@ -51,6 +51,9 @@ from .session import CatalogSession, StorageCredentialsRequired
 from .tableconfig import TableConfig, TableConfigError
 from .workdir import WorkspaceUnavailable
 
+if TYPE_CHECKING:
+    from .health import Watermark
+
 logger = logging.getLogger(__name__)
 
 #: Runbook order. Three of the five gaps between these are load-bearing -- see
@@ -73,6 +76,30 @@ _ENABLED_BY = {
     Operation.REMOVE_DANGLING_DELETES: "remove_dangling_deletes",
     Operation.REWRITE_MANIFESTS: "rewrite_manifests",
 }
+
+
+@dataclass(frozen=True)
+class MinimumInterval:
+    """A table Zamboni maintained less than ``interval`` ago is **not due**.
+
+    A window schedule's ``min_interval_hours`` (docs/maintenance-runtime.md
+    §4.2 point 4): a restart inside a window fires it again, and this is what
+    stops the tables the first firing already maintained from running twice.
+    Read from the table's own watermark, so the runtime keeps no "last
+    maintained" store -- the table is the record.
+
+    A not-due table runs only ``due_anyway``: the operations something else
+    asked for in the same run -- an event merged into a scheduled run still
+    compacts. Every other operation is reported ``not due`` and runs nothing.
+    """
+
+    interval: timedelta
+    due_anyway: frozenset[Operation] = frozenset()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.interval, timedelta) or self.interval <= timedelta(0):
+            raise ValueError(f"a minimum interval must be a positive timedelta: {self.interval!r}")
+        object.__setattr__(self, "due_anyway", frozenset(Operation(o) for o in self.due_anyway))
 
 
 @dataclass(frozen=True)
@@ -434,6 +461,7 @@ def maintain(
     observer: Callable[[Outcome], None] | None = None,
     reporter: MetricsReporter | None = None,
     should_stop: Callable[[], bool] | None = None,
+    min_interval: MinimumInterval | None = None,
 ) -> MaintenanceReport:
     """Run every operation, in order, over every configured table.
 
@@ -470,6 +498,10 @@ def maintain(
             :attr:`~MaintenanceReport.stopped` naming what did not. An exception
             from it counts as true: a caller asking to be able to stop is better
             served by a stop than by a traceback that loses the report.
+        min_interval: Skip a table maintained more recently than this, except
+            for its ``due_anyway`` operations. ``None``, the default, skips
+            nothing for its age. Read from the same metadata load as the
+            write-driven due-check, so it costs nothing more.
 
     The report carries :attr:`~MaintenanceReport.counters` -- how many tables
     were considered, and how many of them had nothing to do -- which is the
@@ -531,7 +563,9 @@ def maintain(
             table_config=config,
             should_stop=stopping,
         )
-        unchanged = _unchanged_since_maintenance(session, table) or {}
+        mark = _watermark(session, table)
+        unchanged = _unchanged_since_maintenance(mark) or {}
+        recent = _maintained_within(mark, min_interval, started_at)
         done: set[Operation] = set()
         # Operations a stop must wait for: the clean-up after a compaction that
         # committed (see _AFTER_COMPACTION).
@@ -551,6 +585,11 @@ def maintain(
                 done,
                 commit=commit,
                 unchanged=unchanged.get(operation),
+                not_due=(
+                    recent
+                    if min_interval is not None and operation not in min_interval.due_anyway
+                    else None
+                ),
             )
             record(outcome)
             owed.discard(operation)
@@ -651,9 +690,44 @@ def _compaction_unfinished(outcome: Outcome) -> str | None:
     return None
 
 
-def _unchanged_since_maintenance(
-    session: CatalogSession, table: str
-) -> dict[Operation, str] | None:
+def _watermark(session: CatalogSession, table: str) -> Watermark | None:
+    """The table's maintenance watermark; ``None`` if it cannot be read.
+
+    One metadata load per table, which both due-checks share. **``None`` skips
+    nothing** in either: a catalog that will not load the table means the run
+    proceeds and the operations decide for themselves.
+    """
+    from .health import maintenance_watermark
+
+    try:
+        return maintenance_watermark(session.catalog.load_table(table))
+    except Exception:  # pragma: no cover - any catalog trouble means "just run"
+        logger.debug("could not read the watermark for %s; running anyway", table, exc_info=True)
+        return None
+
+
+def _maintained_within(
+    mark: Watermark | None, min_interval: MinimumInterval | None, now: datetime
+) -> str | None:
+    """Why the table is not due under ``min_interval``, or ``None`` if it is.
+
+    Any doubt is due: no interval, no readable watermark, a table never
+    maintained or whose stamp has been expired away, a stamp with no time. The
+    interval holds work back, so the direction to be wrong in is running.
+    """
+    if min_interval is None or mark is None or mark.timestamp_ms is None:
+        return None
+    age = now - datetime.fromtimestamp(mark.timestamp_ms / 1000, UTC)
+    if age >= min_interval.interval:
+        return None
+    hours = min_interval.interval / timedelta(hours=1)
+    return (
+        f"{mark.operation} {age / timedelta(hours=1):.1f} h ago, "
+        f"inside the {hours:g}-hour minimum interval"
+    )
+
+
+def _unchanged_since_maintenance(mark: Watermark | None) -> dict[Operation, str] | None:
     """Which :data:`WRITE_DRIVEN` operations have nothing to do here, and why.
 
     One metadata load per table, ~20-38 ms measured -- against ~400 ms to profile
@@ -670,21 +744,15 @@ def _unchanged_since_maintenance(
     forever. A run that leaves compaction work says so on every stamp it writes
     (:data:`~zamboni.health.COMPACT_INCOMPLETE`), and that keeps compaction running.
 
-    **Any doubt answers ``None``, which skips nothing.** A catalog that will not
-    load the table, a watermark that cannot be read: the run proceeds and the
-    operations decide for themselves, exactly as before. A skip is an
-    optimisation and must never be the thing that stops a table being maintained
-    -- and this function sits in front of every operation in the run, so the safe
-    direction is the one where it is wrong.
+    **Any doubt answers ``None``, which skips nothing.** A watermark that could
+    not be read (:func:`_watermark`): the run proceeds and the operations decide
+    for themselves, exactly as before. A skip is an optimisation and must never
+    be the thing that stops a table being maintained -- and this function sits
+    in front of every operation in the run, so the safe direction is the one
+    where it is wrong.
     """
-    from .health import maintenance_watermark
-
-    try:
-        mark = maintenance_watermark(session.catalog.load_table(table))
-    except Exception:  # pragma: no cover - any catalog trouble means "just run"
-        logger.debug("could not read the watermark for %s; running anyway", table, exc_info=True)
+    if mark is None:
         return None
-
     if mark.written_since or not mark.maintained:
         return {}
     unchanged = f"nothing written since {mark.operation}"
@@ -704,23 +772,31 @@ def _run(
     *,
     commit: bool,
     unchanged: str | None = None,
+    not_due: str | None = None,
 ) -> Outcome:
     """One operation, with every "this is not a failure" case named.
 
-    The four shapes of not-a-failure are easy to conflate and expensive to get
-    wrong: *disabled* means the config said no, *unsupported* means the engine
-    said no, *fulfilled* means another operation already did it, and *unchanged*
-    means nothing has written since maintenance last ran. All four exit 0 and
+    The five shapes of not-a-failure are easy to conflate and expensive to get
+    wrong: *disabled* means the config said no, *not due* means the table was
+    maintained inside its minimum interval, *unsupported* means the engine said
+    no, *fulfilled* means another operation already did it, and *unchanged*
+    means nothing has written since maintenance last ran. All five exit 0 and
     none of them ran anything.
 
     Args:
         unchanged: Why this operation has nothing to do on this table, from
             :func:`_unchanged_since_maintenance`, or ``None`` if it may. Only
             :data:`WRITE_DRIVEN` operations are skipped for it.
+        not_due: Why this table is inside its :class:`MinimumInterval`, from
+            :func:`_maintained_within`, or ``None``. Every operation is skipped
+            for it; the caller withholds it from the ``due_anyway`` ones.
     """
     flag = _ENABLED_BY.get(operation)
     if flag is not None and not getattr(request.retention, flag).enabled:
         return Outcome(table, operation, 0, f"disabled in the config ({flag})")
+
+    if not_due is not None:
+        return Outcome(table, operation, 0, f"not due -- maintained by {not_due}")
 
     if unchanged is not None and operation in WRITE_DRIVEN:
         # A fourth shape of not-a-failure, and the cheapest: nothing has written,

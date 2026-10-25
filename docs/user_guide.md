@@ -585,6 +585,7 @@ internal and may move in a patch release. The entry points you need:
 |---|---|
 | `CatalogSession` | connecting: `for_lakekeeper`, `for_local`, `from_catalog` |
 | **`maintain(session, ...)`** | **the whole run — every operation, every table, one call. The CLI's `maintenance` verb is a printing adapter over it** |
+| `MinimumInterval` | `maintain(min_interval=…)`: a table Zamboni maintained more recently than this reports every operation `not due` and runs nothing, except its `due_anyway` operations. The CLI's `--min-interval-hours` and `--due-anyway` |
 | `MaintenanceReport` / `Outcome` | what it returns: per-operation results, `failures`, `counters`, and `exit_code` — the same number the CLI would exit with |
 | `RunCounters` | how much of the run had anything to act on: `considered`, `skipped`, `maintained`, `failed`, `skip_rate` |
 | `Stopped` | `report.stopped` on a run cut short by `should_stop` or a raising `observer`: the `reason`, and `not_run`, every (table, operation) never started. `None` when the run went to the end |
@@ -598,7 +599,7 @@ internal and may move in a patch release. The entry points you need:
 | `MetricsReporter` / `NoopReporter` / `CollectingReporter` / `LoggingReporter` / `MultiReporter` / `RestMetricsReporter` | where reports go: one method, `report(MetricsReport)`, copying Iceberg's own seam. Pass one as `maintain(reporter=…)`; the default emits nothing |
 | `reporter_for(catalog, extra)` | the reporter that suits a catalog — the metrics endpoint for a REST catalog, nothing to post to for a local one |
 | `NoCommitReport` / `no_commit_report(result)` / `CounterResult` / `TimerResult` / `no_commit_metrics(result)` | Iceberg's metric primitives, and the report for an operation that committed no snapshot — `expire`, `remove-orphans` and `apply-properties` never do, and the other three do not when they find nothing to do |
-| `FleetConfig` / `FleetWarehouse` / `CronSchedule` | the fleet file `zamboni serve` will read — warehouses, a UTC cron schedule each, and their table config inline or by path. `FleetConfig.load(path)` for the file; construct it directly to hold the same state in code. Validated on construction, raising `FleetConfigError`. See [event-driven-maintenance.md §4](event-driven-maintenance.md#4-configuration) |
+| `FleetConfig` / `FleetWarehouse` / `CronSchedule` / `WindowSchedule` / `Firing` | the fleet file `zamboni serve` will read — warehouses, a schedule each (UTC cron, or a window in a named time zone), and their table config inline or by path. `FleetConfig.load(path)` for the file; construct it directly to hold the same state in code. Validated on construction, raising `FleetConfigError`. See [event-driven-maintenance.md §4](event-driven-maintenance.md#4-configuration) |
 | `summarise_logs(paths)` / `FleetSummary` | reading a series of run summaries back — what the fleet did, per warehouse. Behind `zamboni runs`; see [devops.md](devops.md) |
 | `available_engines()` | what this install can drive |
 | `config_from_table_settings` | turning table-config layout into the compaction config `COMPACT` needs |

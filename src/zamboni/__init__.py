@@ -29,7 +29,14 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers and editors only
     from .deletes import DanglingDeleteCleaner
     from .events import get_write_completed_spec
     from .expire import ExpiryAborted, RetentionPolicy, SnapshotExpirer
-    from .fleet import CronSchedule, FleetConfig, FleetConfigError, FleetWarehouse
+    from .fleet import (
+        CronSchedule,
+        Firing,
+        FleetConfig,
+        FleetConfigError,
+        FleetWarehouse,
+        WindowSchedule,
+    )
     from .health import TableHealth, Watermark, maintenance_watermark, table_health
     from .maintainers import (
         EngineConfigProblem,
@@ -49,6 +56,7 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers and editors only
     from .maintenance import (
         RUNBOOK_ORDER,
         MaintenanceReport,
+        MinimumInterval,
         Outcome,
         RunCounters,
         Stopped,
@@ -116,6 +124,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     "ExpiryAborted": (".expire", "ExpiryAborted"),
     "FileGroup": (".planner", "FileGroup"),
     "Finding": (".profile", "Finding"),
+    "Firing": (".fleet", "Firing"),
     "FleetConfig": (".fleet", "FleetConfig"),
     "FleetConfigError": (".fleet", "FleetConfigError"),
     "FleetSummary": (".runlog", "FleetSummary"),
@@ -127,6 +136,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     "MaintainerCapabilities": (".maintainers", "MaintainerCapabilities"),
     "MaintenanceAborted": (".reachable", "MaintenanceAborted"),
     "MaintenanceReport": (".maintenance", "MaintenanceReport"),
+    "MinimumInterval": (".maintenance", "MinimumInterval"),
     "MaintenanceRequest": (".maintainers", "MaintenanceRequest"),
     "ManifestRewriter": (".manifests", "ManifestRewriter"),
     "MemoryMode": (".config", "MemoryMode"),
@@ -168,6 +178,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     "UnsupportedOperation": (".maintainers", "UnsupportedOperation"),
     "UnsupportedPyIceberg": (".committer", "UnsupportedPyIceberg"),
     "Watermark": (".health", "Watermark"),
+    "WindowSchedule": (".fleet", "WindowSchedule"),
     "WorkspaceUnavailable": (".workdir", "WorkspaceUnavailable"),
     "available_engines": (".maintainers", "available"),
     "commit_reports": (".metrics", "commit_reports"),
@@ -305,6 +316,7 @@ __all__ = [
     "ExpiryAborted",
     "FileGroup",
     "Finding",
+    "Firing",
     "FleetConfig",
     "FleetConfigError",
     "FleetSummary",
@@ -320,6 +332,7 @@ __all__ = [
     "ManifestRewriter",
     "MemoryMode",
     "MetricsReporter",
+    "MinimumInterval",
     "MultiReporter",
     "NoCommitReport",
     "NoopReporter",
@@ -356,6 +369,7 @@ __all__ = [
     "UnsupportedOperation",
     "UnsupportedPyIceberg",
     "Watermark",
+    "WindowSchedule",
     "WorkspaceUnavailable",
     "__version__",
     "available_engines",

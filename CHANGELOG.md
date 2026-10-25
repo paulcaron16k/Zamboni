@@ -23,6 +23,23 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **Window schedules: "maintain me overnight, in my time zone"** (#164, R3 of
+  [docs/maintenance-runtime.md](docs/maintenance-runtime.md) §4.2). A fleet
+  warehouse may have `schedule: {window: {timezone, start_hour, end_hour,
+  min_interval_hours}}` instead of a cron string. It fires when the window
+  opens, and a table no worker has started by the time it closes waits for the
+  next one. Daylight saving resolves a skipped hour forward and a repeated hour
+  to its first occurrence. Spread is forward only. A window already open when
+  `serve` starts fires at once. A table Zamboni maintained within
+  `min_interval_hours` (default: the window's length) is reported `not due`,
+  except for the operations an event merged into the run asked for.
+  `maintain(min_interval=MinimumInterval(...))` and `zamboni maintenance
+  --min-interval-hours H [--due-anyway OPS]` are the same check outside the
+  service. `WindowSchedule`, `Firing` and `MinimumInterval` are exported;
+  provisional, with the rest of the runtime.
+- **`tzdata` is a dependency** (2.8 MB, pure data), so a window's zone resolves
+  on an image with no zone database of its own.
+
 - **`zamboni.runtime.MaintenanceRuntime`: the scheduler, event feeds, pressure
   checks, queue and worker pool of `zamboni serve`, as a library** (#162, R1 of
   [docs/maintenance-runtime.md](docs/maintenance-runtime.md)). An application
