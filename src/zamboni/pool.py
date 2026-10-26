@@ -13,14 +13,16 @@ reachable-set arithmetic -- where the measured ~2,035 ms of an orphan scan sits
 -- and because a process is the unit an OOM kill takes
 (docs/event-driven-maintenance.md §3).
 
-**A worker runs the CLI's own ``maintenance`` path**, for one table, in-process.
-Not a second implementation of it: the resolution order (flag > env > profile),
-the session, the engine, the reporter, the exit codes and the ``--json`` run
-record are all the code a cron line already runs, so the service cannot drift
-from it. What crosses the process boundary is an argv of strings, a
-table-config file and the run record coming back -- never a ``CatalogSession``,
-and never a secret on a command line: the worker reads ``.env`` and the profile
-itself.
+**A worker runs an entry** (docs/maintenance-runtime.md §7): a
+``module:function`` taking the :class:`WorkItem` and a :class:`WorkerContext`
+and returning the run record. What crosses the process boundary is the pickled
+item -- config, never a ``CatalogSession`` and never a secret -- and the record
+coming back. The default entry, :func:`run_table`, runs the CLI's own
+``maintenance`` path for the one table, in-process: the resolution order (flag >
+env > profile), the session, the engine, the reporter, the exit codes and the
+``--json`` record are all the code a cron line already runs, so the service
+cannot drift from it, and the worker reads ``.env`` and the profile itself. An
+application supplies its own entry to build its catalog session its own way.
 
 **Long-lived workers, not one process per table.** Measured on this repo's dev
 machine (``/usr/bin/time``, three runs, 2026-10-01): importing what a worker
@@ -165,7 +167,7 @@ def _cgroup_dirs(root: Path, proc: Path, *, v1_controller: str) -> list[Path]:
     return []
 
 
-def available_cpus() -> int:
+def available_cpus(root: Path = CGROUP_ROOT, proc: Path = PROC_CGROUP) -> int:
     """Whole CPUs this process may use: affinity, then the cgroup quota.
 
     Not ``os.cpu_count()``, which reports the host -- a pod limited to two CPUs
@@ -174,7 +176,7 @@ def available_cpus() -> int:
     still use the half.
     """
     cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
-    quota = cgroup_cpu_limit()
+    quota = cgroup_cpu_limit(root, proc)
     if quota is not None:
         cpus = min(cpus or 1, math.ceil(quota))
     return max(1, cpus or 1)
@@ -202,8 +204,17 @@ def size_pool(
     memory_limit: int | None,
     memory_budget_bytes: int,
     requested: int | None = None,
+    reserved_memory_bytes: int = 0,
+    reserved_cpus: int = 0,
 ) -> PoolSize:
     """How many workers fit, and how many DuckDB threads each gets.
+
+    ``reserved_memory_bytes`` and ``reserved_cpus`` are what the host process
+    keeps for itself (docs/maintenance-runtime.md §9.4): the runtime's own
+    baseline, and in single-process mode the web server too. They come off the
+    top, and the pool plans against the rest. A reservation that leaves too
+    little for one worker still gets one, with the warning a plan that does not
+    fit always gives.
 
     Memory is the binding constraint, not CPU (§3): each worker holds its own
     DuckDB connection and its own ``memory_budget_bytes`` group, so the
@@ -215,17 +226,29 @@ def size_pool(
     plan is enforced where the memory is actually allocated rather than only
     assumed: ``MEMORY_HEADROOM x memory_limit / workers - WORKER_BASELINE_BYTES``.
     """
+    if reserved_memory_bytes < 0 or reserved_cpus < 0:
+        raise ValueError(
+            f"reservations cannot be negative: {reserved_memory_bytes} bytes, {reserved_cpus} CPUs"
+        )
+    cpus = max(1, cpus - reserved_cpus)
+    if memory_limit is not None:
+        memory_limit = max(0, memory_limit - reserved_memory_bytes)
     per_worker = WORKER_BASELINE_BYTES + memory_budget_bytes
-    by_cpu = max(1, cpus)
+    by_cpu = cpus
     by_memory = (
         max(1, int(memory_limit * MEMORY_HEADROOM) // per_worker)
         if memory_limit is not None
         else None
     )
-    workers, reason = by_cpu, f"{cpus} CPU(s)"
+    workers, reason = (
+        by_cpu,
+        f"{cpus} CPU(s)" + (f" after {reserved_cpus} reserved" if reserved_cpus else ""),
+    )
     if by_memory is not None and by_memory < workers:
         workers = by_memory
         reason = f"memory: {memory_limit} bytes x {MEMORY_HEADROOM} / {per_worker} bytes per worker"
+        if reserved_memory_bytes:
+            reason += f", after {reserved_memory_bytes} bytes reserved"
     if requested is not None and requested < workers:
         workers, reason = max(1, requested), "requested"
     elif requested is not None and requested > workers:
@@ -258,18 +281,30 @@ def physical_memory() -> int | None:
         return None
 
 
-def plan_pool(*, memory_budget_bytes: int, requested: int | None = None) -> PoolSize:
+def plan_pool(
+    *,
+    memory_budget_bytes: int,
+    requested: int | None = None,
+    reserved_memory_bytes: int = 0,
+    reserved_cpus: int = 0,
+    root: Path = CGROUP_ROOT,
+    proc: Path = PROC_CGROUP,
+) -> PoolSize:
     """Size the pool for *this* process: its CPUs, and the memory it may use.
 
     Memory is the cgroup's limit where there is one, else host RAM. Planning
     against host RAM rather than declining to plan is the safe direction: with
     no figure, every worker's DuckDB would assume 80% of the host for itself.
+    The reservations are :func:`size_pool`'s. ``root`` and ``proc`` locate the
+    cgroup tree, for a test.
     """
     return size_pool(
-        cpus=available_cpus(),
-        memory_limit=cgroup_memory_limit() or physical_memory(),
+        cpus=available_cpus(root, proc),
+        memory_limit=cgroup_memory_limit(root, proc) or physical_memory(),
         memory_budget_bytes=memory_budget_bytes,
         requested=requested,
+        reserved_memory_bytes=reserved_memory_bytes,
+        reserved_cpus=reserved_cpus,
     )
 
 
@@ -300,9 +335,10 @@ class WorkerConfig:
     #: WorkerConfig today, but a ``%r``, a traceback that prints locals or a
     #: debug print would have published all of them (ZMBNI-194).
     base_environ: Mapping[str, str] = field(default_factory=lambda: dict(os.environ), repr=False)
-    #: ``module:function`` taking an argv and returning an exit code. The CLI;
-    #: replaceable so a test can make a worker crash on cue.
-    entry: str = "zamboni.cli:main"
+    #: The worker entry: ``module:function`` taking a :class:`WorkItem` and a
+    #: :class:`WorkerContext` and returning the run record. Importable by name
+    #: in a spawned interpreter. The default runs the CLI (:func:`run_table`).
+    entry: str = "zamboni.pool:run_table"
     #: Where per-table config and run-record files go.
     workdir: Path = field(default_factory=lambda: Path.cwd())
 
@@ -327,12 +363,62 @@ class WorkerConfig:
             **settings,
         )
 
+    def context(self, report: Callable[[str], None] | None = None) -> WorkerContext:
+        """What a worker hands its entry with each table; ``report`` carries progress."""
+        return WorkerContext(
+            threads=self.threads,
+            duckdb_memory_bytes=self.duckdb_memory_bytes,
+            workdir=self.workdir,
+            profile_path=self.profile_path,
+            env_path=self.env_path,
+            base_environ=self.base_environ,
+            report=report or _ignore,
+        )
 
-def worker_argv(item: Job, config: WorkerConfig, table_config: Path, record: Path) -> list[str]:
-    """The ``zamboni`` command line a worker runs for ``item``. Strings only.
 
-    A table is ``maintenance <table>``; a :class:`PressureCheck` is ``health``
-    over every table in the warehouse's config -- read-only, so never ``--yes``.
+def _ignore(note: str) -> None:
+    pass
+
+
+@dataclass(frozen=True)
+class WorkerContext:
+    """What a worker entry is given besides its :class:`WorkItem` (§7).
+
+    Built in the worker, never sent: it carries the environment, and ``report``
+    is the worker's end of the pipe.
+    """
+
+    #: DuckDB threads for the session the entry builds -- this worker's share
+    #: of the CPUs, so N workers do not each assume all of them.
+    threads: int
+    #: DuckDB's memory limit for that session; ``None`` leaves DuckDB its default.
+    duckdb_memory_bytes: int | None
+    #: Where an entry may put per-table scratch files.
+    workdir: Path
+    #: The operator profile and env file, for an entry that resolves its
+    #: settings as the CLI does. The default entry passes them on.
+    profile_path: str | None = None
+    env_path: str | None = None
+    #: The environment the worker restored before this table. Out of the repr,
+    #: as on :class:`WorkerConfig`: it holds every secret the process was given.
+    base_environ: Mapping[str, str] = field(default_factory=dict, repr=False)
+    report: Callable[[str], None] = field(default=_ignore, repr=False, compare=False)
+
+    def progress(self, note: str) -> None:
+        """Tell the runtime this table is still moving, and where it is.
+
+        Call at every operation boundary at least: a long table that reports
+        nothing cannot be told from a hung one (§7.1).
+        """
+        self.report(str(note))
+
+
+def worker_argv(item: Job, context: WorkerContext, table_config: Path, record: Path) -> list[str]:
+    """The ``zamboni`` command line the default entry runs for ``item``. Strings only.
+
+    A table is ``maintenance <table>``, with ``--yes`` only when the item says
+    ``commit``; a :class:`PressureCheck` is ``health`` over every table in the
+    warehouse's config -- read-only, so never ``--yes``.
     """
     if isinstance(item, PressureCheck):
         argv = [
@@ -355,7 +441,7 @@ def worker_argv(item: Job, config: WorkerConfig, table_config: Path, record: Pat
             "--json",
             str(record),
             "--threads",
-            str(config.threads),
+            str(context.threads),
         ]
         # Every merged reason's operations. Each reason is looked up, never
         # `.get`: one missing from the table would read as None, which means
@@ -367,20 +453,101 @@ def worker_argv(item: Job, config: WorkerConfig, table_config: Path, record: Pat
             argv += ["--min-interval-hours", str(interval / timedelta(hours=1))]
             if anyway:
                 argv += ["--due-anyway", ",".join(anyway)]
-        if config.duckdb_memory_bytes is not None:
-            argv += ["--duckdb-memory-limit-bytes", str(config.duckdb_memory_bytes)]
+        if context.duckdb_memory_bytes is not None:
+            argv += ["--duckdb-memory-limit-bytes", str(context.duckdb_memory_bytes)]
     if item.uri:
         argv += ["--uri", item.uri]
-    if config.profile_path:
-        argv += ["--profile", config.profile_path]
-    if config.env_path:
-        argv += ["--env", config.env_path]
-    if config.commit and not isinstance(item, PressureCheck):
+    if context.profile_path:
+        argv += ["--profile", context.profile_path]
+    if context.env_path:
+        argv += ["--env", context.env_path]
+    if isinstance(item, WorkItem) and item.commit:
         argv.append("--yes")
     return argv
 
 
-def _worker_main(conn: connection.Connection, base_environ: dict[str, str], entry: str) -> None:
+def run_table(item: WorkItem, context: WorkerContext) -> dict[str, Any]:
+    """The default worker entry: ``zamboni maintenance <table>``, in-process.
+
+    The command line a cron run of the same table would be, run by the CLI's
+    own ``main`` -- so ``serve`` and cron cannot drift -- and its ``--json``
+    record returned.
+    """
+    return run_cli(item, context)
+
+
+def run_cli(
+    item: WorkItem, context: WorkerContext, *, main: Callable[[list[str]], int] | None = None
+) -> dict[str, Any]:
+    """Run ``item`` through the command line ``main`` parses, and return its record.
+
+    A run that wrote no record -- a usage error, which writes none -- raises
+    ``SystemExit`` with its code, which the worker reports as that exit code
+    with no record, as a cron run of the same line would. ``main`` is the
+    CLI's; a test passes a stand-in that crashes on cue.
+    """
+    context.progress(f"maintenance {item.table}")
+    code, record = _run_argv(item, context, main)
+    if record is None:
+        raise SystemExit(code)
+    return record
+
+
+def _run_argv(
+    item: Job, context: WorkerContext, main: Callable[[list[str]], int] | None
+) -> tuple[int, dict[str, Any] | None]:
+    """``main(worker_argv(item, ...))``: its exit code and the record it wrote."""
+    if main is None:
+        from .cli import main as cli_main
+
+        main = cli_main
+    job_id = uuid.uuid4().hex
+    table_config = context.workdir / f"zamboni-{job_id}.table-config.json"
+    record = context.workdir / f"zamboni-{job_id}.run.jsonl"
+    # The item's own config, frozen when it was taken: a reload that edits
+    # the file it came from cannot reach a table already in flight.
+    item.table_config.dump(table_config)
+    try:
+        try:
+            code = main(worker_argv(item, context, table_config, record))
+        except SystemExit as exc:  # argparse's `parser.error` is exit 2
+            code = _exit_code(exc)
+        return int(code or 0), _read_record(record)
+    finally:
+        table_config.unlink(missing_ok=True)
+        record.unlink(missing_ok=True)
+
+
+def _exit_code(exc: SystemExit) -> int:
+    return exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+
+
+def _run_job(job: Job, run: Callable[..., Any], context: WorkerContext) -> tuple[int, Any]:
+    """One job's exit code and run record, however the entry ends.
+
+    A table goes to the entry, whose record carries its own ``exit_code``. A
+    pressure check is always ``health`` through the CLI: it is the runtime's
+    own measurement, not maintenance an application builds a session for.
+    """
+    if isinstance(job, PressureCheck):
+        return _run_argv(job, context, None)
+    try:
+        record = run(job, context)
+    except SystemExit as exc:
+        return _exit_code(exc), None
+    except BaseException:  # reported, not swallowed
+        traceback.print_exc()
+        return 1, None
+    code = record.get("exit_code") if isinstance(record, dict) else None
+    if not isinstance(code, int) or isinstance(code, bool):
+        # Not the record `maintenance --json` writes, so not a result the run
+        # log can read: a broken entry, reported as a failure, never a success.
+        print(f"the worker entry returned no run record with an exit_code: {record!r:.200}")
+        return 1, None
+    return code, record
+
+
+def _worker_main(conn: connection.Connection, config: WorkerConfig) -> None:
     """A worker process: run jobs until told to stop or the parent goes away."""
     import importlib
 
@@ -392,8 +559,9 @@ def _worker_main(conn: connection.Connection, base_environ: dict[str, str], entr
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
-    module, _, name = entry.partition(":")
+    module, _, name = config.entry.partition(":")
     run = getattr(importlib.import_module(module), name)
+    context = config.context(report=lambda note: conn.send(("progress", note)))
     # Logging to whatever `sys.stderr` is *now*, so the per-table capture below
     # catches it. `cli.main`'s own basicConfig is then a no-op.
     logging.basicConfig(level=logging.INFO, handlers=[_CurrentStderr()], force=True)
@@ -405,19 +573,16 @@ def _worker_main(conn: connection.Connection, base_environ: dict[str, str], entr
             return
         if job is None:
             return
-        argv, record_path = job
         os.environ.clear()
-        os.environ.update(base_environ)
+        os.environ.update(config.base_environ)
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
             try:
-                code = run(argv)
-            except SystemExit as exc:  # argparse's `parser.error` is exit 2
-                code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
-            except BaseException:  # reported, not swallowed
+                code, record = _run_job(job, run, context)
+            except BaseException:  # the pressure path's own failure
                 traceback.print_exc()
-                code = 1
-        conn.send((int(code or 0), out.getvalue(), _read_record(Path(record_path))))
+                code, record = 1, None
+        conn.send(("done", code, out.getvalue(), record))
 
 
 class _CurrentStderr(logging.StreamHandler):
@@ -458,6 +623,8 @@ class ItemResult:
     #: ``"claimed elsewhere"`` when another holder had its claim (§6). ``None``
     #: for a table that ran.
     dropped: str | None = None
+    #: The last ``context.progress`` note the entry sent, if any.
+    progress: str | None = None
 
 
 class _Slot:
@@ -503,51 +670,60 @@ class WorkerPool:
 
     def _run_blocking(self, slot: _Slot, item: Job) -> ItemResult:
         started = time.monotonic()
-        job_id = uuid.uuid4().hex
-        table_config = self.config.workdir / f"zamboni-{job_id}.table-config.json"
-        record = self.config.workdir / f"zamboni-{job_id}.run.jsonl"
-        # The item's own config, frozen when it was taken: a reload that edits
-        # the file it came from cannot reach a table already in flight.
-        item.table_config.dump(table_config)
+        # The runtime's consent travels on the item, which is what an entry
+        # honours (§7 rule 4). Stamped on the copy sent; `item` itself is the
+        # queue's, and is what the result and `kill_table` are matched against.
+        job = (
+            dataclasses.replace(item, commit=self.config.commit)
+            if isinstance(item, WorkItem)
+            else item
+        )
+        progress: str | None = None
+        if slot.process is not None and not slot.process.is_alive():
+            # Died between tables -- killed, OOM, crashed after its last
+            # reply. That is not this table's failure: replace the worker
+            # and run the table, rather than sending it into a dead pipe.
+            self._reset(slot)
+        if slot.process is None:
+            self._spawn(slot)
+        assert slot.conn is not None
+        if slot.doomed:
+            # Killed before it was sent: the kill may have landed on the
+            # previous process, which the check above then replaced.
+            return ItemResult(item, 1, None, "", "worker killed before the table started", 0.0)
+        # Any failure on the pipe is the worker dying, whichever call sees
+        # it. A worker that dies during startup surfaces as
+        # ConnectionResetError, not EOFError, because it exits with our job
+        # unread in its socket buffer; catching EOFError alone left the slot
+        # holding a dead process and failed every later table on it (#155).
         try:
-            if slot.process is not None and not slot.process.is_alive():
-                # Died between tables -- killed, OOM, crashed after its last
-                # reply. That is not this table's failure: replace the worker
-                # and run the table, rather than sending it into a dead pipe.
-                self._reset(slot)
-            if slot.process is None:
-                self._spawn(slot)
-            assert slot.conn is not None
-            if slot.doomed:
-                # Killed before it was sent: the kill may have landed on the
-                # previous process, which the check above then replaced.
-                return ItemResult(item, 1, None, "", "worker killed before the table started", 0.0)
-            # Any failure on the pipe is the worker dying, whichever call sees
-            # it. A worker that dies during startup surfaces as
-            # ConnectionResetError, not EOFError, because it exits with our job
-            # unread in its socket buffer; catching EOFError alone left the slot
-            # holding a dead process and failed every later table on it (#155).
-            try:
-                slot.conn.send((worker_argv(item, self.config, table_config, record), str(record)))
+            slot.conn.send(job)
+            while True:
                 ready = connection.wait([slot.conn, slot.process.sentinel])
                 if slot.conn not in ready:
-                    return self._died(slot, item, started)
-                code, output, run_record = slot.conn.recv()
-            except (OSError, EOFError):
-                return self._died(slot, item, started)
-            slot.tables += 1
-            if slot.tables >= self.recycle_after:
-                self._retire(slot)
-            return ItemResult(item, code, run_record, output, None, time.monotonic() - started)
-        finally:
-            table_config.unlink(missing_ok=True)
-            record.unlink(missing_ok=True)
+                    return self._died(slot, item, started, progress)
+                message = slot.conn.recv()
+                if message[0] != "progress":
+                    break
+                progress = message[1]
+            _, code, output, run_record = message
+        except (OSError, EOFError):
+            return self._died(slot, item, started, progress)
+        slot.tables += 1
+        if slot.tables >= self.recycle_after:
+            self._retire(slot)
+        return ItemResult(
+            item, code, run_record, output, None, time.monotonic() - started, progress=progress
+        )
 
     def _spawn(self, slot: _Slot) -> None:
         parent, child = self._context.Pipe()
         process = self._context.Process(
             target=_worker_main,
-            args=(child, dict(self.config.base_environ), self.config.entry),
+            args=(
+                child,
+                dataclasses.replace(self.config, base_environ=dict(self.config.base_environ)),
+            ),
             name="zamboni-worker",
             daemon=True,
         )
@@ -555,7 +731,7 @@ class WorkerPool:
         child.close()
         slot.process, slot.conn, slot.tables = process, parent, 0
 
-    def _died(self, slot: _Slot, item: Job, started: float) -> ItemResult:
+    def _died(self, slot: _Slot, item: Job, started: float, progress: str | None) -> ItemResult:
         slot.process.join(timeout=5)
         if slot.process.is_alive():
             # The pipe failed but the process did not exit: it can no longer be
@@ -566,7 +742,9 @@ class WorkerPool:
         why = f"killed by signal {-code}" if code is not None and code < 0 else f"exit {code}"
         logger.error("worker for %s/%s died (%s)", item.warehouse, item.table, why)
         self._reset(slot)
-        return ItemResult(item, 1, None, "", f"worker died ({why})", time.monotonic() - started)
+        return ItemResult(
+            item, 1, None, "", f"worker died ({why})", time.monotonic() - started, progress=progress
+        )
 
     def _retire(self, slot: _Slot) -> None:
         with contextlib.suppress(OSError):

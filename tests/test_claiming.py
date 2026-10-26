@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from zamboni.claims import Claim, LocalClaimStore
-from zamboni.pool import ItemResult, PoolSize, WorkerConfig, WorkerPool
+from zamboni.pool import ItemResult, PoolSize, WorkerConfig, WorkerContext, WorkerPool
 from zamboni.runtime import MaintenanceRuntime, RuntimeSettings, StaticFleet, start_in_thread
 from zamboni.scheduler import SCHEDULE, WorkItem
 
@@ -29,16 +29,16 @@ from .test_runtime import QUIET, FakePool, eventually, fleet, warehouse
 RAN = "ZAMBONI_TEST_RAN_DIR"
 
 
-def hang(argv: list[str]) -> int:
+def hang(item: WorkItem, context: WorkerContext) -> dict:
     """A worker entry: say it started, then outlast any lease a test uses.
 
     ``raw.warm`` returns at once. Run first, it spawns the worker, so the
     spawn (about 2 s) is not spent out of the lease of the table under test.
     """
-    Path(os.environ[RAN], argv[1]).touch()
-    if argv[1] != "raw.warm":
+    Path(os.environ[RAN], item.table).touch()
+    if item.table != "raw.warm":
         time.sleep(60)
-    return 0
+    return {"exit_code": 0}
 
 
 # -- stores that misbehave ----------------------------------------------------------

@@ -1,20 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 """Conformance suites for the runtime's protocols (docs/maintenance-runtime.md §9.5).
 
-An implementation of a protocol the runtime depends on for safety -- today
-:class:`~zamboni.claims.ClaimStore` -- is conformant when it passes the suite
-here. Each check is a plain function that raises :class:`ConformanceError`, so
-a suite runs under any test runner, or none: ``claim_store_conformance(...)``
-runs them all, and ``CLAIM_STORE_CHECKS`` lets a pytest suite report each
-check by name::
+An implementation of a protocol the runtime depends on for safety -- a
+:class:`~zamboni.claims.ClaimStore`, and a worker entry (§7) -- is conformant
+when it passes the suite here. Each check is a plain function that raises
+:class:`ConformanceError`, so a suite runs under any test runner, or none:
+``claim_store_conformance(...)`` runs them all, and ``CLAIM_STORE_CHECKS`` lets a
+pytest suite report each check by name (``entry_conformance`` and
+``ENTRY_CHECKS`` likewise)::
 
     @pytest.mark.parametrize("check", CLAIM_STORE_CHECKS, ids=lambda c: c.__name__)
     def test_my_store(check):
         check(ClaimStoreHarness(make_store=fresh_store, now=database_now))
 
 Not :mod:`zamboni.testing`: that module imports private PyIceberg classes to
-simulate merge-on-read tables, and an implementer of a claim store needs none
-of them.
+simulate merge-on-read tables, and an implementer of a claim store or an entry
+needs none of them. The entry checks import the worker pool only when they run,
+so a claim-store suite does not load it.
 """
 
 from __future__ import annotations
@@ -26,9 +28,16 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from .claims import Claim, ClaimStore
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+    from .pool import ItemResult
+    from .scheduler import WorkItem
 
 
 class ConformanceError(AssertionError):
@@ -303,4 +312,152 @@ CLAIM_STORE_CHECKS: tuple[Callable[[ClaimStoreHarness], None], ...] = (
 def claim_store_conformance(harness: ClaimStoreHarness) -> None:
     """Run every check; raises :class:`ConformanceError` naming the first rule broken."""
     for check in CLAIM_STORE_CHECKS:
+        check(harness)
+
+
+# -- worker entries (§7, §9.5 point 2) ----------------------------------------------
+
+
+@dataclass(frozen=True)
+class EntryHarness:
+    """What the entry checks need: the entry, and one table it can maintain.
+
+    The checks run the entry the way the runtime does -- in a spawned worker
+    of a real :class:`~zamboni.pool.WorkerPool`, given ``item`` by pickle --
+    so they prove what a unit test of the function could not.
+    """
+
+    #: The entry under test, ``module:function``, as ``WorkerConfig.entry`` takes it.
+    entry: str
+    #: A table the entry can reach, with work to do: a preview of a table with
+    #: nothing to do proves nothing about previewing. Its ``commit`` is ignored;
+    #: each check sets it.
+    item: WorkItem
+    #: Something that changes whenever the table commits -- its current
+    #: metadata location, or its snapshot id.
+    table_state: Callable[[], object]
+    #: The environment the worker runs with: whatever the entry needs to build
+    #: its session, credentials included.
+    base_environ: Mapping[str, str]
+    #: The credential values in ``base_environ``, or anywhere else the entry
+    #: reads them from. None may appear in the item, the record or the output.
+    secrets: Sequence[str]
+    #: Where the worker may write scratch files.
+    workdir: Path
+    #: The operator profile and env file, for an entry that resolves its
+    #: settings as the CLI does.
+    profile_path: str | None = None
+    env_path: str | None = None
+
+
+def _run_entry(h: EntryHarness, *, commit: bool) -> ItemResult:
+    import asyncio
+
+    from .pool import PoolSize, WorkerConfig, WorkerPool
+
+    config = WorkerConfig(
+        entry=h.entry,
+        commit=commit,
+        base_environ=dict(h.base_environ),
+        workdir=h.workdir,
+        profile_path=h.profile_path,
+        env_path=h.env_path,
+    )
+
+    async def run() -> ItemResult:
+        pool = WorkerPool(PoolSize(1, 1, "conformance"), config)
+        try:
+            return await pool.run(h.item)
+        finally:
+            await pool.close()
+
+    return asyncio.run(run())
+
+
+def _import_entry(entry: str) -> None:
+    import importlib
+
+    module, _, name = entry.partition(":")
+    if not callable(getattr(importlib.import_module(module), name)):
+        raise TypeError(f"{entry} is not callable")
+
+
+def check_entry_is_importable_when_spawned(h: EntryHarness) -> None:
+    from multiprocessing import get_context
+
+    process = get_context("spawn").Process(target=_import_entry, args=(h.entry,))
+    process.start()
+    process.join(timeout=120)
+    if process.is_alive():
+        process.kill()
+        process.join()
+    _require(
+        process.exitcode == 0,
+        "rule 1",
+        f"{h.entry} cannot be imported by name in a spawned interpreter (exit {process.exitcode})",
+    )
+
+
+def check_entry_previews_without_commit(h: EntryHarness) -> None:
+    before = h.table_state()
+    result = _run_entry(h, commit=False)
+    _require(result.died is None, "rule 1", f"the worker died: {result.died}")
+    after = h.table_state()
+    _require(
+        after == before,
+        "rule 4",
+        f"the table changed without commit ({before!r} -> {after!r}); output:\n{result.output}",
+    )
+
+
+def check_entry_returns_a_run_record(h: EntryHarness) -> None:
+    from .maintenance import MaintenanceReport
+
+    result = _run_entry(h, commit=False)
+    record = result.record
+    _require(
+        isinstance(record, dict),
+        "rule 3",
+        f"no run record came back (exit {result.exit_code}); output:\n{result.output}",
+    )
+    assert isinstance(record, dict)
+    # The shape `maintenance --json` writes, read off the report that writes it.
+    missing = sorted(set(MaintenanceReport().as_dict()) - set(record))
+    _require(not missing, "rule 3", f"the run record lacks {missing}")
+    _require(
+        h.item.table in record["tables"],
+        "rule 3",
+        f"the run record names {record['tables']}, not {h.item.table}",
+    )
+
+
+def check_entry_carries_no_secret(h: EntryHarness) -> None:
+    import json
+    import pickle
+
+    _require(h.secrets, "rule 2", "the harness names no secret, so nothing would be checked")
+    sent = pickle.dumps(h.item)
+    result = _run_entry(h, commit=False)
+    places = {
+        "the work item": repr(h.item) + sent.decode("latin-1"),
+        "the run record": json.dumps(result.record, default=str),
+        "the output": result.output,
+    }
+    for secret in h.secrets:
+        for where, text in places.items():
+            _require(secret not in text, "rule 2", f"a secret appears in {where}")
+
+
+#: Every entry check, in the order of §9.5 point 2.
+ENTRY_CHECKS: tuple[Callable[[EntryHarness], None], ...] = (
+    check_entry_is_importable_when_spawned,
+    check_entry_previews_without_commit,
+    check_entry_returns_a_run_record,
+    check_entry_carries_no_secret,
+)
+
+
+def entry_conformance(harness: EntryHarness) -> None:
+    """Run every entry check; raises :class:`ConformanceError` naming the rule broken."""
+    for check in ENTRY_CHECKS:
         check(harness)

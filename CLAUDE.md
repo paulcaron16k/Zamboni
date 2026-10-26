@@ -168,6 +168,11 @@ cannot be renewed by two-thirds of its lease SIGKILLs that table's worker
 (`WorkerPool.kill_table`) before another replica could take it. `serve` uses a
 `LocalClaimStore`; a shared store must pass `conformance.claim_store_conformance`,
 which `tests/claims_postgres.py` runs against §6.1's SQL read from the design doc.
+A worker receives the pickled `WorkItem` plus a `pool.WorkerContext` and runs
+`WorkerConfig.entry`; the default, `pool.run_table`, runs the CLI's own
+`maintenance` line in-process, and an entry must pass
+`conformance.entry_conformance`. `WorkItem.commit` is consent: only the pool
+sets it, from `WorkerConfig.commit`.
 Nothing in the runtime decides whether a table needs work; that is still
 `maintain()`'s due-check, run in each worker.
 docs/maintenance-runtime.md is the design and §12 the stories still to build.

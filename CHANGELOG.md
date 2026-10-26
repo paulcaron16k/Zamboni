@@ -23,6 +23,21 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **Worker entries: an application builds its own catalog session** (#169, R5
+  of [docs/maintenance-runtime.md](docs/maintenance-runtime.md) §7). A worker
+  now receives the pickled `WorkItem` and a `WorkerContext` (DuckDB threads and
+  memory limit, scratch directory, profile and env paths, `progress(note)`)
+  instead of a command line. It runs `WorkerConfig.entry`, a `module:function`
+  returning the run record. The default, `zamboni.pool:run_table`, runs the same
+  `zamboni maintenance <table>` line as before, so `serve` behaves as it did.
+  `WorkItem.commit` is the runtime's consent, stamped by the pool on every item
+  it sends. `zamboni.conformance.entry_conformance` checks an entry: importable
+  in a spawned worker, previews without `commit`, returns a run record, leaks
+  no secret. `plan_pool` and `size_pool` take `reserved_memory_bytes` and
+  `reserved_cpus`, kept for the host process before the pool is sized.
+  Provisional, with the rest of the runtime. An entry written for the old
+  `WorkerConfig.entry` signature — an argv in, an exit code out — now fails
+  every table with exit 1, a `TypeError` for its one argument.
 - **Window schedules: "maintain me overnight, in my time zone"** (#164, R3 of
   [docs/maintenance-runtime.md](docs/maintenance-runtime.md) §4.2). A fleet
   warehouse may have `schedule: {window: {timezone, start_hour, end_hour,

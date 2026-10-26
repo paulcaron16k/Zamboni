@@ -294,6 +294,18 @@ refuses a `claim_renew_every` at or above two-thirds of `claim_lease` — every
 table would be killed before its first renewal
 (`test_a_renewal_cadence_the_lease_cannot_honour_is_refused_at_construction`).
 
+`reserved_memory_bytes` and `reserved_cpus` (R5) are arguments to
+`zamboni.pool.plan_pool` and `size_pool`, not `RuntimeSettings` fields: the
+runtime is handed a pool that is already sized (`pool=PoolSize`), so a setting
+on it would be one it could only ignore. They come off the top of the cgroup's
+limits before the pool is planned
+(`test_the_reserved_memory_comes_off_the_top_of_the_plan`,
+`test_the_reserved_cpus_come_off_the_top_of_the_plan`); one that leaves no room
+still gets one worker and the "does not fit" warning
+(`test_a_reservation_that_leaves_no_room_still_gets_one_worker_and_a_warning`).
+`zamboni serve` has no flag for them yet; an application embedding the runtime
+calls `plan_pool` itself and passes them there.
+
 ---
 
 ## 4. Schedules
@@ -685,6 +697,39 @@ def run_table(item: WorkItem, context: WorkerContext) -> dict: ...
    default entry reports each rewrite group. A long table that reports nothing
    is indistinguishable from a hung one (§7.1).
 
+As built in R5 (`zamboni.pool`):
+
+- **The entry** is `WorkerConfig.entry`, default `zamboni.pool:run_table`. That
+  default builds the command line a cron run of the table would be and runs the
+  CLI's `main` in-process, so the argv and the run record are unchanged: the
+  argv tests in `tests/test_pool.py` pass as they were, and its real-worker
+  tests run that path with only `main` replaced (`tests/pool_entries.py`).
+  `run_cli(item, context, main=…)` is the path, for an entry that wants it.
+- **How a table ends:** the returned record's `exit_code` is the table's. A
+  raised `SystemExit(n)` is exit n with no record — the default entry's answer
+  to a usage error, which writes none, as a cron run would. Any other
+  exception is exit 1 with its traceback in the output, and so is a return
+  that is not a record carrying an integer `exit_code`
+  (`test_an_entry_that_returns_no_run_record_fails_its_table`), so a broken
+  entry never reads as a success.
+- **`item.commit` is the runtime's consent, always.** The queue never sets it;
+  the pool stamps `WorkerConfig.commit` (`serve --yes`) on every item it sends,
+  over whatever the item carried
+  (`test_an_items_own_commit_never_outranks_the_runtimes`).
+- **`WorkerContext`** carries the DuckDB threads and memory limit, a scratch
+  `workdir`, the profile and env paths, and the base environment (out of its
+  repr). It is built in the worker, never sent. `context.progress(note)` goes
+  to the runtime over the worker's pipe, and `ItemResult.progress` keeps the
+  last note even when the worker then dies
+  (`test_progress_reaches_the_runtime_and_survives_the_worker`). The default
+  entry reports once, as the table starts; reporting at each operation and
+  rewrite group (rule 6) needs a hook through `maintain()` and arrives with
+  R7, which is the first thing to read it.
+- **A pressure check is not an entry's.** It always runs `zamboni health`
+  through the CLI, whatever `entry` is: §7's signature is per table, and the
+  check is the runtime's own measurement. An application whose catalog
+  session cannot be built from the operator profile has no hook here yet.
+
 ### 7.1 When maintenance goes wrong
 
 Isolation of maintenance from whatever hosts it is a requirement, not a
@@ -901,9 +946,14 @@ does not fit.
 An implementation is conformant when:
 
 1. its `ClaimStore` passes `zamboni.conformance.claim_store_conformance`;
-2. its worker entry passes the entry checks in `zamboni.testing` (importable
+2. its worker entry passes `zamboni.conformance.entry_conformance` (importable
    when spawned, previews without `commit`, returns a run record, carries no
-   secret in its inputs);
+   secret in its inputs) — in `conformance`, not `zamboni.testing`, for R4's
+   reason: `testing` imports private PyIceberg classes an implementer does not
+   need. The checks run the entry in a spawned worker of a real `WorkerPool`;
+   the default entry passes them against a table with work to do
+   (`test_the_default_entry_passes`), and each is shown to reject an entry
+   broken its own way;
 3. it never calls the runtime except through the control surface, and its web
    tier never imports `zamboni.runtime` — a test imports the web tier's entry
    point and asserts the module is absent from `sys.modules`;

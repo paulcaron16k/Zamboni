@@ -155,13 +155,15 @@ def test_a_worker_is_given_strings_and_never_a_secret(tmp_path):
     config = WorkerConfig(
         profile_path="/etc/zamboni/zamboni.yml",
         env_path="/etc/zamboni/.env",
-        commit=True,
         threads=3,
         base_environ={"ZAMBONI_CREDENTIAL": "client:s3cr3t"},
         workdir=tmp_path,
     )
     argv = worker_argv(
-        item(uri="https://c/catalog"), config, tmp_path / "t.json", tmp_path / "r.jsonl"
+        item(uri="https://c/catalog", commit=True),
+        config.context(),
+        tmp_path / "t.json",
+        tmp_path / "r.jsonl",
     )
     assert all(isinstance(a, str) for a in argv)
     assert not any("s3cr3t" in a for a in argv)
@@ -178,7 +180,9 @@ def test_a_worker_is_given_strings_and_never_a_secret(tmp_path):
 
 
 def test_without_commit_a_worker_previews(tmp_path):
-    argv = worker_argv(item(), WorkerConfig(workdir=tmp_path), tmp_path / "t", tmp_path / "r")
+    argv = worker_argv(
+        item(), WorkerConfig(workdir=tmp_path).context(), tmp_path / "t", tmp_path / "r"
+    )
     assert "--yes" not in argv
 
 
@@ -187,8 +191,8 @@ def test_the_worker_argv_parses_as_a_maintenance_command(tmp_path):
     from zamboni.cli import _build_parser
 
     argv = worker_argv(
-        item(uri="https://c/catalog"),
-        WorkerConfig(commit=True, threads=2, workdir=tmp_path),
+        item(uri="https://c/catalog", commit=True),
+        WorkerConfig(threads=2, workdir=tmp_path).context(),
         tmp_path / "t.json",
         tmp_path / "r.jsonl",
     )
@@ -220,6 +224,57 @@ def run_items(tmp_path, items, *, workers=1, recycle_after=50, environ=None) -> 
             await pool.close()
 
     return asyncio.run(scenario())
+
+
+def run_entry(tmp_path, entry, items, *, commit=False) -> list[ItemResult]:
+    config = WorkerConfig(
+        entry=f"tests.pool_entries:{entry}",
+        workdir=tmp_path,
+        base_environ={"PATH": "/usr/bin:/bin"},
+        commit=commit,
+    )
+
+    async def scenario():
+        pool = WorkerPool(PoolSize(1, 1, "test"), config)
+        try:
+            return [await pool.run(i) for i in items]
+        finally:
+            await pool.close()
+
+    return asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("consent", [False, True])
+def test_an_items_own_commit_never_outranks_the_runtimes(tmp_path, consent):
+    """§7 rule 4 has the entry honour ``item.commit``, so that field is consent.
+    It is the runtime's -- ``serve --yes`` -- on every item a worker receives,
+    whatever the item carried: a previewing runtime never sends a committing
+    item, and a committing one never sends a previewing one by accident."""
+    sent = [item("raw.a", commit=not consent), item("raw.b", commit=consent)]
+    results = run_entry(tmp_path, "progress", sent, commit=consent)
+    assert [r.record["commit"] for r in results] == [consent, consent]
+    assert [r.item for r in results] == sent, "the result names the item as queued"
+
+
+def test_progress_reaches_the_runtime_and_survives_the_worker(tmp_path):
+    """What R7's stall detection reads: the last note, kept even when the worker
+    dies after sending it -- a dead table's last known position."""
+    ran, died = run_entry(tmp_path, "progress", [item("raw.a"), item("raw.die")])
+    assert (ran.exit_code, ran.progress) == (0, "second raw.a")
+    assert died.died is not None and died.progress == "second raw.die"
+
+
+def test_the_default_entry_reports_progress_before_it_runs(tmp_path):
+    (result,) = run_items(tmp_path, [item("raw.a")])
+    assert result.progress == "maintenance raw.a"
+
+
+def test_an_entry_that_returns_no_run_record_fails_its_table(tmp_path):
+    """Rule 3: the record is the result. An entry returning a bare exit code --
+    the shape of the CLI's own ``main`` -- must not read as a success."""
+    (result,) = run_entry(tmp_path, "not_a_record", [item("raw.a")])
+    assert (result.exit_code, result.record, result.died) == (1, None, None)
+    assert "no run record" in result.output
 
 
 def test_a_worker_dying_takes_one_table_not_the_pool(tmp_path):
@@ -613,9 +668,9 @@ def test_with_no_cgroup_the_plan_uses_host_memory(monkeypatch):
     """Declining to plan would leave every worker's DuckDB assuming 80% of the host."""
     from zamboni import pool
 
-    monkeypatch.setattr(pool, "cgroup_memory_limit", lambda: None)
+    monkeypatch.setattr(pool, "cgroup_memory_limit", lambda *_: None)
     monkeypatch.setattr(pool, "physical_memory", lambda: 16384 * MiB)
-    monkeypatch.setattr(pool, "available_cpus", lambda: 4)
+    monkeypatch.setattr(pool, "available_cpus", lambda *_: 4)
     size = pool.plan_pool(memory_budget_bytes=256 * MiB)
     assert size.duckdb_memory_bytes is not None
     assert size.workers * size.duckdb_memory_bytes < 16384 * MiB * MEMORY_HEADROOM
@@ -624,13 +679,73 @@ def test_with_no_cgroup_the_plan_uses_host_memory(monkeypatch):
 def test_the_cgroup_limit_wins_over_host_memory(monkeypatch):
     from zamboni import pool
 
-    monkeypatch.setattr(pool, "cgroup_memory_limit", lambda: 2048 * MiB)
+    monkeypatch.setattr(pool, "cgroup_memory_limit", lambda *_: 2048 * MiB)
     monkeypatch.setattr(pool, "physical_memory", lambda: 65536 * MiB)
-    monkeypatch.setattr(pool, "available_cpus", lambda: 4)
+    monkeypatch.setattr(pool, "available_cpus", lambda *_: 4)
     size = pool.plan_pool(memory_budget_bytes=256 * MiB)
     assert size.workers * (size.duckdb_memory_bytes + WORKER_BASELINE_BYTES) <= (
         2048 * MiB * MEMORY_HEADROOM
     )
+
+
+def pod(tmp_path, *, cpus: int, memory: int) -> dict:
+    """``plan_pool``'s cgroup arguments for a pod limited to ``cpus`` and ``memory``."""
+    root, proc = cgroup_tree(
+        tmp_path,
+        {
+            "kubepods/pod1/cpu.max": f"{cpus * 100000} 100000\n",
+            "kubepods/pod1/memory.max": f"{memory}\n",
+        },
+    )
+    return {"root": root, "proc": proc}
+
+
+def test_the_reserved_memory_comes_off_the_top_of_the_plan(tmp_path):
+    """§9.4: the pool plans against what the host process has not kept. Measured
+    against the fake cgroup's own limit: every worker's DuckDB share plus its
+    baseline fits in the headroom of what is left after the reservation."""
+    from zamboni.pool import plan_pool
+
+    limits = pod(tmp_path, cpus=64, memory=4096 * MiB)
+    reserved = 1536 * MiB
+    plain = plan_pool(memory_budget_bytes=256 * MiB, **limits)
+    held = plan_pool(memory_budget_bytes=256 * MiB, reserved_memory_bytes=reserved, **limits)
+
+    footprint = held.workers * (held.duckdb_memory_bytes + WORKER_BASELINE_BYTES)
+    assert footprint <= (4096 * MiB - reserved) * MEMORY_HEADROOM
+    assert plain.workers * (plain.duckdb_memory_bytes + WORKER_BASELINE_BYTES) > (
+        (4096 * MiB - reserved) * MEMORY_HEADROOM
+    ), "without the reservation the plan would have used it"
+
+
+def test_the_reserved_cpus_come_off_the_top_of_the_plan(tmp_path):
+    from zamboni.pool import available_cpus, plan_pool
+
+    limits = pod(tmp_path, cpus=4, memory=65536 * MiB)
+    cpus = available_cpus(**limits)  # the quota, or fewer on a smaller machine
+    size = plan_pool(memory_budget_bytes=256 * MiB, reserved_cpus=1, **limits)
+    assert size.workers * size.threads_per_worker <= max(1, cpus - 1)
+
+
+def test_a_reservation_that_leaves_no_room_still_gets_one_worker_and_a_warning(tmp_path, caplog):
+    from zamboni.pool import plan_pool
+
+    limits = pod(tmp_path, cpus=2, memory=1024 * MiB)
+    with caplog.at_level("WARNING", logger="zamboni.pool"):
+        size = plan_pool(
+            memory_budget_bytes=256 * MiB,
+            reserved_memory_bytes=1024 * MiB,
+            reserved_cpus=8,
+            **limits,
+        )
+    assert (size.workers, size.threads_per_worker) == (1, 1)
+    assert "does not fit" in caplog.text
+
+
+@pytest.mark.parametrize("reservation", [{"reserved_memory_bytes": -1}, {"reserved_cpus": -1}])
+def test_a_negative_reservation_is_refused(reservation):
+    with pytest.raises(ValueError, match="cannot be negative"):
+        size_pool(cpus=4, memory_limit=None, memory_budget_bytes=0, **reservation)
 
 
 def test_a_worker_config_carries_the_plan_and_the_worker_passes_it(tmp_path):
@@ -645,14 +760,16 @@ def test_a_worker_config_carries_the_plan_and_the_worker_passes_it(tmp_path):
         size.duckdb_memory_bytes,
     )
     args = _build_parser().parse_args(
-        worker_argv(item(), config, tmp_path / "t.json", tmp_path / "r.jsonl")
+        worker_argv(item(), config.context(), tmp_path / "t.json", tmp_path / "r.jsonl")
     )
     assert args.duckdb_memory_limit_bytes == size.duckdb_memory_bytes
     assert args.threads == size.threads_per_worker
 
 
 def test_without_a_plan_a_worker_passes_no_memory_flag(tmp_path):
-    argv = worker_argv(item(), WorkerConfig(workdir=tmp_path), tmp_path / "t", tmp_path / "r")
+    argv = worker_argv(
+        item(), WorkerConfig(workdir=tmp_path).context(), tmp_path / "t", tmp_path / "r"
+    )
     assert "--duckdb-memory-limit-bytes" not in argv
 
 
@@ -773,7 +890,9 @@ def test_an_event_item_runs_only_the_write_driven_operations(tmp_path):
 
     for reason in (EVENT, PRESSURE):
         work = WorkItem("acme", "raw.events", reason, table_config("events"))
-        argv = worker_argv(work, WorkerConfig(workdir=tmp_path), tmp_path / "t", tmp_path / "r")
+        argv = worker_argv(
+            work, WorkerConfig(workdir=tmp_path).context(), tmp_path / "t", tmp_path / "r"
+        )
         args = _build_parser().parse_args(argv)
         assert args.operations == REASON_OPERATIONS[reason]
 
@@ -786,14 +905,18 @@ def test_a_merged_item_runs_every_reasons_operations_in_runbook_order(tmp_path):
     from zamboni.scheduler import EVENT, REASON_OPERATIONS, RECLAIM
 
     work = WorkItem("acme", "raw.events", EVENT, table_config("events"), also=frozenset({RECLAIM}))
-    argv = worker_argv(work, WorkerConfig(workdir=tmp_path), tmp_path / "t", tmp_path / "r")
+    argv = worker_argv(
+        work, WorkerConfig(workdir=tmp_path).context(), tmp_path / "t", tmp_path / "r"
+    )
     operations = _build_parser().parse_args(argv).operations
     union = set(REASON_OPERATIONS[EVENT] or ()) | set(REASON_OPERATIONS[RECLAIM] or ())
     assert list(operations) == [op.value for op in RUNBOOK_ORDER if op.value in union]
 
 
 def test_a_scheduled_item_runs_everything_the_profile_enables(tmp_path):
-    argv = worker_argv(item(), WorkerConfig(workdir=tmp_path), tmp_path / "t", tmp_path / "r")
+    argv = worker_argv(
+        item(), WorkerConfig(workdir=tmp_path).context(), tmp_path / "t", tmp_path / "r"
+    )
     assert "--operations" not in argv
 
 
@@ -831,7 +954,9 @@ def test_the_interval_holds_back_only_what_the_schedule_asked_for(
         also=frozenset(also),
         min_interval=timedelta(hours=18),
     )
-    argv = worker_argv(work, WorkerConfig(workdir=tmp_path), tmp_path / "t", tmp_path / "r")
+    argv = worker_argv(
+        work, WorkerConfig(workdir=tmp_path).context(), tmp_path / "t", tmp_path / "r"
+    )
     rule = _min_interval(_build_parser().parse_args(argv))
 
     if not held:
@@ -843,7 +968,9 @@ def test_the_interval_holds_back_only_what_the_schedule_asked_for(
 
 
 def test_a_cron_warehouse_s_item_carries_no_interval(tmp_path):
-    argv = worker_argv(item(), WorkerConfig(workdir=tmp_path), tmp_path / "t", tmp_path / "r")
+    argv = worker_argv(
+        item(), WorkerConfig(workdir=tmp_path).context(), tmp_path / "t", tmp_path / "r"
+    )
     assert "--min-interval-hours" not in argv and "--due-anyway" not in argv
 
 
@@ -863,7 +990,7 @@ def test_an_unknown_reason_never_reaches_a_worker_as_every_operation(tmp_path, r
 
     with pytest.raises(UnknownReasonError):
         worker_argv(
-            arrived, WorkerConfig(commit=True, workdir=tmp_path), tmp_path / "t", tmp_path / "r"
+            arrived, WorkerConfig(workdir=tmp_path).context(), tmp_path / "t", tmp_path / "r"
         )
 
 
@@ -874,5 +1001,7 @@ def test_every_declared_reason_runs_exactly_its_operations(tmp_path):
 
     for reason, operations in REASON_OPERATIONS.items():
         work = WorkItem("acme", "raw.events", reason, table_config("events"))
-        argv = worker_argv(work, WorkerConfig(workdir=tmp_path), tmp_path / "t", tmp_path / "r")
+        argv = worker_argv(
+            work, WorkerConfig(workdir=tmp_path).context(), tmp_path / "t", tmp_path / "r"
+        )
         assert _build_parser().parse_args(argv).operations == operations

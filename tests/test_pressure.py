@@ -181,7 +181,7 @@ def test_a_pressure_check_is_health_in_a_worker_and_never_commits(tmp_path):
     wh = warehouse()
     config = WorkerConfig(workdir=tmp_path, commit=True, profile_path="/p.yml")
     argv = worker_argv(
-        PressureCheck("acme", wh.table_config), config, tmp_path / "t", tmp_path / "r"
+        PressureCheck("acme", wh.table_config), config.context(), tmp_path / "t", tmp_path / "r"
     )
     assert argv[0] == "health"
     assert "--yes" not in argv, "read-only, whatever the service's --yes"
