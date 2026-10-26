@@ -165,9 +165,11 @@ Implemented by `zamboni.pool` (ZMBNI-121). What it settles, each tested in
 - **A worker runs the CLI's own `maintenance` path** for one table, in-process,
   rather than a second implementation of it. Resolution order, session, engine,
   reporter, exit codes and the `--json` record are the code a cron line runs.
-  What crosses the boundary is an argv of strings, the item's table config as a
-  file, and the run record back — never a `CatalogSession`, and never a secret
-  on a command line.
+  What crosses the boundary is the pickled work item and the run record back —
+  never a `CatalogSession`, and never a secret. The worker writes the item's
+  table config to a file and builds the command line itself. That is the
+  default worker entry; an application embedding the runtime may supply its
+  own ([maintenance-runtime.md](maintenance-runtime.md) §7).
 - **Long-lived workers, not a process per table.** Importing what a worker needs
   measured 1.7–2.1 s and ~174 MB (`/usr/bin/time`, three runs, 2026-10-01): for
   1,000 tables on 4 workers that is ~8 minutes of every sweep spent importing,

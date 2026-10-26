@@ -203,6 +203,9 @@ def test_a_work_item_is_config_that_pickles():
     # `also` and `not_after` narrow or report; neither can widen a run past what
     # its reasons' operations declare, nor skip the due-check. `min_interval`
     # (ZMBNI-164) only holds work back, and only in the worker's own due-check.
+    # `commit` (ZMBNI-169) is consent, so it never comes from the queue: the
+    # pool overwrites it with the runtime's own on every item it sends
+    # (test_pool's test_an_items_own_commit_never_outranks_the_runtimes).
     assert {f.name for f in dataclasses.fields(WorkItem)} == {
         "warehouse",
         "table",
@@ -212,6 +215,7 @@ def test_a_work_item_is_config_that_pickles():
         "also",
         "not_after",
         "min_interval",
+        "commit",
     }, "a new WorkItem field must be serialisable config, and must not bypass the due-check"
 
 

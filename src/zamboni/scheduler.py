@@ -212,6 +212,10 @@ class WorkItem:
     #: The warehouse schedule's minimum interval per table, taken from the fleet
     #: with the rest of the item; ``None`` for cron. See :attr:`interval_rule`.
     min_interval: timedelta | None = None
+    #: Whether the run may commit. **False previews**, and every worker entry
+    #: must honour it (docs/maintenance-runtime.md §7 rule 4). The queue never
+    #: sets it: the pool stamps the runtime's consent on the copy it sends.
+    commit: bool = False
 
     def __post_init__(self) -> None:
         check_offer(self.reason, self.also, self.not_after)
