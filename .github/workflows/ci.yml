@@ -71,6 +71,24 @@ jobs:
       # no Docker services, and the dedicated job below is where they must run.
       - run: uv run --python ${{ matrix.python }} pytest -q --ignore=tests/test_dev_stack.py
 
+  test-macos:
+    # macOS is a first-class platform for development and for `zamboni serve`
+    # (HomeLab, Mac mini hardware), and until ZMBNI-235 nothing here ran on it:
+    # serve's probes and `config-reload` read /proc, and three tests that fail
+    # on macOS passed here on Linux from #119/#122 (2026-10-02) until a local
+    # `make ci` on a Mac found them (2026-10-27). One leg, on the pinned
+    # development Python -- the version spread is the `test` job's concern;
+    # this one asks only whether the OS differs.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --frozen --python 3.13
+      - run: uv run --python 3.13 pytest -q --ignore=tests/test_dev_stack.py
+
   consumer:
     # What a normal install gets. Every other job resolves PyIceberg from the
     # maintenance fork via `[tool.uv.sources]`, which is right for developing

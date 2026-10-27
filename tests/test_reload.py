@@ -19,6 +19,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+import psutil
 import pytest
 import yaml
 
@@ -26,6 +27,7 @@ from zamboni import reload as reload_module
 from zamboni.cli import main
 from zamboni.fleet import FleetConfig
 from zamboni.reload import (
+    PID_FILE_SLACK_SECONDS,
     FleetWatcher,
     PidFileError,
     fingerprint,
@@ -343,6 +345,78 @@ def test_a_stale_pid_naming_another_process_is_not_signalled(tmp_path):
     finally:
         bystander.kill()
         bystander.wait()
+
+
+def test_a_zamboni_started_after_the_pid_file_was_written_is_not_signalled(tmp_path):
+    """The number was reused by *another* zamboni: its cmdline passes, its start does not."""
+    marker = tmp_path / "marker"
+    pid_file = tmp_path / "serve.pid"
+    child = subprocess.Popen(
+        [sys.executable, "-c", HUP_CHILD, str(marker), "zamboni-serve"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout.readline().strip() == "ready"
+        pid_file.write_text(f"{child.pid}\n")
+        # Written a minute before this child existed, as the old serve's file was.
+        written = time.time() - 60
+        os.utime(pid_file, (written, written))
+        with pytest.raises(PidFileError, match="not the zamboni that wrote it"):
+            send_reload(pid_file)
+        time.sleep(0.1)
+        assert not marker.exists(), "it was not signalled"
+        assert child.poll() is None
+        assert main(["config-reload", "--pid-file", str(pid_file)]) == 2
+
+        # Inside the slack it is the writer, and is signalled.
+        written = psutil.Process(child.pid).create_time() - PID_FILE_SLACK_SECONDS / 2
+        os.utime(pid_file, (written, written))
+        assert send_reload(pid_file) == child.pid
+    finally:
+        child.kill()
+        child.wait()
+
+
+@pytest.mark.parametrize(
+    ("where", "message"),
+    [("cmdline", "cannot be checked"), ("send_signal", "owned by another user")],
+)
+def test_a_process_the_os_will_not_show_or_signal_is_refused(tmp_path, monkeypatch, where, message):
+    """Another user's process: refused with a reason, not a traceback, and never signalled.
+
+    Simulated, because the suite does not run as two users. macOS refuses the
+    cmdline of another user's process; Linux shows it and refuses the kill.
+    """
+    signalled = []
+
+    class Process:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def cmdline(self):
+            if where == "cmdline":
+                raise psutil.AccessDenied(self.pid)
+            return ["python", "-m", "zamboni", "serve"]
+
+        def create_time(self):
+            return 0.0
+
+        def is_running(self):
+            return True
+
+        def send_signal(self, sig):
+            if where == "send_signal":
+                raise psutil.AccessDenied(self.pid)
+            signalled.append(sig)
+
+    monkeypatch.setattr(psutil, "Process", Process)
+    pid_file = tmp_path / "serve.pid"
+    pid_file.write_text("4242\n")
+    with pytest.raises(PidFileError, match=message):
+        send_reload(pid_file)
+    assert signalled == []
+    assert main(["config-reload", "--pid-file", str(pid_file)]) == 2
 
 
 @pytest.mark.parametrize("content", [None, "", "not-a-pid\n", "999999999\n"])

@@ -36,7 +36,6 @@ being maintained keeps the config its work item was built from.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import os
 import signal
@@ -44,6 +43,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+
+import psutil
 
 from .fleet import FleetConfig, FleetConfigError
 
@@ -245,33 +246,86 @@ def write_pid_file(path: str | Path) -> None:
     tmp.replace(path)
 
 
-def send_reload(path: str | Path, *, proc: Path = Path("/proc")) -> int:
+#: How long after its pid file was written a process may appear to have
+#: started and still be the process that wrote it. Not zero because psutil's
+#: Linux ``create_time`` is ``/proc/stat``'s ``btime`` -- whole seconds -- plus
+#: the start in clock ticks (``_pslinux.Process.create_time``), so it can read
+#: up to a second late; macOS answers in microseconds. A pid reused within two
+#: seconds of a serve writing its file is not a case worth trading that for.
+#:
+#: Expected from the kernel, not reproduced: Linux moves ``btime`` when the wall
+#: clock is stepped, so a clock stepped *forward* after serve started -- NTP's
+#: first sync on a board with no RTC -- makes a genuine serve look younger than
+#: its pid file, and the reload is refused. That is the safe direction, the
+#: :data:`POLL_SECONDS` poll still reloads, and the message names the cause.
+PID_FILE_SLACK_SECONDS = 2.0
+
+
+def send_reload(path: str | Path) -> int:
     """SIGHUP the service named by ``path``; returns its pid.
 
-    **Checks the pid is Zamboni before signalling it.** A pid file outlives its
-    process, the pid is reused, and SIGHUP's default action is to *terminate* --
-    so signalling a stale pid would kill whatever unrelated process now has the
-    number. ``/proc/<pid>/cmdline`` must mention zamboni; where ``/proc`` is
-    absent the check cannot be made and the signal is refused rather than sent
-    on trust.
+    **Checks the pid is the Zamboni that wrote the file before signalling it.**
+    A pid file outlives its process, the pid is reused, and SIGHUP's default
+    action is to *terminate* -- so signalling a stale pid would kill whatever
+    unrelated process now has the number. Two checks, both through psutil so
+    they answer on Linux and macOS alike (ZMBNI-235; until then they read
+    ``/proc``, and on macOS every reload was refused):
+
+    - the process's command line must mention zamboni;
+    - it must have started no later than the pid file was written (allowing
+      :data:`PID_FILE_SLACK_SECONDS`). The cmdline check alone passes a second
+      zamboni process that was later given the same number. The file's own
+      mtime is the write time, so the pid file stays one pid on one line --
+      what ``kill $(cat serve.pid)`` expects -- and a file written before this
+      check existed needs no migration.
+
+    Anything that cannot be checked -- a process owned by another user, whose
+    command line the OS will not show -- is refused rather than signalled on
+    trust.
     """
     path = Path(path)
     try:
         pid = int(path.read_text().strip())
+        written = path.stat().st_mtime
     except (OSError, ValueError) as exc:
         raise PidFileError(f"{path}: no service pid to signal ({exc})") from None
     try:
-        cmdline = (proc / str(pid) / "cmdline").read_bytes().replace(b"\0", b" ")
-    except OSError:
+        process = psutil.Process(pid)
+        cmdline = " ".join(process.cmdline())
+        started = process.create_time()
+    except psutil.NoSuchProcess:  # ZombieProcess included: it is a subclass
+        raise PidFileError(f"{path}: pid {pid} is not running; the pid file is stale") from None
+    except psutil.AccessDenied:
         raise PidFileError(
-            f"{path}: pid {pid} is not running (or {proc} is unavailable); the pid file is stale"
+            f"{path}: pid {pid} belongs to another user, so whether it is zamboni cannot be "
+            "checked; refusing to signal it"
         ) from None
-    if b"zamboni" not in cmdline:
+    if "zamboni" not in cmdline:
         raise PidFileError(
-            f"{path}: pid {pid} is not a zamboni process ({cmdline.decode(errors='replace')!r}); "
+            f"{path}: pid {pid} is not a zamboni process ({cmdline!r}); "
             "refusing to signal it -- the pid file is stale and the number was reused"
         )
-    with contextlib.suppress(ProcessLookupError):
-        os.kill(pid, signal.SIGHUP)
-        return pid
+    if started > written + PID_FILE_SLACK_SECONDS:
+        raise PidFileError(
+            f"{path}: pid {pid} started {started - written:.0f} s after the pid file was "
+            "written, so it is not the zamboni that wrote it; refusing to signal it -- the "
+            "pid file is stale and the number was reused (or the clock was stepped forward "
+            f"since; the fleet file is still polled every {POLL_SECONDS} s)"
+        )
+    # is_running() re-reads the start time and compares it with the one above;
+    # send_signal() only consults the flag that leaves behind, so without it a
+    # pid reused since the checks would be signalled (psutil 7.2.2's
+    # Process._send_signal / _raise_if_pid_reused).
+    try:
+        if process.is_running():
+            process.send_signal(signal.SIGHUP)
+            return pid
+    except psutil.NoSuchProcess:
+        pass
+    except psutil.AccessDenied:
+        # Linux shows any user's command line, so another user's serve gets
+        # this far; the kill is where it is refused.
+        raise PidFileError(
+            f"{path}: pid {pid} is a zamboni owned by another user; run config-reload as that user"
+        ) from None
     raise PidFileError(f"{path}: pid {pid} exited before it could be signalled")

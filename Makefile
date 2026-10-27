@@ -257,7 +257,7 @@ ruff-pin: ## the ruff in uv.lock and the one .pre-commit-config.yaml pins must m
 
 # -- tests ----------------------------------------------------------------
 
-##@ Tests that need nothing but Python -- CI job `test`
+##@ Tests that need nothing but Python -- CI jobs `test`, and `test-macos` when run on a Mac
 
 test: ## the suite without the dev-stack tests (exactly what CI runs)
 	$(require_venv)

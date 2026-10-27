@@ -92,6 +92,15 @@ provides a Trino cluster -- again for query, not for maintenance.
 
 ## Install
 
+### Platforms
+
+**Linux and macOS** are both supported and tested, for development and for
+running `zamboni serve` -- a Mac mini in a home lab is as much a target as a
+Kubernetes pod. CI runs the suite on both (`test` and `test-macos`, below). Through
+0.7.0 the service's probes and `config-reload` read `/proc`, which macOS lacks
+(#235). **Windows** under WSL is Linux and is expected to work; native Windows
+is neither tested nor claimed (#236).
+
 ### Optional Package Extensions
 
 Depending on the installation use-case you are using, the installation requires different
@@ -495,13 +504,14 @@ Event catalogue: [data/healthims/HIMS_Discharge_Process_Events.md](data/healthim
 
 ## CI
 
-[.github/workflows/ci.yml](.github/workflows/ci.yml) defines six jobs on push and pull
+[.github/workflows/ci.yml](.github/workflows/ci.yml) defines seven jobs on push and pull
 request:
 
 | Job | What it guards |
 |---|---|
 | `lint` | ruff check and format; mypy over `src` and `scripts`; `uv sync --frozen` fails on a stale lockfile; pre-commit and CI must pin the same ruff; every source file carries its SPDX tag |
 | `test` | The suite on Python **3.11, 3.12 and 3.13** — every version `pyproject.toml` carries a classifier for. 3.11 is the floor `requires-python` declares, 3.13 is the pinned development version, and 3.12 is tested because it is claimed |
+| `test-macos` | The same suite on **macOS**, Python 3.13 only — the version spread is `test`'s job, this one asks whether the OS differs. Added when three tests that fail on macOS were found passing on Linux (#235) |
 | `consumer` | **What a normal install gets.** Every other job resolves PyIceberg from the maintenance fork via `[tool.uv.sources]`; a consumer installs from PyPI and gets stock, because that directive does not reach wheel metadata. This job builds the wheel, `pip install`s it into a clean venv, asserts the build really is stock, and runs the suite against it — so the probe-gated fallback that is dead code everywhere else is actually executed |
 | `executables` | `bin/` regenerates to a no-op, and both PEP 723 scripts run **from outside the project directory** |
 | `spark` | Builds a Spark Connect server with the Iceberg runtime and S3A, then runs the live Spark tests against it |
@@ -576,6 +586,7 @@ the seeded pip is there so an accident stays inside the virtualenv.
 | `lint` | `make lint` | nothing |
 | `test` | `make test` | nothing |
 | `test`, all three Pythons | `make test-matrix` | nothing; restores `.venv` afterwards |
+| `test-macos` | `make test`, on a Mac | macOS |
 | `executables` | `make test-executables` | nothing |
 | `dev-stack` | `make test-local`, then `make test-demo` | the local stack |
 | `dev-stack`, Trino leg | `make test-trino` | Trino in the stack |

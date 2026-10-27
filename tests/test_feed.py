@@ -428,14 +428,15 @@ def test_an_event_reaches_a_worker_as_a_write_driven_run(tmp_path):
 
 
 @pytest.mark.parametrize(("connected", "ready"), [(True, True), (False, False), (None, True)])
-def test_readiness_waits_for_a_configured_source_only(tmp_path, connected, ready):
+def test_readiness_waits_for_a_configured_source_only(connected, ready):
     from zamboni.service import probe
 
-    proc = tmp_path / "proc"
-    (proc / "4242").mkdir(parents=True)
+    def alive(pid: int) -> bool:
+        return pid == 4242
+
     state = {"pid": 4242, "phase": "running", "generation": 1, "nats_connected": connected}
-    assert probe(state, "readiness", proc=proc)[0] is ready
-    assert probe(state | {"last_tick": datetime.now(UTC).isoformat()}, "liveness", proc=proc)[0]
+    assert probe(state, "readiness", alive=alive)[0] is ready
+    assert probe(state | {"last_tick": datetime.now(UTC).isoformat()}, "liveness", alive=alive)[0]
 
 
 def test_a_failing_source_is_reported_when_it_fails_not_at_the_next_event(caplog):

@@ -382,7 +382,12 @@ settles, each tested in `tests/test_reload.py`:
 - **`config-reload` refuses to signal a pid that is not zamboni.** A pid file
   outlives its process, pids are reused, and SIGHUP's default action is to
   terminate — so a stale pid file would otherwise kill an unrelated process.
-  The check reads `/proc/<pid>/cmdline`; where `/proc` is absent it refuses.
+  The process's command line must mention zamboni, and it must have started
+  no later than the pid file was written (2 s slack), so a second zamboni
+  that later took the same number is refused too. Both are asked of psutil,
+  on Linux and macOS alike; a process whose command line the OS will not show
+  is refused. Until #235 this read `/proc/<pid>/cmdline`, and on macOS it
+  refused every reload.
 - **The event subscription** (#119's last acceptance line) needs no
   re-subscribing: the subject comes from the profile, not the fleet file, and
   the feed maps each event against the fleet as reloaded at that moment, so a
