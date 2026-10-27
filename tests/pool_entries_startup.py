@@ -14,7 +14,7 @@ from pathlib import Path
 
 _marker = Path(os.environ["ZAMBONI_TEST_STARTUP_MARKER"])
 if not _marker.exists():
-    _marker.write_text("died once")
+    _marker.write_text("died once", encoding="utf-8")
     os._exit(3)
 
 from tests.pool_entries import record  # noqa: E402,F401 - after the deliberate exit

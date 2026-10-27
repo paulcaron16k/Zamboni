@@ -14,6 +14,10 @@ concurrency:
 
 env:
   UV_VERSION: "0.11.26"
+  # PEP 597: emit an EncodingWarning for every text-mode open without an
+  # encoding. pyproject's filterwarnings makes one from zamboni's own code an
+  # error, so the suite catches what ruff's PLW1514 cannot infer (ZMBNI-236).
+  PYTHONWARNDEFAULTENCODING: "1"
 
 jobs:
   lint:
@@ -44,6 +48,10 @@ jobs:
       # an attribute access and values used as types they are not -- two of the
       # four bugs live verification found were exactly that.
       - run: uv run mypy
+      # Native Windows is not tested, so this is its only check (ZMBNI-236):
+      # POSIX-only APIs -- fcntl, signal.SIGHUP, os.sysconf -- fail it unless
+      # guarded by a sys.platform test mypy understands.
+      - run: uv run mypy --platform win32
 
       - run: uv run pre-commit run --all-files --show-diff-on-failure
 

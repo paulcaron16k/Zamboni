@@ -1191,7 +1191,7 @@ def _health(session: CatalogSession, args: argparse.Namespace) -> int:
             "checked_at": datetime.now(UTC).isoformat(),
             "tables": signals,
         }
-        with open(args.json, "a") as out:
+        with Path(args.json).open("a", encoding="utf-8") as out:
             out.write(json.dumps(doc) + "\n")
     if failed:
         return 1
@@ -1716,7 +1716,13 @@ def _serve(args: argparse.Namespace) -> int:
         async def until_signalled() -> int:
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGTERM, signal.SIGINT):
-                loop.add_signal_handler(sig, service.request_stop)
+                if sys.platform == "win32":
+                    # Windows' event loop has no add_signal_handler (it raises
+                    # NotImplementedError), so the C-level handler hands the stop
+                    # to the loop. Statically checked, never run (ZMBNI-236).
+                    signal.signal(sig, lambda *_: loop.call_soon_threadsafe(service.request_stop))
+                else:
+                    loop.add_signal_handler(sig, service.request_stop)
             install_hangup(loop, service.hangup)
             return await service.run()
 
@@ -1900,7 +1906,7 @@ def _write_run_summary(path: str, report) -> None:
         return
 
     try:
-        with open(path, "a", encoding="utf-8") as handle:
+        with Path(path).open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
     except OSError as exc:
         print(f"could not write the run summary to {path}: {exc}", file=sys.stderr)

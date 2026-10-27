@@ -123,6 +123,24 @@ Two categories beyond the usual set, because this tool deletes files:
   format is unchanged, checked byte for byte against a file the previous code
   wrote. Event-source status keeps being written while a stopping service
   drains, rather than ending at the stop request.
+- **Every text file Zamboni reads or writes is UTF-8, whatever the locale**
+  (#236). Fleet and table-config files, the profile, the state file, the run
+  log, the pid file and the probe cache were opened in the locale's encoding,
+  which on Windows is a code page rather than UTF-8. On Linux and macOS with a
+  UTF-8 locale -- and under the C locale, which Python coerces to UTF-8 --
+  nothing changes. A host whose locale is some other encoding (for example
+  `ISO-8859-1`) now reads these files as UTF-8: a file there that holds
+  non-ASCII text in that encoding must be re-saved as UTF-8.
+- **Native Windows is checked statically** (#236), though still neither tested
+  nor claimed. CI runs `mypy --platform win32`, and ruff's `PTH` and
+  `PLW1514` rules; the suite runs with `PYTHONWARNDEFAULTENCODING=1` and fails
+  on an `EncodingWarning` from Zamboni's code. The POSIX-only pieces are
+  guarded, each with a stated Windows behaviour: `config-reload` refuses (no
+  SIGHUP; `serve` polls), the `.env`/profile mode rule is skipped with a
+  warning (Windows reports every file as group- and other-readable), `serve`'s
+  stop signals and single-instance lock use `signal.signal` and `msvcrt`, and
+  host RAM comes from psutil instead of `os.sysconf`. The user guide's
+  "Where it runs" states the support level per platform.
 
 ### Fixed
 

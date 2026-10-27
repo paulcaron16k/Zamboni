@@ -104,7 +104,7 @@ class SchemaDocument:
 
     @classmethod
     def load(cls, path: str | Path) -> SchemaDocument:
-        raw = json.loads(Path(path).read_text())
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
         namespace = raw["namespace"]
         tables = tuple(
             TableDefinition(
@@ -192,7 +192,7 @@ def read_csv(path: Path, definition: TableDefinition) -> pa.Table:
     unplanned discharges, and `actor_id` is absent for system-generated events.
     Reading them as empty strings would quietly turn "unknown" into a value.
     """
-    with path.open(newline="") as fh:
+    with path.open(newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
         header = set(reader.fieldnames or ())
         rows = list(reader)

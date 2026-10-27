@@ -52,7 +52,7 @@ def _cli(argv: list[str]) -> int:
     if table == "raw.usage":
         sys.exit(2)
     path = argv[argv.index("--json") + 1]
-    with open(path, "a") as out:
+    with Path(path).open("a", encoding="utf-8") as out:
         out.write(
             json.dumps(
                 {
@@ -60,7 +60,9 @@ def _cli(argv: list[str]) -> int:
                     "pid": os.getpid(),
                     "argv": argv,
                     "marker": os.environ.get("ZAMBONI_TEST_MARKER"),
-                    "table_config": Path(argv[argv.index("--table-config") + 1]).read_text(),
+                    "table_config": Path(argv[argv.index("--table-config") + 1]).read_text(
+                        encoding="utf-8"
+                    ),
                 }
             )
             + "\n"

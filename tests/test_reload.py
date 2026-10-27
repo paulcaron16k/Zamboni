@@ -133,7 +133,7 @@ def test_a_configmap_symlink_swap_is_seen(tmp_path):
     st = (old / "fleet.yaml").stat()
     os.utime(new / "fleet.yaml", ns=(st.st_atime_ns, st.st_mtime_ns))
     (mount / "..data.tmp").symlink_to(new.name)
-    os.replace(mount / "..data.tmp", mount / "..data")  # the atomic swap
+    (mount / "..data.tmp").replace(mount / "..data")  # the atomic swap
 
     assert settle(watcher).fleet is not None
     assert watcher.fleet.names == ("acme", "globex")

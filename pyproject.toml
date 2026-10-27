@@ -288,17 +288,41 @@ markers = [
     # empty reports a green Trino run that ran no Trino.
     "trino: live tests against the dev stack's Trino server",
 ]
+# An EncodingWarning raised from zamboni's own code is an error (ZMBNI-236):
+# a text-mode open without an encoding, which on Windows means the locale's
+# code page. Python emits the warning only with PYTHONWARNDEFAULTENCODING=1
+# (PEP 597), which `make test` and CI set; the warnings from tests and third
+# parties are ignored, since they are not ours to fix or do not ship.
+filterwarnings = [
+    "ignore::EncodingWarning",
+    "error::EncodingWarning:zamboni",
+]
 
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "RUF", "ISC", "PIE"]
+# PTH and PLW1514 are ZMBNI-236's static half of "could run on Windows":
+# paths through pathlib, and every text-mode open with an explicit encoding --
+# without one Windows uses the locale's code page, not UTF-8, so a fleet file
+# or run log with a non-ASCII name reads differently there. PLW1514 sees only
+# calls whose receiver it can infer is a Path (it flagged 12 of the 35 that
+# grep found, 2026-10-27), which is why the suite also runs with
+# PYTHONWARNDEFAULTENCODING=1 and fails on an EncodingWarning from zamboni
+# (filterwarnings below).
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "RUF", "ISC", "PIE", "PTH", "PLW1514"]
+# PLW1514 is a preview rule (ruff 0.16.1). explicit-preview-rules enables only
+# preview rules named in full, so no stable rule changes behaviour: with both
+# set and nothing else selected, the findings were identical (2026-10-27).
+preview = true
+explicit-preview-rules = true
 
 [tool.ruff.lint.per-file-ignores]
-# Tests reach into private helpers on purpose to pin internal behaviour.
-"tests/*" = ["SLF001"]
+# Tests reach into private helpers on purpose to pin internal behaviour. The
+# encoding rule is for what ships: tests run only on Linux and macOS, where
+# the default encoding is UTF-8.
+"tests/*" = ["SLF001", "PLW1514"]
 
 [tool.mypy]
 # Scoped to the shipped packages and the scripts, not to tests. Test code

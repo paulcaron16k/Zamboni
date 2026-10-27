@@ -336,4 +336,4 @@ def load_schema() -> dict[str, Any]:
     validated against is reproducible from the version they installed, and the
     generator is a build-time tool rather than an import-time cost.
     """
-    return json.loads(SPEC_PATH.read_text())
+    return json.loads(SPEC_PATH.read_text(encoding="utf-8"))

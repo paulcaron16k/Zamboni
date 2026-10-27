@@ -140,7 +140,7 @@ def load(signature: str) -> dict | None:
     if path is None:
         return None
     try:
-        payload = json.loads(path.read_text())
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         logger.debug("probe cache at %s is unreadable; re-probing", path, exc_info=True)
         return None
@@ -159,7 +159,7 @@ def store(signature: str, answers: dict) -> Path | None:
             # Written to a neighbour and moved, so a reader never sees half a
             # file and two processes racing cannot interleave.
             with tempfile.NamedTemporaryFile(
-                "w", dir=directory, prefix=".capabilities-", delete=False
+                "w", encoding="utf-8", dir=directory, prefix=".capabilities-", delete=False
             ) as handle:
                 handle.write(document)
                 staged = Path(handle.name)

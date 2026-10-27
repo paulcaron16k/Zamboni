@@ -43,14 +43,18 @@ without editing it.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 from .events.nats import NatsConfigError, NatsSettings
+
+logger = logging.getLogger(__name__)
 
 #: Where per-warehouse configuration lives when nothing says otherwise.
 DEFAULT_ROOT = Path.home() / ".zamboni"
@@ -339,6 +343,31 @@ def env_ours(path: Path) -> dict[str, str]:
     }
 
 
+def _shared_mode(path: Path) -> int | None:
+    """``path``'s permission bits if group or other may read it, else ``None``.
+
+    On Windows the check cannot be made, and is skipped with a warning
+    (ZMBNI-236). Python synthesises ``st_mode`` there from the read-only flag
+    alone -- 0o666, or 0o444 when read-only (``attributes_to_mode`` in
+    CPython 3.13's Python/fileutils.c, read 2026-10-27) -- so every file carries
+    group and other bits: applying the rule would refuse every ``.env`` while
+    proving nothing about who can read it. Access there is an ACL, which this
+    tool does not inspect.
+    """
+    if sys.platform == "win32":
+        logger.warning(
+            "%s holds credentials; Windows has no POSIX file modes, so whether other "
+            "users can read it was not checked -- restrict it with an ACL",
+            path,
+        )
+        return None
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError as exc:  # pragma: no cover - raced with a delete
+        raise ProfileError(f"{path}: cannot stat: {exc}") from exc
+    return mode if mode & 0o077 else None
+
+
 def check_env_permissions(path: Path) -> None:
     """Refuse to read a credential file that others can read.
 
@@ -351,11 +380,8 @@ def check_env_permissions(path: Path) -> None:
     *stricter*, and rejecting a read-only credential file for being too safe
     would be an odd thing to do.
     """
-    try:
-        mode = path.stat().st_mode & 0o777
-    except OSError as exc:  # pragma: no cover - raced with a delete
-        raise ProfileError(f"{path}: cannot stat: {exc}") from exc
-    if mode & 0o077:
+    mode = _shared_mode(path)
+    if mode is not None:
         raise ProfileError(
             f"{path} is readable by group or other (mode {mode:03o}) and holds "
             f"credentials. Fix it and re-run:\n    chmod 600 {path}"
@@ -391,11 +417,8 @@ def check_profile_permissions(path: Path) -> None:
     meant to be committed and world-readable, so checking it unconditionally
     would break every existing deployment to protect a file with nothing in it.
     """
-    try:
-        mode = path.stat().st_mode & 0o777
-    except OSError as exc:  # pragma: no cover - raced with a delete
-        raise ProfileError(f"{path}: cannot stat: {exc}") from exc
-    if mode & 0o077:
+    mode = _shared_mode(path)
+    if mode is not None:
         raise ProfileError(
             f"{path} holds credentials and is readable by group or other "
             f"(mode {mode:03o}). Fix it and re-run:\n    chmod 600 {path}\n"
@@ -498,7 +521,7 @@ def load_profile(path: Path | None) -> Profile:
     import yaml
 
     try:
-        raw = yaml.safe_load(path.read_text()) or {}
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         # `from None`: the original carries the text describe_yaml_error leaves
         # out, and a chained cause prints in any traceback or logger.exception.

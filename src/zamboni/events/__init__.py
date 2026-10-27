@@ -385,7 +385,7 @@ def build_spec() -> dict[str, Any]:
 
 def get_write_completed_spec() -> dict[str, Any]:
     """The published JSON Schema for `write.completed`, as a dict."""
-    loaded: dict[str, Any] = json.loads(SPEC_PATH.read_text())
+    loaded: dict[str, Any] = json.loads(SPEC_PATH.read_text(encoding="utf-8"))
     return loaded
 
 

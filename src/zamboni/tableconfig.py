@@ -602,7 +602,7 @@ class TableConfig:
     def load(cls, path: str | Path) -> TableConfig:
         path = Path(path)
         try:
-            raw = json.loads(path.read_text())
+            raw = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise TableConfigError(f"{path}: invalid JSON: {exc}") from None
         config = cls.from_dict(raw, source=str(path))
@@ -668,7 +668,7 @@ class TableConfig:
         }
 
     def dump(self, path: str | Path, *, indent: int = 2) -> None:
-        Path(path).write_text(json.dumps(self.to_dict(), indent=indent) + "\n")
+        Path(path).write_text(json.dumps(self.to_dict(), indent=indent) + "\n", encoding="utf-8")
 
 
 # -- dict <-> dataclass ---------------------------------------------------

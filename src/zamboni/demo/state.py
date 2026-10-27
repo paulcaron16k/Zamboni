@@ -79,7 +79,7 @@ class DemoState:
         state = cls(root=root, inputs=inputs)
         if not state.env_path.exists():
             return state
-        for line in state.env_path.read_text().splitlines():
+        for line in state.env_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
@@ -112,7 +112,8 @@ class DemoState:
         self.env_path.write_text(
             f"# zamboni HIMS demo state. Safe to read; edit via {invocation()}.\n"
             f"WRITE_MODE={self.write_mode}\n"
-            f"DAYS_INGESTED={self.days_ingested}\n" + marker
+            f"DAYS_INGESTED={self.days_ingested}\n" + marker,
+            encoding="utf-8",
         )
 
     def reset_counters(self) -> None:

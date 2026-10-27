@@ -32,15 +32,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
-import fcntl
+import errno
 import json
 import logging
 import os
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 import psutil
 
@@ -138,7 +139,9 @@ class ServiceState:
     def write(self, path: Path, state: RuntimeState) -> None:
         """Atomically: a probe reads the old file or the new one, never half."""
         tmp = path.with_name(f".{path.name}.{os.getpid()}")
-        tmp.write_text(json.dumps(self.as_dict(state), indent=2, sort_keys=True) + "\n")
+        tmp.write_text(
+            json.dumps(self.as_dict(state), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
         tmp.replace(path)
 
 
@@ -173,7 +176,7 @@ class StateFileObserver:
 
 
 def read_state(path: str | Path) -> dict[str, Any]:
-    return json.loads(Path(path).read_text())
+    return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
 def probe(
@@ -301,7 +304,7 @@ class RunLogObserver:
         self.path = path
 
     def finished(self, result: ItemResult) -> None:
-        with self.path.open("a") as out:
+        with self.path.open("a", encoding="utf-8") as out:
             out.write(json.dumps(run_record(result), default=str) + "\n")
 
 
@@ -310,6 +313,37 @@ class RunLogObserver:
 
 class AlreadyRunning(RuntimeError):
     """Another ``zamboni serve`` holds this pid file's lock. The CLI's exit 2."""
+
+
+def _lock_exclusive(handle: IO[str]) -> bool:
+    """Take a non-blocking exclusive lock on ``handle``; False if another holds it.
+
+    Any other failure -- ``ENOLCK`` on a filesystem without locks, say -- is
+    raised, not reported as a second serve. The OS releases either lock when
+    the process dies, which is what makes a crashed serve's lock free for the
+    next one. ``msvcrt.locking`` is the Windows branch: checked by ``mypy
+    --platform win32`` and never run, since native Windows is not tested
+    (ZMBNI-236). It locks one byte, which is all exclusion needs, and reports a
+    held lock as ``EACCES`` (the CRT's ``_locking`` documentation, recalled,
+    not re-read).
+    """
+    if sys.platform == "win32":
+        import msvcrt
+
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if exc.errno == errno.EACCES:
+                return False
+            raise
+    else:
+        import fcntl
+
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+    return True
 
 
 @contextlib.contextmanager
@@ -323,19 +357,17 @@ def single_instance(pid_file: Path):
     """
     lock_path = pid_file.with_name(pid_file.name + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = lock_path.open("w")
+    handle = lock_path.open("w", encoding="utf-8")
     try:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+        if not _lock_exclusive(handle):
             raise AlreadyRunning(
                 f"{lock_path} is held: another `zamboni serve` is running with this pid file"
-            ) from None
+            )
         write_pid_file(pid_file)
         yield
     finally:
         with contextlib.suppress(OSError):
-            if pid_file.read_text().strip() == str(os.getpid()):
+            if pid_file.read_text(encoding="utf-8").strip() == str(os.getpid()):
                 pid_file.unlink()
         handle.close()
 
