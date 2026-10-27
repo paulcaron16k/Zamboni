@@ -124,6 +124,21 @@ Two categories beyond the usual set, because this tool deletes files:
   wrote. Event-source status keeps being written while a stopping service
   drains, rather than ending at the stop request.
 
+### Fixed
+
+- **`zamboni serve` and `config-reload` work on macOS** (#235). The service's
+  startup, readiness and liveness probes tested `/proc/<pid>`, and
+  `config-reload` read `/proc/<pid>/cmdline`; macOS has no `/proc`, so every
+  probe said "not running" and every reload was refused. Both now ask
+  [psutil](https://pypi.org/project/psutil/), a new base dependency (580 KB,
+  no dependencies of its own, wheels for glibc and musl Linux, macOS and
+  Windows). `config-reload` also refuses a zamboni process that started more
+  than 2 s after the pid file was written -- the number reused by a *second*
+  zamboni, which the command-line check alone let through -- and reports a
+  process owned by another user as a refusal (exit 2) instead of a traceback.
+  The pid file is unchanged: one pid on one line, and the file's mtime is the
+  write time. CI now runs the suite on macOS too (`test-macos`).
+
 ## [0.7.0] - 2026-10-18
 
 ### BREAKING

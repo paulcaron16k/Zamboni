@@ -202,10 +202,12 @@ def test_the_state_file_reads_as_it_did_before_the_runtime_kept_it(tmp_path):
     assert (tmp_path / "state.json").read_bytes() == GOLDEN.read_bytes()
 
 
-def alive(tmp_path: Path, pid: int = 4242) -> Path:
-    proc = tmp_path / "proc"
-    (proc / str(pid)).mkdir(parents=True)
-    return proc
+def alive(pid: int) -> bool:
+    return pid == 4242
+
+
+def gone(pid: int) -> bool:
+    return False
 
 
 def state_doc(**kw) -> dict:
@@ -217,23 +219,33 @@ def state_doc(**kw) -> dict:
     } | kw
 
 
-def test_liveness_is_only_the_scheduler_ticking(tmp_path):
-    proc = alive(tmp_path)
+def test_liveness_is_only_the_scheduler_ticking():
     fresh = T0 + LIVENESS_STALE - timedelta(seconds=1)
     stale = T0 + LIVENESS_STALE + timedelta(seconds=1)
-    assert probe(state_doc(), "liveness", now=fresh, proc=proc)[0]
-    assert not probe(state_doc(), "liveness", now=stale, proc=proc)[0]
+    assert probe(state_doc(), "liveness", now=fresh, alive=alive)[0]
+    assert not probe(state_doc(), "liveness", now=stale, alive=alive)[0]
     # Busy, a refused reload, a failing table: none of them is a liveness failure.
     busy = state_doc(busy=4, reload_error="bad file", last_error="acme/raw.a: exit 2")
-    assert probe(busy, "liveness", now=fresh, proc=proc)[0]
+    assert probe(busy, "liveness", now=fresh, alive=alive)[0]
 
 
-def test_every_probe_fails_when_the_pid_is_gone(tmp_path):
-    proc = tmp_path / "proc"
-    proc.mkdir()
+def test_every_probe_fails_when_the_pid_is_gone():
     for kind in ("liveness", "readiness", "startup"):
-        ok, why = probe(state_doc(), kind, now=T0, proc=proc)
+        ok, why = probe(state_doc(), kind, now=T0, alive=gone)
         assert not ok and "not running" in why
+
+
+def test_the_default_liveness_check_sees_real_processes():
+    """No stand-in: what serve's probes run, on whatever OS runs the suite.
+
+    Until ZMBNI-235 the default read /proc/<pid>, and on macOS this pid -- the
+    test's own, certainly alive -- was reported "not running".
+    """
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    assert probe(state_doc(pid=os.getpid()), "startup", now=T0) == (True, "phase running")
+    ok, why = probe(state_doc(pid=child.pid), "startup", now=T0)
+    assert not ok and "not running" in why
 
 
 @pytest.mark.parametrize(
@@ -245,16 +257,15 @@ def test_every_probe_fails_when_the_pid_is_gone(tmp_path):
         ("stopped", 1, False, False),
     ],
 )
-def test_startup_and_readiness_follow_the_phase(tmp_path, phase, generation, startup, readiness):
-    proc = alive(tmp_path)
+def test_startup_and_readiness_follow_the_phase(phase, generation, startup, readiness):
     doc = state_doc(phase=phase, generation=generation)
-    assert probe(doc, "startup", now=T0, proc=proc)[0] is startup
-    assert probe(doc, "readiness", now=T0, proc=proc)[0] is readiness
+    assert probe(doc, "startup", now=T0, alive=alive)[0] is startup
+    assert probe(doc, "readiness", now=T0, alive=alive)[0] is readiness
 
 
-def test_an_unknown_probe_is_refused(tmp_path):
+def test_an_unknown_probe_is_refused():
     with pytest.raises(ValueError, match="unknown probe"):
-        probe(state_doc(), "health", now=T0, proc=alive(tmp_path))
+        probe(state_doc(), "health", now=T0, alive=alive)
 
 
 # -- the run log ----------------------------------------------------------------

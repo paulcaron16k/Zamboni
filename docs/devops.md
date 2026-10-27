@@ -640,8 +640,10 @@ and SIGINT and finish under the parent's direction, so a `systemctl stop` drains
 exactly as a pod does. Set `TimeoutStopSec=` above the longest table for the
 same reason as the grace period. `zamboni config-reload` (SIGHUP) reloads the
 fleet file at once instead of at the next 30 s poll; it reads the pid file and
-refuses to signal a process that is not zamboni, because a stale pid and
-SIGHUP's default action would otherwise kill an unrelated one.
+refuses to signal a process that is not the zamboni that wrote it, because a
+stale pid and SIGHUP's default action would otherwise kill an unrelated one.
+The same holds on macOS: the checks go through psutil, not
+`/proc` (#235).
 
 **Writing the fleet file.** Write a temporary file and rename it over the old
 one. The service only adopts a change it has seen unchanged on two consecutive

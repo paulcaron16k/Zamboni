@@ -42,6 +42,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import psutil
+
 from .pool import ItemResult, PoolSize, WorkerConfig, WorkerPool
 from .reload import POLL_SECONDS, FileFleetProvider, write_pid_file
 from .runstate import RuntimeState, WarehouseState
@@ -179,7 +181,7 @@ def probe(
     kind: str,
     *,
     now: datetime | None = None,
-    proc: Path = Path("/proc"),
+    alive: Callable[[int], bool] = psutil.pid_exists,
 ) -> tuple[bool, str]:
     """Whether a Kubernetes probe of ``kind`` passes, and why.
 
@@ -192,10 +194,12 @@ def probe(
 
     All three first check that the pid the file names is alive, because a file
     written by a process that has since died says nothing about the present.
+    ``alive`` asks psutil, which answers on Linux and macOS alike; until
+    ZMBNI-235 this tested ``/proc/<pid>``, and on macOS every probe failed.
     """
     now = now or now_utc()
     pid = state.get("pid")
-    if not pid or not (proc / str(pid)).exists():
+    if not pid or not alive(int(pid)):
         return False, f"pid {pid} is not running"
     phase = state.get("phase")
     if kind == "startup":

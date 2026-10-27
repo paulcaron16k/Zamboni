@@ -102,6 +102,15 @@ dependencies = [
     # dependencies. Reproduced with `PYTHONTZPATH=` and the package absent:
     # `ZoneInfo("America/Toronto")` raises ZoneInfoNotFoundError.
     "tzdata>=2024.1",
+    # Process liveness, command line and start time for `serve`'s probes and
+    # `config-reload`'s stale-pid guard (ZMBNI-235), which read `/proc` until
+    # then -- so on macOS every probe said "not running" and `config-reload`
+    # always refused. macOS is a first-class platform (HomeLab, Mac mini), so
+    # its absence stops the tool doing its job (the rule on `cloud`). Measured
+    # 2026-10-27: 7.2.2, 580 KB installed, no dependencies, wheels in the lock
+    # for glibc and musl Linux, macOS x86_64/arm64 and Windows. Floor is the
+    # major version tested; only 7.2.2 has been run.
+    "psutil>=7.0",
 ]
 
 [project.urls]
