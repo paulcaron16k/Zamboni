@@ -64,9 +64,19 @@ from multiprocessing import connection, get_context
 from pathlib import Path
 from typing import Any
 
+import psutil
+
 from .claims import Claim, Claimer
 from .fleet import FleetConfig
 from .scheduler import CandidateQueue, PressureCheck, WorkItem
+
+# The parent's end of a worker's pipe. Windows' Pipe() returns a
+# PipeConnection, a sibling of Connection rather than a subclass, so
+# `mypy --platform win32` needs the alias (ZMBNI-236).
+if sys.platform == "win32":
+    from multiprocessing.connection import PipeConnection as WorkerConnection
+else:
+    from multiprocessing.connection import Connection as WorkerConnection
 
 logger = logging.getLogger(__name__)
 
@@ -120,15 +130,15 @@ def cgroup_cpu_limit(root: Path = CGROUP_ROOT, proc: Path = PROC_CGROUP) -> floa
     for directory in _cgroup_dirs(root, proc, v1_controller="cpu"):
         v2 = directory / "cpu.max"
         if v2.is_file():
-            quota, _, period = v2.read_text().strip().partition(" ")
+            quota, _, period = v2.read_text(encoding="utf-8").strip().partition(" ")
             if quota != "max" and period:
                 limits.append(int(quota) / int(period))
             continue
         quota_file, period_file = directory / "cpu.cfs_quota_us", directory / "cpu.cfs_period_us"
         if quota_file.is_file() and period_file.is_file():
-            quota_us = int(quota_file.read_text())
+            quota_us = int(quota_file.read_text(encoding="utf-8"))
             if quota_us > 0:
-                limits.append(quota_us / int(period_file.read_text()))
+                limits.append(quota_us / int(period_file.read_text(encoding="utf-8")))
     return min(limits) if limits else None
 
 
@@ -139,7 +149,7 @@ def cgroup_memory_limit(root: Path = CGROUP_ROOT, proc: Path = PROC_CGROUP) -> i
         for name in ("memory.max", "memory.limit_in_bytes"):
             path = directory / name
             if path.is_file():
-                text = path.read_text().strip()
+                text = path.read_text(encoding="utf-8").strip()
                 if text != "max" and int(text) < _V1_UNLIMITED:
                     limits.append(int(text))
                 break
@@ -149,7 +159,7 @@ def cgroup_memory_limit(root: Path = CGROUP_ROOT, proc: Path = PROC_CGROUP) -> i
 def _cgroup_dirs(root: Path, proc: Path, *, v1_controller: str) -> list[Path]:
     """The process's cgroup directories, leaf first, for one controller."""
     try:
-        lines = proc.read_text().splitlines()
+        lines = proc.read_text(encoding="utf-8").splitlines()
     except OSError:
         return []
     for line in lines:
@@ -274,10 +284,17 @@ def size_pool(
 
 
 def physical_memory() -> int | None:
-    """Host RAM, where the platform says."""
+    """Host RAM, where the platform says.
+
+    From psutil rather than ``os.sysconf``, which Windows lacks (ZMBNI-236).
+    On macOS both gave 34359738368 (measured 2026-10-27). On Linux psutil reads
+    ``/proc/meminfo``'s ``MemTotal`` (``_pslinux.virtual_memory``, read); that
+    the kernel fills it from the same ``totalram`` glibc's ``_SC_PHYS_PAGES``
+    reports is recalled from those sources, not re-read.
+    """
     try:
-        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-    except (ValueError, OSError, AttributeError):
+        return int(psutil.virtual_memory().total)
+    except (OSError, RuntimeError):
         return None
 
 
@@ -547,7 +564,7 @@ def _run_job(job: Job, run: Callable[..., Any], context: WorkerContext) -> tuple
     return code, record
 
 
-def _worker_main(conn: connection.Connection, config: WorkerConfig) -> None:
+def _worker_main(conn: WorkerConnection, config: WorkerConfig) -> None:
     """A worker process: run jobs until told to stop or the parent goes away."""
     import importlib
 
@@ -597,7 +614,7 @@ class _CurrentStderr(logging.StreamHandler):
 
 def _read_record(path: Path) -> dict[str, Any] | None:
     try:
-        lines = path.read_text().splitlines()
+        lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return None
     return json.loads(lines[-1]) if lines else None
@@ -630,7 +647,7 @@ class ItemResult:
 class _Slot:
     def __init__(self) -> None:
         self.process: Any = None
-        self.conn: connection.Connection | None = None
+        self.conn: WorkerConnection | None = None
         self.tables = 0
         #: What the worker is running now, so one table's worker can be killed.
         self.job: Job | None = None

@@ -25,8 +25,8 @@ from zamboni.tableconfig_schema import SPEC_PATH, build_schema  # noqa: E402
 
 def main() -> int:
     text = json.dumps(build_schema(), indent=2) + "\n"
-    before = SPEC_PATH.read_text() if SPEC_PATH.exists() else None
-    SPEC_PATH.write_text(text)
+    before = SPEC_PATH.read_text(encoding="utf-8") if SPEC_PATH.exists() else None
+    SPEC_PATH.write_text(text, encoding="utf-8", newline="\n")  # LF on every OS, as committed
     rel = SPEC_PATH.relative_to(ROOT)
     if before == text:
         print(f"{rel}: already current")

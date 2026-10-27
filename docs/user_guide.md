@@ -30,6 +30,22 @@ alone. Both are first-class here; where the advice differs, it says so.
 
 ---
 
+## Where it runs
+
+| Platform | Support | What that rests on |
+|---|---|---|
+| **Linux** | Supported and tested | CI's `test` job, Python 3.11–3.13 |
+| **macOS** | Supported and tested, `serve` included -- a Mac mini is a home-lab target | CI's `test-macos` job (#235) |
+| **Windows under WSL** | Expected to work | WSL is Linux; not run by CI |
+| **Native Windows** | Not claimed, not tested | Statically checked only (#236): `mypy --platform win32` in CI, paths through `pathlib`, every text file opened as UTF-8 |
+
+What native Windows would do differently, by design rather than by test:
+`zamboni config-reload` refuses (there is no SIGHUP; `serve` still reloads the
+fleet file by polling); the mode-600 rule for `.env` and a secret-holding
+profile is skipped with a warning, because Windows reports every file as
+readable by group and other and access there is an ACL; and `serve`'s
+single-instance lock uses `msvcrt` instead of `flock`.
+
 ## What each engine can actually do
 
 The most important decision is which engine performs the work, and it is mostly
@@ -366,6 +382,9 @@ cat >> /srv/zamboni/.env <<'EOF'
 ZAMBONI_TOKEN=...
 EOF
 ```
+
+On native Windows the mode cannot be checked and is not: restrict the file
+with an ACL instead ([Where it runs](#where-it-runs)).
 
 Zamboni looks for `--env`, then `./.env`, then `$ZAMBONI_ROOT/.env` -- the same
 order as the profile, so the fleet-wide layout in

@@ -99,7 +99,9 @@ running `zamboni serve` -- a Mac mini in a home lab is as much a target as a
 Kubernetes pod. CI runs the suite on both (`test` and `test-macos`, below). Through
 0.7.0 the service's probes and `config-reload` read `/proc`, which macOS lacks
 (#235). **Windows** under WSL is Linux and is expected to work; native Windows
-is neither tested nor claimed (#236).
+is neither tested nor claimed, but is checked statically in CI so new
+Linux-only code is caught when it is written (#236) -- the user guide's
+[Where it runs](docs/user_guide.md#where-it-runs) says what differs there.
 
 ### Optional Package Extensions
 
@@ -509,7 +511,7 @@ request:
 
 | Job | What it guards |
 |---|---|
-| `lint` | ruff check and format; mypy over `src` and `scripts`; `uv sync --frozen` fails on a stale lockfile; pre-commit and CI must pin the same ruff; every source file carries its SPDX tag |
+| `lint` | ruff check and format; mypy over `src` and `scripts`, and again as Windows (`--platform win32`); `uv sync --frozen` fails on a stale lockfile; pre-commit and CI must pin the same ruff; every source file carries its SPDX tag |
 | `test` | The suite on Python **3.11, 3.12 and 3.13** — every version `pyproject.toml` carries a classifier for. 3.11 is the floor `requires-python` declares, 3.13 is the pinned development version, and 3.12 is tested because it is claimed |
 | `test-macos` | The same suite on **macOS**, Python 3.13 only — the version spread is `test`'s job, this one asks whether the OS differs. Added when three tests that fail on macOS were found passing on Linux (#235) |
 | `consumer` | **What a normal install gets.** Every other job resolves PyIceberg from the maintenance fork via `[tool.uv.sources]`; a consumer installs from PyPI and gets stock, because that directive does not reach wheel metadata. This job builds the wheel, `pip install`s it into a clean venv, asserts the build really is stock, and runs the suite against it — so the probe-gated fallback that is dead code everywhere else is actually executed |

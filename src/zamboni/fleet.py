@@ -668,7 +668,7 @@ class FleetConfig:
 
         path = Path(path)
         try:
-            raw = yaml.safe_load(path.read_text())
+            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         except OSError as exc:
             raise FleetConfigError(f"{path}: cannot read: {exc}") from None
         except yaml.YAMLError as exc:

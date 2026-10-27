@@ -39,6 +39,7 @@ import asyncio
 import logging
 import os
 import signal
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -227,7 +228,13 @@ class FileFleetProvider:
 
 
 def install_hangup(loop: asyncio.AbstractEventLoop, hangup: asyncio.Event) -> None:
-    """Route SIGHUP to ``hangup``. Reload-on-HUP is the convention a sysadmin expects."""
+    """Route SIGHUP to ``hangup``. Reload-on-HUP is the convention a sysadmin expects.
+
+    Windows has no SIGHUP, so there the fleet file is reloaded by polling alone
+    (ZMBNI-236) -- the primary mechanism everywhere; SIGHUP only skips the wait.
+    """
+    if sys.platform == "win32":
+        return
     loop.add_signal_handler(signal.SIGHUP, hangup.set)
 
 
@@ -242,7 +249,7 @@ def write_pid_file(path: str | Path) -> None:
     """Record this process's pid, atomically: a reader sees the old or the new, never half."""
     path = Path(path)
     tmp = path.with_name(f".{path.name}.{os.getpid()}")
-    tmp.write_text(f"{os.getpid()}\n")
+    tmp.write_text(f"{os.getpid()}\n", encoding="utf-8")
     tmp.replace(path)
 
 
@@ -282,10 +289,18 @@ def send_reload(path: str | Path) -> int:
     Anything that cannot be checked -- a process owned by another user, whose
     command line the OS will not show -- is refused rather than signalled on
     trust.
+
+    Windows has no SIGHUP, so there it refuses outright; the service still
+    polls the fleet file (ZMBNI-236).
     """
     path = Path(path)
+    if sys.platform == "win32":
+        raise PidFileError(
+            "config-reload sends SIGHUP, which Windows does not have; the service "
+            f"reloads the fleet file on its own within {POLL_SECONDS} s of a change"
+        )
     try:
-        pid = int(path.read_text().strip())
+        pid = int(path.read_text(encoding="utf-8").strip())
         written = path.stat().st_mtime
     except (OSError, ValueError) as exc:
         raise PidFileError(f"{path}: no service pid to signal ({exc})") from None

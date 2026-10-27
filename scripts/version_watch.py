@@ -255,7 +255,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    pyproject = tomllib.loads(args.pyproject.read_text())
+    pyproject = tomllib.loads(args.pyproject.read_text(encoding="utf-8"))
     caps = declared_caps(pyproject)
 
     findings: list[Finding] = []
@@ -285,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
     print(body)
 
     if output := os.environ.get("GITHUB_OUTPUT"):
-        with open(output, "a") as handle:
+        with Path(output).open("a", encoding="utf-8") as handle:
             handle.write(f"findings={'true' if findings else 'false'}\n")
 
     if failures:

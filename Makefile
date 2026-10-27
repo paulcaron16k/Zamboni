@@ -235,9 +235,10 @@ format-check: ## ruff format --check; fails rather than writing
 	$(require_venv)
 	uv run ruff format --check $(SRC)
 
-typecheck: ## mypy over src and scripts (config declares its own file set)
+typecheck: ## mypy over src and scripts, as this OS and as Windows (config declares the files)
 	$(require_venv)
 	uv run mypy
+	uv run mypy --platform win32
 
 precommit: ## every pre-commit hook over every file
 	$(require_venv)
@@ -261,14 +262,14 @@ ruff-pin: ## the ruff in uv.lock and the one .pre-commit-config.yaml pins must m
 
 test: ## the suite without the dev-stack tests (exactly what CI runs)
 	$(require_venv)
-	uv run pytest -q --ignore=tests/test_dev_stack.py
+	PYTHONWARNDEFAULTENCODING=1 uv run pytest -q --ignore=tests/test_dev_stack.py
 
 test-matrix: ## the suite on 3.11, 3.12 and 3.13 as CI does; restores .venv after
 	$(require_venv)
 	@for v in $(MATRIX); do \
 	  printf '\n\033[1m-- Python %s\033[0m\n' "$$v"; \
 	  uv sync --frozen --python "$$v" >/dev/null && \
-	  uv run --python "$$v" pytest -q --ignore=tests/test_dev_stack.py || { uv sync >/dev/null; exit 1; }; \
+	  PYTHONWARNDEFAULTENCODING=1 uv run --python "$$v" pytest -q --ignore=tests/test_dev_stack.py || { uv sync >/dev/null; exit 1; }; \
 	done; \
 	uv sync >/dev/null; \
 	printf '\nrestored %s to the pinned Python\n' '$(VENV)'

@@ -91,7 +91,7 @@ class ImportReport:
 
 def load_catalog(path: str | Path) -> dict[str, Any]:
     try:
-        return json.loads(Path(path).read_text())
+        return json.loads(Path(path).read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise TableConfigError(f"{path}: invalid catalog JSON: {exc}") from None
 

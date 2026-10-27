@@ -24,6 +24,7 @@ uv run pytest -m spark                           # live Spark tests (need the de
 uv run ruff check src tests scripts
 uv run ruff format --check src tests scripts
 uv run mypy                                      # config declares its own file set; no arguments
+uv run mypy --platform win32                     # native Windows' only check (#236); CI runs both
 uv run pre-commit run --all-files
 ```
 

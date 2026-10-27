@@ -71,7 +71,7 @@ if __name__ == "__main__":
 def _project() -> dict:
     import tomllib
 
-    return tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    return tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
 
 
 #: Read from `[project.scripts]` rather than repeated here. This file used to
@@ -146,10 +146,10 @@ def requires_python() -> str:
     two stay in step.
     """
     pin = ROOT / ".python-version"
-    if pin.exists() and (version := pin.read_text().strip()):
+    if pin.exists() and (version := pin.read_text(encoding="utf-8").strip()):
         return f"=={version}.*"
 
-    text = (ROOT / "pyproject.toml").read_text()
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     match = re.search(r'requires-python\s*=\s*"([^"]+)"', text)
     if not match:
         raise SystemExit("could not read requires-python from pyproject.toml")
@@ -200,7 +200,11 @@ def main() -> int:
     args.bin_dir.mkdir(parents=True, exist_ok=True)
     for name in names:
         out = args.bin_dir / name
-        out.write_text(render(args.project_path, name, ENTRY_POINTS[name]))
+        # LF on every OS: on Windows write_text would emit CRLF, and the committed
+        # bin/ would then read as stale to `make test-executables` (ZMBNI-236).
+        out.write_text(
+            render(args.project_path, name, ENTRY_POINTS[name]), encoding="utf-8", newline="\n"
+        )
         out.chmod(0o755)
         print(f"wrote {out}")
     return 0
