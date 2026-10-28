@@ -82,6 +82,15 @@ class CatalogSession:
     #: :class:`CredentialUse`.
     credential_use: CredentialUse = CredentialUse.ALWAYS
 
+    def __post_init__(self) -> None:
+        # Before any table is loaded: each table's FileIO copies PyIceberg's
+        # filesystem registry when it is built, so the S3 signer fix must already
+        # be in it (ZMBNI-51). Here rather than in `from_catalog`, so a session an
+        # integrator constructs directly is covered too.
+        from . import signer
+
+        signer.install()
+
     def table(self, identifier: str, *, reclaiming: bool = False) -> Table:
         """Load a table by ``namespace.name`` identifier.
 
