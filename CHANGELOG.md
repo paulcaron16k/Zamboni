@@ -144,6 +144,18 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **A remote-signing catalog no longer leaks three sockets per table in a
+  long-lived process** (#246). The S3 signer fix (#51) kept each signed
+  filesystem in fsspec's instance cache until exit. With it stayed the S3
+  client, the signer, and through the signer the catalog's auth manager and
+  HTTP session. A new catalog meant a new entry for every table it loaded, and
+  a `serve` worker builds one catalog per table, for up to 50 tables before it
+  is recycled. Measured with a keep-alive stand-in for the catalog, signer and
+  store: 30 catalogs left 93 sockets open. Filesystems are now shared only
+  while a table holds one and released after, and the same 30 catalogs,
+  or 300, settle to one socket. A token refresh never grew the cache; the
+  auth manager refreshes in place. The maintenance fork has the same fix on
+  `bug/signed_s3_filesystem_cache_holds_sockets`.
 - **The S3 signer fix decides whether to stand down by what PyIceberg does,
   not by a name it carries** (#245). `zamboni.signer` replaces PyIceberg's S3
   filesystem factory on builds that swap the request signer on a shared client

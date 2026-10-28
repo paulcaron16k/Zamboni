@@ -9,8 +9,10 @@ and no network -- nothing here sends a request.
 
 from __future__ import annotations
 
+import gc
 import threading
 import time
+import weakref
 from typing import TYPE_CHECKING, Any
 from unittest import mock
 
@@ -119,6 +121,30 @@ def test_the_signer_stays_installed_while_another_thread_builds_filesystems():
 
     assert observations
     assert all(observations), f"{observations.count(False)} observations found no signer"
+
+
+@pytest.mark.usefixtures("installed")
+def test_a_filesystem_no_table_uses_is_released_with_its_signer():
+    """fsspec's instance cache kept every signed filesystem until exit (#246).
+
+    With it went the S3 client, the signer and, through the signer's
+    properties, the catalog's auth manager and HTTP session: three sockets for
+    every catalog and table, and a `serve` worker builds a catalog per table.
+    The client is closed on fsspec's loop thread after the filesystem goes, so
+    the signer is waited for rather than expected at once.
+    """
+    fs = _s3(_signer_properties())
+    filesystem = weakref.ref(fs)
+    (signer_ref,) = [weakref.ref(s) for s in _signers(fs)]
+    del fs
+
+    deadline = time.monotonic() + 5
+    while (filesystem() is not None or signer_ref() is not None) and time.monotonic() < deadline:
+        gc.collect()
+        time.sleep(0.05)
+
+    assert filesystem() is None, "nothing uses the filesystem, but something still holds it"
+    assert signer_ref() is None, "the filesystem went, but its signer and the catalog's auth stayed"
 
 
 @pytest.mark.usefixtures("installed")

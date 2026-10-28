@@ -18,8 +18,8 @@ The ExperienceFlow fork fixes this in ``_s3()`` itself
 (``bug/s3v4restsigner_unregisters_signer_mid_flight``, merged into
 ``feature/maintenance``). Zamboni's users install the release from PyPI, so the
 same behaviour is carried here: the signer is registered once, on the
-``AioSession`` s3fs creates every client from, and the filesystem is cached per
-signer.
+``AioSession`` s3fs creates every client from, and the filesystem is shared per
+signer for as long as a table uses it.
 
 **Why this replaces a library global rather than subclassing.** A catalog names
 ``FsspecFileIO`` by class path, so a subclass is never used; the only seam is the
@@ -27,10 +27,7 @@ signer.
 entries and refuses, naming the entry, unless every one is still the stock
 ``_s3`` -- the same fail-closed shape as
 :func:`zamboni.committer.assert_supported_pyiceberg`. It does nothing against a
-PyIceberg that already signs once per signer. Sharing one client between
-identical signers relies on fsspec's ``_strip_tokenize_options``, which the
-``s3fs>=2024.6.0`` floor's fsspec predates: there each call builds its own
-client, still signed and never replaced, but not shared. Listed in
+PyIceberg that already signs once per signer. Listed in
 ``docs/pyiceberg-private-api.md`` §2.6; delete this module in the change that
 adopts a release carrying the fix.
 """
@@ -39,7 +36,10 @@ from __future__ import annotations
 
 import functools
 import hashlib
-from typing import TYPE_CHECKING, Any
+import os
+import threading
+import weakref
+from typing import TYPE_CHECKING
 
 from zamboni.committer import UnsupportedPyIceberg
 
@@ -54,6 +54,17 @@ _S3_SCHEMES = ("s3", "s3a", "s3n")
 #: The event and unique id PyIceberg registers its signer under.
 _SIGNER_EVENT = "before-sign.s3"
 _SIGNER_UNIQUE_ID = 1925
+
+#: The signed filesystems some FileIO still holds, one per signer. Weak, so a
+#: filesystem -- with its S3 client, its signer, and through the signer the
+#: catalog's auth manager and HTTP session -- goes when the last table using it
+#: does. fsspec's instance cache held them all until exit: three sockets each,
+#: one per catalog and table, which a ``serve`` worker builds for every table
+#: it runs (#246).
+_in_use: weakref.WeakValueDictionary[tuple[int, str], AbstractFileSystem] = (
+    weakref.WeakValueDictionary()
+)
+_in_use_lock = threading.Lock()
 
 
 def library_signs_once() -> bool:
@@ -127,12 +138,21 @@ def _s3_signed_once(properties: Properties) -> AbstractFileSystem:
     # The signer replaces AWS signing, exactly as the stock ``_s3`` arranges when it has one.
     options["config_kwargs"] = {**options.get("config_kwargs", {}), "signature_version": UNSIGNED}
 
-    session = AioSession()
-    session.get_component("event_emitter").register_last(
-        _SIGNER_EVENT, signer_class(properties), unique_id=_SIGNER_UNIQUE_ID
-    )
-    signer_key = _signer_cache_key(properties)
-    return _signed_s3_filesystem()(**options, session=session, signer_key=signer_key)
+    # The pid, as fsspec keys its own cache: a forked child must not reuse a
+    # client bound to its parent's event-loop thread. The digest covers the
+    # auth manager by its repr, which carries its address; that cannot be
+    # reused while the filesystem lives, because the filesystem's signer holds it.
+    key = (os.getpid(), _signer_cache_key(properties))
+    with _in_use_lock:
+        if (fs := _in_use.get(key)) is not None:
+            return fs
+        session = AioSession()
+        session.get_component("event_emitter").register_last(
+            _SIGNER_EVENT, signer_class(properties), unique_id=_SIGNER_UNIQUE_ID
+        )
+        fs = _signed_s3_filesystem()(**options, session=session)
+        _in_use[key] = fs
+        return fs
 
 
 def _signer_cache_key(properties: Properties) -> str:
@@ -148,15 +168,10 @@ def _signed_s3_filesystem() -> type[AbstractFileSystem]:
     class SignedS3FileSystem(S3FileSystem):
         """An S3FileSystem whose clients are created from a session carrying a request signer.
 
-        fsspec caches filesystems by their constructor arguments. The session is a
-        new object on every call, so it is left out of that key, and ``signer_key``
-        stands in for the signer it carries: tables signed through different
-        endpoints get separate clients, and identical ones share one.
+        Kept out of fsspec's instance cache, which holds every filesystem for
+        the life of the process; :data:`_in_use` shares them instead (#246).
         """
 
-        _strip_tokenize_options = ("session",)
-
-        def __init__(self, *args: Any, signer_key: str, **kwargs: Any) -> None:
-            super().__init__(*args, **kwargs)
+        cachable = False
 
     return SignedS3FileSystem
