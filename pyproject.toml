@@ -250,7 +250,7 @@ dev = [
 # commit stays reachable by construction -- the 2026-10-27 rebase left the old
 # SHA pin reachable only through a hand-made tag -- and the pin says which state
 # is in use. `uv.lock` records the commit the tag named when it was locked.
-pyiceberg = { git = "https://github.com/paulcaron16k/iceberg-python.git", tag = "maintenance/2026-10-27" }
+pyiceberg = { git = "https://github.com/paulcaron16k/iceberg-python.git", tag = "maintenance/2026-10-28.2" }
 
 [tool.uv]
 # The whole point of this project's environment: never resolve against whatever

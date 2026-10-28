@@ -1171,8 +1171,8 @@ requires-dist = [
     { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.30,<2" },
     { name = "psutil", specifier = ">=7.0" },
     { name = "pyarrow", specifier = ">=18" },
-    { name = "pyiceberg", extras = ["pyarrow", "sql-sqlite"], git = "https://github.com/paulcaron16k/iceberg-python.git?tag=maintenance%2F2026-10-27" },
-    { name = "pyiceberg", extras = ["sql-sqlite"], marker = "extra == 'sql'", git = "https://github.com/paulcaron16k/iceberg-python.git?tag=maintenance%2F2026-10-27" },
+    { name = "pyiceberg", extras = ["pyarrow", "sql-sqlite"], git = "https://github.com/paulcaron16k/iceberg-python.git?tag=maintenance%2F2026-10-28.2" },
+    { name = "pyiceberg", extras = ["sql-sqlite"], marker = "extra == 'sql'", git = "https://github.com/paulcaron16k/iceberg-python.git?tag=maintenance%2F2026-10-28.2" },
     { name = "pyiceberg-core", specifier = ">=0.10.1,<0.11" },
     { name = "pyspark", marker = "extra == 'spark-lib'", specifier = ">=3.5,<5" },
     { name = "pyspark-client", marker = "extra == 'spark'", specifier = ">=4.0,<5" },
@@ -2616,7 +2616,7 @@ wheels = [
 [[package]]
 name = "pyiceberg"
 version = "0.12.0"
-source = { git = "https://github.com/paulcaron16k/iceberg-python.git?tag=maintenance%2F2026-10-27#cd75c16b1da6f26879ecf4dc7a8eeec74130abaf" }
+source = { git = "https://github.com/paulcaron16k/iceberg-python.git?tag=maintenance%2F2026-10-28.2#02b82ad576aa137fbc95aecc175a7ddcb7648e7a" }
 dependencies = [
     { name = "cachetools" },
     { name = "click" },
