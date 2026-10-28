@@ -76,10 +76,17 @@ def test_capabilities_reject_a_missing_operation():
 
 def test_support_is_three_valued_in_practice_not_just_in_theory():
     """If every declaration were FULL or UNSUPPORTED the third state would be
-    dead weight. These are the real ones, from the engine comparison."""
-    assert LocalMaintainer.capabilities().of(Operation.REMOVE_DANGLING_DELETES).support is (
-        Support.PARTIAL
-    )
+    dead weight. These are the real ones, from the engine comparison.
+
+    Local dangling-delete removal is PARTIAL only where a delete manifest
+    cannot be written -- stock 0.12.0 and the pinned fork, not a fork carrying
+    the delete-manifest writer (#240) -- so that one follows the probe. The
+    two `expire` declarations are PARTIAL on every build.
+    """
+    from zamboni.capabilities import detect
+
+    local = LocalMaintainer.capabilities().of(Operation.REMOVE_DANGLING_DELETES).support
+    assert local is (Support.FULL if detect().delete_manifests_writable else Support.PARTIAL)
     assert TrinoMaintainer.capabilities().of(Operation.EXPIRE).support is Support.PARTIAL
     assert SparkMaintainer.capabilities().of(Operation.EXPIRE).support is Support.PARTIAL
 

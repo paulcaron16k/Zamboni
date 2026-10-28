@@ -144,6 +144,16 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **`zamboni-demo`'s simulated merge-on-read deletes commit on the current
+  maintenance fork** (#240). `zamboni.testing`, which the demo and the tests
+  use to register position delete files, committed them through PyIceberg's
+  append producer. The fork refuses that since `1a47312b` (`ValueError: An
+  append cannot add POSITION_DELETES files`), as Java's `AppendFiles` does,
+  because an incremental reader treats an append as pure growth and never
+  applies its deletes. It commits through `_OverwriteFiles` now, still
+  labelled `delete` and still into a delete manifest; the table it builds is
+  unchanged. Not reachable from the maintenance verbs, which never write
+  delete files.
 - **On stock PyIceberg 0.12.0, a compaction no longer loses to an unrelated
   concurrent append** (#239). ZMBNI-79 moved "a rewrite ignores an append it
   never touched" into the maintenance fork and removed Zamboni's own guard, so
