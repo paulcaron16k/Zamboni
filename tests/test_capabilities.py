@@ -78,6 +78,7 @@ def _caps(**overrides) -> PyIcebergCapabilities:
         "streaming_write_supported": False,
         "prunes_manifests_by_predicate": False,
         "added_files_honour_spec": False,
+        "rewrite_ignores_unrelated_append": False,
         "derives_delete_predicate": False,
         "equality_deletes_readable": False,
         "delete_manifests_writable": False,
@@ -124,6 +125,24 @@ def test_a_structural_no_cannot_overrule_an_observed_row_loss():
 def test_missing_operation_argument_is_refused():
     caps = _caps(operation_is_injectable=False)
     assert "replace snapshot" in caps.unsupported_reason()
+
+
+def test_the_concurrent_append_probe_answers_for_the_expected_build():
+    """Fork: a rewrite commits over an unrelated append. Stock 0.12.0: refused (#239).
+
+    Declared by the environment, as above, so a leg that resolved the wrong
+    PyIceberg fails here instead of agreeing with whatever it found. On stock
+    the fallback in `_ReplaceFiles._validate_concurrency` is what lets the
+    rewrite through; on the fork it stands down.
+    """
+    from tests.conftest import library_honours_spec_expected
+
+    fork = library_honours_spec_expected()
+    assert detect().rewrite_ignores_unrelated_append is fork, (
+        "the maintenance fork lets a rewrite past an unrelated concurrent append (ZMBNI-79); "
+        "stock 0.12.0 refuses it. This build answered the other way -- check which "
+        "PyIceberg the leg resolved."
+    )
 
 
 def test_describe_lists_every_probe():
