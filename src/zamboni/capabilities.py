@@ -39,6 +39,13 @@ not in the 330 ms below, which predates it. A wrong True defers to the library,
 which can only over-refuse (exit 3, nothing written); a wrong False runs the
 fallback, which skips the one validator the fork skips.
 
+``s3_signer_registered_once`` (#245) was measured the same way, 2026-10-28,
+with s3fs and botocore already imported: 817 ms for the first run in a process
+(botocore loading its S3 model) and 219-246 ms after, on the fork (five runs);
+840 ms then 1 ms on stock 0.12.0, where every run after the first reuses one
+shared client. A wrong True stands the signer mirror down on a build that
+still swaps signers; a wrong False installs a redundant but correct mirror.
+
 ``detect()`` is **330 ms** cold, and since ZMBNI-88 that is paid once per
 install rather than once per process, so the cost argument that once justified
 leaving a probe structural has largely expired.
@@ -80,6 +87,7 @@ from __future__ import annotations
 import inspect
 import logging
 import os
+import uuid
 from dataclasses import asdict, dataclass, fields
 from functools import lru_cache
 from typing import NamedTuple
@@ -183,6 +191,14 @@ class PyIcebergCapabilities:
     #: limited to dropping whole delete manifests; see :mod:`zamboni.deletes`.
     delete_manifests_writable: bool
 
+    #: Every S3 filesystem PyIceberg builds is signed by its own request signer,
+    #: and keeps it when s3fs recreates the client. Established by building two
+    #: with different sign endpoints and presigning a request through each, not
+    #: by looking for a name (#245). False on stock 0.12.0, whose ``_s3`` swaps
+    #: the signer on a client every table shares (#51); True on the maintenance
+    #: fork. False installs :mod:`zamboni.signer`'s mirror.
+    s3_signer_registered_once: bool
+
     #: *How* ``derives_delete_predicate`` was established. Reported by
     #: ``zamboni doctor``, because "we proved it" and "we recognised a name" are
     #: different confidences, and an operator deciding whether to trust a new
@@ -249,6 +265,7 @@ class PyIcebergCapabilities:
             ("rewrite ignores unrelated append", self.rewrite_ignores_unrelated_append),
             ("equality deletes readable", self.equality_deletes_readable),
             ("delete manifests writable", self.delete_manifests_writable),
+            ("S3 signer registered once", self.s3_signer_registered_once),
         ]
         return "\n".join(f"  {name:<28} {value}" for name, value in rows)
 
@@ -341,6 +358,7 @@ def _probe() -> Probed:
     added_files = _added_files_honour_their_spec()
     unrelated_append = _rewrite_ignores_unrelated_append()
     delete_manifests = _delete_manifests_writable()
+    signs_once = _s3_signer_registered_once()
 
     unobserved = tuple(
         f"{name}: {answer.why}"
@@ -348,6 +366,7 @@ def _probe() -> Probed:
             ("added-file spec probe", added_files),
             ("concurrent-append probe", unrelated_append),
             ("delete-manifest probe", delete_manifests),
+            ("S3 signer probe", signs_once),
         )
         if isinstance(answer, CouldNotRun)
     )
@@ -380,6 +399,11 @@ def _probe() -> Probed:
         # to whole manifests. Guessing the other way would let us rewrite a
         # delete manifest into one labelled as data.
         delete_manifests_writable=delete_manifests is True,
+        # Unknown -> assume NOT, so the mirror installs. On a library that does
+        # sign once it is redundant but correct; standing down on one that does
+        # not would bring back unsigned requests and the last table loaded
+        # signing for all of them.
+        s3_signer_registered_once=signs_once is True,
     )
     return Probed(capabilities, unobserved)
 
@@ -708,6 +732,102 @@ def _rewrite_ignores_unrelated_append() -> bool | CouldNotRun:
             return committed.scan().to_arrow().num_rows == 2
     except Exception as exc:  # pragma: no cover - any failure means "could not establish"
         logger.debug("concurrent-append behavioural probe did not complete", exc_info=True)
+        return CouldNotRun.from_exception(exc)
+
+
+def _s3_signer_registered_once() -> bool | CouldNotRun:
+    """Is each S3 filesystem signed by its own signer, and still after a reconnect?
+
+    Behavioural, because the answer selects an implementation: false installs
+    :mod:`zamboni.signer`'s replacement for PyIceberg's S3 factory. It replaced
+    ``hasattr(fsspec, "_signed_s3_filesystem")`` (#245), a name that proves
+    nothing -- a build carrying it without a working fix would have made the
+    mirror stand down and left #51's bug in place.
+
+    It asks ``fsspec._s3``, the factory :func:`zamboni.signer.install` would
+    replace, not ``SCHEME_TO_FS`` -- which holds the mirror once it is
+    installed, so asking it would observe our own code. A library that moved
+    the fix to a different factory answers false here and then meets
+    ``install``'s refusal to overwrite an entry it did not expect: loud, not
+    silent.
+
+    A recording signer is registered under a key of its own in
+    ``fsspec.SIGNERS`` for the duration, and two filesystems are built with
+    different sign endpoints. A presigned URL is generated through each --
+    botocore's own signing path, which emits ``before-sign`` with every argument
+    its handlers expect, and sends nothing -- and each must be signed by exactly
+    its own signer; then once more after ``connect(refresh=True)``, which is how
+    s3fs recreates a client. Measured on the 0.12.0 wheel, 2026-10-28: the
+    first filesystem is signed by the *second* one's signer, and after the
+    reconnect by none. On the fork: each by its own, before and after.
+
+    The explicit credentials keep botocore from walking its credential chain
+    (environment, profile, instance metadata), which a client otherwise does
+    when it is created; the signer replaces AWS signing, so they are never
+    used. The probe's filesystems stay in fsspec's instance cache, keyed on an
+    endpoint nothing real uses: two per run on the fork, one on stock, and a run
+    is once per install unless the cache is off.
+
+    Without s3fs nothing can remote-sign, so the answer is a stored false rather
+    than "could not run": ``install`` costs nothing then, and an unstored answer
+    would keep every other probe out of the cache too. Installing s3fs later
+    leaves that false standing, which is the safe direction.
+    """
+    try:
+        from pyiceberg.io import fsspec
+    except ImportError as exc:  # pragma: no cover - depends on the install
+        return CouldNotRun.from_exception(exc)
+    try:
+        import s3fs  # noqa: F401
+        from fsspec.asyn import sync
+    except ImportError:
+        return False
+
+    key = "zamboni-capability-probe"
+    # Fresh endpoints every run: the fork caches a filesystem per set of signer
+    # properties, so a second probe in one process -- after detect.cache_clear()
+    # -- was handed the first run's filesystem, signing through the first run's
+    # recorder, and answered False on the fork (found by the test suite).
+    run = uuid.uuid4().hex
+    first_endpoint, second_endpoint = f"first-{run}", f"second-{run}"
+    signed_by: list[str] = []
+
+    class RecordingSigner(fsspec.S3RequestSigner):
+        def __call__(self, request: object, **_: object) -> None:
+            signed_by.append(self.properties["s3.signer.endpoint"])
+
+    def build(endpoint: str):
+        return fsspec._s3(
+            {
+                "s3.signer": key,
+                "s3.signer.endpoint": endpoint,
+                "uri": "http://zamboni-probe.invalid",
+                "s3.endpoint": "http://zamboni-probe.invalid",
+                "s3.region": "us-east-1",
+                "s3.access-key-id": "zamboni-probe",
+                "s3.secret-access-key": "zamboni-probe",
+            }
+        )
+
+    def signers_of(fs) -> list[str]:
+        signed_by.clear()
+        sync(
+            fs.loop, fs.s3.generate_presigned_url, "put_object", Params={"Bucket": "b", "Key": "k"}
+        )
+        return list(signed_by)
+
+    try:
+        fsspec.SIGNERS[key] = RecordingSigner
+        try:
+            first, second = build(first_endpoint), build(second_endpoint)
+            if signers_of(first) != [first_endpoint] or signers_of(second) != [second_endpoint]:
+                return False
+            first.connect(refresh=True)
+            return signers_of(first) == [first_endpoint]
+        finally:
+            fsspec.SIGNERS.pop(key, None)
+    except Exception as exc:  # pragma: no cover - any failure means "could not establish"
+        logger.debug("S3 signer behavioural probe did not complete", exc_info=True)
         return CouldNotRun.from_exception(exc)
 
 
