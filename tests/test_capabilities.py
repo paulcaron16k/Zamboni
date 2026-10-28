@@ -204,13 +204,37 @@ def test_the_equality_delete_probe_agrees_with_the_installed_source():
     )
 
 
-def test_the_delete_manifest_probe_agrees_with_the_installed_writer():
-    """ZMBNI-604's blocker is `ManifestWriterV2.content()` returning DATA."""
+def test_the_delete_manifest_probe_agrees_with_the_installed_writer(tmp_path):
+    """ZMBNI-604's blocker is `ManifestWriterV2.content()` returning DATA.
+
+    Re-derived from the writer *object*: build one, ask for a delete manifest
+    where the constructor takes a `content` argument, and read the label it
+    reports. The probe reads the label off the manifest list instead, so the
+    two routes differ. This used to call `ManifestWriterV2.content(None)`,
+    which assumed the method ignores `self` -- true while it returned DATA
+    unconditionally, an AttributeError once the fork stored the content on the
+    writer (#240).
+    """
+    import inspect
+
+    from pyiceberg.io.pyarrow import PyArrowFileIO
     from pyiceberg.manifest import ManifestContent, ManifestWriterV2
+    from pyiceberg.partitioning import PartitionSpec
+    from pyiceberg.schema import Schema
+    from pyiceberg.types import IntegerType, NestedField
 
-    writes_data_only = ManifestWriterV2.content(None) is ManifestContent.DATA
+    arguments = {
+        "spec": PartitionSpec(),
+        "schema": Schema(NestedField(1, "k", IntegerType(), required=False)),
+        "output_file": PyArrowFileIO().new_output(f"file://{tmp_path}/m.avro"),
+        "snapshot_id": 1,
+        "avro_compression": "null",
+    }
+    if "content" in inspect.signature(ManifestWriterV2.__init__).parameters:
+        arguments["content"] = ManifestContent.DELETES
+    labels_deletes = ManifestWriterV2(**arguments).content() is ManifestContent.DELETES
 
-    assert detect().delete_manifests_writable is not writes_data_only
+    assert detect().delete_manifests_writable is labels_deletes
 
 
 # -- the three probes that had no independent cross-check (ZMBNI-14/38) ---

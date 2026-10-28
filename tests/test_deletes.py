@@ -232,6 +232,28 @@ def test_the_producer_refuses_to_rewrite_a_delete_manifest(session, partitioned)
         producer._existing_manifests()
 
 
+def test_simulated_deletes_are_committed_as_a_delete_not_an_append(partitioned):
+    """An append means "only data added"; a reader would never apply its deletes (#240).
+
+    The helper committed through `_FastAppendFiles`, which the maintenance fork
+    refuses for delete files since 1a47312b, as Java's `AppendFiles` does. It
+    is an `_OverwriteFiles` now, declaring `delete` because only deletes are
+    added -- asserted on the producer as well as the label, since the label
+    was already `delete` while the producer was the append one.
+    """
+    from pyiceberg.table.snapshots import Operation
+    from pyiceberg.table.update.snapshot import _FastAppendFiles, _OverwriteFiles
+
+    from zamboni import testing
+
+    assert issubclass(testing._CommitDeleteFiles, _OverwriteFiles)
+    assert not issubclass(testing._CommitDeleteFiles, _FastAppendFiles)
+
+    target = next(task.file.file_path for task in partitioned.scan().plan_files())
+    testing.add_position_deletes(partitioned, target, [0])
+    assert partitioned.current_snapshot().summary.operation == Operation.DELETE
+
+
 def test_delete_files_land_in_a_delete_manifest(mor_table):
     """The simulation has to be faithful at the manifest level too.
 

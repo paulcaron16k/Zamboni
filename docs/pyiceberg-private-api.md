@@ -37,7 +37,7 @@ build the tool". What follows is the bill for that decision, itemised.
 
 ## 2. The inventory
 
-**Six** private symbols imported, **three** upstream base classes subclassed,
+**Five** private symbols imported, **two** upstream base classes subclassed,
 **six** private methods overridden, **eleven** private instance attributes read,
 one inherited private method called without being overridden, and three reaches
 that are not attribute access at all (§2.6). Small and concentrated, and every
@@ -47,17 +47,17 @@ wrong.
 
 ### 2.1 Imported symbols
 
-Six symbols, at seven import statements (re-derived 2026-10-27 by walking every
+Five symbols, at seven import statements (re-derived 2026-10-28 for #240, which
+dropped `_FastAppendFiles`, and first 2026-10-27 by walking every
 `ImportFrom` of a `pyiceberg` module in `src/` with `ast` and keeping the names
 that start with `_`; the `git grep` this line used to cite misses the
 parenthesised, one-name-per-line imports).
 
 | Symbol | Imported by | What public API cannot do |
 |---|---|---|
-| `_OverwriteFiles` | `committer.py:31`, `capabilities.py:328` | Base for `_ReplaceFiles`. Nothing public emits a `replace` snapshot |
-| `_SnapshotProducer` | `capabilities.py:328` **only** | Probed for the `operation` constructor argument. `evolution.py` names it in prose and does not import it |
-| `_FastAppendFiles` | `testing.py:43` | Register **position delete files**, which PyIceberg cannot write at all |
-| `_dataframe_to_data_files` | `backends/duckdb_arrow.py:30`, `capabilities.py:555`, `capabilities.py:845` | Computes the partition key **from the data**, so `bucket` works. `add_files` infers it from statistics |
+| `_OverwriteFiles` | `committer.py:31`, `capabilities.py:335`, `testing.py:54` | Base for `_ReplaceFiles`, and for `testing._CommitDeleteFiles`, which registers **position delete files** -- PyIceberg 0.12.0 cannot commit them into a delete manifest. Nothing public emits a `replace` snapshot |
+| `_SnapshotProducer` | `capabilities.py:335` **only** | Probed for the `operation` constructor argument. `evolution.py` names it in prose and does not import it |
+| `_dataframe_to_data_files` | `backends/duckdb_arrow.py:30`, `capabilities.py:562`, `capabilities.py:852` | Computes the partition key **from the data**, so `bucket` works. `add_files` infers it from statistics |
 | `_validate_data_files_exist`, `_validate_no_new_deletes_for_data_files` | `committer.py:134` (`pyiceberg.table.update.validate`) | The two validators a rewrite needs, called by `_ReplaceFiles._validate_concurrency`'s fallback on a build whose own method also refuses unrelated appends (#239). Upstream's, so the rule they enforce is not re-implemented |
 
 `PyArrowFileIO._initialize_fs` is **not** in this table: it is never imported, only
@@ -65,7 +65,7 @@ reached as an attribute, and it is counted once in §2.6.
 
 `zamboni.testing` is **not** test-only.  `zamboni/demo/ingest.py:28` imports
 `locate_rows` and `write_position_deletes` from it, and `zamboni-demo` is a
-shipped console script — so `_FastAppendFiles` is on a user's path whenever the
+shipped console script — so `_CommitDeleteFiles` is on a user's path whenever the
 demo simulates merge-on-read. The module's own docstring says "tests *and the
 demo*"; an earlier revision here said "never on a user's path", which was wrong.
 
@@ -81,14 +81,13 @@ not count, so it cannot count here either.)
 
 ```
 _OverwriteFiles                     (pyiceberg.table.update.snapshot)
-└── _ReplaceFiles                   committer.py     -- relabels the snapshot `replace`
-    ├── MultiSpecReplaceFiles       evolution.py     -- one commit spanning two partition specs
-    ├── _RewriteManifests           manifests.py     -- regroup manifests, touch no data
-    └── _RemoveDeleteFiles          deletes.py       -- drop whole delete manifests
-_FastAppendFiles                    (same module)
-└── _AppendDeleteFiles              testing.py       -- register position delete files
+├── _ReplaceFiles                   committer.py     -- relabels the snapshot `replace`
+│   ├── MultiSpecReplaceFiles       evolution.py     -- one commit spanning two partition specs
+│   ├── _RewriteManifests           manifests.py     -- regroup manifests, touch no data
+│   └── _RemoveDeleteFiles          deletes.py       -- drop whole delete manifests
+└── _CommitDeleteFiles              testing.py       -- register position delete files, as `delete`
 ManifestWriterV2                    (pyiceberg.manifest -- public name, private contract)
-└── _DeleteManifestWriter           testing.py:206   -- label a manifest `content: deletes`
+└── _DeleteManifestWriter           testing.py:222   -- label a manifest `content: deletes`
 ```
 
 The third base is easy to miss because its name carries no underscore.
@@ -118,8 +117,8 @@ Six names. `git grep -nE "super\(\)\._"` finds the overrides that delegate;
 | `_validate_concurrency()` | `committer.py:96` | Let a rewrite commit over an append that landed while it ran, in a partition it never touched. Stock 0.12.0 refuses that ("Added data files were found matching the filter"); the fork does not (ZMBNI-79). A **probe-gated fallback**: `super()` wherever `rewrite_ignores_unrelated_append` holds, or the producer has a predicate; otherwise the fork's method with no predicate -- the commit-window checks plus the two validators in §2.1 (#239) |
 | `_existing_manifests()` | `deletes.py:97` **only** | Refuse the one path that corrupts metadata: upstream rewrites a partially-emptied manifest through `write_manifest`, which stamps `content: data`. Delegates to `super()` otherwise |
 | `_deleted_entries()` | `deletes.py:75`, `manifests.py:258` | `manifests.py`: a manifest rewrite deletes no entries. `deletes.py`: drop whole delete manifests, which is all `ManifestWriterV2` lets this tool do (§2.2) |
-| `_manifests()` | `manifests.py:261`, `testing.py:226`, `evolution.py:159` | `evolution.py`: one added manifest per partition spec, where upstream writes one under `table_metadata.spec()` -- the second **probe-gated fallback** (ZMBNI-83), dead code on the fork |
-| `_meta` | `testing.py:219` | A **property**, not a method. Labels a manifest `content: deletes`, which `ManifestWriterV2` will not do |
+| `_manifests()` | `manifests.py:261`, `testing.py:251`, `evolution.py:159` | `evolution.py`: one added manifest per partition spec, where upstream writes one under `table_metadata.spec()` -- the second **probe-gated fallback** (ZMBNI-83), dead code on the fork |
+| `_meta` | `testing.py:235` | A **property**, not a method. Labels a manifest `content: deletes`, which `ManifestWriterV2` will not do |
 
 **Three overrides are fallbacks for what only the maintenance fork does**,
 each gated on a behavioural probe so it stands down where the library behaves:
@@ -434,7 +433,7 @@ fine**. Nothing below should be raised upstream without that step.
 | `_deleted_entries` no-ops | Metadata-only operations delete nothing; this is the extension point used as intended | — |
 | `_existing_manifests` refusal | `ManifestWriterV2.content()` still returns `DATA` | probe: `delete_manifests_writable = False` |
 | `_SnapshotProducer` | Probe only; dies with ZMBNI-38 | — |
-| `_FastAppendFiles`, `_meta` | PyIceberg cannot write position deletes at all | probe, as above |
+| `_CommitDeleteFiles`, `_meta` | PyIceberg 0.12.0 cannot commit position deletes into a delete manifest | probe, as above |
 
 ### 6.2 Upstream is already building table maintenance
 
@@ -463,8 +462,9 @@ correct.
 That claim was written into this document from the PR's title before it was
 measured, and it was wrong. It is left visible rather than quietly deleted,
 because inferring a capability from a title is the exact failure this document
-exists to prevent. **`_meta`, `_FastAppendFiles`, `_existing_manifests` and
-ZMBNI-9 are unaffected by #3624.**
+exists to prevent. **`_meta`, the delete-file producer (`_FastAppendFiles` then,
+`_OverwriteFiles` since #240), `_existing_manifests` and ZMBNI-9 are unaffected
+by #3624.**
 
 So the correct contribution for most of this surface is **not a new pull
 request**. It is testing an in-flight one against a real workload and saying what

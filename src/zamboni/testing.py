@@ -13,15 +13,26 @@ So the delete file is written and registered directly here.
 Anything built with this is *simulating* what a merge-on-read engine would
 emit. Callers that surface it to a user should say so.
 
-Simulating it *faithfully* takes one more step than it looks. Appending the
-delete file through ``_FastAppendFiles`` puts it in a manifest that
-``ManifestWriterV2`` labels ``content: data``, because that writer returns
-``ManifestContent.DATA`` unconditionally and there is no delete-manifest writer
-in PyIceberg. The spec requires delete files to be tracked in delete manifests,
-so the table would be readable-but-wrong: PyIceberg and DuckDB both dispatch on
-the *entry's* content and cope, but an engine that prunes on manifest content
-would miss every delete. :class:`_DeleteManifestWriter` supplies the missing
-writer so the simulation is what it claims to be.
+Simulating it *faithfully* takes two more steps than it looks.
+
+**The manifest.** Committing the delete file through a stock producer puts it in
+a manifest that ``ManifestWriterV2`` labels ``content: data``, because that
+writer returns ``ManifestContent.DATA`` unconditionally on 0.12.0. The spec
+requires delete files to be tracked in delete manifests, so the table would be
+readable-but-wrong: PyIceberg and DuckDB both dispatch on the *entry's* content
+and cope, but an engine that prunes on manifest content would miss every
+delete. :class:`_DeleteManifestWriter` supplies the missing writer so the
+simulation is what it claims to be.
+
+**The producer.** The snapshot must not be an append. The spec defines
+``append`` as only data files added, so an incremental reader takes it as pure
+growth and never applies a delete committed under it. Java's ``AppendFiles``
+refuses delete files, and so does the maintenance fork since ``1a47312b``
+(``ValueError: An append cannot add POSITION_DELETES files``). This committed
+through ``_FastAppendFiles`` until #240 -- labelled ``delete``, but through the
+producer that is meant for appends, and which skips concurrency validation.
+:class:`_CommitDeleteFiles` is an ``_OverwriteFiles``, as target-iceberg's
+ELT-1267 commits them, declaring ``delete`` because only deletes are added.
 """
 
 from __future__ import annotations
@@ -40,7 +51,7 @@ from pyiceberg.manifest import (
 )
 from pyiceberg.table import Table
 from pyiceberg.table.snapshots import Operation
-from pyiceberg.table.update.snapshot import _FastAppendFiles
+from pyiceberg.table.update.snapshot import _OverwriteFiles
 from pyiceberg.typedef import Record
 
 #: Iceberg's reserved field ids for the positional delete schema.
@@ -178,8 +189,13 @@ def write_position_deletes(
         # spec_id is deliberately not stored in the manifest entry -- the reader
         # derives it from the manifest. from_args therefore does not set the
         # backing attribute, so assign it explicitly for our own grouping below.
+        # The library's default record layout, not ``tbl.format_version``'s, as
+        # every DataFile PyIceberg builds itself is. Built V2-shaped, the record
+        # fell one field short once upstream's 308768d9 ("Add missing
+        # referenced_data_file field to v2 manifests", iceberg-python#3953)
+        # reached the fork: the V2 manifest writer raised IndexError (#240).
+        # The argument dated from the initial commit with no reason recorded.
         delete_file = DataFile.from_args(
-            _table_format_version=tbl.format_version,
             content=DataFileContent.POSITION_DELETES,
             file_path=path,
             file_format=FileFormat.PARQUET,
@@ -194,7 +210,7 @@ def write_position_deletes(
         written.append(delete_file)
 
     with tbl.transaction() as txn:
-        producer = _AppendDeleteFiles(operation=Operation.DELETE, transaction=txn, io=tbl.io)
+        producer = _CommitDeleteFiles(operation=Operation.DELETE, transaction=txn, io=tbl.io)
         with producer as update:
             for data_file in written:
                 update.append_data_file(data_file)
@@ -220,8 +236,17 @@ class _DeleteManifestWriter(ManifestWriterV2):
         return {**super()._meta, "content": "deletes"}
 
 
-class _AppendDeleteFiles(_FastAppendFiles):
-    """Append delete files into a properly-labelled delete manifest."""
+class _CommitDeleteFiles(_OverwriteFiles):
+    """Commit delete files into properly-labelled delete manifests.
+
+    An overwrite producer that removes nothing, so ``_existing_manifests``
+    keeps every manifest as it is: each one either fails the (empty) partition
+    filter or holds none of ``_deleted_data_files``. The added files go through
+    :class:`_DeleteManifestWriter` on every build, including a fork that routes
+    delete files into delete manifests itself: one path, so every build produces
+    the same table, and stock 0.12.0 -- whose writer labels every manifest
+    ``data`` -- still gets a delete manifest.
+    """
 
     def _manifests(self) -> list[ManifestFile]:
         by_spec: dict[int, list[DataFile]] = {}
