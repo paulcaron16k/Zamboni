@@ -48,16 +48,16 @@ wrong.
 ### 2.1 Imported symbols
 
 Five symbols, at seven import statements (re-derived 2026-10-28 for #240, which
-dropped `_FastAppendFiles`, and first 2026-10-27 by walking every
+dropped `_FastAppendFiles`, line numbers again for #245, and first 2026-10-27 by walking every
 `ImportFrom` of a `pyiceberg` module in `src/` with `ast` and keeping the names
 that start with `_`; the `git grep` this line used to cite misses the
 parenthesised, one-name-per-line imports).
 
 | Symbol | Imported by | What public API cannot do |
 |---|---|---|
-| `_OverwriteFiles` | `committer.py:31`, `capabilities.py:335`, `testing.py:54` | Base for `_ReplaceFiles`, and for `testing._CommitDeleteFiles`, which registers **position delete files** -- PyIceberg 0.12.0 cannot commit them into a delete manifest. Nothing public emits a `replace` snapshot |
-| `_SnapshotProducer` | `capabilities.py:335` **only** | Probed for the `operation` constructor argument. `evolution.py` names it in prose and does not import it |
-| `_dataframe_to_data_files` | `backends/duckdb_arrow.py:30`, `capabilities.py:562`, `capabilities.py:852` | Computes the partition key **from the data**, so `bucket` works. `add_files` infers it from statistics |
+| `_OverwriteFiles` | `committer.py:31`, `capabilities.py:345`, `testing.py:54` | Base for `_ReplaceFiles`, and for `testing._CommitDeleteFiles`, which registers **position delete files** -- PyIceberg 0.12.0 cannot commit them into a delete manifest. Nothing public emits a `replace` snapshot |
+| `_SnapshotProducer` | `capabilities.py:345` **only** | Probed for the `operation` constructor argument. `evolution.py` names it in prose and does not import it |
+| `_dataframe_to_data_files` | `backends/duckdb_arrow.py:30`, `capabilities.py:579`, `capabilities.py:965` | Computes the partition key **from the data**, so `bucket` works. `add_files` infers it from statistics |
 | `_validate_data_files_exist`, `_validate_no_new_deletes_for_data_files` | `committer.py:134` (`pyiceberg.table.update.validate`) | The two validators a rewrite needs, called by `_ReplaceFiles._validate_concurrency`'s fallback on a build whose own method also refuses unrelated appends (#239). Upstream's, so the rule they enforce is not re-implemented |
 
 `PyArrowFileIO._initialize_fs` is **not** in this table: it is never imported, only
@@ -177,7 +177,7 @@ everything else here.
 | `hasattr(io, "_initialize_fs")` then `io._initialize_fs(...)` | `orphans.py:216-217` | The fsspec filesystem needed to **list** storage; `FileIO` exposes open/delete and no listing. Guarded — a non-PyArrow `FileIO` falls back rather than crashing |
 | `from pyiceberg.table.delete_file_index import DeleteFileIndex` | `deletes.py:180` | Answers "does this delete file still apply" with upstream's own index rather than a second implementation of the rule. No underscore, and no public-API promise either |
 | `RestCatalog._session` | `reporters.py` | The authenticated session for `POST .../tables/{table}/metrics`. PyIceberg has **no metrics endpoint at all** — its `Endpoints` class does not mention one and `RestCatalog` never posts one (`iceberg-python#847`, open) — so there is no public way to make an authenticated request to a catalog it is already talking to. The URL itself uses the public `RestCatalog.url()`. Building a second session from the same credentials was the alternative and would duplicate the OAuth2 client-credentials refresh for a second set of tokens. Guarded: absent means `TypeError` naming the cause, and the reporter only exists on a catalog that has both `url` and `_session`. **Deletes entirely** when PyIceberg implements metrics reporting |
-| `pyiceberg.io.fsspec.SCHEME_TO_FS["s3"/"s3a"/"s3n"]` replaced; `fsspec._s3` called; `fsspec.SIGNERS` read | `signer.py` | 0.12's `_s3()` replaces the request signer on a client fsspec shares across threads and tables, leaving a window in which requests go out unsigned and get `403 AccessDenied`, and letting the last table loaded sign for all of them (ZMBNI-51). A catalog names `FsspecFileIO` by class path, so a subclass is never used and the registry is the only seam. The replacement calls the stock `_s3` for the client options and registers the signer once, on the session its clients come from. Guarded: `install()` refuses with `UnsupportedPyIceberg` unless every S3 entry is still the stock `_s3`, and stands down on a build that already signs once per signer. **Deletes entirely** when a release carries the fork's fix |
+| `pyiceberg.io.fsspec.SCHEME_TO_FS["s3"/"s3a"/"s3n"]` replaced; `fsspec._s3` called; `fsspec.SIGNERS` read, and written for the probe's duration; `fsspec.S3RequestSigner` subclassed by the probe | `signer.py`; `capabilities._s3_signer_registered_once` | 0.12's `_s3()` replaces the request signer on a client fsspec shares across threads and tables, leaving a window in which requests go out unsigned and get `403 AccessDenied`, and letting the last table loaded sign for all of them (ZMBNI-51). A catalog names `FsspecFileIO` by class path, so a subclass is never used and the registry is the only seam. The replacement calls the stock `_s3` for the client options and registers the signer once, on the session its clients come from. Guarded: `install()` refuses with `UnsupportedPyIceberg` unless every S3 entry is still the stock `_s3`, and stands down on a build that already signs once per signer -- established by `s3_signer_registered_once`, which builds two filesystems through `fsspec._s3` with different sign endpoints and presigns through each, not by the name of the fork's function (#245). **Deletes entirely**, probe included, when a release carries the fork's fix |
 
 **And the most fragile reach in the repository, which has no row above because it
 is not attribute access at all:** three probes depend on upstream's *source text*.
@@ -185,8 +185,8 @@ is not attribute access at all:** three probes depend on upstream's *source text
 | Reach | In | Breaks when |
 |---|---|---|
 | `"manifest_evaluator" in getsource(_OverwriteFiles._existing_manifests)` | `capabilities.py` | that method's body is refactored — and the needle matches a **local variable name** (`manifest_evaluators`), so a rename that changes no behaviour breaks it. Since ZMBNI-38 this can only *withdraw* pruning safety, never grant it: the behavioural probe runs regardless and decides |
-| `"does not yet support equality deletes" in getsource(pyiceberg.table)` | `capabilities.py:274-278` | an **error message** is reworded |
-| `inspect.signature(_dataframe_to_data_files).parameters["df"].annotation` | `capabilities.py:320` | a type annotation changes — **which it did**, see §3 |
+| `"does not yet support equality deletes" in getsource(pyiceberg.table)` | `capabilities.py:846-850` | an **error message** is reworded |
+| `inspect.signature(_dataframe_to_data_files).parameters["df"].annotation` | `capabilities.py:967` | a type annotation changes — **which it did**, see §3 |
 
 Each fails *silently*, to its own safe direction, so the cost is a capability
 believed absent forever rather than a crash. That is the whole subject of
@@ -213,7 +213,7 @@ unchanged.** The exception matters more than the rule:
 0.12.0   _dataframe_to_data_files(df: pa.Table | pa.RecordBatchReader, ...)
 ```
 
-That is §2.1's fourth row, and `capabilities.py:316-326` exists *only* to read
+That is §2.1's fourth row, and `capabilities.py:963-971` exists *only* to read
 that annotation — so the one signature that moved is the one a probe watches, and
 §4.6 bills for its consequence (the two tests that skip by build). An earlier
 revision of this document claimed nothing changed, which was both false and

@@ -144,6 +144,17 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **The S3 signer fix decides whether to stand down by what PyIceberg does,
+  not by a name it carries** (#245). `zamboni.signer` replaces PyIceberg's S3
+  filesystem factory on builds that swap the request signer on a shared client
+  (#51), and stood down wherever `pyiceberg.io.fsspec` had a function called
+  `_signed_s3_filesystem`. A build carrying that name without a working fix
+  would have kept the unsigned-request `403`s. A new behavioural probe,
+  `s3_signer_registered_once` (shown by `zamboni doctor`), builds two
+  filesystems with different sign endpoints, presigns through each without
+  sending anything, and checks that each is signed by its own signer, also
+  after s3fs recreates the client. If it cannot tell, the fix installs.
+  Stored probe answers are re-probed once (cache schema 3).
 - **`zamboni-demo`'s simulated merge-on-read deletes commit on the current
   maintenance fork** (#240). `zamboni.testing`, which the demo and the tests
   use to register position delete files, committed them through PyIceberg's

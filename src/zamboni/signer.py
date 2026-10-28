@@ -59,11 +59,13 @@ _SIGNER_UNIQUE_ID = 1925
 def library_signs_once() -> bool:
     """Whether the installed PyIceberg already registers its S3 signer once per signer.
 
-    True on a fork carrying the fix, false on any released 0.12.
+    True on a fork carrying the fix, false on any released 0.12. Asked of the
+    library's behaviour by :func:`zamboni.capabilities.detect`, and cached with
+    the other probes; it was a check for the fork's function name until #245.
     """
-    from pyiceberg.io import fsspec
+    from .capabilities import detect
 
-    return hasattr(fsspec, "_signed_s3_filesystem")
+    return detect().s3_signer_registered_once
 
 
 def install() -> None:

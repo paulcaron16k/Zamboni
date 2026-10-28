@@ -82,6 +82,7 @@ def _caps(**overrides) -> PyIcebergCapabilities:
         "derives_delete_predicate": False,
         "equality_deletes_readable": False,
         "delete_manifests_writable": False,
+        "s3_signer_registered_once": False,
     }
     base.update(overrides)
     return PyIcebergCapabilities(**base)
@@ -143,6 +144,90 @@ def test_the_concurrent_append_probe_answers_for_the_expected_build():
         "stock 0.12.0 refuses it. This build answered the other way -- check which "
         "PyIceberg the leg resolved."
     )
+
+
+def test_the_s3_signer_probe_answers_for_the_expected_build():
+    """Fork: each filesystem keeps its own signer. Stock 0.12.0: it does not (#51, #245).
+
+    Declared by the environment, like the probes above, so a leg that resolved
+    the wrong PyIceberg fails here rather than agreeing with whatever it found.
+    """
+    from tests.conftest import library_honours_spec_expected
+
+    fork = library_honours_spec_expected()
+    assert detect().s3_signer_registered_once is fork, (
+        "the maintenance fork registers each S3 signer once, on its own client (ZMBNI-51); "
+        "stock 0.12.0 swaps it on a shared one. This build answered the other way -- "
+        "check which PyIceberg the leg resolved."
+    )
+
+
+def test_the_s3_signer_probe_answers_the_same_when_run_again():
+    """A second run in one process used to answer False on the fork (#245).
+
+    The fork caches a filesystem per set of signer properties, so a repeated
+    probe got the first run's filesystem, signing through the first run's
+    recorder. `test_probecache` re-probes after `detect.cache_clear()`, and the
+    session built next installed the mirror over the fork.
+    """
+    from tests.conftest import library_honours_spec_expected
+    from zamboni import capabilities
+
+    expected = library_honours_spec_expected()
+    assert [capabilities._s3_signer_registered_once() for _ in range(3)] == [expected] * 3
+
+
+def _stock_s3(properties):
+    """PyIceberg 0.12.0's ``_s3`` for a signed table, reduced to what decides the bug.
+
+    The last lines are 0.12.0's verbatim: the signer is unregistered and
+    registered again on ``fs.s3``, the client fsspec shares between every
+    filesystem built with the same options.
+    """
+    from botocore import UNSIGNED
+    from pyiceberg.io import fsspec
+    from s3fs import S3FileSystem
+
+    fs = S3FileSystem(
+        client_kwargs={
+            "endpoint_url": properties["s3.endpoint"],
+            "aws_access_key_id": properties["s3.access-key-id"],
+            "aws_secret_access_key": properties["s3.secret-access-key"],
+            "region_name": properties["s3.region"],
+        },
+        config_kwargs={"signature_version": UNSIGNED},
+    )
+    signer = fsspec.SIGNERS[properties["s3.signer"]](properties)
+    fs.s3.meta.events.unregister("before-sign.s3", unique_id=1925)
+    fs.s3.meta.events.register_last("before-sign.s3", signer, unique_id=1925)
+    return fs
+
+
+def test_the_fork_name_without_its_behaviour_still_installs_the_signer_mirror(monkeypatch):
+    """The name `library_signs_once` used to check proves nothing, so it must decide nothing (#245).
+
+    A build carrying `_signed_s3_filesystem` beside a stock `_s3` is the case a
+    name-based probe gets wrong: it stands the mirror down and leaves the 403s.
+    """
+    pytest.importorskip("s3fs")
+    from pyiceberg.io import fsspec
+
+    from zamboni import capabilities, signer
+
+    monkeypatch.setattr(fsspec, "_signed_s3_filesystem", object(), raising=False)
+    monkeypatch.setattr(fsspec, "_s3", _stock_s3)
+    for scheme in ("s3", "s3a", "s3n"):
+        monkeypatch.setitem(fsspec.SCHEME_TO_FS, scheme, _stock_s3)
+
+    observed = capabilities._s3_signer_registered_once()
+    assert observed is False
+    monkeypatch.setattr(
+        capabilities, "detect", lambda: replace(detect(), s3_signer_registered_once=observed)
+    )
+
+    signer.install()
+
+    assert {fsspec.SCHEME_TO_FS[s] for s in ("s3", "s3a", "s3n")} == {signer._s3_signed_once}
 
 
 def test_describe_lists_every_probe():
