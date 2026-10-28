@@ -154,8 +154,10 @@ Two categories beyond the usual set, because this tool deletes files:
   store: 30 catalogs left 93 sockets open. Filesystems are now shared only
   while a table holds one and released after, and the same 30 catalogs,
   or 300, settle to one socket. A token refresh never grew the cache; the
-  auth manager refreshes in place. The maintenance fork has the same fix on
-  `bug/signed_s3_filesystem_cache_holds_sockets`.
+  auth manager refreshes in place. The maintenance fork had the same leak and
+  carries the same fix; the development pin moves to its tag
+  `maintenance/2026-10-28.2`, which also brings in the fork's upsert conflict
+  check (ELT-1271), a path Zamboni does not take.
 - **The S3 signer fix decides whether to stand down by what PyIceberg does,
   not by a name it carries** (#245). `zamboni.signer` replaces PyIceberg's S3
   filesystem factory on builds that swap the request signer on a shared client
