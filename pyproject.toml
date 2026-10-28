@@ -233,17 +233,24 @@ dev = [
 ]
 
 [tool.uv.sources]
-# Development, CI and `bin/` generation resolve PyIceberg from our maintenance
-# fork, pinned to a commit rather than tracking the branch so a rebase is a
-# decision rather than something that happens to a build.
+# **For development, CI and testing only.** This resolves PyIceberg from our
+# maintenance fork so the suite runs against the library form of each fix, and
+# so each of Zamboni's mirrored overrides is proven to stand down where the
+# library has the behaviour. Production never sees it: `tool.uv.sources` is a
+# uv workspace directive and does not reach wheel metadata -- verified by
+# building one: it declares only `Requires-Dist: pyiceberg[pyarrow]<0.13,>=0.12`
+# -- so `pip install iceberg-zamboni` gets stock PyIceberg and runs the mirrors,
+# each gated on a behavioural probe in `capabilities.detect()`. CI's `consumer`
+# job runs the suite that way.
 #
-# **Not published.** `tool.uv.sources` is a uv workspace directive and does not
-# reach wheel metadata -- verified by building one: it declares only
-# `Requires-Dist: pyiceberg[pyarrow]<0.13,>=0.12`. A consumer installing from
-# PyPI therefore gets stock PyIceberg and must redirect the source itself, which
-# is what ExperienceFlow IWS does. The probe in `capabilities.detect()` is what
-# makes that failure loud rather than silent.
-pyiceberg = { git = "https://github.com/paulcaron16k/iceberg-python.git", rev = "16c85e421eeb4efe43b7acc39d515471fae60f5f" }
+# **Pinned to a tag on the fork, not a branch or a bare SHA (ZMBNI-241).** The
+# fork tags each state a consumer adopts `maintenance/YYYY-MM-DD`, annotated and
+# never moved (its MAINTENANCE-FORK.md). A rebase of `feature/maintenance` is
+# then a decision rather than something that happens to a build, the pinned
+# commit stays reachable by construction -- the 2026-10-27 rebase left the old
+# SHA pin reachable only through a hand-made tag -- and the pin says which state
+# is in use. `uv.lock` records the commit the tag named when it was locked.
+pyiceberg = { git = "https://github.com/paulcaron16k/iceberg-python.git", tag = "maintenance/2026-10-27" }
 
 [tool.uv]
 # The whole point of this project's environment: never resolve against whatever
