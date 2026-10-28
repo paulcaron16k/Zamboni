@@ -93,6 +93,59 @@ class _ReplaceFiles(_OverwriteFiles):
         # Summary is a frozen pydantic model, so rebuild rather than mutate.
         return Summary(operation=wanted, **summary.additional_properties)
 
+    def _validate_concurrency(self) -> None:
+        """Ignore a concurrent append the rewrite never touched, where the library will not.
+
+        **A fallback, gated on a behavioural probe** -- the pattern
+        :class:`~zamboni.evolution.MultiSpecReplaceFiles` set. The behaviour
+        lives in the maintenance fork (ZMBNI-79, ``40d7af89``): there
+        ``_SnapshotProducer._validate_concurrency`` runs
+        ``_validate_added_data_files`` only when the operation has a
+        conflict-detection filter. Stock 0.12.0 runs it with ``None``, which
+        that validator reads as "match everything", so an append to *any*
+        partition that lands while a rewrite is in flight refuses it with
+        "Added data files were found matching the filter" -- exit 3, for a
+        conflict that does not exist (#239). Compaction deletes named files and
+        adds equivalent ones; it asserts nothing about rows it did not read.
+        Java's ``RewriteFiles`` draws the same line.
+
+        Where ``capabilities.rewrite_ignores_unrelated_append`` says the
+        library already behaves -- the fork, or a release that takes the fix --
+        this is ``super()``, so it cannot mask a library that has been fixed or
+        drift from one that changes. Likewise whenever ``_predicate`` is set,
+        where the fork's method and stock's are the same.
+
+        Otherwise it is the fork's method with ``_predicate`` empty, which every
+        commit here has: file deletes only, never ``delete_by_predicate``. Its
+        first two blocks are then skipped -- the first by the fix, the second
+        because it needs a predicate -- leaving the window checks and the two
+        validators that guard the files being removed: each must still exist,
+        and none may have gained a delete. Those are what refuse a writer that
+        touched our files (``test_a_concurrent_commit_touching_our_files_is_still_refused``).
+        """
+        from pyiceberg.expressions import AlwaysFalse
+
+        from .capabilities import detect
+
+        if detect().rewrite_ignores_unrelated_append or self._predicate != AlwaysFalse():
+            super()._validate_concurrency()
+            return
+
+        from pyiceberg.table.update.validate import (
+            _validate_data_files_exist,
+            _validate_no_new_deletes_for_data_files,
+        )
+
+        window = self._commit_window
+        if window is None or window.is_empty() or window.head is None:
+            return
+        if self._deleted_data_files:
+            table = self._transaction._table
+            _validate_data_files_exist(table, window.head, self._deleted_data_files, window.base)
+            _validate_no_new_deletes_for_data_files(
+                table, window.head, None, self._deleted_data_files, window.base
+            )
+
 
 class ConcurrentModification(RuntimeError):
     """The table moved on between planning and committing."""
@@ -162,9 +215,13 @@ class ReplaceCommitter:
         ZMBNI-79. That check refused whenever the table had moved *at all*,
         which is coarser than the loss it was guarding against: compaction
         replaces named files, so a commit touching none of them cannot cause a
-        lost update. PyIceberg 0.12 validates the right thing --
-        ``_validate_data_files_exist`` checks that every file this producer
-        deletes still exists -- and does it per file. Proven adversarially by
+        lost update. ``_validate_data_files_exist`` checks the right thing --
+        that every file this producer deletes still exists -- and does it per
+        file. That is all the maintenance fork validates for a rewrite; stock
+        0.12.0 also refuses any append that lands meanwhile, in any partition,
+        which :meth:`_ReplaceFiles._validate_concurrency` stands in for there
+        (#239, ``test_a_rewrite_commits_over_an_append_that_landed_while_it_ran``).
+        Proven adversarially by
         ``test_a_concurrent_commit_touching_our_files_is_still_refused``: with
         the old guard gone, a writer that rewrites a file in the removal set is
         still refused, the rows are not duplicated and its update survives.
@@ -189,10 +246,16 @@ class ReplaceCommitter:
         from .capabilities import detect
 
         want_replace = self._snapshot_operation == "replace"
-        # If a future PyIceberg accepts REPLACE in update_snapshot_summaries,
-        # drop the subclass and use the stock producer.
-        needs_relabel = want_replace and not detect().replace_summary_supported
-        producer_cls = self._producer_cls or (_ReplaceFiles if needs_relabel else _OverwriteFiles)
+        caps = detect()
+        # The stock producer only where it needs neither fallback: a PyIceberg
+        # that accepts REPLACE in update_snapshot_summaries *and* lets a rewrite
+        # past an unrelated append (#239). `snapshot_operation="overwrite"`
+        # takes the stock producer regardless -- it is the escape hatch from
+        # private subclasses, and so from both fallbacks.
+        needs_subclass = want_replace and not (
+            caps.replace_summary_supported and caps.rewrite_ignores_unrelated_append
+        )
+        producer_cls = self._producer_cls or (_ReplaceFiles if needs_subclass else _OverwriteFiles)
         operation = Operation.REPLACE if want_replace else Operation.OVERWRITE
 
         with tbl.transaction() as txn:

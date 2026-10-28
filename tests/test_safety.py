@@ -13,7 +13,7 @@ from zamboni.committer import (
 from zamboni.compactor import CompactionBlocked
 from zamboni.profile import Finding, Severity, TableProfile, profile_table
 
-from .conftest import SCHEMA, batch
+from .conftest import SCHEMA, batch, library_honours_spec_expected
 
 
 def test_pyiceberg_internals_are_as_expected():
@@ -103,6 +103,82 @@ def test_an_unrelated_concurrent_commit_no_longer_refuses_the_rewrite(session, u
     # Removes nothing; adds a file. Nothing we depend on has changed.
     outcome = ReplaceCommitter().commit(tbl, removed=[], added=[keep])
     assert outcome.snapshot_id is not None, "an unrelated commit must not refuse the rewrite"
+
+
+def test_a_rewrite_commits_over_an_append_that_landed_while_it_ran(session, partitioned):
+    """The case the test above does not reach: the append lands *during* the rewrite (#239).
+
+    Above, the table is reloaded after the other commit, so nothing concurrent
+    is inside the commit window and nothing is validated. Here the handle is
+    the one the rewrite planned from, so the commit fails its ref check,
+    PyIceberg refreshes and retries, and validates against the append.
+
+    Stock PyIceberg 0.12.0 refused that as "Added data files were found
+    matching the filter" -- for an append to a partition the rewrite never
+    touched -- and Zamboni reported exit 3. ZMBNI-79 fixed it in the fork
+    only; `_ReplaceFiles._validate_concurrency` carries the fallback.
+    """
+    planned = session.table("db.partitioned")
+    doomed = next(
+        f.data_file for f in profile_table(planned).live_files if f.data_file.partition[0] == "a"
+    )
+    rows_before = planned.scan().to_arrow().num_rows
+
+    session.table("db.partitioned").append(batch(9000, 5, "b"))  # another writer, partition b
+
+    outcome = ReplaceCommitter().commit(planned, removed=[doomed], added=[doomed])
+
+    assert outcome.snapshot_id is not None
+    after = session.table("db.partitioned").scan().to_arrow()
+    assert after.num_rows == rows_before + 5, "the other writer's rows survive, none duplicated"
+    assert sorted(after["id"].to_pylist())[-5:] == list(range(9000, 9005))
+
+
+@pytest.mark.parametrize("library_behaves", [True, False], ids=["library", "fallback"])
+def test_both_validation_paths_pass_an_unrelated_append_and_refuse_a_touched_file(
+    session, partitioned, monkeypatch, library_behaves
+):
+    """Each path, on whichever build is installed (#239).
+
+    Forcing the probe is the only way this repository's CI runs the fallback:
+    it resolves the fork, where the probe says the library behaves. The
+    rewrite commits over an append it never touched -- except on the library
+    path of stock 0.12.0, which is the defect and is asserted as such -- and
+    is refused by a writer that replaced one of its files on every path: the
+    fallback skips exactly one validator, and this checks it skipped no other.
+    """
+    from dataclasses import replace
+
+    from pyiceberg.exceptions import ValidationException
+
+    import zamboni.capabilities as capabilities_module
+
+    forced = replace(capabilities_module.detect(), rewrite_ignores_unrelated_append=library_behaves)
+    monkeypatch.setattr(capabilities_module, "detect", lambda: forced)
+
+    a_files = [
+        f.data_file
+        for f in profile_table(partitioned).live_files
+        if f.data_file.partition[0] == "a"
+    ]
+
+    planned = session.table("db.partitioned")
+    session.table("db.partitioned").append(batch(9000, 5, "b"))
+    if library_behaves and not library_honours_spec_expected():
+        # Stock 0.12.0's own validation, the defect itself. If this stops
+        # raising, stock has gained the fix and the fallback can retire.
+        with pytest.raises(ValidationException, match="Added data files"):
+            ReplaceCommitter().commit(planned, removed=[a_files[0]], added=[a_files[0]])
+    else:
+        commit = ReplaceCommitter().commit(planned, removed=[a_files[0]], added=[a_files[0]])
+        assert commit.snapshot_id is not None
+
+    planned = session.table("db.partitioned")
+    other = session.table("db.partitioned")
+    with other.transaction() as txn, txn.update_snapshot().overwrite() as update:
+        update.delete_data_file(a_files[1])
+    with pytest.raises((ValidationException, ConcurrentModification)):
+        ReplaceCommitter().commit(planned, removed=[a_files[1]], added=[a_files[1]])
 
 
 def test_row_count_mismatch_aborts_before_commit(session, unpartitioned, monkeypatch):

@@ -144,6 +144,19 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **On stock PyIceberg 0.12.0, a compaction no longer loses to an unrelated
+  concurrent append** (#239). ZMBNI-79 moved "a rewrite ignores an append it
+  never touched" into the maintenance fork and removed Zamboni's own guard, so
+  a `pip install` -- which resolves stock PyIceberg -- refused any compaction
+  whose commit raced an append to *any* partition, as `ValidationException:
+  Added data files were found matching the filter`, exit 3. No data was at
+  risk; the work was thrown away. `_ReplaceFiles._validate_concurrency` now
+  carries the fork's behaviour as a fallback, gated on a new behavioural probe
+  (`rewrite_ignores_unrelated_append`, shown by `zamboni doctor`) so it stands
+  down wherever the library already behaves. A writer that replaced or
+  deleted one of the compaction's own files is still refused on every build.
+  `snapshot_operation="overwrite"` uses PyIceberg's stock producer and does not
+  get the fallback.
 - **`zamboni serve` and `config-reload` work on macOS** (#235). The service's
   startup, readiness and liveness probes tested `/proc/<pid>`, and
   `config-reload` read `/proc/<pid>/cmdline`; macOS has no `/proc`, so every

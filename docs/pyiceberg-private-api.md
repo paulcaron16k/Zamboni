@@ -37,8 +37,8 @@ build the tool". What follows is the bill for that decision, itemised.
 
 ## 2. The inventory
 
-**Four** private symbols imported, **three** upstream base classes subclassed,
-**four** private methods overridden, **nine** private instance attributes read,
+**Six** private symbols imported, **three** upstream base classes subclassed,
+**six** private methods overridden, **eleven** private instance attributes read,
 one inherited private method called without being overridden, and three reaches
 that are not attribute access at all (§2.6). Small and concentrated, and every
 count below was re-derived against this branch — an earlier revision of this
@@ -47,14 +47,18 @@ wrong.
 
 ### 2.1 Imported symbols
 
-Four symbols, at five import sites (`git grep -nE "from pyiceberg.*import.*\b_"`).
+Six symbols, at seven import statements (re-derived 2026-10-27 by walking every
+`ImportFrom` of a `pyiceberg` module in `src/` with `ast` and keeping the names
+that start with `_`; the `git grep` this line used to cite misses the
+parenthesised, one-name-per-line imports).
 
 | Symbol | Imported by | What public API cannot do |
 |---|---|---|
-| `_OverwriteFiles` | `committer.py:31`, `capabilities.py:115` | Base for `_ReplaceFiles`. Nothing public emits a `replace` snapshot |
-| `_SnapshotProducer` | `capabilities.py:115` **only** | Probed for the `operation` constructor argument. `evolution.py` names it in prose and does not import it |
+| `_OverwriteFiles` | `committer.py:31`, `capabilities.py:328` | Base for `_ReplaceFiles`. Nothing public emits a `replace` snapshot |
+| `_SnapshotProducer` | `capabilities.py:328` **only** | Probed for the `operation` constructor argument. `evolution.py` names it in prose and does not import it |
 | `_FastAppendFiles` | `testing.py:43` | Register **position delete files**, which PyIceberg cannot write at all |
-| `_dataframe_to_data_files` | `backends/duckdb_arrow.py:29`, `capabilities.py:318` | Computes the partition key **from the data**, so `bucket` works. `add_files` infers it from statistics |
+| `_dataframe_to_data_files` | `backends/duckdb_arrow.py:30`, `capabilities.py:555`, `capabilities.py:845` | Computes the partition key **from the data**, so `bucket` works. `add_files` infers it from statistics |
+| `_validate_data_files_exist`, `_validate_no_new_deletes_for_data_files` | `committer.py:134` (`pyiceberg.table.update.validate`) | The two validators a rewrite needs, called by `_ReplaceFiles._validate_concurrency`'s fallback on a build whose own method also refuses unrelated appends (#239). Upstream's, so the rule they enforce is not re-implemented |
 
 `PyArrowFileIO._initialize_fs` is **not** in this table: it is never imported, only
 reached as an attribute, and it is counted once in §2.6.
@@ -103,24 +107,36 @@ as much a private-contract dependency as anything above.
 Each override exists because the inherited behaviour is wrong for the operation,
 not because it is inconvenient.
 
-Four names, at the sites `git grep -nE "super\(\)\._"` reports.
+Six names. `git grep -nE "super\(\)\._"` finds the overrides that delegate;
+`_deleted_entries` delegates to nothing, so it was found by listing every
+`def _…(self` in the producer modules -- and was missing from this table until
+#239.
 
 | Override | In | Why |
 |---|---|---|
-| `_summary()` | `committer.py:74` **only** | Let PyIceberg compute the totals as an overwrite, then relabel the finished summary as whatever was asked for. `evolution.py`'s copy is gone: its per-spec half moved into the maintenance fork, and the operation-label half turned out to be correcting a hardcode in `_ReplaceFiles`, now fixed there (ZMBNI-59) |
+| `_summary()` | `committer.py:76`, `evolution.py:97` | `committer.py`: let PyIceberg compute the totals as an overwrite, then relabel the finished summary as whatever was asked for (the label half used to sit in `evolution.py`, correcting a hardcode here; ZMBNI-59). `evolution.py`: summarise added files under their own spec -- a **probe-gated fallback** that is `super()` wherever `added_files_honour_spec` holds (ZMBNI-83) |
+| `_validate_concurrency()` | `committer.py:96` | Let a rewrite commit over an append that landed while it ran, in a partition it never touched. Stock 0.12.0 refuses that ("Added data files were found matching the filter"); the fork does not (ZMBNI-79). A **probe-gated fallback**: `super()` wherever `rewrite_ignores_unrelated_append` holds, or the producer has a predicate; otherwise the fork's method with no predicate -- the commit-window checks plus the two validators in §2.1 (#239) |
 | `_existing_manifests()` | `deletes.py:97` **only** | Refuse the one path that corrupts metadata: upstream rewrites a partially-emptied manifest through `write_manifest`, which stamps `content: data`. Delegates to `super()` otherwise |
-| `_manifests()` | `manifests.py` (via `_RewriteManifests`), `testing.py` | `evolution.py`'s override is **gone**: `_SnapshotProducer._manifests` used to declare the added manifest under `table_metadata.spec()` while grouping deleted entries by each file's own spec, and the maintenance fork now groups both the same way |
+| `_deleted_entries()` | `deletes.py:75`, `manifests.py:258` | `manifests.py`: a manifest rewrite deletes no entries. `deletes.py`: drop whole delete manifests, which is all `ManifestWriterV2` lets this tool do (§2.2) |
+| `_manifests()` | `manifests.py:261`, `testing.py:226`, `evolution.py:159` | `evolution.py`: one added manifest per partition spec, where upstream writes one under `table_metadata.spec()` -- the second **probe-gated fallback** (ZMBNI-83), dead code on the fork |
 | `_meta` | `testing.py:219` | A **property**, not a method. Labels a manifest `content: deletes`, which `ManifestWriterV2` will not do |
 
-**`evolution.py` now overrides nothing.** It had three: `_manifests`, `_summary`
-and a `_surviving_manifests` that replaced upstream's pruning. The first moved
-into the fork; the second was correcting its own parent; the third existed only
-because of ZMBNI-58, a call this project had failed to make, and was measurably
-unnecessary once that was fixed. `MultiSpecReplaceFiles` survives as a name so
-the committer's producer choice still reads as a decision.
+**Three overrides are fallbacks for what only the maintenance fork does**,
+each gated on a behavioural probe so it stands down where the library behaves:
+`evolution.py`'s `_summary` and `_manifests` (ZMBNI-83) and `committer.py`'s
+`_validate_concurrency` (#239). The probe is what stops two copies drifting:
+it measures the library, not our override, so a fallback cannot mask a library
+that has been fixed. Each is exercised on the fork by forcing its probe false
+(`tests/test_evolution.py`, and
+`test_both_validation_paths_pass_an_unrelated_append_and_refuse_a_touched_file`),
+and for real by the `consumer` CI leg on stock.
 
-That is what this document is for. Three entries left this table in one change,
-and two of them were never upstream's problem.
+This section said "`evolution.py` now overrides nothing" from ZMBNI-58 until
+#239, which was false from ZMBNI-83 on: that change carried `_summary` and
+`_manifests` back as fallbacks so a stock install keeps partition evolution, and
+this table was not updated with it. Before that, three entries left it in one
+change -- `_manifests` and `_summary` moved into the fork, and a
+`_surviving_manifests` that existed only because of ZMBNI-58 was deleted.
 
 ### 2.4 Inherited private attributes
 
@@ -129,10 +145,16 @@ of the surface** — an import that disappears is an `ImportError` on the next r
 whereas an attribute that is renamed is an `AttributeError` in the middle of a
 commit.
 
-`_transaction` (19 uses) · `_snapshot_id` (7) · `_io` (6) ·
-`_parent_snapshot_id` (5) · `_compression` (5) · `_deleted_data_files` (4) ·
-`_added_data_files` (3) · `_target_branch` (2) · `_operation` (set by us, read by
-upstream)
+`_transaction` (20 uses) · `_snapshot_id` (7) · `_io` (6) ·
+`_parent_snapshot_id` (5) · `_compression` (5) · `_deleted_data_files` (7) ·
+`_added_data_files` (3) · `_target_branch` (2) · `_commit_window` (1) ·
+`_predicate` (1) · `_operation` (set by us, read by upstream)
+
+#239 added the last two and one `_transaction` and three `_deleted_data_files`
+reads, all in `_ReplaceFiles._validate_concurrency`. The other totals are this
+document's earlier counts, carried forward: a `self.<name>` grep over `src/`
+gives lower numbers for several (15 for `_transaction` before #239), so they
+were counted some other way that was not recorded, and are not re-derived here.
 
 Counts are code references only, excluding prose. `_compression` was absent from
 an earlier revision of this list — read at `evolution.py:163`, `:190`, `:252`,

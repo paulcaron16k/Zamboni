@@ -32,6 +32,13 @@ probe                            kind             cost  a wrong answer
 ``delete_manifests_writable``    behavioural    3.2 ms  a delete manifest labelled ``data``
 ===============================  ==========  =========  ==============================
 
+``rewrite_ignores_unrelated_append`` was added later (#239) and measured on its
+own, 2026-10-27, warm: 179-191 ms on stock 0.12.0 (two runs; it refuses) and
+257-301 ms on the fork (five runs; it commits and reads the table back). It is
+not in the 330 ms below, which predates it. A wrong True defers to the library,
+which can only over-refuse (exit 3, nothing written); a wrong False runs the
+fallback, which skips the one validator the fork skips.
+
 ``detect()`` is **330 ms** cold, and since ZMBNI-88 that is paid once per
 install rather than once per process, so the cost argument that once justified
 leaving a probe structural has largely expired.
@@ -157,6 +164,14 @@ class PyIcebergCapabilities:
     #: leaves the six operations alone.
     added_files_honour_spec: bool
 
+    #: A file rewrite commits over an append that landed while it ran, in a
+    #: partition it never touched. Established by doing it through PyIceberg's
+    #: own overwrite producer -- not ours, or the probe would observe our
+    #: fallback. False on stock 0.12.0, which refuses with "Added data files
+    #: were found matching the filter"; True on the maintenance fork (ZMBNI-79).
+    #: False switches on ``_ReplaceFiles._validate_concurrency``'s fallback (#239).
+    rewrite_ignores_unrelated_append: bool
+
     #: Scan planning can materialise equality deletes.
     equality_deletes_readable: bool
 
@@ -231,6 +246,7 @@ class PyIcebergCapabilities:
             ("derives delete predicate", self.derives_delete_predicate),
             ("  established by", self.pruning_evidence),
             ("added files honour their spec", self.added_files_honour_spec),
+            ("rewrite ignores unrelated append", self.rewrite_ignores_unrelated_append),
             ("equality deletes readable", self.equality_deletes_readable),
             ("delete manifests writable", self.delete_manifests_writable),
         ]
@@ -323,12 +339,14 @@ def _probe() -> Probed:
     )
     derives, evidence = _derivation_is_correct(prunes)
     added_files = _added_files_honour_their_spec()
+    unrelated_append = _rewrite_ignores_unrelated_append()
     delete_manifests = _delete_manifests_writable()
 
     unobserved = tuple(
         f"{name}: {answer.why}"
         for name, answer in (
             ("added-file spec probe", added_files),
+            ("concurrent-append probe", unrelated_append),
             ("delete-manifest probe", delete_manifests),
         )
         if isinstance(answer, CouldNotRun)
@@ -353,6 +371,10 @@ def _probe() -> Probed:
         # Unknown -> assume absent. Declaring a layout feature we could not
         # demonstrate is how a configured evolution gets silently ignored.
         added_files_honour_spec=added_files is True,
+        # Unknown -> assume the library already behaves, so its own validation
+        # runs. That direction can only over-refuse (exit 3, nothing written);
+        # the other would skip a library check on a build nobody observed.
+        rewrite_ignores_unrelated_append=unrelated_append is not False,
         equality_deletes_readable=not _guard_anywhere_in_scan_planning(),
         # Unknown -> assume NOT writable, which limits dangling-delete removal
         # to whole manifests. Guessing the other way would let us rewrite a
@@ -614,6 +636,78 @@ def _added_files_honour_their_spec() -> bool | CouldNotRun:
             return True
     except Exception as exc:  # pragma: no cover - any failure means "could not establish"
         logger.debug("added-file spec behavioural probe did not complete", exc_info=True)
+        return CouldNotRun.from_exception(exc)
+
+
+def _rewrite_ignores_unrelated_append() -> bool | CouldNotRun:
+    """Does a rewrite commit over an append that landed while it ran?
+
+    Behavioural, for the reason every probe here that selects an implementation
+    is: the answer decides which code runs (#239). Stock 0.12.0 and the
+    maintenance fork share every name involved; they differ in one condition
+    inside ``_SnapshotProducer._validate_concurrency``.
+
+    The smallest thing that goes wrong: a table with one file; a handle loaded
+    from it; a second writer appends; the first handle rewrites its file. Its
+    commit fails the ref check, PyIceberg refreshes, and validates the retry
+    against the append. A build that runs ``_validate_added_data_files``
+    without a filter refuses with ``ValidationException``; one that does not
+    commits. Through ``update_snapshot().overwrite()`` -- PyIceberg's producer,
+    so what is measured is the library, never our fallback.
+
+    Returns :class:`CouldNotRun` when the probe could not run; the caller then
+    defers to the library's own validation, which can only over-refuse.
+    """
+    try:
+        import tempfile
+
+        import pyarrow as pa
+        from pyiceberg.catalog.sql import SqlCatalog
+        from pyiceberg.exceptions import ValidationException
+        from pyiceberg.schema import Schema
+        from pyiceberg.types import IntegerType, NestedField
+    except ImportError as exc:  # pragma: no cover - depends on the install
+        return CouldNotRun.from_exception(exc)
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="zamboni-probe-") as root:
+            catalog = SqlCatalog(
+                "zamboni_probe", uri=f"sqlite:///{root}/c.db", warehouse=f"file://{root}"
+            )
+            catalog.create_namespace("probe")
+            catalog.create_table(
+                "probe.t",
+                schema=Schema(NestedField(1, "k", IntegerType(), required=False)),
+                properties={"format-version": "2"},
+            )
+            rows = pa.table({"k": pa.array([1], type=pa.int32())})
+            catalog.load_table("probe.t").append(rows)
+
+            planned = catalog.load_table("probe.t")
+            (doomed,) = [task.file for task in planned.scan().plan_files()]
+            catalog.load_table("probe.t").append(rows)  # lands while the rewrite runs
+
+            # The retry is the point of the probe, so PyIceberg's "Commit failed
+            # due to a concurrent update, retrying" warning is not news; left on,
+            # it printed in `zamboni doctor` and in the first run after install.
+            retry_log = logging.getLogger("pyiceberg.table")
+            level = retry_log.level
+            retry_log.setLevel(logging.ERROR)
+            try:
+                with planned.transaction() as tx, tx.update_snapshot().overwrite() as rewrite:
+                    rewrite.delete_data_file(doomed)
+                    rewrite.append_data_file(doomed)
+            except ValidationException:
+                # The refusal *is* the answer, as in the added-file probe.
+                logger.debug("concurrent-append probe: the rewrite was refused", exc_info=True)
+                return False
+            finally:
+                retry_log.setLevel(level)
+
+            committed = catalog.load_table("probe.t")
+            return committed.scan().to_arrow().num_rows == 2
+    except Exception as exc:  # pragma: no cover - any failure means "could not establish"
+        logger.debug("concurrent-append behavioural probe did not complete", exc_info=True)
         return CouldNotRun.from_exception(exc)
 
 
