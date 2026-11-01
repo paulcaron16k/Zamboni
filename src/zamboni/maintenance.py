@@ -26,6 +26,7 @@ import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -462,6 +463,7 @@ def maintain(
     reporter: MetricsReporter | None = None,
     should_stop: Callable[[], bool] | None = None,
     min_interval: MinimumInterval | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> MaintenanceReport:
     """Run every operation, in order, over every configured table.
 
@@ -502,6 +504,14 @@ def maintain(
             for its ``due_anyway`` operations. ``None``, the default, skips
             nothing for its age. Read from the same metadata load as the
             write-driven due-check, so it costs nothing more.
+        progress: Told a one-line note as each operation starts on each table
+            -- ``db.t: compact (1/6)``, skipped ones included -- and, on the
+            local engine, as each compaction rewrite group starts. For a
+            caller that must tell a long table from a hung one (the runtime's
+            stall timeout, #170); ``observer`` hears only once an operation
+            is over. **An exception from it never stops or fails the run**:
+            it is logged once and the run carries on, because a run that did
+            its work must not be undone by its liveness signal.
 
     The report carries :attr:`~MaintenanceReport.counters` -- how many tables
     were considered, and how many of them had nothing to do -- which is the
@@ -551,6 +561,19 @@ def maintain(
             logger.warning("observer raised; stopping the run", exc_info=True)
             stop_reason = stop_reason or f"observer raised {type(exc).__name__}: {exc}"
 
+    progress_failed = False
+
+    def tell(table: str, note: str) -> None:
+        nonlocal progress_failed
+        if progress is None:
+            return
+        try:
+            progress(f"{table}: {note}")
+        except Exception:
+            if not progress_failed:
+                logger.warning("progress raised; the run carries on", exc_info=True)
+            progress_failed = True
+
     not_run: list[tuple[str, Operation]] = []
     for position, table in enumerate(wanted):
         if stopping():
@@ -562,6 +585,7 @@ def maintain(
             compaction=config_from_table_settings(settings, base_config),
             table_config=config,
             should_stop=stopping,
+            progress=partial(tell, table),
         )
         mark = _watermark(session, table)
         unchanged = _unchanged_since_maintenance(mark) or {}
@@ -575,6 +599,7 @@ def maintain(
                 not_run += [(table, o) for o in order[step:]]
                 not_run += [(t, o) for t in wanted[position + 1 :] for o in order]
                 break
+            tell(table, f"{operation.value} ({step + 1}/{len(order)})")
             started_ns = time.perf_counter_ns()
             outcome = _run(
                 maintainer,

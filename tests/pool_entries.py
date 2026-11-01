@@ -13,14 +13,16 @@ in for ``zamboni.cli.main`` to crash on cue.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import signal
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from zamboni.pool import WorkerContext, run_cli
+from zamboni.pool import WorkerContext, run_cli, run_table
 from zamboni.scheduler import WorkItem
 
 
@@ -37,12 +39,24 @@ def progress(item: WorkItem, context: WorkerContext) -> dict[str, Any]:
     return {"exit_code": 0, "commit": item.commit}
 
 
+def recorded(item: WorkItem, context: WorkerContext) -> dict[str, Any]:
+    """The real default entry, every note it reports also kept in its record."""
+    notes: list[str] = []
+
+    def report(note: str) -> None:
+        notes.append(note)
+        context.report(note)
+
+    record = run_table(item, dataclasses.replace(context, report=report))
+    return {**record, "notes": notes}
+
+
 def not_a_record(item: WorkItem, context: WorkerContext) -> Any:
     """Breaks rule 3: returns what a CLI ``main`` would, an exit code."""
     return 0
 
 
-def _cli(argv: list[str]) -> int:
+def _cli(argv: list[str], *, progress: Callable[[str], None] | None = None) -> int:
     """Write what the worker saw into the run record, then behave per table."""
     table = argv[1]
     if table == "raw.die":

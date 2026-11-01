@@ -721,10 +721,14 @@ As built in R5 (`zamboni.pool`):
   repr). It is built in the worker, never sent. `context.progress(note)` goes
   to the runtime over the worker's pipe, and `ItemResult.progress` keeps the
   last note even when the worker then dies
-  (`test_progress_reaches_the_runtime_and_survives_the_worker`). The default
-  entry reports once, as the table starts; reporting at each operation and
-  rewrite group (rule 6) needs a hook through `maintain()` and arrives with
-  R7, which is the first thing to read it.
+  (`test_progress_reaches_the_runtime_and_survives_the_worker`);
+  `ItemResult.progress_reports` counts them. The default entry reports as the
+  table starts, then passes `context.progress` to `maintain(progress=…)`
+  through the CLI's `main`, which reports each operation as it starts and, on
+  the local engine, each compaction rewrite group (#232,
+  `test_the_default_entry_reports_each_operation_and_group_from_a_worker`). A
+  `progress` that raises is logged once and never stops or fails the run
+  (`test_a_progress_that_raises_neither_stops_nor_fails_the_run`).
 - **A pressure check is not an entry's.** It always runs `zamboni health`
   through the CLI, whatever `entry` is: §7's signature is per table, and the
   check is the runtime's own measurement. An application whose catalog
@@ -948,7 +952,8 @@ An implementation is conformant when:
 1. its `ClaimStore` passes `zamboni.conformance.claim_store_conformance`;
 2. its worker entry passes `zamboni.conformance.entry_conformance` (importable
    when spawned, previews without `commit`, returns a run record, carries no
-   secret in its inputs) — in `conformance`, not `zamboni.testing`, for R4's
+   secret in its inputs, reports progress at every operation — §7 rule 6,
+   checked on a preview, so its per-group half is not) — in `conformance`, not `zamboni.testing`, for R4's
    reason: `testing` imports private PyIceberg classes an implementer does not
    need. The checks run the entry in a spawned worker of a real `WorkerPool`;
    the default entry passes them against a table with work to do
@@ -988,7 +993,8 @@ An implementation is conformant when:
   (§7.1). It strengthens the case for two tiers; it does not change the design.
 - The stall timeout's default. One hour assumes progress reports at least every
   rewrite group; a table whose single largest group takes longer needs a larger
-  value, and no measurement of that exists yet.
+  value, and no measurement of that exists yet. On Trino and Spark an operation
+  is one statement, so the reports come only per operation.
 - Whether `RuntimeState` is exposed over HTTP by `zamboni serve`. Today the
   answer is no (event-driven-maintenance.md §9: not a platform).
 
@@ -1007,7 +1013,7 @@ builds the event path on it, then lets a Lakehouse App adopt it.
 | R4 | **Claims**: the `ClaimStore` protocol, `LocalClaimStore`, renewal and kill-on-loss, the conformance suite, the reference schema | R1 | §6 |
 | R5 | **Worker entries**: the work item crosses the boundary instead of argv; `WorkerContext`; `reserved_memory_bytes` in pool sizing; the entry conformance checks | R2 | §7, §9.4 |
 | R6 | **Observers and `state()`**: the `Observer` protocol; the state file and run log rewritten as observers | R1 | §8 |
-| R7 | **When maintenance goes wrong**: per-reason table timeouts, stall detection from progress reports, retire-on-failure, the parent-death watcher, `oom_score_adj` and `nice`, quarantine with backoff, capability detection moved into a worker | R5 | §7.1 — every row tested by making it happen |
+| R7 | **When maintenance goes wrong**: per-reason table timeouts, stall detection from progress reports, retire-on-failure, the parent-death watcher, `oom_score_adj` and `nice`, quarantine with backoff, capability detection moved into a worker | R5, #232 | §7.1 — every row tested by making it happen |
 | R8 | **Priorities**: classes, oldest-watermark-first, ageing, reserved high-class slots | R2 | §3.4 |
 | R9 | **Requests from another process**: the `RequestSource` contract, its conformance checks, the request-table reference schema run against PostgreSQL, a state-persisting observer reference | R6, E2 | §9.2 |
 | B1 | **A worker that dies at startup leaves its slot broken** (#155) | — | fixes merged code now; R7 generalises it |

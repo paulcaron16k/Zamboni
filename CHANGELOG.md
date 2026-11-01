@@ -23,6 +23,15 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **`maintain(progress=...)`: a long run says it is still working** (#232). A
+  callable told a one-line note as each operation starts on each table and, on
+  the local engine, as each compaction rewrite group starts — `observer` hears
+  an operation only once it is over. An exception from it is logged once and
+  never stops or fails the run. `zamboni serve`'s default worker entry now
+  passes these notes to the runtime, which counts them in
+  `ItemResult.progress_reports`; R7's stall timeout (#170) is to read them.
+  `entry_conformance` gains a fifth check, that an entry reports at every
+  operation (§7 rule 6). Provisional, with the rest of the runtime.
 - **Worker entries: an application builds its own catalog session** (#169, R5
   of [docs/maintenance-runtime.md](docs/maintenance-runtime.md) §7). A worker
   now receives the pickled `WorkItem` and a `WorkerContext` (DuckDB threads and

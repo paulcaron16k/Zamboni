@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import itertools
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -204,7 +205,11 @@ class TableCompactor:
     # -- execution -------------------------------------------------------
 
     def execute(
-        self, *, dry_run: bool = False, should_stop: Callable[[], bool] | None = None
+        self,
+        *,
+        dry_run: bool = False,
+        should_stop: Callable[[], bool] | None = None,
+        progress: Callable[[str], None] | None = None,
     ) -> CompactionResult:
         """Compact the table, or preview it.
 
@@ -213,6 +218,9 @@ class TableCompactor:
                 rewrite or a commit. Once it answers true no further group is
                 started; what was already rewritten is still committed, and
                 :attr:`CompactionResult.not_reached` counts the rest (ZMBNI-201).
+            progress: Told ``rewriting group <n>/<total>: <group>`` as each
+                group starts, after ``should_stop`` has let it. A preview
+                rewrites nothing and reports nothing.
         """
         assert_supported_pyiceberg()
 
@@ -295,16 +303,27 @@ class TableCompactor:
             tbl = self._session.table(self._identifier)
 
         stop = should_stop or _never
+        report = progress or _quiet
+        total = len(evolution_plan.groups) + len(plan.groups)
+        started = itertools.count(1)
+
+        def proceed(group: str) -> bool:
+            """Whether to start the next group, announcing it if so."""
+            if stop():
+                return False
+            report(f"rewriting group {next(started)}/{total}: {group}")
+            return True
+
         if self._config.partial_progress:
-            self._run_incrementally(tbl, evolution_plan, plan, result, stop)
+            self._run_incrementally(tbl, evolution_plan, plan, result, proceed)
         else:
-            self._run_atomically(tbl, evolution_plan, plan, result, stop)
+            self._run_atomically(tbl, evolution_plan, plan, result, proceed)
         return result
 
     # -- the two commit strategies ---------------------------------------
 
     def _run_atomically(
-        self, tbl, evolution_plan: EvolutionPlan, plan, result, stop: Callable[[], bool]
+        self, tbl, evolution_plan: EvolutionPlan, plan, result, proceed: Callable[[str], bool]
     ) -> None:
         """Rewrite everything, then commit it in one snapshot.
 
@@ -333,7 +352,7 @@ class TableCompactor:
 
         try:
             for group in evolution_plan.groups:
-                if stop():
+                if not proceed(f"evolution {group.label}"):
                     break
                 output = self._rewrite_evolution_group(tbl, group)
                 removed += [f.data_file for f in group.files]
@@ -344,7 +363,7 @@ class TableCompactor:
                 )
             else:
                 for group in plan.groups:
-                    if stop():
+                    if not proceed(group.describe()):
                         break
                     output = self._rewrite_group(tbl, group)
                     removed += [f.data_file for f in group.files]
@@ -381,7 +400,7 @@ class TableCompactor:
             result.added_bytes += group_result.added_bytes
 
     def _run_incrementally(
-        self, tbl, evolution_plan: EvolutionPlan, plan, result, stop: Callable[[], bool]
+        self, tbl, evolution_plan: EvolutionPlan, plan, result, proceed: Callable[[str], bool]
     ) -> None:
         """Commit each group as it completes.
 
@@ -398,7 +417,7 @@ class TableCompactor:
         """
         remaining = len(evolution_plan.groups) + len(plan.groups)
         for group in evolution_plan.groups:
-            if stop():
+            if not proceed(f"evolution {group.label}"):
                 result.not_reached = remaining
                 return
             output = self._rewrite_evolution_group(tbl, group)
@@ -420,7 +439,7 @@ class TableCompactor:
             tbl = self._session.table(self._identifier)
 
         for group in plan.groups:
-            if stop():
+            if not proceed(group.describe()):
                 result.not_reached = remaining
                 return
             output = self._rewrite_group(tbl, group)
@@ -553,6 +572,10 @@ def _evolution_labels(labels: list[str]) -> dict[str, str]:
 
 def _never() -> bool:
     return False
+
+
+def _quiet(note: str) -> None:
+    pass
 
 
 def _left_for_later(*, held: int, remaining: int) -> dict[str, str]:

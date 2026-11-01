@@ -62,7 +62,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from multiprocessing import connection, get_context
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import psutil
 
@@ -483,18 +483,27 @@ def worker_argv(item: Job, context: WorkerContext, table_config: Path, record: P
     return argv
 
 
+class CommandLine(Protocol):
+    """``zamboni.cli.main``'s shape: an argv, and where ``maintenance`` reports progress."""
+
+    def __call__(
+        self, argv: list[str], *, progress: Callable[[str], None] | None = None
+    ) -> int: ...
+
+
 def run_table(item: WorkItem, context: WorkerContext) -> dict[str, Any]:
     """The default worker entry: ``zamboni maintenance <table>``, in-process.
 
     The command line a cron run of the same table would be, run by the CLI's
     own ``main`` -- so ``serve`` and cron cannot drift -- and its ``--json``
-    record returned.
+    record returned. It reports progress as it starts, then as ``maintain()``
+    starts each operation and each rewrite group (§7 rule 6).
     """
     return run_cli(item, context)
 
 
 def run_cli(
-    item: WorkItem, context: WorkerContext, *, main: Callable[[list[str]], int] | None = None
+    item: WorkItem, context: WorkerContext, *, main: CommandLine | None = None
 ) -> dict[str, Any]:
     """Run ``item`` through the command line ``main`` parses, and return its record.
 
@@ -511,9 +520,13 @@ def run_cli(
 
 
 def _run_argv(
-    item: Job, context: WorkerContext, main: Callable[[list[str]], int] | None
+    item: Job, context: WorkerContext, main: CommandLine | None
 ) -> tuple[int, dict[str, Any] | None]:
-    """``main(worker_argv(item, ...))``: its exit code and the record it wrote."""
+    """``main(worker_argv(item, ...))``: its exit code and the record it wrote.
+
+    ``main`` reports through ``context.progress``; ``health``, a pressure
+    check's verb, has nothing to report and ignores it.
+    """
     if main is None:
         from .cli import main as cli_main
 
@@ -526,7 +539,7 @@ def _run_argv(
     item.table_config.dump(table_config)
     try:
         try:
-            code = main(worker_argv(item, context, table_config, record))
+            code = main(worker_argv(item, context, table_config, record), progress=context.progress)
         except SystemExit as exc:  # argparse's `parser.error` is exit 2
             code = _exit_code(exc)
         return int(code or 0), _read_record(record)
@@ -642,6 +655,8 @@ class ItemResult:
     dropped: str | None = None
     #: The last ``context.progress`` note the entry sent, if any.
     progress: str | None = None
+    #: How many notes it sent in all, the last included.
+    progress_reports: int = 0
 
 
 class _Slot:
@@ -696,6 +711,7 @@ class WorkerPool:
             else item
         )
         progress: str | None = None
+        reports = 0
         if slot.process is not None and not slot.process.is_alive():
             # Died between tables -- killed, OOM, crashed after its last
             # reply. That is not this table's failure: replace the worker
@@ -718,19 +734,27 @@ class WorkerPool:
             while True:
                 ready = connection.wait([slot.conn, slot.process.sentinel])
                 if slot.conn not in ready:
-                    return self._died(slot, item, started, progress)
+                    return self._died(slot, item, started, progress, reports)
                 message = slot.conn.recv()
                 if message[0] != "progress":
                     break
                 progress = message[1]
+                reports += 1
             _, code, output, run_record = message
         except (OSError, EOFError):
-            return self._died(slot, item, started, progress)
+            return self._died(slot, item, started, progress, reports)
         slot.tables += 1
         if slot.tables >= self.recycle_after:
             self._retire(slot)
         return ItemResult(
-            item, code, run_record, output, None, time.monotonic() - started, progress=progress
+            item,
+            code,
+            run_record,
+            output,
+            None,
+            time.monotonic() - started,
+            progress=progress,
+            progress_reports=reports,
         )
 
     def _spawn(self, slot: _Slot) -> None:
@@ -748,7 +772,9 @@ class WorkerPool:
         child.close()
         slot.process, slot.conn, slot.tables = process, parent, 0
 
-    def _died(self, slot: _Slot, item: Job, started: float, progress: str | None) -> ItemResult:
+    def _died(
+        self, slot: _Slot, item: Job, started: float, progress: str | None, reports: int
+    ) -> ItemResult:
         slot.process.join(timeout=5)
         if slot.process.is_alive():
             # The pipe failed but the process did not exit: it can no longer be
@@ -760,7 +786,14 @@ class WorkerPool:
         logger.error("worker for %s/%s died (%s)", item.warehouse, item.table, why)
         self._reset(slot)
         return ItemResult(
-            item, 1, None, "", f"worker died ({why})", time.monotonic() - started, progress=progress
+            item,
+            1,
+            None,
+            "",
+            f"worker died ({why})",
+            time.monotonic() - started,
+            progress=progress,
+            progress_reports=reports,
         )
 
     def _retire(self, slot: _Slot) -> None:

@@ -263,6 +263,12 @@ class MaintenanceRequest:
     #: engine asks it between compaction's rewrite groups; an engine that runs
     #: an operation as one statement has nothing to ask it between (ZMBNI-201).
     should_stop: Callable[[], bool] | None = field(default=None, compare=False, repr=False)
+    #: Told a note as each unit of work inside an operation starts. Set by
+    #: :func:`zamboni.maintenance.maintain` from its ``progress``, already
+    #: guarded so it cannot raise. The local engine reports each of
+    #: compaction's rewrite groups; the same units ``should_stop`` is asked
+    #: between, for the same reason an engine running one statement has none.
+    progress: Callable[[str], None] | None = field(default=None, compare=False, repr=False)
 
 
 class Maintainer(ABC):

@@ -47,7 +47,7 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -161,7 +161,13 @@ def _apply_profile(args: argparse.Namespace, profile) -> None:
             args.table_config = str(candidate)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, progress: Callable[[str], None] | None = None) -> int:
+    """The ``zamboni`` command line.
+
+    ``progress`` is not a flag: it is how a worker running this in-process
+    (``zamboni.pool.run_table``) hears ``maintenance`` start each operation and
+    rewrite group, which ``maintain(progress=...)`` describes. Other verbs ignore it.
+    """
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -240,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
         # The reclaim verbs take no compaction arguments, so they dispatch
         # before a compactor is built from flags they do not have.
         if args.command == "maintenance":
-            return _maintenance(session, args)
+            return _maintenance(session, args, progress)
 
         if args.command == "warehouses":
             return _warehouses(session, args)
@@ -1543,7 +1549,11 @@ def _operations(profile, args: argparse.Namespace) -> list[Operation]:
     return [op for op in enabled if op.value in wanted]
 
 
-def _maintenance(session: CatalogSession, args: argparse.Namespace) -> int:
+def _maintenance(
+    session: CatalogSession,
+    args: argparse.Namespace,
+    progress: Callable[[str], None] | None = None,
+) -> int:
     """Every operation, in the runbook order, over every configured table.
 
     A thin adapter over :func:`zamboni.maintenance.maintain`, which is the same
@@ -1600,6 +1610,7 @@ def _maintenance(session: CatalogSession, args: argparse.Namespace) -> int:
             observer=show,
             reporter=reporter,
             min_interval=_min_interval(args),
+            progress=progress,
         )
 
     if before is not None:

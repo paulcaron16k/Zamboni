@@ -448,12 +448,39 @@ def check_entry_carries_no_secret(h: EntryHarness) -> None:
             _require(secret not in text, "rule 2", f"a secret appears in {where}")
 
 
-#: Every entry check, in the order of §9.5 point 2.
+def check_entry_reports_progress_at_every_operation(h: EntryHarness) -> None:
+    """Rule 6, as far as a preview can show it: a note per operation the record says ran.
+
+    A preview, like every other check, so the harness's table is never
+    committed to. That leaves rule 6's second half -- notes *within* a long
+    operation, such as the default entry's per rewrite group -- unchecked here:
+    a preview rewrites nothing, so there are no groups to report.
+    """
+    result = _run_entry(h, commit=False)
+    record = result.record
+    _require(
+        isinstance(record, dict),
+        "rule 6",
+        f"no run record came back to count operations from (exit {result.exit_code})",
+    )
+    assert isinstance(record, dict)
+    ran = {o.get("operation") for o in record.get("outcomes", []) if o.get("table") == h.item.table}
+    _require(ran, "rule 6", f"the run record names no operation on {h.item.table}")
+    _require(
+        result.progress_reports >= len(ran),
+        "rule 6",
+        f"{result.progress_reports} progress report(s) for {len(ran)} operation(s); "
+        "a long table that reports nothing is indistinguishable from a hung one",
+    )
+
+
+#: Every entry check, in the order of §9.5 point 2, then §7 rule 6.
 ENTRY_CHECKS: tuple[Callable[[EntryHarness], None], ...] = (
     check_entry_is_importable_when_spawned,
     check_entry_previews_without_commit,
     check_entry_returns_a_run_record,
     check_entry_carries_no_secret,
+    check_entry_reports_progress_at_every_operation,
 )
 
 
