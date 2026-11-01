@@ -260,13 +260,72 @@ def test_progress_reaches_the_runtime_and_survives_the_worker(tmp_path):
     """What R7's stall detection reads: the last note, kept even when the worker
     dies after sending it -- a dead table's last known position."""
     ran, died = run_entry(tmp_path, "progress", [item("raw.a"), item("raw.die")])
-    assert (ran.exit_code, ran.progress) == (0, "second raw.a")
-    assert died.died is not None and died.progress == "second raw.die"
+    assert (ran.exit_code, ran.progress, ran.progress_reports) == (0, "second raw.a", 2)
+    assert died.died is not None
+    assert (died.progress, died.progress_reports) == ("second raw.die", 2)
 
 
 def test_the_default_entry_reports_progress_before_it_runs(tmp_path):
     (result,) = run_items(tmp_path, [item("raw.a")])
     assert result.progress == "maintenance raw.a"
+
+
+def test_the_default_entry_reports_each_operation_and_group_from_a_worker(
+    tmp_path, monkeypatch, partitioned
+):
+    """§7 rule 6, end to end: the real default entry in a spawned worker over a
+    real table, its notes in the order ``maintain()`` starts the work (#232)."""
+    from zamboni.maintenance import RUNBOOK_ORDER
+
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)  # so a developer's own zamboni.yml is not read
+    table = "db.partitioned"
+    config = WorkerConfig(
+        entry="tests.pool_entries:recorded",
+        workdir=workdir,
+        base_environ={
+            "PATH": "/usr/bin:/bin",
+            "ZAMBONI_LOCAL_WAREHOUSE": str(tmp_path / "warehouse"),
+        },
+        commit=True,
+    )
+    work = WorkItem(
+        warehouse="acme",
+        table=table,
+        reason="schedule",
+        table_config=TableConfig(
+            warehouse="acme",
+            namespaces={"db": NamespaceSettings(tables={"partitioned": TableSettings()})},
+        ),
+    )
+
+    async def scenario():
+        pool = WorkerPool(PoolSize(1, 1, "test"), config)
+        try:
+            return await pool.run(work)
+        finally:
+            await pool.close()
+
+    result = asyncio.run(scenario())
+    assert result.exit_code == 0, result.output
+    notes = result.record["notes"]
+    assert (result.progress, result.progress_reports) == (notes[-1], len(notes))
+
+    n = len(RUNBOOK_ORDER)
+    operations = [f"{table}: {op.value} ({i}/{n})" for i, op in enumerate(RUNBOOK_ORDER, 1)]
+    groups = [note for note in notes if note.startswith(f"{table}: rewriting group ")]
+    assert len(groups) >= 2, "the fixture must give compaction more than one group"
+    compact = [op.value for op in RUNBOOK_ORDER].index("compact")
+    assert notes == [
+        f"maintenance {table}",
+        *operations[: compact + 1],
+        *groups,
+        *operations[compact + 1 :],
+    ]
+    assert [g.split(" ")[3] for g in groups] == [
+        f"{i}/{len(groups)}:" for i in range(1, len(groups) + 1)
+    ]
 
 
 def test_an_entry_that_returns_no_run_record_fails_its_table(tmp_path):

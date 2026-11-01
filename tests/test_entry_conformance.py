@@ -24,9 +24,11 @@ from zamboni.conformance import (
     check_entry_carries_no_secret,
     check_entry_is_importable_when_spawned,
     check_entry_previews_without_commit,
+    check_entry_reports_progress_at_every_operation,
     check_entry_returns_a_run_record,
     entry_conformance,
 )
+from zamboni.maintenance import RUNBOOK_ORDER
 from zamboni.pool import WorkerContext, run_cli, run_table
 from zamboni.scheduler import WorkItem
 from zamboni.tableconfig import NamespaceSettings, TableConfig, TableSettings
@@ -52,6 +54,12 @@ def prints_the_credential(item: WorkItem, context: WorkerContext) -> dict[str, A
     """Breaks rule 2: a debug line that echoes what it authenticated with."""
     print(f"connecting with {os.environ['ZAMBONI_CREDENTIAL']}")
     return run_table(item, context)
+
+
+def reports_once(item: WorkItem, context: WorkerContext) -> dict[str, Any]:
+    """Breaks rule 6: says it started, then runs every operation in silence."""
+    context.progress(f"starting {item.table}")
+    return run_table(item, dataclasses.replace(context, report=lambda note: None))
 
 
 # -- a table with work to do ---------------------------------------------------------
@@ -140,6 +148,13 @@ def test_an_entry_that_prints_a_credential_is_refused(harness):
     )
     with pytest.raises(ConformanceError, match="rule 2: a secret appears in the output"):
         check_entry_carries_no_secret(broken)
+
+
+def test_an_entry_that_reports_only_its_start_is_refused(harness):
+    broken = dataclasses.replace(harness, entry="tests.test_entry_conformance:reports_once")
+    expected = rf"rule 6: 1 progress report\(s\) for {len(RUNBOOK_ORDER)} operation"
+    with pytest.raises(ConformanceError, match=expected):
+        check_entry_reports_progress_at_every_operation(broken)
 
 
 def test_a_secret_in_the_work_item_is_refused(harness):

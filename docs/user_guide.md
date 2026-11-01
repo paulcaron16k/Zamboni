@@ -816,6 +816,19 @@ if report.stopped:
   and the outcomes collected so far were lost. An exception from `should_stop`
   is read as "stop".
 
+### Knowing a long run is still working
+
+`maintain(progress=...)` takes a callable that is told a one-line note as each
+operation *starts* on each table — `db.events: compact (1/6)`, skipped
+operations included — and, on the local engine, as each compaction rewrite
+group starts: `db.events: rewriting group 2/5: spec=0 partition=…`. `observer`
+hears an operation only once it is over, so on a table whose compaction takes
+an hour, `progress` is what tells a working run from a hung one; this is what
+`zamboni serve`'s workers report to the runtime. Trino and Spark run each
+operation as one statement, so there the notes are per operation only. **An
+exception from `progress` never stops or fails the run**: it is logged once and
+the run carries on.
+
 `report.exit_code` is the number `zamboni maintenance` would have exited with —
 `test_the_cli_and_the_api_agree_on_the_exit_code` pins that, because two paths
 that disagree about an exit code are two paths one of which is lying to a cron
