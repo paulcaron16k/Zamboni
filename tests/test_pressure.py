@@ -235,6 +235,106 @@ def test_a_real_worker_measures_a_merge_on_read_table_over_the_default_threshold
     assert list(found["errors"]) == ["db.absent"], "the rest are still checked"
 
 
+def run_check(workdir, environ, wh, **config):
+    """One pressure check of ``wh`` through a real pool, one spawned worker."""
+    import asyncio
+
+    from zamboni.pool import PoolSize, WorkerConfig, WorkerPool
+    from zamboni.scheduler import PressureCheck
+
+    async def scenario():
+        pool = WorkerPool(
+            PoolSize(1, 1, "test"), WorkerConfig(workdir=workdir, base_environ=environ, **config)
+        )
+        try:
+            return await pool.run(PressureCheck("acme", wh.table_config))
+        finally:
+            await pool.close()
+
+    return asyncio.run(scenario())
+
+
+def test_a_health_entry_with_its_own_session_drives_pressure_as_the_cli_does(
+    tmp_path, monkeypatch, mor_table
+):
+    """#233: the session built the entry's own way -- here from a variable no
+    profile or flag reads -- and a record the decision reads exactly as it
+    reads `health --json`'s, because both come from `check_tables`' pieces."""
+    import os
+
+    from zamboni.service import pressure_offers
+
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)  # no developer zamboni.yml or .env
+    wh = warehouse(None, "mor", "absent")
+    path = os.environ.get("PATH", "")
+    own = {"PATH": path, "TEST_OWN_WAREHOUSE": str(tmp_path / "warehouse")}
+
+    custom = run_check(workdir, own, wh, health_entry="tests.pool_entries:own_session_health")
+    assert custom.exit_code == 1, "a table it could not read makes the exit 1, as health's does"
+    found = pressure_offers(wh, custom.record)
+    assert list(found["over"]) == ["db.mor"] and "0.25" in found["over"]["db.mor"]
+    assert list(found["errors"]) == ["db.absent"], "the rest are still checked"
+
+    cli = run_check(
+        workdir, {"PATH": path, "ZAMBONI_LOCAL_WAREHOUSE": own["TEST_OWN_WAREHOUSE"]}, wh
+    )
+    assert custom.record["tables"] == cli.record["tables"]
+    assert pressure_offers(wh, custom.record) == pressure_offers(wh, cli.record)
+
+    blind = run_check(workdir, own, wh)
+    assert blind.record is None, "the default entry cannot read a catalog only the entry knows"
+
+
+@pytest.mark.parametrize(
+    "entry, code, said",
+    [
+        ("health_that_raises", 1, "RuntimeError: the catalog is down"),
+        ("health_that_exits", 5, ""),
+        ("health_without_tables", 1, "no health record with tables"),
+    ],
+)
+def test_a_broken_health_entry_is_a_failed_check_never_a_reading(tmp_path, entry, code, said):
+    """A check that read nothing must not read as "no table over"."""
+    from zamboni.service import pressure_offers
+
+    result = run_check(
+        tmp_path, {"PATH": "/usr/bin:/bin"}, warehouse(), health_entry=f"tests.pool_entries:{entry}"
+    )
+    assert (result.exit_code, result.record, result.died) == (code, None, None)
+    assert said in result.output
+    assert pressure_offers(warehouse(), result.record)["errors"] == {
+        "*": "the check wrote no record"
+    }
+
+
+def test_a_table_never_goes_to_the_health_entry(tmp_path):
+    """The two entries are routed by job, so a broken health entry costs the
+    pressure checks and nothing else."""
+    import asyncio
+
+    from tests.test_pool import item
+    from zamboni.pool import PoolSize, WorkerConfig, WorkerPool
+
+    config = WorkerConfig(
+        entry="tests.pool_entries:record",
+        health_entry="tests.pool_entries:health_that_raises",
+        workdir=tmp_path,
+        base_environ={"PATH": "/usr/bin:/bin"},
+    )
+
+    async def scenario():
+        pool = WorkerPool(PoolSize(1, 1, "test"), config)
+        try:
+            return await pool.run(item("raw.a"))
+        finally:
+            await pool.close()
+
+    result = asyncio.run(scenario())
+    assert (result.exit_code, result.record["argv"][:2]) == (0, ["maintenance", "raw.a"])
+
+
 # -- what the service does with a check ------------------------------------------------------
 
 

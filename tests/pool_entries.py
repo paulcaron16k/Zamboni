@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from zamboni.pool import WorkerContext, run_cli, run_table
-from zamboni.scheduler import WorkItem
+from zamboni.scheduler import PressureCheck, WorkItem
 
 
 def record(item: WorkItem, context: WorkerContext) -> dict[str, Any]:
@@ -49,6 +49,34 @@ def recorded(item: WorkItem, context: WorkerContext) -> dict[str, Any]:
 
     record = run_table(item, dataclasses.replace(context, report=report))
     return {**record, "notes": notes}
+
+
+def own_session_health(check: PressureCheck, context: WorkerContext) -> dict[str, Any]:
+    """A health entry that builds its catalog its own way: from a variable no
+    profile or flag knows, as an application with its own store would."""
+    from zamboni import CatalogSession
+    from zamboni.health import check_tables
+
+    session = CatalogSession.for_local(warehouse_path=os.environ["TEST_OWN_WAREHOUSE"])
+    try:
+        return check_tables(
+            session.catalog, sorted(check.table_config.tables), warehouse=check.warehouse
+        )
+    finally:
+        session.close()
+
+
+def health_that_raises(check: PressureCheck, context: WorkerContext) -> dict[str, Any]:
+    raise RuntimeError("the catalog is down")
+
+
+def health_that_exits(check: PressureCheck, context: WorkerContext) -> dict[str, Any]:
+    raise SystemExit(5)
+
+
+def health_without_tables(check: PressureCheck, context: WorkerContext) -> dict[str, Any]:
+    """A run record, not a health record: what a table entry returns."""
+    return {"exit_code": 0}
 
 
 def not_a_record(item: WorkItem, context: WorkerContext) -> Any:

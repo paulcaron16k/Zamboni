@@ -40,15 +40,17 @@ really "no problems visible from here", which is the more dangerous of the two.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .units import human_bytes
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from pyiceberg.catalog import Catalog
     from pyiceberg.table import Table
     from pyiceberg.table.snapshots import Snapshot
 
@@ -414,3 +416,56 @@ def maintenance_watermark(tbl: Table) -> Watermark:
 def _stamp(snapshot: Snapshot) -> str | None:
     summary = snapshot.summary
     return None if summary is None else summary.additional_properties.get(OPERATION_STAMP)
+
+
+# -- the health record (#175, #233) -------------------------------------------------
+
+
+def table_signals(health: TableHealth, mark: Watermark) -> dict[str, Any]:
+    """One table's entry in a health record.
+
+    What ``zamboni health --json`` writes for a table it could load, and what
+    a pressure check's decision (``zamboni.pressure``) reads: every
+    :class:`TableHealth` field but ``unseen`` -- a constant about the method,
+    not the table -- plus the two watermark answers that make a table due.
+    """
+    signals = dataclasses.asdict(health)
+    signals.pop("unseen")
+    return signals | {"written_since": mark.written_since, "incomplete": mark.incomplete}
+
+
+def unreadable(exc: BaseException) -> dict[str, Any]:
+    """The entry for a table that could not be loaded: an outage or a dropped
+    table is that table's, and the rest of the record is still checked."""
+    return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def health_record(warehouse: str | None, tables: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """The whole record: one line of ``health --json``, and what a pressure
+    check's entry returns (docs/maintenance-runtime.md §7)."""
+    return {
+        "warehouse": warehouse,
+        "checked_at": dt.datetime.now(dt.UTC).isoformat(),
+        "tables": tables,
+    }
+
+
+def check_tables(
+    catalog: Catalog, tables: Iterable[str], *, warehouse: str | None
+) -> dict[str, Any]:
+    """Measure ``tables`` from metadata and return the health record.
+
+    The ``health`` verb's measurement without its printing, for an application
+    whose pressure-check entry builds its own catalog: the record comes out
+    the shape the runtime reads whichever session measured it. One
+    ``load_table`` per table.
+    """
+    signals: dict[str, dict[str, Any]] = {}
+    for name in tables:
+        try:
+            table = catalog.load_table(name)
+        except Exception as exc:  # NoSuchTable, an outage: this table's, not the record's
+            signals[name] = unreadable(exc)
+            continue
+        signals[name] = table_signals(table_health(table), maintenance_watermark(table))
+    return health_record(warehouse, signals)

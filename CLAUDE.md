@@ -173,7 +173,10 @@ A worker receives the pickled `WorkItem` plus a `pool.WorkerContext` and runs
 `WorkerConfig.entry`; the default, `pool.run_table`, runs the CLI's own
 `maintenance` line in-process, and an entry must pass
 `conformance.entry_conformance`. `WorkItem.commit` is consent: only the pool
-sets it, from `WorkerConfig.commit`.
+sets it, from `WorkerConfig.commit`. A pressure check goes to
+`WorkerConfig.health_entry` instead (default `pool.run_health`, the CLI's
+`health`), which returns the record `health.check_tables` builds and must pass
+`conformance.health_entry_conformance`.
 Nothing in the runtime decides whether a table needs work; that is still
 `maintain()`'s due-check, run in each worker.
 docs/maintenance-runtime.md is the design and §12 the stories still to build.

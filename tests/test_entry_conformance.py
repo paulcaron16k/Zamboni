@@ -19,6 +19,7 @@ import pytest
 
 from zamboni.conformance import (
     ENTRY_CHECKS,
+    HEALTH_ENTRY_CHECKS,
     ConformanceError,
     EntryHarness,
     check_entry_carries_no_secret,
@@ -26,11 +27,16 @@ from zamboni.conformance import (
     check_entry_previews_without_commit,
     check_entry_reports_progress_at_every_operation,
     check_entry_returns_a_run_record,
+    check_health_entry_carries_no_secret,
+    check_health_entry_is_importable_when_spawned,
+    check_health_entry_returns_a_health_record,
     entry_conformance,
+    health_entry_conformance,
 )
+from zamboni.health import health_record
 from zamboni.maintenance import RUNBOOK_ORDER
-from zamboni.pool import WorkerContext, run_cli, run_table
-from zamboni.scheduler import WorkItem
+from zamboni.pool import WorkerContext, run_cli, run_health, run_table
+from zamboni.scheduler import PressureCheck, WorkItem
 from zamboni.tableconfig import NamespaceSettings, TableConfig, TableSettings
 
 SECRET = "client:s3cr3t-conformance"
@@ -60,6 +66,17 @@ def reports_once(item: WorkItem, context: WorkerContext) -> dict[str, Any]:
     """Breaks rule 6: says it started, then runs every operation in silence."""
     context.progress(f"starting {item.table}")
     return run_table(item, dataclasses.replace(context, report=lambda note: None))
+
+
+def health_of_nothing(check: PressureCheck, context: WorkerContext) -> dict[str, Any]:
+    """Breaks rule 3: a well-formed record that measured no table."""
+    return health_record(check.warehouse, {})
+
+
+def health_prints_the_credential(check: PressureCheck, context: WorkerContext) -> dict[str, Any]:
+    """Breaks rule 2, the same debug line as :func:`prints_the_credential`."""
+    print(f"connecting with {os.environ['ZAMBONI_CREDENTIAL']}")
+    return run_health(check, context)
 
 
 # -- a table with work to do ---------------------------------------------------------
@@ -176,3 +193,57 @@ def test_a_claim_store_suite_does_not_load_the_worker_pool():
     code = "import sys, zamboni.conformance; print('zamboni.pool' in sys.modules)"
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "False"
+
+
+# -- the pressure-check entry (#233) ------------------------------------------------
+
+
+@pytest.mark.parametrize("check", HEALTH_ENTRY_CHECKS, ids=lambda c: c.__name__)
+def test_the_default_health_entry_passes(harness, check):
+    check(harness)
+
+
+def test_the_health_suite_runs_every_check(harness, monkeypatch):
+    ran = []
+    monkeypatch.setattr(
+        "zamboni.conformance.HEALTH_ENTRY_CHECKS",
+        tuple((lambda h, c=c: ran.append(c.__name__)) for c in HEALTH_ENTRY_CHECKS),
+    )
+    health_entry_conformance(harness)
+    assert ran == [c.__name__ for c in HEALTH_ENTRY_CHECKS]
+
+
+def test_a_health_entry_a_spawned_interpreter_cannot_import_is_refused(harness):
+    broken = dataclasses.replace(harness, health_entry="tests.no_such_module:run_health")
+    with pytest.raises(ConformanceError, match="rule 1"):
+        check_health_entry_is_importable_when_spawned(broken)
+
+
+@pytest.mark.parametrize(
+    "entry, said",
+    [
+        ("tests.pool_entries:health_without_tables", "rule 3: no health record came back"),
+        ("tests.test_entry_conformance:health_of_nothing", "rule 3: the health record leaves out"),
+    ],
+    ids=["a-run-record", "no-tables"],
+)
+def test_a_health_entry_returning_no_usable_record_is_refused(harness, entry, said):
+    broken = dataclasses.replace(harness, health_entry=entry)
+    with pytest.raises(ConformanceError, match=said):
+        check_health_entry_returns_a_health_record(broken)
+
+
+def test_a_health_entry_that_prints_a_credential_is_refused(harness):
+    broken = dataclasses.replace(
+        harness, health_entry="tests.test_entry_conformance:health_prints_the_credential"
+    )
+    with pytest.raises(ConformanceError, match="rule 2: a secret appears in the output"):
+        check_health_entry_carries_no_secret(broken)
+
+
+def test_a_table_entry_check_never_runs_the_health_entry(harness):
+    """Routed by job: a broken health entry does not fail the table checks."""
+    broken = dataclasses.replace(
+        harness, health_entry="tests.test_entry_conformance:health_prints_the_credential"
+    )
+    check_entry_carries_no_secret(broken)

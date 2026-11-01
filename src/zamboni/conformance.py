@@ -7,7 +7,8 @@ when it passes the suite here. Each check is a plain function that raises
 :class:`ConformanceError`, so a suite runs under any test runner, or none:
 ``claim_store_conformance(...)`` runs them all, and ``CLAIM_STORE_CHECKS`` lets a
 pytest suite report each check by name (``entry_conformance`` and
-``ENTRY_CHECKS`` likewise)::
+``ENTRY_CHECKS``, ``health_entry_conformance`` and ``HEALTH_ENTRY_CHECKS``,
+likewise)::
 
     @pytest.mark.parametrize("check", CLAIM_STORE_CHECKS, ids=lambda c: c.__name__)
     def test_my_store(check):
@@ -348,15 +349,31 @@ class EntryHarness:
     #: settings as the CLI does.
     profile_path: str | None = None
     env_path: str | None = None
+    #: The pressure-check entry under test, as ``WorkerConfig.health_entry``
+    #: takes it. Checked by :func:`health_entry_conformance` over ``item``'s
+    #: warehouse and table config.
+    health_entry: str = "zamboni.pool:run_health"
 
 
 def _run_entry(h: EntryHarness, *, commit: bool) -> ItemResult:
+    return _run_job(h, h.item, commit=commit)
+
+
+def _run_check(h: EntryHarness) -> ItemResult:
+    """A pressure check of the harness's warehouse, through ``health_entry``."""
+    from .scheduler import PressureCheck
+
+    return _run_job(h, PressureCheck(h.item.warehouse, h.item.table_config, h.item.uri))
+
+
+def _run_job(h: EntryHarness, job: Any, *, commit: bool = False) -> ItemResult:
     import asyncio
 
     from .pool import PoolSize, WorkerConfig, WorkerPool
 
     config = WorkerConfig(
         entry=h.entry,
+        health_entry=h.health_entry,
         commit=commit,
         base_environ=dict(h.base_environ),
         workdir=h.workdir,
@@ -367,7 +384,7 @@ def _run_entry(h: EntryHarness, *, commit: bool) -> ItemResult:
     async def run() -> ItemResult:
         pool = WorkerPool(PoolSize(1, 1, "conformance"), config)
         try:
-            return await pool.run(h.item)
+            return await pool.run(job)
         finally:
             await pool.close()
 
@@ -383,9 +400,13 @@ def _import_entry(entry: str) -> None:
 
 
 def check_entry_is_importable_when_spawned(h: EntryHarness) -> None:
+    _require_importable(h.entry)
+
+
+def _require_importable(entry: str) -> None:
     from multiprocessing import get_context
 
-    process = get_context("spawn").Process(target=_import_entry, args=(h.entry,))
+    process = get_context("spawn").Process(target=_import_entry, args=(entry,))
     process.start()
     process.join(timeout=120)
     if process.is_alive():
@@ -394,7 +415,7 @@ def check_entry_is_importable_when_spawned(h: EntryHarness) -> None:
     _require(
         process.exitcode == 0,
         "rule 1",
-        f"{h.entry} cannot be imported by name in a spawned interpreter (exit {process.exitcode})",
+        f"{entry} cannot be imported by name in a spawned interpreter (exit {process.exitcode})",
     )
 
 
@@ -432,15 +453,22 @@ def check_entry_returns_a_run_record(h: EntryHarness) -> None:
 
 
 def check_entry_carries_no_secret(h: EntryHarness) -> None:
+    _require_secrets_named(h)
+    _require_no_secret(h, h.item, _run_entry(h, commit=False), "run record")
+
+
+def _require_secrets_named(h: EntryHarness) -> None:
+    """Before running anything: a check with no secret to look for passes vacuously."""
+    _require(h.secrets, "rule 2", "the harness names no secret, so nothing would be checked")
+
+
+def _require_no_secret(h: EntryHarness, job: Any, result: ItemResult, record: str) -> None:
     import json
     import pickle
 
-    _require(h.secrets, "rule 2", "the harness names no secret, so nothing would be checked")
-    sent = pickle.dumps(h.item)
-    result = _run_entry(h, commit=False)
     places = {
-        "the work item": repr(h.item) + sent.decode("latin-1"),
-        "the run record": json.dumps(result.record, default=str),
+        "the work item": repr(job) + pickle.dumps(job).decode("latin-1"),
+        f"the {record}": json.dumps(result.record, default=str),
         "the output": result.output,
     }
     for secret in h.secrets:
@@ -487,4 +515,62 @@ ENTRY_CHECKS: tuple[Callable[[EntryHarness], None], ...] = (
 def entry_conformance(harness: EntryHarness) -> None:
     """Run every entry check; raises :class:`ConformanceError` naming the rule broken."""
     for check in ENTRY_CHECKS:
+        check(harness)
+
+
+# -- pressure-check entries (§7, #233) ----------------------------------------------
+#
+# The same rules as a table's entry, where they apply: a check is read-only, so
+# rule 4 has nothing to hold, and it reports no progress, so neither has rule 6.
+
+
+def check_health_entry_is_importable_when_spawned(h: EntryHarness) -> None:
+    _require_importable(h.health_entry)
+
+
+def check_health_entry_returns_a_health_record(h: EntryHarness) -> None:
+    """Rule 3: the record ``zamboni.health.check_tables`` builds, covering every
+    configured table, with the fields the pressure decision reads."""
+    from .pressure import HEALTH_FIELDS
+
+    result = _run_check(h)
+    tables = result.record.get("tables") if isinstance(result.record, dict) else None
+    _require(
+        isinstance(tables, dict),
+        "rule 3",
+        f"no health record came back (exit {result.exit_code}); output:\n{result.output}",
+    )
+    assert isinstance(tables, dict)
+    configured = set(h.item.table_config.tables)
+    missing = sorted(configured - set(tables))
+    _require(not missing, "rule 3", f"the health record leaves out {missing}")
+    signals = tables[h.item.table]
+    _require(
+        "error" not in signals,
+        "rule 3",
+        f"the harness's own table could not be read: {signals.get('error')}",
+    )
+    lacking = sorted(set(HEALTH_FIELDS) - set(signals))
+    _require(not lacking, "rule 3", f"{h.item.table}'s signals lack {lacking}")
+
+
+def check_health_entry_carries_no_secret(h: EntryHarness) -> None:
+    from .scheduler import PressureCheck
+
+    _require_secrets_named(h)
+    check = PressureCheck(h.item.warehouse, h.item.table_config, h.item.uri)
+    _require_no_secret(h, check, _run_check(h), "health record")
+
+
+#: Every pressure-check entry check.
+HEALTH_ENTRY_CHECKS: tuple[Callable[[EntryHarness], None], ...] = (
+    check_health_entry_is_importable_when_spawned,
+    check_health_entry_returns_a_health_record,
+    check_health_entry_carries_no_secret,
+)
+
+
+def health_entry_conformance(harness: EntryHarness) -> None:
+    """Run every pressure-check entry check; raises :class:`ConformanceError`."""
+    for check in HEALTH_ENTRY_CHECKS:
         check(harness)

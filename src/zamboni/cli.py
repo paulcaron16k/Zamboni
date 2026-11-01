@@ -49,7 +49,7 @@ import os
 import sys
 from collections.abc import Callable, Iterator
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -1166,9 +1166,13 @@ def _health(session: CatalogSession, args: argparse.Namespace) -> int:
     not blind a fleet's pressure check -- and makes the exit 1, so a script sees
     it. ``--exit-code`` then asks "is any table due".
     """
-    import dataclasses
-
-    from .health import maintenance_watermark, table_health
+    from .health import (
+        health_record,
+        maintenance_watermark,
+        table_health,
+        table_signals,
+        unreadable,
+    )
 
     if args.table:
         tables = [args.table]
@@ -1185,7 +1189,7 @@ def _health(session: CatalogSession, args: argparse.Namespace) -> int:
             table = session.catalog.load_table(name)
         except Exception as exc:  # NoSuchTable, an outage: this table's, not the run's
             failed += 1
-            signals[name] = {"error": f"{type(exc).__name__}: {exc}"}
+            signals[name] = unreadable(exc)
             print(f"{name}: cannot check -- {type(exc).__name__}: {exc}")
             continue
         health = table_health(table)
@@ -1204,19 +1208,10 @@ def _health(session: CatalogSession, args: argparse.Namespace) -> int:
         print(f"{health.identifier}: {'due' if is_due else 'not due'} -- {reason}")
         print(mark.describe())
         print(health.describe())
-        record = dataclasses.asdict(health)
-        record.pop("unseen")  # a constant about the method, not the table
-        signals[name] = record | {
-            "written_since": mark.written_since,
-            "incomplete": mark.incomplete,
-        }
+        signals[name] = table_signals(health, mark)
 
     if args.json:
-        doc = {
-            "warehouse": getattr(args, "warehouse", None),
-            "checked_at": datetime.now(UTC).isoformat(),
-            "tables": signals,
-        }
+        doc = health_record(getattr(args, "warehouse", None), signals)
         with Path(args.json).open("a", encoding="utf-8") as out:
             out.write(json.dumps(doc) + "\n")
     if failed:
