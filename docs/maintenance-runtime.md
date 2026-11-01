@@ -303,8 +303,10 @@ limits before the pool is planned
 `test_the_reserved_cpus_come_off_the_top_of_the_plan`); one that leaves no room
 still gets one worker and the "does not fit" warning
 (`test_a_reservation_that_leaves_no_room_still_gets_one_worker_and_a_warning`).
-`zamboni serve` has no flag for them yet; an application embedding the runtime
-calls `plan_pool` itself and passes them there.
+`zamboni serve` takes them as `--reserved-memory-bytes` and `--reserved-cpus`,
+or `ZAMBONI_RESERVED_MEMORY_BYTES` and `ZAMBONI_RESERVED_CPUS`, default 0, and
+logs what it kept (#234, `test_the_flags_reach_the_plan`); an application
+embedding the runtime calls `plan_pool` itself and passes them there.
 
 ---
 

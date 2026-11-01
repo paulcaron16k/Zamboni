@@ -23,6 +23,14 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **`zamboni serve --reserved-memory-bytes N --reserved-cpus N`** (#234), or
+  `ZAMBONI_RESERVED_MEMORY_BYTES` and `ZAMBONI_RESERVED_CPUS`: memory and CPUs
+  `serve` keeps back from the cgroup's limits before sizing its worker pool,
+  for a container that runs something beside it. Default 0, so an existing
+  `serve` plans the same pool. `serve` logs what it kept; a negative or
+  malformed value is a usage error, exit 2. The variables are read after
+  `.env` is loaded, so a value there arrives — which most `ZAMBONI_*` flag
+  defaults do not yet manage (#252).
 - **`maintain(progress=...)`: a long run says it is still working** (#232). A
   callable told a one-line note as each operation starts on each table and, on
   the local engine, as each compaction rewrite group starts — `observer` hears
