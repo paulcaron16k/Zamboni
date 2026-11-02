@@ -83,6 +83,7 @@ def _caps(**overrides) -> PyIcebergCapabilities:
         "equality_deletes_readable": False,
         "delete_manifests_writable": False,
         "s3_signer_registered_once": False,
+        "s3_signing_overlaps": False,
     }
     base.update(overrides)
     return PyIcebergCapabilities(**base)
@@ -223,6 +224,75 @@ def test_the_fork_name_without_its_behaviour_still_installs_the_signer_mirror(mo
     assert observed is False
     monkeypatch.setattr(
         capabilities, "detect", lambda: replace(detect(), s3_signer_registered_once=observed)
+    )
+
+    signer.install()
+
+    assert {fsspec.SCHEME_TO_FS[s] for s in ("s3", "s3a", "s3n")} == {signer._s3_signed_once}
+
+
+def test_the_s3_signing_overlap_probe_answers_for_the_expected_build():
+    """Fork from #250: a waiting signer leaves the loop free. Stock 0.12.0: it does not."""
+    from tests.conftest import library_honours_spec_expected
+    from zamboni import capabilities
+
+    fork = library_honours_spec_expected()
+    assert detect().s3_signing_overlaps is fork, (
+        "the maintenance fork signs S3 requests off the event loop (#250); stock 0.12.0 "
+        "signs inline. This build answered the other way -- check which PyIceberg the leg "
+        "resolved, and that the fork pin carries #250."
+    )
+    assert [capabilities._s3_signing_overlaps() for _ in range(2)] == [fork] * 2
+
+
+def _signs_once_but_inline(properties):
+    """A fork tag before #250, reduced to what decides it: one client per signer, signed inline.
+
+    The signer is on the session, as the fork registers it, so a recreated
+    client keeps it; it is the synchronous signer itself, not a wrapper.
+    """
+    from aiobotocore.session import AioSession
+    from botocore import UNSIGNED
+    from pyiceberg.io import fsspec
+    from s3fs import S3FileSystem
+
+    session = AioSession()
+    signer = fsspec.SIGNERS[properties["s3.signer"]](properties)
+    session.get_component("event_emitter").register_last("before-sign.s3", signer, unique_id=1925)
+    return S3FileSystem(
+        client_kwargs={
+            "endpoint_url": properties["s3.endpoint"],
+            "aws_access_key_id": properties["s3.access-key-id"],
+            "aws_secret_access_key": properties["s3.secret-access-key"],
+            "region_name": properties["s3.region"],
+        },
+        config_kwargs={"signature_version": UNSIGNED},
+        session=session,
+        skip_instance_cache=True,
+    )
+
+
+def test_a_build_that_signs_once_but_inline_still_installs_the_signer_mirror(monkeypatch):
+    """Registering once is not enough to stand down: the mirror also signs off the loop (#250).
+
+    Fork tags before #250 sign each table through its own signer, inline on
+    fsspec's loop. Standing down there would give up the overlap the mirror has.
+    """
+    pytest.importorskip("s3fs")
+    from pyiceberg.io import fsspec
+
+    from zamboni import capabilities, signer
+
+    monkeypatch.setattr(fsspec, "_s3", _signs_once_but_inline)
+    for scheme in ("s3", "s3a", "s3n"):
+        monkeypatch.setitem(fsspec.SCHEME_TO_FS, scheme, _signs_once_but_inline)
+
+    once, overlaps = capabilities._s3_signer_registered_once(), capabilities._s3_signing_overlaps()
+    assert (once, overlaps) == (True, False)
+    monkeypatch.setattr(
+        capabilities,
+        "detect",
+        lambda: replace(detect(), s3_signer_registered_once=once, s3_signing_overlaps=overlaps),
     )
 
     signer.install()

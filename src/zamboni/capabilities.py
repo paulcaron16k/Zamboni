@@ -46,6 +46,14 @@ with s3fs and botocore already imported: 817 ms for the first run in a process
 shared client. A wrong True stands the signer mirror down on a build that
 still swaps signers; a wrong False installs a redundant but correct mirror.
 
+``s3_signing_overlaps`` (#250) was measured the same way, 2026-11-01, Python
+3.13, six runs each: on the fork with #250, 950 ms first, then 257-299 ms; on
+fork tag ``maintenance/2026-10-28.2``, which signs inline, 1370 ms first, then
+794-860 ms, the 500 ms wait included; on stock 0.12.0, 718 ms first, then
+11-13 ms. Wrong answers fall as for the probe above: a wrong True stands the
+mirror down on a build that signs inline, a wrong False installs a redundant
+but correct one.
+
 ``detect()`` is **330 ms** cold, and since ZMBNI-88 that is paid once per
 install rather than once per process, so the cost argument that once justified
 leaving a probe structural has largely expired.
@@ -199,6 +207,17 @@ class PyIcebergCapabilities:
     #: fork. False installs :mod:`zamboni.signer`'s mirror.
     s3_signer_registered_once: bool
 
+    #: A signer waiting on its endpoint leaves fsspec's event loop free to sign
+    #: another request. Established by holding one filesystem's signer until a
+    #: second filesystem's request has been signed, not by looking for a name
+    #: (#250). False on stock 0.12.0 and on fork tags before #250, which sign
+    #: inline on the loop; True on the fork from #250. The mirror stands down
+    #: only when this and :attr:`s3_signer_registered_once` both hold. Connection
+    #: sharing (#250's other half) is not probed: a library that signs off the
+    #: loop but pools per table stands the mirror down and costs sockets, not
+    #: correctness.
+    s3_signing_overlaps: bool
+
     #: *How* ``derives_delete_predicate`` was established. Reported by
     #: ``zamboni doctor``, because "we proved it" and "we recognised a name" are
     #: different confidences, and an operator deciding whether to trust a new
@@ -266,6 +285,7 @@ class PyIcebergCapabilities:
             ("equality deletes readable", self.equality_deletes_readable),
             ("delete manifests writable", self.delete_manifests_writable),
             ("S3 signer registered once", self.s3_signer_registered_once),
+            ("S3 signing overlaps", self.s3_signing_overlaps),
         ]
         return "\n".join(f"  {name:<28} {value}" for name, value in rows)
 
@@ -359,6 +379,7 @@ def _probe() -> Probed:
     unrelated_append = _rewrite_ignores_unrelated_append()
     delete_manifests = _delete_manifests_writable()
     signs_once = _s3_signer_registered_once()
+    signing_overlaps = _s3_signing_overlaps()
 
     unobserved = tuple(
         f"{name}: {answer.why}"
@@ -367,6 +388,7 @@ def _probe() -> Probed:
             ("concurrent-append probe", unrelated_append),
             ("delete-manifest probe", delete_manifests),
             ("S3 signer probe", signs_once),
+            ("S3 signing-overlap probe", signing_overlaps),
         )
         if isinstance(answer, CouldNotRun)
     )
@@ -404,6 +426,9 @@ def _probe() -> Probed:
         # not would bring back unsigned requests and the last table loaded
         # signing for all of them.
         s3_signer_registered_once=signs_once is True,
+        # Unknown -> assume NOT, for the same reason: the mirror installs, and
+        # on a library that does overlap signing it is redundant but correct.
+        s3_signing_overlaps=signing_overlaps is True,
     )
     return Probed(capabilities, unobserved)
 
@@ -828,6 +853,95 @@ def _s3_signer_registered_once() -> bool | CouldNotRun:
             fsspec.SIGNERS.pop(key, None)
     except Exception as exc:  # pragma: no cover - any failure means "could not establish"
         logger.debug("S3 signer behavioural probe did not complete", exc_info=True)
+        return CouldNotRun.from_exception(exc)
+
+
+#: How long the overlap probe's first signer waits for the second request to be
+#: signed. Paid in full only by a build that signs one filesystem at a time on
+#: the loop and signs each through its own signer: a fork tag before #250.
+_OVERLAP_WAIT = 0.5
+
+
+def _s3_signing_overlaps() -> bool | CouldNotRun:
+    """Can a second request be signed while a first request's signer waits?
+
+    Behavioural, because the answer selects an implementation, as
+    :func:`_s3_signer_registered_once` does and for the same reasons it asks
+    ``fsspec._s3`` and registers a recording signer for the duration.
+
+    Two filesystems are built with different sign endpoints. The first's signer
+    waits up to :data:`_OVERLAP_WAIT` for an event the second's signer sets; a
+    presign is started through the first, and once its signer is running, a
+    second presign through the other. Where signing runs off the loop, the
+    second is signed while the first waits, and the first sees the event. Where
+    it runs inline, the loop is blocked by the first, the second cannot start,
+    and the first times out. On stock 0.12.0 both filesystems share one client
+    signed by the last signer registered, so the first signer never runs: also
+    false, quickly. Timings are in the module docstring.
+    """
+    try:
+        from pyiceberg.io import fsspec
+    except ImportError as exc:  # pragma: no cover - depends on the install
+        return CouldNotRun.from_exception(exc)
+    try:
+        import asyncio
+        import threading
+        import time
+
+        import s3fs  # noqa: F401
+        from fsspec.asyn import sync
+    except ImportError:
+        return False
+
+    key = "zamboni-overlap-probe"
+    run = uuid.uuid4().hex
+    waiting_endpoint, releasing_endpoint = f"waits-{run}", f"releases-{run}"
+    started, released = threading.Event(), threading.Event()
+    waited: list[bool] = []
+
+    class OverlapSigner(fsspec.S3RequestSigner):
+        def __call__(self, request: object, **_: object) -> None:
+            if self.properties["s3.signer.endpoint"] == waiting_endpoint:
+                started.set()
+                waited.append(released.wait(_OVERLAP_WAIT))
+            else:
+                released.set()
+
+    def build(endpoint: str):
+        return fsspec._s3(
+            {
+                "s3.signer": key,
+                "s3.signer.endpoint": endpoint,
+                "uri": "http://zamboni-probe.invalid",
+                "s3.endpoint": "http://zamboni-probe.invalid",
+                "s3.region": "us-east-1",
+                "s3.access-key-id": "zamboni-probe",
+                "s3.secret-access-key": "zamboni-probe",
+            }
+        )
+
+    def presign(fs):
+        return fs.s3.generate_presigned_url("put_object", Params={"Bucket": "b", "Key": "k"})
+
+    try:
+        fsspec.SIGNERS[key] = OverlapSigner
+        try:
+            waiting, releasing = build(waiting_endpoint), build(releasing_endpoint)
+            waiting.s3, releasing.s3  # noqa: B018 - create both clients before timing anything
+            first = asyncio.run_coroutine_threadsafe(presign(waiting), waiting.loop)
+            # Stock's first request is signed by the other signer and finishes
+            # without ``started``; waiting for it there cost 5 s a run.
+            deadline = time.monotonic() + 5
+            while not started.wait(0.01) and not first.done() and time.monotonic() < deadline:
+                pass
+            if started.is_set():
+                sync(releasing.loop, presign, releasing, timeout=5)
+            first.result(timeout=5)
+            return waited == [True]
+        finally:
+            fsspec.SIGNERS.pop(key, None)
+    except Exception as exc:  # pragma: no cover - any failure means "could not establish"
+        logger.debug("S3 signing-overlap behavioural probe did not complete", exc_info=True)
         return CouldNotRun.from_exception(exc)
 
 

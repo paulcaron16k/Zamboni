@@ -52,7 +52,9 @@ logger = logging.getLogger(__name__)
 #: Bumped whenever probe *logic* changes in a way that invalidates stored
 #: answers. The installed Zamboni version covers a released change; this covers
 #: the rest, and costs nothing to bump.
-CACHE_SCHEMA = 3  # 2: rewrite_ignores_unrelated_append (#239); 3: s3_signer_registered_once (#245)
+# 2: rewrite_ignores_unrelated_append (#239); 3: s3_signer_registered_once (#245);
+# 4: s3_signing_overlaps (#250)
+CACHE_SCHEMA = 4
 
 #: Both are fingerprinted: PyIceberg because it is what the probes ask about,
 #: Zamboni because it is what does the asking.
