@@ -153,6 +153,38 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **Against a remote-signing catalog, object-store requests no longer wait for
+  each other's signatures** (#250). PyIceberg's `S3V4RestSigner` signs with a
+  blocking HTTP call, and aiobotocore runs it inline on fsspec's one event-loop
+  thread, which carries every S3 request in the process. Measured against a
+  local stand-in whose sign endpoint takes 50 ms, one table per thread: about
+  8 GETs a second whether 1, 8 or 20 threads issued them, on stock 0.12.0 with
+  `zamboni.signer` and on the fork alike. The signer now runs on a daemon
+  thread per call, at most ten at once, and the loop serves other requests
+  meanwhile: 48–50 GETs a second with 8 threads and 67–71 with 20, on the fork
+  and through `zamboni.signer` alike. A batch of requests waits on the loop
+  rather than starting a thread each. A signing error still fails its request;
+  an interrupt inside a signer fails only that request; a sign endpoint that
+  never answers no longer keeps the process from exiting. Within one table this is the scan's read-ahead and PyIceberg's executor
+  queueing behind one another; not measured end to end in Zamboni.
+- **Tables signed through a remote-signing catalog share connections** (#250).
+  Lakekeeper vends each table its own sign endpoint, so each table had its own
+  S3 client, with its own connection pool, and its own signer, with its own
+  HTTP session: two sockets per table held, 21 for 10 tables and 101 for 50,
+  and new connections for each table a `serve` worker or a CLI run moved on to.
+  Clients and signers stay per table, so each request is still signed through
+  its own endpoint, but they now draw on one object-store connection pool,
+  sized at botocore's per-client default plus PyIceberg's executor workers, and
+  one signing session: 3 sockets for 10 or 50 tables. The pool relies on
+  private aiobotocore names; where one is missing a warning is logged and each
+  table keeps its own pool, as before. Checked on aiobotocore 3.5.0 and 3.9. A new probe, `s3_signing_overlaps`
+  (shown by `zamboni doctor`), checks that a waiting signer leaves the loop
+  free, and `zamboni.signer` stands down only where that and
+  `s3_signer_registered_once` both hold, so fork tags before #250 get the
+  mirror. Stored probe answers are re-probed once (cache schema 4). The fork
+  carries both fixes (`bug/s3_signer_blocks_event_loop`,
+  `bug/signed_s3_filesystems_share_no_connections`); the development pin moves
+  to its tag `maintenance/2026-11-01`.
 - **A remote-signing catalog no longer leaks three sockets per table in a
   long-lived process** (#246). The S3 signer fix (#51) kept each signed
   filesystem in fsspec's instance cache until exit. With it stayed the S3
