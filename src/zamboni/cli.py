@@ -86,6 +86,7 @@ from .workdir import describe_temp_directory
 
 if TYPE_CHECKING:
     from .maintenance import MinimumInterval
+    from .pool import PoolSize
 
 USAGE = """\
 getting started
@@ -382,6 +383,18 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_positive_int,
         help="at most this many worker processes. Default: what the CPU quota and "
         "memory limit allow; a larger number is lowered to that",
+    )
+    sv.add_argument(
+        "--reserved-memory-bytes",
+        type=_non_negative_int,
+        help="memory this process keeps for itself before the pool is sized: taken "
+        "off the cgroup's limit (or host RAM) first. For running beside something "
+        "else in the same container. Default: $ZAMBONI_RESERVED_MEMORY_BYTES, else 0",
+    )
+    sv.add_argument(
+        "--reserved-cpus",
+        type=_non_negative_int,
+        help="CPUs kept the same way, off the CPU quota. Default: $ZAMBONI_RESERVED_CPUS, else 0",
     )
     sv.add_argument(
         "--json",
@@ -970,6 +983,13 @@ def _positive_int(text: str) -> int:
     value = int(text)
     if value < 1:
         raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
+    return value
+
+
+def _non_negative_int(text: str) -> int:
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be 0 or more, got {value}")
     return value
 
 
@@ -1641,13 +1661,67 @@ def _maintenance(
     return report.exit_code
 
 
+#: ``serve``'s reservations: the flag's attribute, and the variable it falls back to.
+_RESERVATIONS = {
+    "reserved_memory_bytes": "ZAMBONI_RESERVED_MEMORY_BYTES",
+    "reserved_cpus": "ZAMBONI_RESERVED_CPUS",
+}
+
+
+def _reservation(args: argparse.Namespace, attribute: str) -> int:
+    """A reservation from its flag, else its ``ZAMBONI_*`` variable, else 0.
+
+    The variable is read here, not as the flag's default: a default is read
+    when the parser is built, before ``.env`` is loaded, so a value set only
+    there would never arrive (#252).
+    """
+    if (value := getattr(args, attribute)) is not None:
+        return int(value)
+    variable = _RESERVATIONS[attribute]
+    text = os.environ.get(variable, "").strip()
+    if not text:
+        return 0
+    try:
+        return _non_negative_int(text)
+    except (ValueError, argparse.ArgumentTypeError) as exc:
+        raise ValueError(f"{variable}={text!r}: {exc}") from None
+
+
+def _plan_serve_pool(
+    args: argparse.Namespace, *, root: Path | None = None, proc: Path | None = None
+) -> PoolSize:
+    """The pool ``serve`` runs: ``--workers`` and the reservations, against this
+    process's cgroup -- or, for a test, the tree ``root`` and ``proc`` locate.
+    Raises ValueError for a malformed reservation variable."""
+    from .pool import CGROUP_ROOT, PROC_CGROUP, plan_pool
+
+    memory = _reservation(args, "reserved_memory_bytes")
+    cpus = _reservation(args, "reserved_cpus")
+    if memory or cpus:
+        # Said here, not left to the plan's reason: that names a reservation
+        # only when its own bound decided the worker count.
+        logging.getLogger(__name__).info(
+            "keeping %d byte(s) of memory and %d CPU(s) for this process before sizing the pool",
+            memory,
+            cpus,
+        )
+    return plan_pool(
+        memory_budget_bytes=_DEFAULTS.memory_budget_bytes,
+        requested=args.workers,
+        reserved_memory_bytes=memory,
+        reserved_cpus=cpus,
+        root=root or CGROUP_ROOT,
+        proc=proc or PROC_CGROUP,
+    )
+
+
 def _serve(args: argparse.Namespace) -> int:
     """`zamboni serve`. 0 on a clean stop; 2 if it could not start."""
     import asyncio
     import signal
 
     from .fleet import FleetConfigError
-    from .pool import WorkerConfig, plan_pool
+    from .pool import WorkerConfig
     from .reload import POLL_SECONDS, install_hangup
     from .service import AlreadyRunning, Service, single_instance
 
@@ -1657,7 +1731,11 @@ def _serve(args: argparse.Namespace) -> int:
     for directory in {state_path.parent, pid_path.parent}:
         directory.mkdir(parents=True, exist_ok=True)
 
-    size = plan_pool(memory_budget_bytes=_DEFAULTS.memory_budget_bytes, requested=args.workers)
+    try:
+        size = _plan_serve_pool(args)
+    except ValueError as exc:
+        print(f"zamboni serve: {exc}", file=sys.stderr)
+        return 2
     profile = args.zamboni_profile
     config = WorkerConfig.from_pool(
         size,

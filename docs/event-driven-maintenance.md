@@ -201,6 +201,9 @@ Implemented by `zamboni.pool` (ZMBNI-121). What it settles, each tested in
   but not a parent's (24.9 GiB of a 31.2 GiB host with the 1 GiB limit one level
   up). Either way N workers would each plan for most of the whole. With no
   cgroup limit the plan uses host RAM rather than declining to plan.
+  `--reserved-memory-bytes` and `--reserved-cpus` (or `ZAMBONI_RESERVED_*`)
+  come off the memory limit and the CPU count first, for a container that runs
+  something beside `serve` (#234).
 - **The feed takes from the queue only when a worker is free**, so a waiting
   table still coalesces and is still resolved against the newest config.
   Waiting for a worker is raced against stop: an earlier draft, blocked there,
