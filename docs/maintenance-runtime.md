@@ -731,10 +731,20 @@ As built in R5 (`zamboni.pool`):
   `test_the_default_entry_reports_each_operation_and_group_from_a_worker`). A
   `progress` that raises is logged once and never stops or fails the run
   (`test_a_progress_that_raises_neither_stops_nor_fails_the_run`).
-- **A pressure check is not an entry's.** It always runs `zamboni health`
-  through the CLI, whatever `entry` is: §7's signature is per table, and the
-  check is the runtime's own measurement. An application whose catalog
-  session cannot be built from the operator profile has no hook here yet.
+- **A pressure check has an entry of its own** (#233):
+  `WorkerConfig.health_entry`, taking the `PressureCheck` and the
+  `WorkerContext` and returning the health record — the line `zamboni health
+  --json` writes. The default, `zamboni.pool:run_health`, is that CLI verb
+  in-process. An application whose session `entry` builds its own way supplies
+  this too, and builds the record with `zamboni.health.check_tables`, which the
+  CLI's `health` is assembled from, so the pressure decision reads it exactly
+  as it reads the CLI's
+  (`test_a_health_entry_with_its_own_session_drives_pressure_as_the_cli_does`).
+  Its exit code is `health`'s: 1 if any table could not be read. A
+  `SystemExit(n)` is exit n, and any other exception, or a return without a
+  `tables` mapping, is exit 1 with no record — a failed check, never "no table
+  over" (`test_a_broken_health_entry_is_a_failed_check_never_a_reading`).
+  Rules 4 and 6 do not apply: a check is read-only and reports no progress.
 
 ### 7.1 When maintenance goes wrong
 
@@ -960,7 +970,10 @@ An implementation is conformant when:
    need. The checks run the entry in a spawned worker of a real `WorkerPool`;
    the default entry passes them against a table with work to do
    (`test_the_default_entry_passes`), and each is shown to reject an entry
-   broken its own way;
+   broken its own way. Its pressure-check entry passes
+   `health_entry_conformance` (importable when spawned, returns a health
+   record covering every configured table, carries no secret;
+   `test_the_default_health_entry_passes`);
 3. it never calls the runtime except through the control surface, and its web
    tier never imports `zamboni.runtime` — a test imports the web tier's entry
    point and asserts the module is absent from `sys.modules`;

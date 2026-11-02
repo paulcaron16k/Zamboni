@@ -23,6 +23,9 @@ env > profile), the session, the engine, the reporter, the exit codes and the
 ``--json`` record are all the code a cron line already runs, so the service
 cannot drift from it, and the worker reads ``.env`` and the profile itself. An
 application supplies its own entry to build its catalog session its own way.
+A pressure check is a second entry of the same kind (``health_entry``, #233):
+a :class:`PressureCheck` in, the health record out, the default
+:func:`run_health` being the CLI's ``health``.
 
 **Long-lived workers, not one process per table.** Measured on this repo's dev
 machine (``/usr/bin/time``, three runs, 2026-10-01): importing what a worker
@@ -356,6 +359,13 @@ class WorkerConfig:
     #: :class:`WorkerContext` and returning the run record. Importable by name
     #: in a spawned interpreter. The default runs the CLI (:func:`run_table`).
     entry: str = "zamboni.pool:run_table"
+    #: The pressure-check entry: ``module:function`` taking a
+    #: :class:`PressureCheck` and a :class:`WorkerContext` and returning the
+    #: health record :func:`zamboni.health.check_tables` builds. An application
+    #: whose session ``entry`` builds its own way needs this too, or its pressure
+    #: checks read through a profile it does not have. The default runs the
+    #: CLI's ``health`` (:func:`run_health`).
+    health_entry: str = "zamboni.pool:run_health"
     #: Where per-table config and run-record files go.
     workdir: Path = field(default_factory=lambda: Path.cwd())
 
@@ -431,7 +441,7 @@ class WorkerContext:
 
 
 def worker_argv(item: Job, context: WorkerContext, table_config: Path, record: Path) -> list[str]:
-    """The ``zamboni`` command line the default entry runs for ``item``. Strings only.
+    """The ``zamboni`` command line the default entries run for ``item``. Strings only.
 
     A table is ``maintenance <table>``, with ``--yes`` only when the item says
     ``commit``; a :class:`PressureCheck` is ``health`` over every table in the
@@ -519,6 +529,16 @@ def run_cli(
     return record
 
 
+def run_health(check: PressureCheck, context: WorkerContext) -> dict[str, Any]:
+    """The default pressure-check entry: ``zamboni health`` over the warehouse,
+    in-process, and its ``--json`` record returned. A run that wrote none raises
+    ``SystemExit`` with its code, as :func:`run_cli` does."""
+    code, record = _run_argv(check, context, None)
+    if record is None:
+        raise SystemExit(code)
+    return record
+
+
 def _run_argv(
     item: Job, context: WorkerContext, main: CommandLine | None
 ) -> tuple[int, dict[str, Any] | None]:
@@ -552,22 +572,34 @@ def _exit_code(exc: SystemExit) -> int:
     return exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
 
 
-def _run_job(job: Job, run: Callable[..., Any], context: WorkerContext) -> tuple[int, Any]:
-    """One job's exit code and run record, however the entry ends.
+def _run_job(
+    job: Job, entry: Callable[..., Any], health: Callable[..., Any], context: WorkerContext
+) -> tuple[int, Any]:
+    """One job's exit code and record, however its entry ends.
 
-    A table goes to the entry, whose record carries its own ``exit_code``. A
-    pressure check is always ``health`` through the CLI: it is the runtime's
-    own measurement, not maintenance an application builds a session for.
+    A table goes to ``entry``, whose run record carries its own ``exit_code``.
+    A pressure check goes to ``health``, whose record carries none: its code
+    is the one ``zamboni health`` exits with, 1 if any table could not be read.
+    Either way a ``SystemExit(n)`` is exit n with no record, and any other
+    exception, or a return that is not the record, is exit 1 -- a broken entry
+    is a failure, never a reading or a success.
     """
-    if isinstance(job, PressureCheck):
-        return _run_argv(job, context, None)
+    check = isinstance(job, PressureCheck)
     try:
-        record = run(job, context)
+        record = (health if check else entry)(job, context)
     except SystemExit as exc:
         return _exit_code(exc), None
     except BaseException:  # reported, not swallowed
         traceback.print_exc()
         return 1, None
+    if check:
+        tables = record.get("tables") if isinstance(record, dict) else None
+        if not isinstance(tables, dict) or not all(isinstance(t, dict) for t in tables.values()):
+            # Not what `health --json` writes, so not something the pressure
+            # decision can read: reported as a failed check, not as "no table over".
+            print(f"the health entry returned no health record with tables: {record!r:.200}")
+            return 1, None
+        return (1 if any("error" in t for t in tables.values()) else 0), record
     code = record.get("exit_code") if isinstance(record, dict) else None
     if not isinstance(code, int) or isinstance(code, bool):
         # Not the record `maintenance --json` writes, so not a result the run
@@ -589,8 +621,11 @@ def _worker_main(conn: WorkerConnection, config: WorkerConfig) -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
-    module, _, name = config.entry.partition(":")
-    run = getattr(importlib.import_module(module), name)
+    def load(spec: str) -> Callable[..., Any]:
+        module, _, name = spec.partition(":")
+        return getattr(importlib.import_module(module), name)
+
+    run, health = load(config.entry), load(config.health_entry)
     context = config.context(report=lambda note: conn.send(("progress", note)))
     # Logging to whatever `sys.stderr` is *now*, so the per-table capture below
     # catches it. `cli.main`'s own basicConfig is then a no-op.
@@ -608,8 +643,8 @@ def _worker_main(conn: WorkerConnection, config: WorkerConfig) -> None:
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
             try:
-                code, record = _run_job(job, run, context)
-            except BaseException:  # the pressure path's own failure
+                code, record = _run_job(job, run, health, context)
+            except BaseException:  # reported, as a failure of this job
                 traceback.print_exc()
                 code, record = 1, None
         conn.send(("done", code, out.getvalue(), record))

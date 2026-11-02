@@ -23,6 +23,16 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **Pressure checks can build their catalog session the application's way**
+  (#233). `WorkerConfig.health_entry` is to a pressure check what `entry` is
+  to a table: a `module:function` taking the `PressureCheck` and returning
+  the health record. The default, `zamboni.pool:run_health`, runs `zamboni
+  health` as before. `zamboni.health.check_tables(catalog, tables,
+  warehouse=...)` builds that record from any catalog — the CLI's `health` is
+  now assembled from the same pieces — and `zamboni.conformance` gains
+  `health_entry_conformance`. A health entry that raises or returns no record
+  is a failed check, never "no table over". Provisional, with the rest of the
+  runtime.
 - **`zamboni serve --reserved-memory-bytes N --reserved-cpus N`** (#234), or
   `ZAMBONI_RESERVED_MEMORY_BYTES` and `ZAMBONI_RESERVED_CPUS`: memory and CPUs
   `serve` keeps back from the cgroup's limits before sizing its worker pool,
