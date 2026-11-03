@@ -457,8 +457,11 @@ def _shared_pool_session() -> type | None:
 
     class SharedPoolAIOHTTPSession(AIOHTTPSession):
         async def _get_session(self, proxy_url: str | None) -> aiohttp.ClientSession:
-            # Set by ``__aenter__``, as aiobotocore's own ``_get_session`` assumes.
+            # Set by ``__aenter__`` and None once closed, as aiobotocore's own
+            # ``_get_session`` assumes.
             sessions: dict[str | None, aiohttp.ClientSession] = self._sessions
+            if session := sessions.get(proxy_url):
+                return session
             # Held across creation where aiobotocore has it (3.9.1 on), as its
             # own ``_get_session`` holds it, so closing the client waits for a
             # session being created instead of leaving it unclosed.
@@ -466,6 +469,12 @@ def _shared_pool_session() -> type | None:
                 getattr(self, "_sessions_lock", None) or contextlib.nullcontext()
             )
             async with lock:
+                # Read again under the lock: a ``close`` that held it emptied
+                # the old dict and set ``_sessions`` to None, so a request
+                # queued behind it built a session on the closed client that
+                # nothing would close (#260). As in aiobotocore's own, such a
+                # request now fails instead.
+                sessions = self._sessions
                 if not (session := sessions.get(proxy_url)):
                     session = await self._exit_stack.enter_async_context(
                         aiohttp.ClientSession(

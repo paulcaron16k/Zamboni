@@ -758,6 +758,75 @@ def test_a_failed_connector_build_is_tried_again(monkeypatch):
     assert len(attempts) == 2
 
 
+async def _close_this_loops_connectors() -> None:
+    loop = asyncio.get_running_loop()
+    for connector in signer._built({loop: signer._connectors.get(loop, {})}):
+        await connector.close()
+
+
+def test_a_client_session_is_created_under_aiobotocores_sessions_lock():
+    """Creating a client's session holds aiobotocore's ``_sessions_lock``, as 3.9.1's own does.
+
+    Otherwise a client could close while its session is being created and leave
+    that session unclosed. aiobotocore before 3.9.1 has no such lock, so the
+    test gives the session one, holds it, and checks that creation waits.
+    """
+    session_class: Any = signer._shared_pool_session()
+
+    async def scenario() -> tuple[bool, bool]:
+        async with session_class() as session:
+            session._sessions_lock = lock = asyncio.Lock()
+            async with lock:
+                creating = asyncio.create_task(session._get_session(None))
+                await asyncio.sleep(0.1)
+                waited = not creating.done()
+            await creating
+            created = None in session._sessions
+        await _close_this_loops_connectors()
+        return waited, created
+
+    waited, created = _run_on_a_new_loop(scenario)
+
+    assert waited, "the session was created while the lock was held"
+    assert created
+
+
+def test_a_request_queued_behind_close_creates_no_session_on_the_closed_client():
+    """A request waiting on ``_sessions_lock`` while its client closes must not reopen it.
+
+    aiobotocore 3.9.1's ``close`` empties the sessions dict, closes the exit
+    stack and sets ``_sessions`` to None, all under the lock. Read before the
+    lock, the emptied dict sent the waiting request on to build a session
+    nothing would close (#260, reproduced on 3.9.2 against target-iceberg's
+    copy). The test does what that ``close`` does while holding a lock of its
+    own, so it runs on any aiobotocore; the request must fail, as in
+    aiobotocore's own ``_get_session``.
+    """
+    session_class: Any = signer._shared_pool_session()
+
+    async def scenario() -> BaseException | None:
+        session = session_class()
+        await session.__aenter__()
+        session._sessions_lock = lock = asyncio.Lock()
+        async with lock:
+            creating = asyncio.create_task(session._get_session(None))
+            await asyncio.sleep(0.1)
+            session._sessions.clear()  # 3.9.1's ``__aexit__``, under the lock.
+            await session._exit_stack.aclose()
+            session._sessions = None
+        refused: BaseException | None = None
+        try:
+            leaked = await creating
+        except AttributeError as exc:
+            refused = exc
+        else:
+            await leaked.close()
+        await _close_this_loops_connectors()
+        return refused
+
+    assert _run_on_a_new_loop(scenario) is not None, "a session was created on a closed client"
+
+
 def test_a_pool_is_shared_with_an_aiobotocore_that_builds_its_connector_synchronously(stand_in):
     """``_create_connector`` became a coroutine in aiobotocore 3.8; 2.19 to 3.7 have a plain method.
 

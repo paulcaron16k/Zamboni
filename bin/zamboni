@@ -35,7 +35,7 @@
 #     "pydantic-core==2.46.4",
 #     "pydantic==2.13.4",
 #     "pygments==2.20.0",
-#     "pyiceberg @ git+https://github.com/paulcaron16k/iceberg-python.git@dba366f976e3c0d5c80768f9bcd1ed4c7ad57bd9",
+#     "pyiceberg @ git+https://github.com/paulcaron16k/iceberg-python.git@dfdcc4da63a88cf91911b35bbf8557a2fcbbc62d",
 #     "pyiceberg-core==0.10.1",
 #     "pyparsing==3.3.2",
 #     "pyroaring==1.1.0",
