@@ -57,13 +57,14 @@ import math
 import os
 import signal
 import sys
+import threading
 import time
 import traceback
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from multiprocessing import connection, get_context
+from multiprocessing import connection, get_context, parent_process
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -71,7 +72,17 @@ import psutil
 
 from .claims import Claim, Claimer
 from .fleet import FleetConfig
-from .scheduler import CandidateQueue, PressureCheck, WorkItem
+from .scheduler import (
+    EVENT,
+    MANUAL,
+    PRESSURE,
+    REASON_OPERATIONS,
+    RECLAIM,
+    SCHEDULE,
+    CandidateQueue,
+    PressureCheck,
+    WorkItem,
+)
 
 # The parent's end of a worker's pipe. Windows' Pipe() returns a
 # PipeConnection, a sibling of Connection rather than a subclass, so
@@ -98,6 +109,42 @@ RECYCLE_AFTER_TABLES = 50
 #: `pyarrow` (3 runs, 2026-10-01), rounded up to leave room for the catalog
 #: client and the session.
 WORKER_BASELINE_BYTES = 256 * 1024 * 1024
+
+#: The exits after which a worker is trusted with another table: the exit-code
+#: contract's own answers -- success, a usage or consent refusal, a blocked
+#: table, a safety abort that deleted nothing. Anything else, an uncaught
+#: exception's 1 above all, **retires the worker**: a process that just raised
+#: may hold whatever state the raise left behind (docs/maintenance-runtime.md §7.1).
+SOUND_EXITS = frozenset({0, 2, 3, 4})
+
+#: A worker's scheduling priority, so maintenance yields the CPU to whatever
+#: shares the host. The runtime's own process is left as it is (§7.1).
+WORKER_NICE = 10
+
+#: A worker's ``oom_score_adj``, so an out-of-memory kill picks a worker rather
+#: than the runtime. Raising one's own needs no privilege (verified 2026-10-07,
+#: §7.1); only lowering it below where it started does.
+WORKER_OOM_SCORE_ADJ = 900
+
+#: How long one table may run, by the reason it was offered, before its worker
+#: is SIGKILLed (docs/maintenance-runtime.md §3.5, §7.1). **Chosen, not
+#: measured**: long enough for a full-table rewrite on a schedule, shorter for
+#: the write-driven reasons, which run fewer operations. A killed table commits
+#: nothing it had not already committed, so the kill is safe; its written
+#: files are orphans for a later sweep.
+TABLE_TIMEOUTS: Mapping[str, timedelta] = {
+    SCHEDULE: timedelta(hours=6),
+    MANUAL: timedelta(hours=6),
+    RECLAIM: timedelta(hours=6),
+    EVENT: timedelta(hours=1),
+    PRESSURE: timedelta(hours=2),
+}
+
+#: How long a job may go without a progress report before its worker is
+#: SIGKILLed as hung (§7.1). An entry reports at every operation and rewrite
+#: group (§7 rule 6), so an hour of silence is a stuck process, native code
+#: included. A pressure check reports nothing, so this is its whole limit.
+STALL_TIMEOUT = timedelta(hours=1)
 
 #: The share of the memory limit the pool plans to use. The rest is headroom for
 #: what `memory_budget_bytes` does not bound -- Arrow buffers in flight, DuckDB's
@@ -366,6 +413,19 @@ class WorkerConfig:
     #: checks read through a profile it does not have. The default runs the
     #: CLI's ``health`` (:func:`run_health`).
     health_entry: str = "zamboni.pool:run_health"
+    #: Each worker's niceness. Never lowered below what the worker inherited,
+    #: which would need a privilege.
+    nice: int = WORKER_NICE
+    #: Each worker's ``oom_score_adj``, on Linux. Likewise never lowered.
+    oom_score_adj: int = WORKER_OOM_SCORE_ADJ
+    #: How long a table may run, by reason; ``None`` for no limit. Every reason
+    #: must be named, so a reason added later cannot run unlimited by omission.
+    #: Enforced by the pool, like ``commit``, not by the worker.
+    table_timeout: Mapping[str, timedelta | None] = field(
+        default_factory=lambda: dict(TABLE_TIMEOUTS)
+    )
+    #: How long a job may go without a progress report; ``None`` for no limit.
+    stall_timeout: timedelta | None = STALL_TIMEOUT
     #: Where per-table config and run-record files go.
     workdir: Path = field(default_factory=lambda: Path.cwd())
 
@@ -376,6 +436,22 @@ class WorkerConfig:
             object.__setattr__(self, "workdir", Path(self.workdir))
         if not isinstance(self.workdir, Path):
             raise TypeError(f"workdir must be a path, not {type(self.workdir).__name__}")
+        if set(self.table_timeout) != set(REASON_OPERATIONS):
+            raise ValueError(
+                f"table_timeout must name every reason, {sorted(REASON_OPERATIONS)}; "
+                f"it names {sorted(self.table_timeout)}"
+            )
+
+    def time_limit(self, job: Job) -> timedelta | None:
+        """How long ``job`` may run in all. A merged item gets the longest of its
+        reasons', since it runs all of their operations; a pressure check has
+        only :attr:`stall_timeout`."""
+        if isinstance(job, PressureCheck):
+            return None
+        limits = [self.table_timeout[reason] for reason in job.reasons]
+        if any(limit is None for limit in limits):
+            return None
+        return max(limit for limit in limits if limit is not None)
 
     @classmethod
     def from_pool(cls, size: PoolSize, **settings: Any) -> WorkerConfig:
@@ -620,6 +696,8 @@ def _worker_main(conn: WorkerConnection, config: WorkerConfig) -> None:
     # parent retires it, or SIGKILLs it on a forced stop.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    _exit_with_parent()
+    _yield_to_the_host(config)
 
     def load(spec: str) -> Callable[..., Any]:
         module, _, name = spec.partition(":")
@@ -648,6 +726,55 @@ def _worker_main(conn: WorkerConnection, config: WorkerConfig) -> None:
                 traceback.print_exc()
                 code, record = 1, None
         conn.send(("done", code, out.getvalue(), record))
+
+
+def _exit_with_parent() -> None:
+    """Exit the moment the parent does, whatever this worker is doing.
+
+    An orphaned worker keeps maintaining a table whose claim nobody renews any
+    more, so another replica can claim it while this one is still writing --
+    the concurrency claims exist to prevent. A worker survived its parent's
+    SIGKILL, re-parented and still running two seconds later, before this
+    (verified 2026-10-07). A thread waits on the parent's sentinel, which also
+    covers a table stuck in native code where no Python signal handler would
+    run. Not ``PR_SET_PDEATHSIG``: that fires when the *thread* that spawned
+    the worker exits, and the pool spawns from short-lived threads.
+    """
+    parent = parent_process()
+    if parent is None:  # run directly, not spawned: nothing to outlive
+        return
+
+    def watch() -> None:
+        connection.wait([parent.sentinel])
+        os._exit(1)
+
+    threading.Thread(target=watch, name="zamboni-parent-watch", daemon=True).start()
+
+
+def _yield_to_the_host(config: WorkerConfig) -> None:
+    """Lower this worker's CPU priority and make it the kernel's OOM victim.
+
+    Each is only ever *raised* from what the worker inherited: lowering either
+    needs a privilege, and a host that already niced the whole service further
+    keeps its choice. A setting that cannot be applied is logged, never fatal
+    -- the worker is still useful, only less polite.
+    """
+    if sys.platform == "win32":  # neither exists there; the pool still works
+        return
+    try:
+        current = os.getpriority(os.PRIO_PROCESS, 0)
+        if config.nice > current:
+            os.setpriority(os.PRIO_PROCESS, 0, config.nice)
+    except OSError as exc:
+        logger.warning("could not set worker niceness to %d: %s", config.nice, exc)
+    path = Path("/proc/self/oom_score_adj")
+    try:
+        if config.oom_score_adj > int(path.read_text(encoding="ascii")):
+            path.write_text(str(config.oom_score_adj), encoding="ascii")
+    except FileNotFoundError:  # not Linux
+        pass
+    except (OSError, ValueError) as exc:
+        logger.warning("could not set worker oom_score_adj to %d: %s", config.oom_score_adj, exc)
 
 
 class _CurrentStderr(logging.StreamHandler):
@@ -679,8 +806,10 @@ class ItemResult:
     record: dict[str, Any] | None
     #: What the run printed, stdout and stderr together.
     output: str
-    #: Why the table failed without a run record: its worker died -- killed for
-    #: a lost claim among the ways -- or the pool or the claim store failed.
+    #: Why the table failed without a run record: its worker died, or was
+    #: killed -- ``"timed out ..."`` past its reason's limit, ``"stalled ..."``
+    #: with no progress report for too long, or for a lost claim -- or the pool
+    #: or the claim store failed.
     died: str | None
     seconds: float
     #: Why the table was never started, with exit 0: ``"deadline"`` when its
@@ -764,10 +893,27 @@ class WorkerPool:
         # ConnectionResetError, not EOFError, because it exits with our job
         # unread in its socket buffer; catching EOFError alone left the slot
         # holding a dead process and failed every later table on it (#155).
+        limit, stall = self.config.time_limit(item), self.config.stall_timeout
         try:
             slot.conn.send(job)
+            # Both clocks start here, once the job is sent: a replacement
+            # worker's spawn and imports take seconds, and are not the table's.
+            heard = time.monotonic()
+            deadline = None if limit is None else heard + limit.total_seconds()
             while True:
-                ready = connection.wait([slot.conn, slot.process.sentinel])
+                # Woken by a message, the worker exiting, or whichever limit is
+                # nearer: the run's own deadline, or a stall since the last report.
+                due = [] if deadline is None else [deadline]
+                if stall is not None:
+                    due.append(heard + stall.total_seconds())
+                timeout = max(0.0, min(due) - time.monotonic()) if due else None
+                ready = connection.wait([slot.conn, slot.process.sentinel], timeout)
+                if not ready:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        why = f"timed out after {limit} ({item.reason})"
+                    else:
+                        why = f"stalled: no progress report for {stall}"
+                    return self._killed(slot, item, started, progress, reports, why)
                 if slot.conn not in ready:
                     return self._died(slot, item, started, progress, reports)
                 message = slot.conn.recv()
@@ -775,11 +921,12 @@ class WorkerPool:
                     break
                 progress = message[1]
                 reports += 1
+                heard = time.monotonic()
             _, code, output, run_record = message
         except (OSError, EOFError):
             return self._died(slot, item, started, progress, reports)
         slot.tables += 1
-        if slot.tables >= self.recycle_after:
+        if code not in SOUND_EXITS or slot.tables >= self.recycle_after:
             self._retire(slot)
         return ItemResult(
             item,
@@ -826,6 +973,36 @@ class WorkerPool:
             None,
             "",
             f"worker died ({why})",
+            time.monotonic() - started,
+            progress=progress,
+            progress_reports=reports,
+        )
+
+    def _killed(
+        self,
+        slot: _Slot,
+        item: Job,
+        started: float,
+        progress: str | None,
+        reports: int,
+        why: str,
+    ) -> ItemResult:
+        """SIGKILL a worker past a limit: a failure of its table, reported as ``why``.
+
+        Safe whatever it was doing: a compaction commits once at the end, or
+        per completed group with partial progress, so a killed table commits
+        nothing further, and what it wrote is orphans for a later sweep (§7.1).
+        """
+        logger.error("killing the worker for %s/%s: %s", item.warehouse, item.table, why)
+        slot.process.kill()
+        slot.process.join()
+        self._reset(slot)
+        return ItemResult(
+            item,
+            1,
+            None,
+            "",
+            why,
             time.monotonic() - started,
             progress=progress,
             progress_reports=reports,

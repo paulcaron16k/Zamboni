@@ -36,6 +36,18 @@ Two categories beyond the usual set, because this tool deletes files:
   `ZAMBONI_SSL_INSECURE` and the new `ZAMBONI_S3_PATH_STYLE_ACCESS`. A
   misspelt `ZAMBONI_SSL_INSECURE=ture` used to mean "verify" without a word;
   it now stops the run, so a deployment carrying one fails until it is fixed.
+- **`zamboni serve` now limits how long a table may run, and backs off a table
+  that keeps failing** (#170, R7). A table still running after its reason's
+  `table_timeout` is SIGKILLed: 6 h for `schedule`, `manual` and `reclaim`, 1 h
+  for `event`, 2 h for `pressure`. So is one with no progress report for
+  `stall_timeout`, 1 h. Both are reported as failures, `timed out ...` or
+  `stalled ...`. Before, nothing limited a table, and a hung one held its
+  worker until `serve` stopped. A table that fails 3 times in a row (outside
+  exits 0, 2, 3 and 4) is quarantined: offers other than `manual` are refused
+  for 1 h, doubling with each further failure up to 24 h. A deployment with a
+  table that legitimately runs longer than its limit must raise it on
+  `WorkerConfig.table_timeout`. Killing a table is safe: it commits nothing it
+  had not already committed. Provisional, with the rest of the runtime.
 
 ### Added
 
@@ -43,7 +55,19 @@ Two categories beyond the usual set, because this tool deletes files:
   `ZAMBONI_S3_PATH_STYLE_ACCESS` (#263). Default on, as before: the bucket in
   the path. Off addresses the bucket as a host name, for a store that requires
   that.
-
+- **The rest of docs/maintenance-runtime.md §7.1** (#170, R7):
+  - A worker whose entry raised, or that exited outside 0, 2, 3 and 4, is
+    retired rather than trusted with the next table.
+  - A worker exits as soon as the runtime's process dies, so it never
+    maintains a table whose claim nobody renews.
+  - Workers run at `nice` 10 and `oom_score_adj` 900, so the kernel's OOM
+    killer picks one of them rather than the runtime. Both are new
+    `WorkerConfig` fields, and both only ever raise what a worker inherited.
+  - `state()` and `serve`'s state file show each quarantined table, and
+    observers get two new events, `quarantined` and `released`.
+  - `OfferReceipt.quarantined` names the tables an offer was refused for.
+  - `serve`'s capability check runs in a spawned process, never in the
+    process hosting the runtime.
 - **Pressure checks can build their catalog session the application's way**
   (#233). `WorkerConfig.health_entry` is to a pressure check what `entry` is
   to a table: a `module:function` taking the `PressureCheck` and returning
@@ -192,6 +216,13 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **A runtime loop that raises stops the runtime** (#170). `MaintenanceRuntime.run`
+  gathered its loops, so when one raised the others kept running: a scheduler
+  firing into a queue no worker took from, with the pool closed under it. Now
+  the failure is logged and kept as `last_error`, the runtime stops as on any
+  stop (tables in flight finish), and `run` re-raises it. The exception is a
+  failed workers loop: nothing waits on its tables any more, so their workers
+  are killed.
 - **`storage.s3.path_style_access: false` in `zamboni.yml` is honoured**
   (#263). The profile accepted the key and never passed it on, so S3 was
   always addressed path-style. Profile values must now be true or false; any

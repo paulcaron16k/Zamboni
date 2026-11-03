@@ -118,7 +118,7 @@ class ServiceState:
     started_at: datetime = field(default_factory=now_utc)
 
     def as_dict(self, state: RuntimeState) -> dict[str, Any]:
-        return {
+        doc = {
             "version": STATE_VERSION,
             "pid": self.pid,
             "fleet_path": self.fleet_path,
@@ -135,6 +135,19 @@ class ServiceState:
             "reload_error": state.reload_error,
             "warehouses": {name: _warehouse(w) for name, w in state.warehouses.items()},
         }
+        # Only once something is quarantined, as a warehouse field is written
+        # only once it has happened: the file reads as it did until then.
+        if state.quarantined:
+            doc["quarantined"] = {
+                table: {
+                    "failures": held.failures,
+                    "until": _iso(held.until),
+                    "backoff_seconds": int(held.backoff.total_seconds()),
+                    "last_failure": held.last_failure,
+                }
+                for table, held in sorted(state.quarantined.items())
+            }
+        return doc
 
     def write(self, path: Path, state: RuntimeState) -> None:
         """Atomically: a probe reads the old file or the new one, never half."""
@@ -507,7 +520,29 @@ class Service:
 
 
 def _capabilities_unsupported() -> str | None:
-    """Why this PyIceberg cannot be used, or ``None`` -- `zamboni doctor`'s answer."""
+    """Why this PyIceberg cannot be used, or ``None`` -- `zamboni doctor`'s answer.
+
+    **Asked of a spawned process, never this one** (docs/maintenance-runtime.md
+    §7.1). The probe performs a real overwrite on a scratch table to learn what
+    the installed PyIceberg does, which is work the process hosting the runtime
+    should not do -- a probe that crashes or leaks would take the runtime with
+    it. Spawned, as the pool's workers are, for the reason `zamboni.pool` gives
+    against fork. A probe process that dies is an answer too: nothing can be
+    maintained, and the reason says why.
+    """
+    from concurrent.futures import ProcessPoolExecutor
+    from concurrent.futures.process import BrokenProcessPool
+    from multiprocessing import get_context
+
+    with ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn")) as probe:
+        try:
+            return probe.submit(_probe_unsupported).result()
+        except BrokenProcessPool as exc:
+            return f"the capability probe's process died: {exc}"
+
+
+def _probe_unsupported() -> str | None:
+    """`_capabilities_unsupported`'s body, run in the probe's own process."""
     from .capabilities import detect
 
     return detect().unsupported_reason()

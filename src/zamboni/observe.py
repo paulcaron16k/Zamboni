@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from .claims import Claim
     from .fleet import FleetConfig
     from .pool import ItemResult
+    from .quarantine import QuarantineState
     from .runtime import OfferReceipt
     from .scheduler import WorkItem
 
@@ -51,6 +52,8 @@ EVENTS = (
     "fleet_changed",
     "refused",
     "pressure_checked",
+    "quarantined",
+    "released",
 )
 
 
@@ -95,6 +98,13 @@ class Observer:
     def pressure_checked(self, warehouse: str, found: Mapping[str, Any]) -> None:
         """A delete-pressure check of ``warehouse`` (#175): ``checked``, ``over``,
         ``errors``, ``offered`` and the check's ``exit_code``."""
+
+    def quarantined(self, warehouse: str, table: str, state: QuarantineState) -> None:
+        """``table`` failed again with too many failures in a row: offers of it,
+        other than ``manual``, are refused until ``state.until`` (§7.1)."""
+
+    def released(self, warehouse: str, table: str) -> None:
+        """A quarantined ``table`` ran soundly, and is offered as any other again."""
 
 
 class Observers:

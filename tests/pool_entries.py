@@ -18,6 +18,7 @@ import json
 import os
 import signal
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -79,6 +80,36 @@ def health_without_tables(check: PressureCheck, context: WorkerContext) -> dict[
     return {"exit_code": 0}
 
 
+def sleeps(item: WorkItem, context: WorkerContext) -> dict[str, Any]:
+    """Writes its pid where ``ZAMBONI_TEST_PID_FILE`` says, then sleeps far past
+    any test: a table still running when its parent is killed."""
+    Path(os.environ["ZAMBONI_TEST_PID_FILE"]).write_text(str(os.getpid()), encoding="ascii")
+    time.sleep(600)
+    return {"exit_code": 0}
+
+
+def goes_quiet(item: WorkItem, context: WorkerContext) -> dict[str, Any]:
+    """Reports once, then nothing: hung, as far as anyone outside can tell."""
+    context.progress("starting, then silence")
+    time.sleep(600)
+    return {"exit_code": 0}
+
+
+def keeps_talking(item: WorkItem, context: WorkerContext) -> dict[str, Any]:
+    """Reports every 0.1 s for ``ZAMBONI_TEST_TALK_SECONDS``, then succeeds: a
+    long table that is plainly still working."""
+    until = time.monotonic() + float(os.environ["ZAMBONI_TEST_TALK_SECONDS"])
+    while time.monotonic() < until:
+        context.progress("still rewriting")
+        time.sleep(0.1)
+    return {"exit_code": 0}
+
+
+def health_that_hangs(check: PressureCheck, context: WorkerContext) -> dict[str, Any]:
+    time.sleep(600)
+    return {"tables": {}}
+
+
 def not_a_record(item: WorkItem, context: WorkerContext) -> Any:
     """Breaks rule 3: returns what a CLI ``main`` would, an exit code."""
     return 0
@@ -93,13 +124,16 @@ def _cli(argv: list[str], *, progress: Callable[[str], None] | None = None) -> i
         raise RuntimeError("boom")
     if table == "raw.usage":
         sys.exit(2)
+    code = {"raw.blocked": 3, "raw.aborted": 4}.get(table, 0)
     path = argv[argv.index("--json") + 1]
     with Path(path).open("a", encoding="utf-8") as out:
         out.write(
             json.dumps(
                 {
-                    "exit_code": 3 if table == "raw.blocked" else 0,
+                    "exit_code": code,
                     "pid": os.getpid(),
+                    "nice": os.getpriority(os.PRIO_PROCESS, 0),
+                    "oom_score_adj": _oom_score_adj(),
                     "argv": argv,
                     "marker": os.environ.get("ZAMBONI_TEST_MARKER"),
                     "table_config": Path(argv[argv.index("--table-config") + 1]).read_text(
@@ -112,4 +146,11 @@ def _cli(argv: list[str], *, progress: Callable[[str], None] | None = None) -> i
     # Left behind on purpose: the next table on this worker must not see it.
     os.environ["ZAMBONI_TEST_MARKER"] = "left over from the previous table"
     print(f"maintained {table}")
-    return 3 if table == "raw.blocked" else 0
+    return code
+
+
+def _oom_score_adj() -> int | None:
+    try:
+        return int(Path("/proc/self/oom_score_adj").read_text(encoding="ascii"))
+    except FileNotFoundError:  # not Linux
+        return None
