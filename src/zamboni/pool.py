@@ -391,6 +391,10 @@ class WorkerConfig:
     threads: int = 1
     #: DuckDB's memory limit per worker; ``None`` leaves DuckDB's default.
     duckdb_memory_bytes: int | None = None
+    #: DuckDB's spill ceiling per worker -- its share of the pod's spill budget,
+    #: from :meth:`from_pool`. ``None`` leaves each table's own setting, which
+    #: is DuckDB's 90% of the free disk it can see unless configured (#186).
+    max_temp_directory_bytes: int | None = None
     #: The environment a worker restores before every table. Must be taken
     #: *before* anything loads ``.env`` into ``os.environ``: ``load_env`` lets
     #: the real environment win, so a worker inheriting already-loaded keys
@@ -454,12 +458,29 @@ class WorkerConfig:
         return max(limit for limit in limits if limit is not None)
 
     @classmethod
-    def from_pool(cls, size: PoolSize, **settings: Any) -> WorkerConfig:
-        """A config carrying ``size``'s per-worker threads and DuckDB memory.
+    def from_pool(
+        cls, size: PoolSize, *, spill_budget_bytes: int | None = None, **settings: Any
+    ) -> WorkerConfig:
+        """A config carrying ``size``'s per-worker threads and DuckDB memory,
+        and its share of ``spill_budget_bytes``.
 
         The way to build one for a sized pool, so the numbers the sizing chose
         are the numbers the workers get -- not restated beside it.
+
+        **The spill budget is the pod's, divided here** because the pool cannot
+        find it out: from inside a pod, ``statvfs`` on an ``emptyDir`` reports
+        the node's disk, not its ``sizeLimit`` -- the blindness that made
+        DuckDB's own default unsafe (#186). Every worker spills into the same
+        directory with a DuckDB of its own, so each gets ``budget // workers``
+        (#205). A budget that cannot give each worker a byte is refused.
         """
+        if spill_budget_bytes is not None:
+            if spill_budget_bytes < size.workers:
+                raise ValueError(
+                    f"a spill budget of {spill_budget_bytes} byte(s) cannot give each of "
+                    f"{size.workers} worker(s) a byte"
+                )
+            settings["max_temp_directory_bytes"] = spill_budget_bytes // size.workers
         return cls(
             threads=size.threads_per_worker,
             duckdb_memory_bytes=size.duckdb_memory_bytes,
@@ -471,6 +492,7 @@ class WorkerConfig:
         return WorkerContext(
             threads=self.threads,
             duckdb_memory_bytes=self.duckdb_memory_bytes,
+            max_temp_directory_bytes=self.max_temp_directory_bytes,
             workdir=self.workdir,
             profile_path=self.profile_path,
             env_path=self.env_path,
@@ -502,6 +524,9 @@ class WorkerContext:
     #: settings as the CLI does. The default entry passes them on.
     profile_path: str | None = None
     env_path: str | None = None
+    #: That session's spill ceiling, this worker's share of the pod's budget;
+    #: ``None`` leaves the table's own setting.
+    max_temp_directory_bytes: int | None = None
     #: The environment the worker restored before this table. Out of the repr,
     #: as on :class:`WorkerConfig`: it holds every secret the process was given.
     base_environ: Mapping[str, str] = field(default_factory=dict, repr=False)
@@ -558,6 +583,9 @@ def worker_argv(item: Job, context: WorkerContext, table_config: Path, record: P
                 argv += ["--due-anyway", ",".join(anyway)]
         if context.duckdb_memory_bytes is not None:
             argv += ["--duckdb-memory-limit-bytes", str(context.duckdb_memory_bytes)]
+        # A table only: a pressure check loads metadata and never spills.
+        if context.max_temp_directory_bytes is not None:
+            argv += ["--max-temp-directory-bytes", str(context.max_temp_directory_bytes)]
     if item.uri:
         argv += ["--uri", item.uri]
     if context.profile_path:

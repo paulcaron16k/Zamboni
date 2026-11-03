@@ -203,7 +203,11 @@ Implemented by `zamboni.pool` (ZMBNI-121). What it settles, each tested in
   cgroup limit the plan uses host RAM rather than declining to plan.
   `--reserved-memory-bytes` and `--reserved-cpus` (or `ZAMBONI_RESERVED_*`)
   come off the memory limit and the CPU count first, for a container that runs
-  something beside `serve` (#234).
+  something beside `serve` (#234). Spill is divided the same way:
+  `--spill-budget-bytes` (or `ZAMBONI_SPILL_BUDGET_BYTES`) is the pod's, and
+  each worker gets `budget // workers` as its `--max-temp-directory-bytes`
+  (#205). The pool cannot find the budget itself: inside a pod, `statvfs` on
+  an `emptyDir` reports the node's disk, not its `sizeLimit`.
 - **The feed takes from the queue only when a worker is free**, so a waiting
   table still coalesces and is still resolved against the newest config.
   Waiting for a worker is raced against stop: an earlier draft, blocked there,

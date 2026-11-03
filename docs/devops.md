@@ -562,16 +562,13 @@ spec:
             - --profile=/etc/zamboni/profile/zamboni.yml
             - serve
             - --fleet=/etc/zamboni/fleet/fleet.yaml
-            - --workers=4                 # pinned, because the spill cap is divided by it
+            - --spill-budget-bytes=19327352832   # 20 GiB sizeLimit - 2 GiB headroom
             - --yes
             - --json=/var/log/zamboni/runs.jsonl
             - --state-file=/run/zamboni/state.json
             - --pid-file=/run/zamboni/serve.pid
           envFrom:
             - secretRef: {name: zamboni-credentials}   # ZAMBONI_CREDENTIAL, ZAMBONI_S3_SECRET_ACCESS_KEY, ...
-          env:
-            # Per worker: (20 GiB sizeLimit - 2 GiB headroom) / 4 workers = 4.5 GiB
-            - {name: ZAMBONI_MAX_TEMP_DIRECTORY_BYTES, value: "4831838208"}
           resources:
             limits: {cpu: "4", memory: 8Gi}            # the pool sizes itself from these
           startupProbe:
@@ -613,7 +610,7 @@ someone, or would:
 | liveness checks nothing external | It asserts only that the scheduler loop ticked in the last 180 s. A catalog or object-store outage is not fixed by a restart, and a probe that checked one would turn that outage into a restart loop |
 | the fleet file as a **directory** mount | A ConfigMap mounted with `subPath` is not updated when the ConfigMap changes, so the service would never see a new tenant. Mounted as a directory it is projected by symlink swap, which the reload watcher follows |
 | `/run/zamboni` and `/tmp` as `emptyDir` | The state file, the pid file and per-table scratch files go in the first; DuckDB spills to the second. A read-only root filesystem needs both writable |
-| `sizeLimit` and `ZAMBONI_MAX_TEMP_DIRECTORY_BYTES` | DuckDB limits its spill to 90% of the free disk *it can see*, which is the node's disk, not the `emptyDir`'s `sizeLimit`. Without a cap, one large sorted rewrite spills past the limit and the kubelet evicts the whole pod, every table in flight with it (ZMBNI-186). With the cap, that rewrite fails its own table with exit 3, nothing committed, and the service goes on. **The cap is per worker**: each worker is its own process with its own DuckDB, and they all spill into `/tmp`. The pool divides memory between workers but not spill. So divide the `sizeLimit`, less headroom for anything else writing to `/tmp`, by the worker count, and pin `--workers` so that count cannot grow under you |
+| `sizeLimit` and `--spill-budget-bytes` | DuckDB limits its spill to 90% of the free disk *it can see*, which is the node's disk, not the `emptyDir`'s `sizeLimit`. Without a cap, one large sorted rewrite spills past the limit and the kubelet evicts the whole pod, every table in flight with it (ZMBNI-186). With the cap, that rewrite fails its own table with exit 3, nothing committed, and the service goes on. Each worker is its own process with its own DuckDB, and they all spill into `/tmp`. So give `serve` the **pod's** budget, the `sizeLimit` less headroom for anything else writing to `/tmp`, and it divides that equally between however many workers it plans, as it divides memory (#205). It refuses a budget too small to give each worker a byte, and one set beside a per-worker `ZAMBONI_MAX_TEMP_DIRECTORY_BYTES`, which the budget would override. Before 0.8.0 the division was by hand, with `--workers` pinned so the count could not grow under it; neither is needed now. `ZAMBONI_SPILL_BUDGET_BYTES` works the same as the flag |
 | `resources.limits` | The pool reads the cgroup's CPU quota and memory limit, not the node's, and gives each worker's DuckDB its share ([event-driven-maintenance.md §3](event-driven-maintenance.md)). Without limits it sizes itself from the node. Another process in the same container shares those limits and is not counted: keep its share back with `--reserved-memory-bytes` and `--reserved-cpus`. A sidecar is its own container with its own limits, so it needs neither |
 
 **Credentials: from the environment, not a projected file.** `envFrom` a Secret

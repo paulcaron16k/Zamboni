@@ -715,7 +715,7 @@ def run_table(item: WorkItem, context: WorkerContext) -> dict: ...
 3. Return the run record — the shape `maintenance --json` writes — so every
    deployment's results read the same. A raised exception is recorded as exit 1.
 4. Honour `item.commit`: **False previews.**
-5. Pass `context`'s thread and memory limits to the session it builds.
+5. Pass `context`'s thread, memory and spill limits to the session it builds.
 6. Report progress (`context.progress(...)`) at least at every operation
    boundary, and within a long operation wherever it has a natural unit — the
    default entry reports each rewrite group. A long table that reports nothing
@@ -740,7 +740,9 @@ As built in R5 (`zamboni.pool`):
   the pool stamps `WorkerConfig.commit` (`serve --yes`) on every item it sends,
   over whatever the item carried
   (`test_an_items_own_commit_never_outranks_the_runtimes`).
-- **`WorkerContext`** carries the DuckDB threads and memory limit, a scratch
+- **`WorkerContext`** carries the DuckDB threads, memory limit and spill
+  ceiling (`max_temp_directory_bytes`, this worker's share of `serve
+  --spill-budget-bytes`, #205), a scratch
   `workdir`, the profile and env paths, and the base environment (out of its
   repr). It is built in the worker, never sent. `context.progress(note)` goes
   to the runtime over the worker's pipe, and `ItemResult.progress` keeps the

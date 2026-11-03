@@ -86,7 +86,7 @@ from .workdir import describe_temp_directory
 
 if TYPE_CHECKING:
     from .maintenance import MinimumInterval
-    from .pool import PoolSize
+    from .pool import PoolSize, WorkerConfig
 
 USAGE = """\
 getting started
@@ -407,6 +407,16 @@ def _build_parser() -> argparse.ArgumentParser:
         variable="ZAMBONI_RESERVED_CPUS",
         type=_non_negative_int,
         help="CPUs kept the same way, off the CPU quota. Default: $ZAMBONI_RESERVED_CPUS, else 0",
+    )
+    _env_argument(
+        sv,
+        "--spill-budget-bytes",
+        variable="ZAMBONI_SPILL_BUDGET_BYTES",
+        type=_positive_int,
+        help="disk every worker's DuckDB may spill to, together: the spill volume's "
+        "size less headroom. Each worker gets an equal share as its "
+        "--max-temp-directory-bytes. On Kubernetes, below the emptyDir's sizeLimit, "
+        "which DuckDB cannot see. Default: $ZAMBONI_SPILL_BUDGET_BYTES, else no limit",
     )
     sv.add_argument(
         "--json",
@@ -1782,13 +1792,44 @@ def _plan_serve_pool(
     )
 
 
+def _serve_worker_config(
+    args: argparse.Namespace, size: PoolSize, *, workdir: Path
+) -> WorkerConfig:
+    """What ``serve``'s workers share. Raises ValueError for a spill budget it
+    cannot divide, or one set beside a per-worker cap.
+
+    The two are refused together rather than one silently winning: a worker's
+    ``--max-temp-directory-bytes`` beats the variable (#252), so the per-worker
+    figure an operator set by hand would be ignored without a word. Checked
+    after ``.env`` is loaded, so it sees a cap set there too.
+    """
+    from .pool import WorkerConfig
+
+    budget = args.spill_budget_bytes
+    if budget is not None and os.environ.get("ZAMBONI_MAX_TEMP_DIRECTORY_BYTES", "").strip():
+        raise ValueError(
+            "--spill-budget-bytes (or ZAMBONI_SPILL_BUDGET_BYTES) is divided between "
+            "the workers; ZAMBONI_MAX_TEMP_DIRECTORY_BYTES is a per-worker cap it "
+            "would override. Set one: the budget, which follows the worker count."
+        )
+    profile = args.zamboni_profile
+    return WorkerConfig.from_pool(
+        size,
+        spill_budget_bytes=budget,
+        profile_path=str(profile.source) if profile.source else None,
+        env_path=str(args.zamboni_env_file) if args.zamboni_env_file else None,
+        commit=bool(args.yes),
+        base_environ=args.zamboni_base_environ,
+        workdir=workdir,
+    )
+
+
 def _serve(args: argparse.Namespace) -> int:
     """`zamboni serve`. 0 on a clean stop; 2 if it could not start."""
     import asyncio
     import signal
 
     from .fleet import FleetConfigError
-    from .pool import WorkerConfig
     from .reload import POLL_SECONDS, install_hangup
     from .service import AlreadyRunning, Service, single_instance
 
@@ -1799,22 +1840,21 @@ def _serve(args: argparse.Namespace) -> int:
         directory.mkdir(parents=True, exist_ok=True)
 
     size = _plan_serve_pool(args)
+    try:
+        config = _serve_worker_config(args, size, workdir=state_path.parent)
+    except ValueError as exc:
+        print(f"zamboni serve: {exc}", file=sys.stderr)
+        return 2
     profile = args.zamboni_profile
-    config = WorkerConfig.from_pool(
-        size,
-        profile_path=str(profile.source) if profile.source else None,
-        env_path=str(args.zamboni_env_file) if args.zamboni_env_file else None,
-        commit=bool(args.yes),
-        base_environ=args.zamboni_base_environ,
-        workdir=state_path.parent,
-    )
     logging.getLogger(__name__).info(
-        "serving %s: %d worker(s) (%s), %d DuckDB thread(s) and %s bytes each",
+        "serving %s: %d worker(s) (%s), %d DuckDB thread(s), %s bytes of memory "
+        "and %s bytes of spill each",
         args.fleet,
         size.workers,
         size.reason,
         size.threads_per_worker,
         size.duckdb_memory_bytes,
+        config.max_temp_directory_bytes,
     )
     events = []
     if profile.nats is not None:
