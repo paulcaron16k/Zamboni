@@ -125,10 +125,16 @@ def test_a_value_only_in_dotenv_reaches_its_flag(workdir, variable):
     assert getattr(settled(argv), action.dest) == expected
 
 
-@pytest.mark.parametrize(
-    "variable",
-    sorted(v for v, (a, _) in VARIABLES.items() if callable(a.type) or a.choices is not None),
-)
+def refuses(action: argparse.Action) -> bool:
+    """Whether the flag has values it would refuse; a plain string takes anything."""
+    return (
+        callable(action.type)
+        or action.choices is not None
+        or isinstance(action, argparse.BooleanOptionalAction)
+    )
+
+
+@pytest.mark.parametrize("variable", sorted(v for v, (a, _) in VARIABLES.items() if refuses(a)))
 @pytest.mark.parametrize("source", ["dotenv", "process"])
 def test_a_malformed_value_is_a_usage_error_naming_its_variable(
     workdir, monkeypatch, capsys, variable, source

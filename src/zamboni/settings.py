@@ -90,7 +90,7 @@ STORAGE_SETTINGS = {
     "s3": frozenset(
         {"endpoint", "region", "access_key_id", "secret_access_key", "path_style_access"}
     ),
-    "gcs": frozenset({"token", "project_id", "service_host", "default_location"}),
+    "gcs": frozenset({"token", "project_id", "service_host"}),
     "azure": frozenset(
         {
             "account_name",
@@ -103,6 +103,38 @@ STORAGE_SETTINGS = {
         }
     ),
 }
+
+#: Storage keys that are switches, checked when the profile loads. A misspelt
+#: boolean read leniently is false, which for `path_style_access` changes how
+#: every request is addressed and says nothing.
+BOOLEAN_STORAGE_SETTINGS = frozenset({("s3", "path_style_access")})
+
+#: Storage keys once accepted and now refused, each with why. Named rather than
+#: left to "unknown key", so a profile that carried one learns what changed.
+REMOVED_STORAGE_SETTINGS = {
+    ("gcs", "default_location"): (
+        "removed. It set the location of buckets PyIceberg creates, and Zamboni "
+        "never creates a bucket on any store -- provisioning them is a DevOps "
+        "task. Delete the key (#263)"
+    ),
+}
+
+#: The spellings `parse_bool` accepts, lower-cased.
+_TRUE = frozenset({"1", "true", "yes"})
+_FALSE = frozenset({"0", "false", "no"})
+
+
+def parse_bool(text: object) -> bool:
+    """A switch from a profile or a variable. Anything but the six spellings is
+    refused rather than read as false, for the reason `BOOLEAN_STORAGE_SETTINGS`
+    gives."""
+    word = str(text).strip().lower()
+    if word in _TRUE:
+        return True
+    if word in _FALSE:
+        return False
+    raise ValueError(f"must be true or false, got {text!r}")
+
 
 #: What may appear under `ssl:` in the profile. Neither is a secret -- a CA
 #: bundle is a path to a *public* certificate, and `insecure` is a policy -- so
@@ -590,6 +622,14 @@ def load_profile(path: Path | None) -> Profile:
     for provider, settings in storage_block.items():
         if not isinstance(settings, dict):
             raise ProfileError(f"{path}: storage.{provider} must be a block of settings")
+        for key in settings:
+            if (reason := REMOVED_STORAGE_SETTINGS.get((provider, key))) is not None:
+                raise ProfileError(f"{path}: storage.{provider}.{key}: {reason}")
+            if (provider, key) in BOOLEAN_STORAGE_SETTINGS:
+                try:
+                    parse_bool(settings[key])
+                except ValueError as exc:
+                    raise ProfileError(f"{path}: storage.{provider}.{key}: {exc}") from None
         allowed = STORAGE_SETTINGS[provider]
         if unknown := sorted(set(settings) - allowed):
             raise ProfileError(

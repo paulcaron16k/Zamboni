@@ -183,6 +183,10 @@ rather than failing at the first read:
 # S3, and every S3-compatible store: MinIO, Silo, Garage, Ceph RGW
 ZAMBONI_S3_ACCESS_KEY_ID=...
 ZAMBONI_S3_SECRET_ACCESS_KEY=...
+# Bucket in the path (http://endpoint/bucket/key) unless this says false, for a
+# store that wants it as a host (http://bucket.endpoint/key). In zamboni.yml it is
+# `storage.s3.path_style_access`; on the command line, --no-s3-path-style-access.
+ZAMBONI_S3_PATH_STYLE_ACCESS=true      # optional; the default
 
 # Google Cloud Storage. A path to a service-account key file, or the literal
 # `google_default` to use ambient credentials -- which is what GKE Workload

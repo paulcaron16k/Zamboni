@@ -21,7 +21,28 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### BREAKING
+
+- **`storage.gcs.default_location` and `GCSSettings.default_location` are
+  removed** (#263). They set the location of buckets PyIceberg creates, and
+  Zamboni never creates a bucket on any store; provisioning them is a DevOps
+  task. The profile key was accepted but never passed on, so it already did
+  nothing. A profile carrying it now fails at load and says so. A library
+  caller passing `default_location=` gets a `TypeError`, and one constructing
+  `GCSSettings` positionally loses a field before `extra`.
+- **A boolean `ZAMBONI_*` variable must say true or false** (#263):
+  `1`/`true`/`yes` or `0`/`false`/`no`, in any case. Anything else exits 2
+  naming the variable, where it used to be read as false. That covers
+  `ZAMBONI_SSL_INSECURE` and the new `ZAMBONI_S3_PATH_STYLE_ACCESS`. A
+  misspelt `ZAMBONI_SSL_INSECURE=ture` used to mean "verify" without a word;
+  it now stops the run, so a deployment carrying one fails until it is fixed.
+
 ### Added
+
+- **`--s3-path-style-access` / `--no-s3-path-style-access`**, or
+  `ZAMBONI_S3_PATH_STYLE_ACCESS` (#263). Default on, as before: the bucket in
+  the path. Off addresses the bucket as a host name, for a store that requires
+  that.
 
 - **Pressure checks can build their catalog session the application's way**
   (#233). `WorkerConfig.health_entry` is to a pressure check what `entry` is
@@ -171,6 +192,10 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **`storage.s3.path_style_access: false` in `zamboni.yml` is honoured**
+  (#263). The profile accepted the key and never passed it on, so S3 was
+  always addressed path-style. Profile values must now be true or false; any
+  other value fails at load.
 - **A `ZAMBONI_*` setting in `.env` now reaches its flag** (#252). Twenty
   flags, from `--trino-host` to `--max-temp-directory-bytes`, read their
   variable as an argparse default. That default is evaluated when the parser is
