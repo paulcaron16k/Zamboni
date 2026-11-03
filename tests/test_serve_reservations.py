@@ -39,7 +39,11 @@ def limits(tmp_path, monkeypatch):
 
 
 def serve_args(*flags: str):
-    return cli._build_parser().parse_args(["serve", "--fleet", "fleet.yaml", *flags])
+    """Parsed, with each flag's variable applied, as ``main`` does."""
+    parser = cli._build_parser()
+    args = parser.parse_args(["serve", "--fleet", "fleet.yaml", *flags])
+    cli._apply_environment(parser, args)
+    return args
 
 
 def expected(limits, *, memory: int = 0, cpus: int = 0, workers: int | None = None):
@@ -77,13 +81,12 @@ def test_the_flags_reach_the_plan_under_workers(limits):
     assert planned == expected(limits, cpus=4, workers=2)
 
 
-def test_a_variable_set_after_parsing_still_arrives(limits, monkeypatch):
-    """`.env` is loaded after the parser is built, so the variable is read when
-    the pool is planned -- not as a flag default, which would miss it (#252)."""
-    args = serve_args()
+def test_the_variables_reach_the_plan(limits, monkeypatch):
+    """Through the same step as every other flag's variable; that the step sees
+    a value set only in `.env` is tests/test_env_flags.py's to show (#252)."""
     monkeypatch.setenv(CPUS, "6")
     monkeypatch.setenv(MEMORY, str(GiB))
-    assert cli._plan_serve_pool(args, **limits) == expected(limits, cpus=6, memory=GiB)
+    assert cli._plan_serve_pool(serve_args(), **limits) == expected(limits, cpus=6, memory=GiB)
 
 
 def test_a_flag_beats_its_variable(limits, monkeypatch):
@@ -106,18 +109,19 @@ def test_a_malformed_variable_stops_serve_with_exit_2_naming_it(
 ):
     monkeypatch.chdir(tmp_path)  # so a developer's own zamboni.yml is not read
     monkeypatch.setenv(MEMORY, value)
-    code = cli.main(
-        [
-            "serve",
-            "--fleet",
-            str(tmp_path / "fleet.yaml"),
-            "--state-file",
-            str(tmp_path / "state.json"),
-            "--pid-file",
-            str(tmp_path / "serve.pid"),
-        ]
-    )
-    assert code == 2
+    with pytest.raises(SystemExit) as exc:
+        cli.main(
+            [
+                "serve",
+                "--fleet",
+                str(tmp_path / "fleet.yaml"),
+                "--state-file",
+                str(tmp_path / "state.json"),
+                "--pid-file",
+                str(tmp_path / "serve.pid"),
+            ]
+        )
+    assert exc.value.code == 2
     assert f"{MEMORY}={value!r}" in capsys.readouterr().err
 
 

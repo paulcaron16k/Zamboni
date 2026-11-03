@@ -34,6 +34,28 @@ ARROW_SCHEMA = pa.schema(
 
 
 @pytest.fixture
+def restore_environment():
+    """`load_env` writes into `os.environ`, and nothing else undoes it.
+
+    For any test that loads a dotenv file. `monkeypatch.delenv` is no
+    substitute: for a variable not yet set it records nothing, so what the file
+    adds afterwards stays. tests/test_env_flags.py leaked ZAMBONI_WAREHOUSE that
+    way into test_maintenance.py on its first full run.
+
+    Every test in test_settings.py that loads a dotenv file once left its
+    variables set for the rest of the session. It never failed because pytest
+    collects `test_cli.py` before `test_settings.py` alphabetically, so the
+    tests that would trip over a stray `ZAMBONI_WAREHOUSE` happened to run
+    first, and nothing promises that order. A latent flake rather than a
+    passing suite.
+    """
+    saved = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
+
+
+@pytest.fixture
 def session(tmp_path):
     warehouse = tmp_path / "warehouse"
     warehouse.mkdir()

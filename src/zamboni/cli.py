@@ -126,12 +126,12 @@ def _apply_profile(args: argparse.Namespace, profile) -> None:
     """Fill in what neither a flag nor the environment supplied.
 
     Only ever fills gaps. A flag beats the profile because a one-off run has to
-    be able to override a committed file without editing it, and the flag
-    defaults already carry the ZAMBONI_* values -- so anything still None here
-    was specified nowhere else.
+    be able to override a committed file without editing it, and
+    `_apply_environment` has already given each flag its ZAMBONI_* value -- so
+    anything still None here was specified nowhere else.
     """
-    # uri and warehouse: fill only when unset. Their flag defaults already carry
-    # ZAMBONI_URI / ZAMBONI_WAREHOUSE, so None here means nobody said.
+    # uri and warehouse: fill only when unset. `_apply_environment` has already
+    # given them ZAMBONI_URI / ZAMBONI_WAREHOUSE, so None here means nobody said.
     for attribute in ("uri", "warehouse", "credential_use"):
         if not getattr(args, attribute, None) and (value := getattr(profile, attribute)):
             setattr(args, attribute, value)
@@ -146,8 +146,8 @@ def _apply_profile(args: argparse.Namespace, profile) -> None:
         args.engine = profile.engine
 
     # Engine connection settings from the profile, gap-filled the same way.
-    # `--trino-host` beats `trino: {host: ...}` beats nothing; the flag defaults
-    # already carry ZAMBONI_TRINO_HOST, so a None here means nobody said.
+    # `--trino-host` beats `trino: {host: ...}` beats nothing; ZAMBONI_TRINO_HOST
+    # has already been applied, so a None here means nobody said.
     for engine_name, block in profile.engines.items():
         for key, value in block.items():
             attribute = f"{engine_name}_{key}"
@@ -160,6 +160,28 @@ def _apply_profile(args: argparse.Namespace, profile) -> None:
         candidate = profile.table_config_for(args.warehouse)
         if candidate.is_file():
             args.table_config = str(candidate)
+
+
+def _settle(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Give every setting ``args`` carries its value: flag, then the process
+    environment, then ``.env``, then the profile, then the built-in default.
+
+    Before anything reads an environment variable: the dotenv file has to be in
+    os.environ first. Then each flag the command line left unset takes its
+    ZAMBONI_* variable, and the profile supplies what neither did (#252). Exits
+    2, through ``parser.error``, on a profile or a variable it cannot use.
+    """
+    # Taken before `.env` is loaded into os.environ, for `serve`'s workers: each
+    # restores this before a table, so every table reads `.env` fresh.
+    args.zamboni_base_environ = dict(os.environ)
+    try:
+        args.zamboni_profile, args.zamboni_env_file = settings.resolve(
+            profile_path=args.profile, env_path=args.env
+        )
+    except settings.ProfileError as exc:
+        parser.error(str(exc))
+    _apply_environment(parser, args)
+    _apply_profile(args, args.zamboni_profile)
 
 
 def main(argv: list[str] | None = None, *, progress: Callable[[str], None] | None = None) -> int:
@@ -177,24 +199,10 @@ def main(argv: list[str] | None = None, *, progress: Callable[[str], None] | Non
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    # Before anything reads an environment variable or a flag default: the
-    # dotenv file has to be in os.environ first, and the profile supplies what
-    # neither a flag nor the environment did.
-    # Taken before `.env` is loaded into os.environ, for `serve`'s workers: each
-    # restores this before a table, so every table reads `.env` fresh.
-    args.zamboni_base_environ = dict(os.environ)
-    try:
-        args.zamboni_profile, env_file = settings.resolve(
-            profile_path=args.profile, env_path=args.env
-        )
-    except settings.ProfileError as exc:
-        parser.error(str(exc))
-        return 2
-    args.zamboni_env_file = env_file
-    _apply_profile(args, args.zamboni_profile)
+    _settle(parser, args)
     if args.verbose:
         logging.getLogger(__name__).debug(
-            "profile: %s, env: %s", args.zamboni_profile.source, env_file
+            "profile: %s, env: %s", args.zamboni_profile.source, args.zamboni_env_file
         )
 
     if args.command == "doctor":
@@ -384,15 +392,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="at most this many worker processes. Default: what the CPU quota and "
         "memory limit allow; a larger number is lowered to that",
     )
-    sv.add_argument(
+    _env_argument(
+        sv,
         "--reserved-memory-bytes",
+        variable="ZAMBONI_RESERVED_MEMORY_BYTES",
         type=_non_negative_int,
         help="memory this process keeps for itself before the pool is sized: taken "
         "off the cgroup's limit (or host RAM) first. For running beside something "
         "else in the same container. Default: $ZAMBONI_RESERVED_MEMORY_BYTES, else 0",
     )
-    sv.add_argument(
+    _env_argument(
+        sv,
         "--reserved-cpus",
+        variable="ZAMBONI_RESERVED_CPUS",
         type=_non_negative_int,
         help="CPUs kept the same way, off the CPU quota. Default: $ZAMBONI_RESERVED_CPUS, else 0",
     )
@@ -717,74 +729,82 @@ def _add_engine_arg(p: argparse.ArgumentParser) -> None:
     # Connection details for a non-local engine. Environment fallbacks match the
     # ZAMBONI_* pattern the catalog flags already use, so a cron entry needs no
     # flags at all.
-    p.add_argument("--trino-host", default=os.environ.get("ZAMBONI_TRINO_HOST"))
-    p.add_argument("--trino-port", default=os.environ.get("ZAMBONI_TRINO_PORT"))
-    p.add_argument("--trino-user", default=os.environ.get("ZAMBONI_TRINO_USER"))
-    p.add_argument(
+    _env_argument(p, "--trino-host", variable="ZAMBONI_TRINO_HOST")
+    _env_argument(p, "--trino-port", variable="ZAMBONI_TRINO_PORT")
+    _env_argument(p, "--trino-user", variable="ZAMBONI_TRINO_USER")
+    _env_argument(
+        p,
         "--trino-version",
-        default=os.environ.get("ZAMBONI_TRINO_VERSION"),
+        variable="ZAMBONI_TRINO_VERSION",
         help="server version, e.g. 479. Gates arguments that only newer Trino "
         "accepts; unknown means the tool assumes the older behaviour.",
     )
-    p.add_argument(
+    _env_argument(
+        p,
         "--trino-catalog",
-        default=os.environ.get("ZAMBONI_TRINO_CATALOG"),
+        variable="ZAMBONI_TRINO_CATALOG",
         help="the Trino catalog holding the Iceberg tables. Default `iceberg`.",
     )
     # Spark had no flags at all until ZMBNI-913 -- the maintainer read `remote`,
     # `master` and `catalog` from its options, and nothing on the CLI ever put
     # them there. `--engine spark` was reachable and unconfigurable.
-    p.add_argument(
+    _env_argument(
+        p,
         "--spark-remote",
-        default=os.environ.get("ZAMBONI_SPARK_REMOTE"),
+        variable="ZAMBONI_SPARK_REMOTE",
         help="Spark Connect endpoint, e.g. sc://localhost:15002. Needs no JVM "
         "here; the server owns the Iceberg extensions and the S3 credentials "
         "`remove-orphans` lists with.",
     )
-    p.add_argument(
+    _env_argument(
+        p,
         "--spark-master",
-        default=os.environ.get("ZAMBONI_SPARK_MASTER"),
+        variable="ZAMBONI_SPARK_MASTER",
         help="Spark master for a local driver, e.g. local[*]. Mutually "
         "exclusive with --spark-remote.",
     )
-    p.add_argument(
+    _env_argument(
+        p,
         "--spark-catalog",
-        default=os.environ.get("ZAMBONI_SPARK_CATALOG"),
+        variable="ZAMBONI_SPARK_CATALOG",
         help="the Spark catalog holding the Iceberg tables. Default `iceberg`.",
     )
 
 
 def _add_catalog_args(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("catalog")
-    g.add_argument("--uri", default=os.environ.get("ZAMBONI_URI"), help="REST catalog endpoint")
+    _env_argument(g, "--uri", variable="ZAMBONI_URI", help="REST catalog endpoint")
     # `--db` is the same flag. Iceberg says warehouse, Lakekeeper says warehouse,
     # and everyone who has used a database says database -- the concept maps to
     # a Postgres/Snowflake *database*, with an Iceberg namespace as its schema.
     # `--catalog` is deliberately not offered: it already means the engine's
     # catalog in `--trino-catalog`/`--spark-catalog`, and a Singer catalog file
     # in `from-catalog`, so a bare one would be the most ambiguous flag here.
-    g.add_argument(
+    _env_argument(
+        g,
         "--warehouse",
         "--db",
         dest="warehouse",
-        default=os.environ.get("ZAMBONI_WAREHOUSE"),
+        variable="ZAMBONI_WAREHOUSE",
         help="the warehouse (Iceberg catalog) to maintain -- a database, in "
         "Postgres/Snowflake terms. `--db` is an alias.",
     )
     _add_removed_secret_flag(g, "--credential", "ZAMBONI_CREDENTIAL")
     _add_removed_secret_flag(g, "--token", "ZAMBONI_TOKEN")
-    g.add_argument("--oauth2-server-uri", default=os.environ.get("ZAMBONI_OAUTH2_SERVER_URI"))
-    g.add_argument("--scope", default=os.environ.get("ZAMBONI_SCOPE"))
+    _env_argument(g, "--oauth2-server-uri", variable="ZAMBONI_OAUTH2_SERVER_URI")
+    _env_argument(g, "--scope", variable="ZAMBONI_SCOPE")
     # Transport security for an HTTPS catalog (ZMBNI-100 / ELT-1014), consistent with target-iceberg
     # and IWS. Catalog leg only -- the object store's TLS trust is the container trust store /
     # AWS_CA_BUNDLE, not a flag here.
-    g.add_argument(
+    _env_argument(
+        g,
         "--ssl-ca-bundle",
-        default=os.environ.get("ZAMBONI_SSL_CA_BUNDLE"),
+        variable="ZAMBONI_SSL_CA_BUNDLE",
         help="path to a CA bundle/cert (PEM) to TRUST for an HTTPS catalog with a private CA or "
         "self-signed cert -- the secure on-prem answer",
     )
-    g.add_argument(
+    _env_argument(
+        g,
         # `BooleanOptionalAction`, not `store_true`: with an environment-derived
         # default, `store_true` can only ever turn this *on*. So
         # ZAMBONI_SSL_INSECURE=true in a deployment's environment could not be
@@ -792,18 +812,19 @@ def _add_catalog_args(p: argparse.ArgumentParser) -> None:
         # locally would be the unsafe one, which is the wrong way round. It also
         # restores the rule settings.py states: a flag always wins.
         "--ssl-insecure",
-        action=argparse.BooleanOptionalAction,
+        variable="ZAMBONI_SSL_INSECURE",
         # `None` when neither the flag nor the variable said anything, so the
         # profile can still fill the gap. A plain `False` default would make
         # "nobody said" indistinguishable from "explicitly off" -- the same trap
         # `_apply_profile` documents for `--engine local`.
-        default=_env_bool("ZAMBONI_SSL_INSECURE"),
+        action=argparse.BooleanOptionalAction,
         help="SKIP catalog TLS verification (a dev escape hatch; prefer --ssl-ca-bundle). "
         "--no-ssl-insecure restores verification for one run. Env: ZAMBONI_SSL_INSECURE=true",
     )
-    g.add_argument(
+    _env_argument(
+        g,
         "--local-warehouse",
-        default=os.environ.get("ZAMBONI_LOCAL_WAREHOUSE"),
+        variable="ZAMBONI_LOCAL_WAREHOUSE",
         help="path to a filesystem warehouse with a SQL catalog, instead of --uri",
     )
     g.add_argument(
@@ -838,19 +859,20 @@ def _add_catalog_args(p: argparse.ArgumentParser) -> None:
         "ZAMBONI_AZURE_ACCOUNT_KEY / _SAS_TOKEN / _CLIENT_SECRET. Configure the "
         "one your warehouse lives in; see docs/reclaiming-storage.md.",
     )
-    s.add_argument("--s3-endpoint", default=os.environ.get("ZAMBONI_S3_ENDPOINT"))
-    s.add_argument("--s3-access-key-id", default=os.environ.get("ZAMBONI_S3_ACCESS_KEY_ID"))
-    s.add_argument(
+    _env_argument(s, "--s3-endpoint", variable="ZAMBONI_S3_ENDPOINT")
+    _env_argument(s, "--s3-access-key-id", variable="ZAMBONI_S3_ACCESS_KEY_ID")
+    _env_argument(
+        s,
         "--credential-use",
         choices=[c.value for c in CredentialUse],
-        default=os.environ.get("ZAMBONI_CREDENTIAL_USE"),
+        variable="ZAMBONI_CREDENTIAL_USE",
         help=(
             "whose object-store credentials reclaim uses: always (default) Zamboni's own, "
             "reclaim-only for expire and remove-orphans alone, never the catalog's"
         ),
     )
     _add_removed_secret_flag(s, "--s3-secret-access-key", "ZAMBONI_S3_SECRET_ACCESS_KEY")
-    s.add_argument("--s3-region", default=os.environ.get("ZAMBONI_S3_REGION", "us-east-1"))
+    _env_argument(s, "--s3-region", variable="ZAMBONI_S3_REGION")
 
 
 #: Defaults come from the dataclass, never repeated as literals here.
@@ -928,10 +950,11 @@ def _add_config_args(p: argparse.ArgumentParser) -> None:
         help="ceiling on concurrent reads regardless of --read-ahead-bytes.",
     )
     g.add_argument("--temp-directory")
-    g.add_argument(
+    _env_argument(
+        g,
         "--max-temp-directory-bytes",
         type=_positive_int,
-        default=os.environ.get("ZAMBONI_MAX_TEMP_DIRECTORY_BYTES"),
+        variable="ZAMBONI_MAX_TEMP_DIRECTORY_BYTES",
         help="ceiling on DuckDB's spill. Default: DuckDB's own, 90%% of the free "
         "disk it can see -- on Kubernetes the node's, not the emptyDir's sizeLimit. "
         "Set it at or below that limit and a rewrite needing more fails its table "
@@ -1044,14 +1067,70 @@ def _as_bool(value: str | None) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes")
 
 
-def _env_bool(name: str) -> bool | None:
-    """True, False, or None when the variable is not set at all.
+#: Where `_env_argument` records a flag's variable, on the flag's own action.
+_ENV_VARIABLE = "zamboni_env_variable"
 
-    The third answer is the point: it is what lets a flag, then a variable, then
-    the profile resolve in that order for a boolean.
+
+def _env_argument(
+    container: argparse._ActionsContainer, *flags: str, variable: str, **kwargs: Any
+) -> argparse.Action:
+    """A flag that falls back to the ``ZAMBONI_*`` variable ``variable``.
+
+    The variable is not the flag's ``default``. argparse evaluates a default
+    when the parser is built, and ``main`` parses before it knows where
+    ``.env`` is -- ``--env`` is itself a flag -- so a value set only in ``.env``
+    never reached a flag defaulted that way (#252). :func:`_apply_environment`
+    reads the variable once ``.env`` is loaded. The default stays ``None``, so
+    that "nobody said" is still visible to it and then to the profile.
     """
-    raw = os.environ.get(name)
-    return None if raw is None else _as_bool(raw)
+    if kwargs.get("default") is not None:
+        raise TypeError(f"{flags[0]} falls back to {variable}; it cannot also have a default")
+    action = container.add_argument(*flags, **kwargs)
+    setattr(action, _ENV_VARIABLE, variable)
+    return action
+
+
+def _env_actions(parser: argparse.ArgumentParser) -> Iterator[tuple[argparse.Action, str]]:
+    """Every flag declared with `_env_argument`, in ``parser`` and its subcommands."""
+    for action in parser._actions:
+        if variable := getattr(action, _ENV_VARIABLE, None):
+            yield action, variable
+        if isinstance(action, argparse._SubParsersAction):
+            for subparser in action.choices.values():
+                yield from _env_actions(subparser)
+
+
+def _from_text(action: argparse.Action, text: str) -> Any:
+    """``text`` as the flag would have taken it on the command line."""
+    if isinstance(action, argparse.BooleanOptionalAction):
+        return _as_bool(text)
+    value = action.type(text) if callable(action.type) else text
+    if action.choices is not None and value not in action.choices:
+        raise ValueError(f"must be one of {', '.join(map(str, action.choices))}")
+    return value
+
+
+def _apply_environment(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Fill each flag the command line did not give from its ``ZAMBONI_*`` variable.
+
+    Called once ``.env`` is in ``os.environ``. ``settings.load_env`` never
+    replaces a variable the process already had, so this gives flag > process
+    environment > ``.env``; `_apply_profile` then fills what is still None. An
+    empty value is unset, as ``VAR=`` reads in a dotenv template. A value the
+    flag would refuse is a usage error naming the variable, since the variable
+    is what the operator has to fix.
+    """
+    for action, variable in _env_actions(parser):
+        # Absent: a flag of another subcommand. Not None: given on the command line.
+        if getattr(args, action.dest, None) is not None or not hasattr(args, action.dest):
+            continue
+        text = os.environ.get(variable, "")
+        if not text.strip():
+            continue
+        try:
+            setattr(args, action.dest, _from_text(action, text))
+        except (ValueError, TypeError, argparse.ArgumentTypeError) as exc:
+            parser.error(f"{variable}={text!r}: {exc}")
 
 
 def _storage_from(args: argparse.Namespace) -> S3Settings | GCSSettings | AzureSettings | None:
@@ -1656,42 +1735,15 @@ def _maintenance(
     return report.exit_code
 
 
-#: ``serve``'s reservations: the flag's attribute, and the variable it falls back to.
-_RESERVATIONS = {
-    "reserved_memory_bytes": "ZAMBONI_RESERVED_MEMORY_BYTES",
-    "reserved_cpus": "ZAMBONI_RESERVED_CPUS",
-}
-
-
-def _reservation(args: argparse.Namespace, attribute: str) -> int:
-    """A reservation from its flag, else its ``ZAMBONI_*`` variable, else 0.
-
-    The variable is read here, not as the flag's default: a default is read
-    when the parser is built, before ``.env`` is loaded, so a value set only
-    there would never arrive (#252).
-    """
-    if (value := getattr(args, attribute)) is not None:
-        return int(value)
-    variable = _RESERVATIONS[attribute]
-    text = os.environ.get(variable, "").strip()
-    if not text:
-        return 0
-    try:
-        return _non_negative_int(text)
-    except (ValueError, argparse.ArgumentTypeError) as exc:
-        raise ValueError(f"{variable}={text!r}: {exc}") from None
-
-
 def _plan_serve_pool(
     args: argparse.Namespace, *, root: Path | None = None, proc: Path | None = None
 ) -> PoolSize:
     """The pool ``serve`` runs: ``--workers`` and the reservations, against this
-    process's cgroup -- or, for a test, the tree ``root`` and ``proc`` locate.
-    Raises ValueError for a malformed reservation variable."""
+    process's cgroup -- or, for a test, the tree ``root`` and ``proc`` locate."""
     from .pool import CGROUP_ROOT, PROC_CGROUP, plan_pool
 
-    memory = _reservation(args, "reserved_memory_bytes")
-    cpus = _reservation(args, "reserved_cpus")
+    memory = args.reserved_memory_bytes or 0
+    cpus = args.reserved_cpus or 0
     if memory or cpus:
         # Said here, not left to the plan's reason: that names a reservation
         # only when its own bound decided the worker count.
@@ -1726,11 +1778,7 @@ def _serve(args: argparse.Namespace) -> int:
     for directory in {state_path.parent, pid_path.parent}:
         directory.mkdir(parents=True, exist_ok=True)
 
-    try:
-        size = _plan_serve_pool(args)
-    except ValueError as exc:
-        print(f"zamboni serve: {exc}", file=sys.stderr)
-        return 2
+    size = _plan_serve_pool(args)
     profile = args.zamboni_profile
     config = WorkerConfig.from_pool(
         size,

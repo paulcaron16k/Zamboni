@@ -194,7 +194,10 @@ version number, because the maintenance fork and stock PyIceberg both declare
 never caches.
 
 **`settings.py`** resolves the operator config: flag > `ZAMBONI_*` env var >
-`./zamboni.yml` > `$ZAMBONI_ROOT/zamboni.yml` > built-in default. `zamboni.yml`
+`./zamboni.yml` > `$ZAMBONI_ROOT/zamboni.yml` > built-in default. A flag with a
+`ZAMBONI_*` fallback is declared with `cli._env_argument` and filled by
+`cli._settle` after `.env` loads — never `default=os.environ.get(...)`, which is
+read before `.env` exists (#252); `tests/test_env_flags.py` refuses one. `zamboni.yml`
 is normally committable with credentials in `.env`, but it **may** hold them
 (`credential`, `token`, `storage.*`) — a Kubernetes Secret mounts as a file, and
 splitting one deployment's config across two mechanisms buys nothing. A profile
