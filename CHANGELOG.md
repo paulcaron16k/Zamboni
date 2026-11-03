@@ -171,6 +171,21 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **A `ZAMBONI_*` setting in `.env` now reaches its flag** (#252). Twenty
+  flags, from `--trino-host` to `--max-temp-directory-bytes`, read their
+  variable as an argparse default. That default is evaluated when the parser is
+  built, before `.env` is loaded, so a value set only in `.env` was dropped
+  without a word; the process environment worked. Each such flag now declares
+  its variable, and every variable is read once `.env` is in place. Precedence
+  is flag > process environment > `.env` > profile > built-in default. A value
+  a flag would refuse exits 2 and names the variable, and so does a bad
+  `ZAMBONI_CREDENTIAL_USE`. An empty value (`VAR=`) counts as unset, so
+  `ZAMBONI_SSL_INSECURE=` no longer means "verify" over a profile that says
+  `insecure: true`.
+- **`storage.s3.region` in `zamboni.yml` is used.** `--s3-region` defaulted to
+  `us-east-1` on the flag itself, so the profile's region was never read; with
+  no flag, variable or profile value, it is still `us-east-1`. Found while
+  fixing #252.
 - **Against a remote-signing catalog, object-store requests no longer wait for
   each other's signatures** (#250). PyIceberg's `S3V4RestSigner` signs with a
   blocking HTTP call, and aiobotocore runs it inline on fsspec's one event-loop

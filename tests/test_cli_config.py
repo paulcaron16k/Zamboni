@@ -842,14 +842,19 @@ def test_the_insecure_flag_can_be_turned_off_for_one_run(monkeypatch):
     single run. That put the un-overridable value on the unsafe side, which is
     the wrong way round for a security setting.
     """
-    from zamboni.cli import _add_catalog_args
+    from zamboni.cli import _add_catalog_args, _apply_environment
 
     monkeypatch.setenv("ZAMBONI_SSL_INSECURE", "true")
     parser = argparse.ArgumentParser()
     _add_catalog_args(parser)
 
-    assert parser.parse_args([]).ssl_insecure is True, "the environment still sets the default"
-    assert parser.parse_args(["--no-ssl-insecure"]).ssl_insecure is False, (
+    def parsed(*flags):
+        args = parser.parse_args(list(flags))
+        _apply_environment(parser, args)
+        return args
+
+    assert parsed().ssl_insecure is True, "the environment still sets the default"
+    assert parsed("--no-ssl-insecure").ssl_insecure is False, (
         "a flag must be able to restore verification for one run"
     )
 
@@ -876,7 +881,7 @@ def test_tls_resolves_flag_then_environment_then_profile(
     """
     import argparse as _argparse
 
-    from zamboni.cli import _add_catalog_args
+    from zamboni.cli import _add_catalog_args, _apply_environment
     from zamboni.settings import load_profile
 
     path = _profile(tmp_path, f"ssl:\n  {profile}\n")
@@ -887,6 +892,7 @@ def test_tls_resolves_flag_then_environment_then_profile(
     parser = _argparse.ArgumentParser()
     _add_catalog_args(parser)
     args = parser.parse_args(flag)
+    _apply_environment(parser, args)
     loaded = load_profile(path)
 
     resolved = (

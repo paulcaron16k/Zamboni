@@ -15,22 +15,7 @@ import pytest
 
 from zamboni import settings
 
-
-@pytest.fixture(autouse=True)
-def restore_environment():
-    """`load_env` writes into `os.environ`, and nothing undid it.
-
-    Every test here that loads a dotenv file left its variables set for the rest
-    of the session. It never failed because pytest collects `test_cli.py` before
-    `test_settings.py` alphabetically, so the tests that would trip over a stray
-    `ZAMBONI_WAREHOUSE` happened to run first -- and this project runs
-    `pytest-randomly`, which does not promise that order. A latent flake rather
-    than a passing suite.
-    """
-    saved = dict(os.environ)
-    yield
-    os.environ.clear()
-    os.environ.update(saved)
+pytestmark = pytest.mark.usefixtures("restore_environment")
 
 
 def write(tmp_path: Path, name: str, text: str) -> Path:

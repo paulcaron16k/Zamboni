@@ -650,17 +650,18 @@ def load_profile(path: Path | None) -> Profile:
     )
 
 
-def _credential_use(value: str) -> str:
+def _credential_use(value: str, *, where: str = "credential_use") -> str:
     """Validated at load, like everything else here, never mid-run.
 
     A typo such as ``reclaim_only`` would otherwise fall through to "not always
     and not reclaim-only", i.e. silently behave as ``never`` -- turning a
-    misspelling into "reclaim quietly stopped working".
+    misspelling into "reclaim quietly stopped working". ``where`` is what the
+    operator has to correct: the profile key, or the variable.
     """
     allowed = [c.value for c in CredentialUse]
     if value not in allowed:
         raise ProfileError(
-            f"credential_use: {value!r} is not one of {allowed}. It decides whether "
+            f"{where}={value!r}: not one of {allowed}. It decides whether "
             "Zamboni reclaims storage on its own credentials or the catalog's."
         )
     return value
@@ -690,7 +691,9 @@ def _from_environment(*, source: Path | None) -> Profile:
         uri=os.environ.get("ZAMBONI_URI"),
         warehouse=os.environ.get("ZAMBONI_WAREHOUSE"),
         engine=os.environ.get("ZAMBONI_ENGINE", "local"),
-        credential_use=_credential_use(os.environ.get("ZAMBONI_CREDENTIAL_USE", "always")),
+        credential_use=_credential_use(
+            os.environ.get("ZAMBONI_CREDENTIAL_USE") or "always", where="ZAMBONI_CREDENTIAL_USE"
+        ),
         root=Path(root).expanduser() if root else DEFAULT_ROOT,
         # With a profile, `load_profile` merges these variables over its block;
         # judging them here alone would refuse ZAMBONI_NATS_SERVERS set without

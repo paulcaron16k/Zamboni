@@ -172,6 +172,15 @@ Found at `--env`, then `./.env`, then `$ZAMBONI_ROOT/.env` -- the same order
 as the profile. Copy
 [env.sample](../env.sample), which lists every variable Zamboni reads.
 
+**Any `ZAMBONI_*` variable may be set here**, including the ones a flag falls
+back to: the file is loaded before any of them is read, so `ZAMBONI_TRINO_HOST`
+in `.env` does what `--trino-host` would. A value the flag would refuse is a
+usage error, exit 2, naming the variable. An empty value (`VAR=`) counts as
+unset. The one limit is `ZAMBONI_ROOT`, which helps find this file and so cannot
+move its own search. Set in `./.env`, it still decides where the profile and the
+per-warehouse configs are found. Only `ZAMBONI_*` entries are loaded at all;
+`OTEL_*` belongs in the process environment (§6).
+
 **Why a file rather than the crontab.** Cron gives a job almost no environment,
 so credentials have to come from somewhere. Putting them in the crontab itself
 puts them in `crontab -l`, in every backup of `/var/spool/cron`, and in the

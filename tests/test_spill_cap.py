@@ -340,24 +340,29 @@ def test_a_table_over_the_cap_is_exit_3_and_the_next_table_still_runs(spilling, 
 def test_the_cap_reaches_the_run_from_the_environment_or_the_flag(
     monkeypatch, tmp_path, env, flags, expected
 ):
-    """A `serve` worker is a `zamboni maintenance` subprocess, so the pod sets
-    the cap once in its environment, beside the volume it is sized from. The
-    flag still wins for a one-off run."""
-    from zamboni.cli import _build_parser, _operational_config
+    """A `serve` worker runs `zamboni maintenance`, so the pod sets the cap once
+    in its environment, beside the volume it is sized from. The flag still wins
+    for a one-off run."""
+    from zamboni.cli import _apply_environment, _build_parser, _operational_config
 
     if env is None:
         monkeypatch.delenv("ZAMBONI_MAX_TEMP_DIRECTORY_BYTES", raising=False)
     else:
         monkeypatch.setenv("ZAMBONI_MAX_TEMP_DIRECTORY_BYTES", env)
 
-    args = _build_parser().parse_args(["maintenance", "--local-warehouse", str(tmp_path), *flags])
+    parser = _build_parser()
+    args = parser.parse_args(["maintenance", "--local-warehouse", str(tmp_path), *flags])
+    _apply_environment(parser, args)
     assert _operational_config(args).max_temp_directory_bytes == expected
 
 
-def test_a_non_positive_cap_in_the_environment_is_a_usage_error(monkeypatch, tmp_path):
-    from zamboni.cli import _build_parser
+def test_a_non_positive_cap_in_the_environment_is_a_usage_error(monkeypatch, tmp_path, capsys):
+    from zamboni.cli import _apply_environment, _build_parser
 
     monkeypatch.setenv("ZAMBONI_MAX_TEMP_DIRECTORY_BYTES", "0")
+    parser = _build_parser()
+    args = parser.parse_args(["maintenance", "--local-warehouse", str(tmp_path)])
     with pytest.raises(SystemExit) as exc:
-        _build_parser().parse_args(["maintenance", "--local-warehouse", str(tmp_path)])
+        _apply_environment(parser, args)
     assert exc.value.code == 2
+    assert "ZAMBONI_MAX_TEMP_DIRECTORY_BYTES='0': must be at least 1" in capsys.readouterr().err
