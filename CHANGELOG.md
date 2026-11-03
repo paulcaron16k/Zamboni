@@ -199,10 +199,14 @@ Two categories beyond the usual set, because this tool deletes files:
   (shown by `zamboni doctor`), checks that a waiting signer leaves the loop
   free, and `zamboni.signer` stands down only where that and
   `s3_signer_registered_once` both hold, so fork tags before #250 get the
-  mirror. Stored probe answers are re-probed once (cache schema 4). The fork
-  carries both fixes (`bug/s3_signer_blocks_event_loop`,
-  `bug/signed_s3_filesystems_share_no_connections`); the development pin moves
-  to its tag `maintenance/2026-11-01`.
+  mirror. Stored probe answers are re-probed once (cache schema 4). A client's
+  sessions are read again under aiobotocore's `_sessions_lock`, so a request
+  queued behind the client's close fails, as with stock aiobotocore, instead
+  of opening a session nothing would close (#260). The fork carries all three
+  fixes (`bug/s3_signer_blocks_event_loop`,
+  `bug/signed_s3_filesystems_share_no_connections`,
+  `bug/shared_pool_session_reads_sessions_before_lock`); the development pin
+  moves to its tag `maintenance/2026-11-02`.
 - **A remote-signing catalog no longer leaks three sockets per table in a
   long-lived process** (#246). The S3 signer fix (#51) kept each signed
   filesystem in fsspec's instance cache until exit. With it stayed the S3
