@@ -177,6 +177,12 @@ sets it, from `WorkerConfig.commit`. A pressure check goes to
 `WorkerConfig.health_entry` instead (default `pool.run_health`, the CLI's
 `health`), which returns the record `health.check_tables` builds and must pass
 `conformance.health_entry_conformance`.
+The pool enforces §7.1: `WorkerConfig.table_timeout` (per reason) and
+`stall_timeout` SIGKILL a worker; any exit outside `pool.SOUND_EXITS` (0, 2,
+3, 4) retires it; a worker exits with its parent and runs niced with a high
+`oom_score_adj`. Failing outside `SOUND_EXITS` in a row quarantines a table
+(`quarantine.py`, gated in `CandidateQueue.offer`; `manual` overrides). A
+runtime loop that raises stops the runtime and `run` re-raises it.
 Nothing in the runtime decides whether a table needs work; that is still
 `maintain()`'s due-check, run in each worker.
 docs/maintenance-runtime.md is the design and §12 the stories still to build.

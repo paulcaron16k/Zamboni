@@ -51,6 +51,7 @@ from .claims import Claim, Claimer, ClaimStore, LocalClaimStore, new_holder
 from .fleet import FleetConfig, FleetWarehouse
 from .observe import Observers
 from .pool import ItemResult, PoolSize, WorkerConfig, WorkerPool, run_workers
+from .quarantine import Quarantine
 from .runstate import Ledger, RuntimeState
 from .scheduler import (
     MAX_SLEEP,
@@ -135,6 +136,8 @@ class OfferReceipt:
     #: Why nothing was offered -- the runtime is stopping, or the warehouse is
     #: not in the fleet. ``None`` when the offer was considered table by table.
     refused: str | None = None
+    #: Refused because the table is quarantined (§7.1). A ``manual`` offer never is.
+    quarantined: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -149,6 +152,13 @@ class RuntimeSettings:
     #: How often a running table's claim is renewed; ``None`` is a third of
     #: the lease. Must be under two-thirds of it, where an unrenewed table is killed.
     claim_renew_every: timedelta | None = None
+    #: Failures in a row before a table's offers are refused for a while
+    #: (§7.1); ``None`` never quarantines.
+    quarantine_after: int | None = 3
+    #: How long the first quarantine lasts; each failure after doubles it...
+    quarantine_backoff: timedelta = timedelta(hours=1)
+    #: ...up to this.
+    quarantine_backoff_max: timedelta = timedelta(hours=24)
 
     @property
     def renew_every(self) -> timedelta:
@@ -310,8 +320,14 @@ class MaintenanceRuntime:
             renew_every=self.settings.renew_every,
         )
         self._ledger = Ledger()
+        # Built here too, so a backoff it cannot use is refused by the constructor.
+        self._quarantine = Quarantine(
+            after=self.settings.quarantine_after,
+            backoff=self.settings.quarantine_backoff,
+            most=self.settings.quarantine_backoff_max,
+        )
         self._events = tuple(events)
-        self._queue = CandidateQueue()
+        self._queue = CandidateQueue(admit=lambda c: self._quarantine.admits(c, self._clock()))
         self._stop = asyncio.Event()
         self._generation = 1
         self._phase = CREATED
@@ -431,15 +447,26 @@ class MaintenanceRuntime:
             return OfferReceipt(
                 warehouse, reason, refused=f"warehouse {warehouse!r} is not in the fleet"
             )
-        queued, coalesced, unknown = [], [], []
+        queued, coalesced, unknown, quarantined = [], [], [], []
+        now = self._clock()
         for table in sorted(known) if tables is None else dict.fromkeys(tables):
+            candidate = Candidate(warehouse, table, reason, not_after=not_after)
             if table not in known:
                 unknown.append(table)
-            elif self._queue.offer(Candidate(warehouse, table, reason, not_after=not_after)):
+            elif not self._quarantine.admits(candidate, now):
+                quarantined.append(table)
+            elif self._queue.offer(candidate):
                 queued.append(table)
             else:
                 coalesced.append(table)
-        return OfferReceipt(warehouse, reason, tuple(queued), tuple(coalesced), tuple(unknown))
+        return OfferReceipt(
+            warehouse,
+            reason,
+            tuple(queued),
+            tuple(coalesced),
+            tuple(unknown),
+            quarantined=tuple(quarantined),
+        )
 
     def _adopt(self, fleet: FleetConfig) -> int:
         self._fleet = fleet
@@ -447,6 +474,7 @@ class MaintenanceRuntime:
         if self._scheduler is not None:
             self._scheduler.rearm(fleet, self._clock())
         self._ledger.adopted(fleet, self._clock())
+        self._quarantine.adopted(fleet)
         self._observers.notify("fleet_changed", self._generation, fleet)
         return self._generation
 
@@ -472,6 +500,7 @@ class MaintenanceRuntime:
             sources_connected=(
                 all(bool(s.connected) for s in self._events) if self._events else None
             ),
+            quarantined=self._quarantine.quarantined,
         )
 
     def _request_stop(self, force: bool) -> None:
@@ -501,37 +530,39 @@ class MaintenanceRuntime:
             self._pool = self._pool_factory(self._size, self._worker)
             self._observers.notify("phase_changed", RUNNING)
             self._started.set()
-            await asyncio.gather(
-                *(feed.run(self._stop) for feed in self.feeds),
-                run_scheduler(
-                    self._scheduler,
-                    self._queue,
-                    self._stop,
-                    clock=self._clock,
-                    on_tick=self._ticked,
-                    on_fired=self._fired,
-                    wait=self._wait,
-                ),
-                run_workers(
-                    self._queue,
-                    lambda: self._fleet,
-                    self._pool,
-                    self._stop,
-                    on_result=self._finished,
-                    clock=self._clock,
-                    on_start=self._started_table,
-                    claims=self._claimer,
-                ),
-                self._provider.run(self._adopt, self._refused, self._stop),
-                self._stopping(),
-                run_pressure_checks(
-                    lambda: self._fleet,
-                    self._pool,
-                    self._queue.offer,
-                    self._stop,
-                    clock=self._clock,
-                    on_check=self._pressure_checked,
-                ),
+            await self._run_loops(
+                {
+                    **{f"event feed {f.source.name}": f.run(self._stop) for f in self.feeds},
+                    "scheduler": run_scheduler(
+                        self._scheduler,
+                        self._queue,
+                        self._stop,
+                        clock=self._clock,
+                        on_tick=self._ticked,
+                        on_fired=self._fired,
+                        wait=self._wait,
+                    ),
+                    "workers": run_workers(
+                        self._queue,
+                        lambda: self._fleet,
+                        self._pool,
+                        self._stop,
+                        on_result=self._finished,
+                        clock=self._clock,
+                        on_start=self._started_table,
+                        claims=self._claimer,
+                    ),
+                    "fleet provider": self._provider.run(self._adopt, self._refused, self._stop),
+                    "stopping": self._stopping(),
+                    "pressure checks": run_pressure_checks(
+                        lambda: self._fleet,
+                        self._pool,
+                        self._queue.offer,
+                        self._stop,
+                        clock=self._clock,
+                        on_check=self._pressure_checked,
+                    ),
+                }
             )
         finally:
             try:
@@ -549,6 +580,47 @@ class MaintenanceRuntime:
                 await asyncio.sleep(0)
                 self._observers.notify("phase_changed", STOPPED)
                 self._observers.close()
+
+    async def _run_loops(self, loops: dict[str, Awaitable[None]]) -> None:
+        """Run every loop until stop; if one raises, stop the rest and re-raise.
+
+        Gathered without this, the survivors kept running after one loop died
+        -- a scheduler still firing into a queue no worker would ever take
+        from, with the pool closed under them -- carried over unchanged from
+        `Service` by #162 (#170). Now the failure is logged and kept as
+        ``last_error``, the runtime stops as on any stop -- no new tables, the
+        ones in flight let finish -- and ``run`` raises it, so the host sees
+        the runtime end and restarts it. The workers loop is the exception: if
+        it is the one that failed, nothing is waiting on its tables, so their
+        workers are killed rather than left running unreported.
+        """
+        tasks = {asyncio.ensure_future(loop): name for name, loop in loops.items()}
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        except BaseException:
+            # `run` itself cancelled: unlike `gather`, `wait` leaves its tasks
+            # running, and none of them may outlive the runtime.
+            for task in tasks:
+                task.cancel()
+            raise
+        failed = next(
+            (task for task in tasks if task.done() and not task.cancelled() and task.exception()),
+            None,
+        )
+        if failed is None:
+            await asyncio.gather(*tasks)
+            return
+        name, exc = tasks[failed], failed.exception()
+        assert exc is not None
+        logger.error("the runtime's %s loop failed; stopping", name, exc_info=exc)
+        self._ledger.last_error = f"runtime: the {name} loop failed: {exc!r}"
+        self._request_stop(force=name == "workers")
+        for task, outcome in zip(
+            tasks, await asyncio.gather(*tasks, return_exceptions=True), strict=True
+        ):
+            if task is not failed and isinstance(outcome, BaseException):
+                logger.error("the runtime's %s loop failed too", tasks[task], exc_info=outcome)
+        raise exc
 
     def _ticked(self, at: datetime) -> None:
         self._last_tick = at
@@ -568,9 +640,15 @@ class MaintenanceRuntime:
         self._observers.notify("started", item, claim)
 
     def _finished(self, result: ItemResult) -> None:
-        # Before the queue releases the table, so `state()` still counts it.
-        self._ledger.finished(result, self._clock())
+        # Before the queue releases the table, so `state()` still counts it --
+        # and so a dirty re-offer on release meets the quarantine this decides.
+        at = self._clock()
+        self._ledger.finished(result, at)
         self._observers.notify("finished", result)
+        change, held = self._quarantine.finished(result, at)
+        if change:
+            args = (result.item.warehouse, result.item.table)
+            self._observers.notify(change, *args, *(() if held is None else (held,)))
 
     def _pressure_checked(self, warehouse: str, found: dict[str, Any]) -> None:
         self._ledger.pressure_checked(warehouse, found, self._clock())

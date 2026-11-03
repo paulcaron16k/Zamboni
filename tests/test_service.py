@@ -202,6 +202,32 @@ def test_the_state_file_reads_as_it_did_before_the_runtime_kept_it(tmp_path):
     assert (tmp_path / "state.json").read_bytes() == GOLDEN.read_bytes()
 
 
+def test_a_quarantined_table_is_in_the_state_file_and_only_then(tmp_path):
+    """Absent until something is quarantined, as the golden file above shows;
+    then each table with what an operator needs to know: how many failures,
+    until when, and why the last one failed (§7.1, #170)."""
+    from zamboni.quarantine import QuarantineState
+
+    held = QuarantineState(
+        failures=3,
+        until=T0 + timedelta(hours=1),
+        backoff=timedelta(hours=1),
+        last_failure="stalled: no progress report for 1:00:00",
+    )
+    serve = ServiceState(fleet_path="f", dry_run=False)
+
+    assert "quarantined" not in serve.as_dict(unstarted())
+    doc = serve.as_dict(dataclasses.replace(unstarted(), quarantined={"acme/raw.a": held}))
+    assert doc["quarantined"] == {
+        "acme/raw.a": {
+            "failures": held.failures,
+            "until": held.until.isoformat().replace("+00:00", "Z"),
+            "backoff_seconds": held.backoff.total_seconds(),
+            "last_failure": held.last_failure,
+        }
+    }
+
+
 def alive(pid: int) -> bool:
     return pid == 4242
 

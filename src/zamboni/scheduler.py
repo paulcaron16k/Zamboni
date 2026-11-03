@@ -298,9 +298,13 @@ class CandidateQueue:
       write it reports (decided on #110, 2026-10-06), anything else for the
       operations the run in flight is not doing (#163). The due-check makes a
       re-run that finds nothing new cost one metadata load.
+    * An offer ``admit`` refuses is dropped before any of that, whichever path
+      it came by -- a firing, an event, pressure, a caller, a dirty re-offer.
+      The runtime's :class:`~zamboni.quarantine.Quarantine` is the one.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, admit: Callable[[Candidate], bool] | None = None) -> None:
+        self._admit = admit
         self._queued: OrderedDict[tuple[str, str], Candidate] = OrderedDict()
         #: Each table in flight, and what its run does.
         self._in_flight: dict[tuple[str, str], tuple[str, ...] | None] = {}
@@ -320,7 +324,16 @@ class CandidateQueue:
         return tuple(self._queued)
 
     def offer(self, candidate: Candidate) -> bool:
-        """Queue ``candidate``; ``False`` if it coalesced into existing work."""
+        """Queue ``candidate``; ``False`` if it coalesced into existing work, or
+        ``admit`` refused it."""
+        if self._admit is not None and not self._admit(candidate):
+            logger.debug(
+                "not offering %s/%s (%s): refused",
+                candidate.warehouse,
+                candidate.table,
+                candidate.reason,
+            )
+            return False
         key = candidate.key
         if key in self._in_flight:
             if candidate.reasons & _REOFFER_AFTER_RUN or not covers(

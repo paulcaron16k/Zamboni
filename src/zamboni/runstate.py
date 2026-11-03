@@ -19,6 +19,7 @@ from typing import Any
 
 from .fleet import FleetConfig
 from .pool import ItemResult
+from .quarantine import QuarantineState
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,9 @@ class RuntimeState:
     #: Whether every event source is connected; ``None`` when there are none,
     #: which is "nothing to wait for" rather than "disconnected".
     sources_connected: bool | None = None
+    #: Tables refusing offers after failing in a row, by ``warehouse/table``
+    #: (docs/maintenance-runtime.md §7.1).
+    quarantined: Mapping[str, QuarantineState] = field(default_factory=dict)
 
     @property
     def busy(self) -> int:

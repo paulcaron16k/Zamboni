@@ -308,6 +308,28 @@ or `ZAMBONI_RESERVED_MEMORY_BYTES` and `ZAMBONI_RESERVED_CPUS`, default 0, and
 logs what it kept (#234, `test_the_flags_reach_the_plan`); an application
 embedding the runtime calls `plan_pool` itself and passes them there.
 
+R7 (#170) built the rest of §7.1's settings, in two places:
+
+- **On `RuntimeSettings`:** `quarantine_after` (3; `None` never quarantines),
+  `quarantine_backoff` (1 h) and `quarantine_backoff_max` (24 h), the last two
+  being this table's single `quarantine_backoff` row. Like the claim cadence,
+  values it cannot use are refused by the constructor
+  (`test_a_quarantine_it_cannot_use_is_refused_by_the_runtimes_constructor`).
+- **On `zamboni.pool.WorkerConfig`, not `RuntimeSettings`:** `table_timeout`,
+  `stall_timeout`, `worker_nice` (as `nice`) and `worker_oom_score_adj` (as
+  `oom_score_adj`). The worker applies the last two to itself, so they have to
+  travel to it, and `WorkerConfig` is what travels. The pool enforces the two
+  timeouts on its own side, as it already stamps `commit`. Keeping them there
+  also leaves `pool_factory(size, config)` unchanged. `table_timeout` must name
+  every reason (`test_a_limit_table_that_leaves_a_reason_out_is_refused`), and
+  its defaults are read from this table by
+  `test_each_reason_has_the_limit_the_design_gives_it`, so the two cannot
+  disagree.
+
+`recycle_after_tables`, `reserved_high_slots` and `priority_age_step` are not
+built yet: the first is still `WorkerPool`'s `recycle_after` argument, and the
+other two arrive with R8.
+
 ---
 
 ## 4. Schedules
@@ -797,6 +819,68 @@ Notes that decide the implementation:
   and its written files are orphans for a later sweep. That is what makes SIGKILL
   a safe response to every row above.
 
+As built in R7 (#170). Each row is made to happen, mostly in
+`tests/test_worker_failures.py`, to a real spawned worker:
+
+- **Too long:** `test_a_table_that_runs_too_long_is_killed_and_reported_timed_out`.
+  The table reports progress all the while, so the wall clock is shown to be a
+  limit of its own. The result is exit 1 with `died` set to
+  `timed out after 6:00:00 (schedule)`, and the last progress note is kept.
+- **Hung:** `test_a_table_that_stops_reporting_is_killed_and_reported_stalled`
+  gives `stalled: no progress report for 1:00:00`. Each report restarts the
+  clock (`test_a_table_that_keeps_reporting_outlives_the_stall_timeout`).
+  **Both clocks start when the job is sent**, not when the slot was taken: a
+  replacement worker's spawn takes seconds, and it is not the table's time.
+  **A merged item gets the longest of its reasons' limits**, since it runs all
+  of their operations
+  (`test_a_merged_item_gets_the_longest_of_its_reasons_limits`). **A pressure
+  check reports nothing, so `stall_timeout` is its whole limit**
+  (`test_a_pressure_check_reports_nothing_so_the_stall_timeout_is_its_limit`).
+- **Crashes:** at startup,
+  `test_a_worker_dying_at_startup_costs_one_table_and_the_slot_recovers`
+  (#155, `tests/test_pool.py`). Any pipe error on send or receive was already a
+  death there, as this row asks.
+- **The entry raises:** `test_a_worker_whose_entry_raised_is_retired`. Exits 2,
+  3 and 4 keep their worker (`test_a_refusal_or_an_abort_keeps_its_worker`).
+  The line is `zamboni.pool.SOUND_EXITS`, and it is drawn on the exit code,
+  not on whether an exception was seen. A run record reporting exit 1, or a
+  pressure check that could not read a table, retires its worker too. The cost
+  is one spawn.
+- **Out of memory:** `test_a_worker_killed_as_an_oom_would_be_is_reported_died`
+  SIGKILLs a worker from outside mid-table, and it reports as
+  `worker died (killed by signal 9)`.
+  `test_a_worker_runs_niced_and_first_in_line_for_the_oom_killer` reads the
+  worker's niceness and `oom_score_adj` back. Each is only ever *raised* from
+  what the worker inherited, since lowering either needs a privilege. One that
+  cannot be set is logged and the worker carries on. Neither exists on Windows,
+  and there the worker skips both.
+- **The runtime's process dies:**
+  `test_a_worker_exits_when_the_runtimes_process_is_killed` SIGKILLs a real
+  parent mid-table, and its worker is gone within five seconds.
+- **Fails every time:** `tests/test_quarantine.py`. A failure is a run that
+  ended outside `SOUND_EXITS`, the line that retires a worker. A sound run
+  clears the record. A table dropped at its deadline, or claimed elsewhere,
+  never ran, so it neither counts nor clears. The refusal is the queue's own,
+  so it holds whichever way an offer arrives. A schedule firing skips the table
+  (`test_a_schedule_firing_skips_a_quarantined_table`), and so does `offer()`,
+  whose `OfferReceipt.quarantined` names it
+  (`test_a_table_failing_in_a_row_is_quarantined_and_reported`).
+- **Capability detection** is answered for `serve` by a spawned process.
+  `test_the_runtimes_process_never_runs_the_capability_probe` drives `serve`'s
+  own default check in a fresh interpreter. It finds `detect()` never ran
+  there, and the probe's catalog module never loaded.
+
+**A runtime loop that raises now stops the runtime.** `run` used to gather its
+loops, so when one raised the rest kept going: a scheduler firing into a queue
+nothing took from, with the pool closed under it. Now the failure is logged and
+kept as `last_error`. The runtime stops as on any stop, letting tables in
+flight finish (`test_a_table_in_flight_when_a_loop_fails_is_let_finish`), and
+`run` re-raises it so the host restarts it
+(`test_a_loop_that_raises_stops_the_runtime_and_is_raised`, one case per loop).
+A failed workers loop is the exception: nothing waits on its tables any more,
+so their workers are killed
+(`test_only_a_failed_workers_loop_kills_the_workers`).
+
 ---
 
 ## 8. Observing
@@ -812,6 +896,8 @@ class Observer:                                   # zamboni.observe; every metho
     def fleet_changed(self, generation: int, fleet: FleetConfig) -> None: ...
     def refused(self, kind: str, detail: str) -> None: ...  # "fleet": a candidate not adopted
     def pressure_checked(self, warehouse: str, found: Mapping[str, Any]) -> None: ...
+    def quarantined(self, warehouse: str, table: str, state: QuarantineState) -> None: ...
+    def released(self, warehouse: str, table: str) -> None: ...  # §7.1
 
 def handed_off(observer, *, name: str | None = None) -> HandedOff: ...
 ```
@@ -845,7 +931,8 @@ history, dashboard and audit trail are a third.
 everything the state file does: the phase, generation and workers, the queue
 and what is in flight, the last error and the last refused fleet, each event
 source's counters and whether every source is connected, and per warehouse the
-last firing, last result, last completed sweep and last pressure check. The
+last firing, last result, last completed sweep and last pressure check, and
+each quarantined table (§7.1). The
 state file is `state()` plus what only `serve` knows — its pid, its fleet file,
 whether `--yes` was given — and reads byte for byte as it did before the move
 (`test_the_state_file_reads_as_it_did_before_the_runtime_kept_it`). A table is
