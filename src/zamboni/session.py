@@ -457,7 +457,6 @@ class GCSSettings:
     project_id: str | None = None
     #: An alternate GCS endpoint, for an emulator or a private service host.
     service_host: str | None = None
-    default_location: str | None = None
     extra: dict[str, str] = field(default_factory=dict)
 
     #: Location schemes these credentials can serve.
@@ -477,7 +476,6 @@ class GCSSettings:
         return (
             f"GCSSettings(token={token!r}, project_id={self.project_id!r}, "
             f"service_host={self.service_host!r}, "
-            f"default_location={self.default_location!r}, "
             f"extra={{{len(self.extra)} key(s)}})"
         )
 
@@ -489,8 +487,6 @@ class GCSSettings:
             props["gcs.project-id"] = self.project_id
         if self.service_host is not None:
             props["gcs.service.host"] = self.service_host
-        if self.default_location is not None:
-            props["gcs.default-bucket-location"] = self.default_location
         props.update(self.extra)
         return props
 

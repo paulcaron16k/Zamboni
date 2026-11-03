@@ -873,6 +873,16 @@ def _add_catalog_args(p: argparse.ArgumentParser) -> None:
     )
     _add_removed_secret_flag(s, "--s3-secret-access-key", "ZAMBONI_S3_SECRET_ACCESS_KEY")
     _env_argument(s, "--s3-region", variable="ZAMBONI_S3_REGION")
+    _env_argument(
+        s,
+        "--s3-path-style-access",
+        variable="ZAMBONI_S3_PATH_STYLE_ACCESS",
+        # `None` when unset, so the profile's `path_style_access` can still say.
+        action=argparse.BooleanOptionalAction,
+        help="address a bucket in the path, http://endpoint/bucket/key (the default). "
+        "--no-s3-path-style-access addresses it as a host, http://bucket.endpoint/key, "
+        "for a store that requires that",
+    )
 
 
 #: Defaults come from the dataclass, never repeated as literals here.
@@ -1103,7 +1113,7 @@ def _env_actions(parser: argparse.ArgumentParser) -> Iterator[tuple[argparse.Act
 def _from_text(action: argparse.Action, text: str) -> Any:
     """``text`` as the flag would have taken it on the command line."""
     if isinstance(action, argparse.BooleanOptionalAction):
-        return _as_bool(text)
+        return settings.parse_bool(text)
     value = action.type(text) if callable(action.type) else text
     if action.choices is not None and value not in action.choices:
         raise ValueError(f"must be one of {', '.join(map(str, action.choices))}")
@@ -1131,6 +1141,15 @@ def _apply_environment(parser: argparse.ArgumentParser, args: argparse.Namespace
             setattr(args, action.dest, _from_text(action, text))
         except (ValueError, TypeError, argparse.ArgumentTypeError) as exc:
             parser.error(f"{variable}={text!r}: {exc}")
+
+
+def _s3_path_style_access(args: argparse.Namespace, profile_storage: dict) -> bool:
+    """Flag (or its variable), then the profile, then :class:`S3Settings`'s own default."""
+    if (flag := getattr(args, "s3_path_style_access", None)) is not None:
+        return bool(flag)
+    if (value := profile_storage.get("s3", {}).get("path_style_access")) is not None:
+        return settings.parse_bool(value)  # validated when the profile loaded
+    return S3Settings.path_style_access
 
 
 def _storage_from(args: argparse.Namespace) -> S3Settings | GCSSettings | AzureSettings | None:
@@ -1183,6 +1202,7 @@ def _storage_from(args: argparse.Namespace) -> S3Settings | GCSSettings | AzureS
                     region=args.s3_region
                     or profile_storage.get("s3", {}).get("region")
                     or "us-east-1",
+                    path_style_access=_s3_path_style_access(args, profile_storage),
                 ),
             )
         )
