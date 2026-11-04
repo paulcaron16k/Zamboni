@@ -1856,7 +1856,7 @@ default; `test_cli_defaults_match_the_dataclass` keeps them honest.
 | `--read-ahead-bytes` | 64 MiB | How much of a group the streaming path may have in flight. `0` reads strictly one file at a time — bounded tightest, and slower against object storage because it serialises the round trips |
 | `--max-read-ahead-files` | 8 | Ceiling on concurrent reads regardless of the byte window |
 | `--temp-directory` | system | Where DuckDB spills sorts. Point it somewhere with room if you Z-order |
-| `--max-temp-directory-bytes` | DuckDB's: 90% of the free disk it can see | Ceiling on that spill; also `ZAMBONI_MAX_TEMP_DIRECTORY_BYTES`. A rewrite that needs more fails its table with exit 3 (`SpillLimitExceeded`) instead of filling the disk. On Kubernetes, set it below the spill volume's `sizeLimit`; see [devops.md §8](devops.md#kubernetes) |
+| `--max-temp-directory-bytes` | DuckDB's: 90% of the free disk it can see | Ceiling on that spill; also `ZAMBONI_MAX_TEMP_DIRECTORY_BYTES`. A rewrite that needs more fails its table with exit 3 (`SpillLimitExceeded`) instead of filling the disk. On Kubernetes, set it below the spill volume's `sizeLimit`. Under `zamboni serve`, give the pod's budget as `--spill-budget-bytes` instead, which is divided between the workers; see [devops.md §8](devops.md#kubernetes) |
 | `--partial-progress` | off | Commit each group as it finishes. More commits, but a failure keeps the finished ones |
 | `--branch` | `main` | Which branch to commit to |
 | `--snapshot-operation` | `replace` | How the snapshot is labelled |

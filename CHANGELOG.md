@@ -51,6 +51,17 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **`zamboni serve --spill-budget-bytes N`**, or `ZAMBONI_SPILL_BUDGET_BYTES`
+  (#205): the spill disk for the whole pod, divided equally between the
+  workers as each one's `--max-temp-directory-bytes`, as memory already is.
+  docs/devops.md §8 no longer has the operator divide the volume's `sizeLimit`
+  by the worker count, or pin `--workers` so that count cannot change under
+  the cap. `serve` refuses to start (exit 2) with a budget too small to give
+  each worker a byte, or with a per-worker `ZAMBONI_MAX_TEMP_DIRECTORY_BYTES`
+  beside it, which the budget would silently override. Without a budget,
+  nothing changes. `WorkerContext.max_temp_directory_bytes` carries the share
+  to an application's own entry; pressure checks get none, since they do not
+  spill.
 - **`--s3-path-style-access` / `--no-s3-path-style-access`**, or
   `ZAMBONI_S3_PATH_STYLE_ACCESS` (#263). Default on, as before: the bucket in
   the path. Off addresses the bucket as a host name, for a store that requires
