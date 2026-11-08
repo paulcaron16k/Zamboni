@@ -589,8 +589,8 @@ def test_zamboni_serve_end_to_end(tmp_path):
 
 
 def test_serve_keeps_no_worker_idle_for_high_class_work(tmp_path):
-    """Nothing in serve offers manual or reclaim work until R9 (#168), so a
-    worker reserved for it would never run anything (#165)."""
+    """Nothing in serve offers manual or reclaim work -- it reads no request
+    source (#168) -- so a worker reserved for it would never run anything (#165)."""
     pools: list[FakePool] = []
 
     async def scenario():

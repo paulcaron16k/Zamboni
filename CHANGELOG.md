@@ -51,6 +51,25 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **Requests from another process** (#168, R9 of
+  [docs/maintenance-runtime.md](docs/maintenance-runtime.md) §9.2). A web tier
+  asks for "run now" or "drop with reclaim" by writing a row; the maintenance
+  tier reads it through a `zamboni.requests.RequestSource`, passed as
+  `MaintenanceRuntime(requests=[...])`. Each request is offered as it arrives
+  (`manual` or `reclaim`, never debounced) and acknowledged with what became of
+  it -- `offered`, `refused` (quarantined, or naming no table) or `unmapped`
+  (a warehouse or table the fleet does not manage, never retried) -- for the
+  row to record. A runtime that is stopping gives a request back unmarked. Each
+  source's counters are in `state().events`. `LocalRequests` is an in-memory
+  request table for one process.
+  `zamboni.conformance.request_source_conformance` is the suite a source must
+  pass: each request to one replica at a time, acknowledged once, and never
+  lost to a nak or a replica that stopped. The PostgreSQL request table and
+  state rows in §9.2 pass it, now exercised against PostgreSQL with two
+  runtimes reading one table. **The reference `take` now locks one request
+  per transaction, not 50**: a replica stopping partway through a batch
+  rolled back the marks of requests it had already offered, and another
+  replica offered them again. Provisional, with the rest of the runtime.
 - **The maintenance runtime takes work by priority** (#165, R8 of
   [docs/maintenance-runtime.md](docs/maintenance-runtime.md) §3.4). A free
   worker takes `manual` and `reclaim` first, then `event` and `pressure`, then

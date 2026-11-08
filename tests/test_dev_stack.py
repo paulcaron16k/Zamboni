@@ -1151,10 +1151,10 @@ def test_the_watermark_and_changed_set_hold_on_every_load(session, table):
 
 
 @pytest.fixture
-def claim_store():
-    from zamboni.conformance import ClaimStoreHarness
-
-    from .claims_postgres import PostgresClaimStore, psycopg
+def postgres_schemas():
+    """``(conninfo, new_schema)``: the stack's Postgres, and a schema of the
+    caller's own per call, dropped after the test."""
+    from .claims_postgres import psycopg
 
     values = stack_env() or {}
     keys = ("POSTGRES_PORT", "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB")
@@ -1171,21 +1171,35 @@ def claim_store():
 
     schemas: list[str] = []
 
-    def make_store() -> PostgresClaimStore:
-        schema = f"zamboni_claims_{uuid.uuid4().hex[:12]}"
+    def new_schema(prefix: str) -> str:
+        schema = f"{prefix}_{uuid.uuid4().hex[:12]}"
         with psycopg.connect(conninfo, autocommit=True) as conn:
             conn.execute(f"CREATE SCHEMA {schema}")
         schemas.append(schema)
-        store = PostgresClaimStore(conninfo, schema)
-        store.create_schema()
-        return store
+        return schema
 
     try:
-        yield ClaimStoreHarness(make_store=make_store, now=lambda store: store.now())
+        yield conninfo, new_schema
     finally:
         with psycopg.connect(conninfo, autocommit=True) as conn:
             for schema in schemas:
                 conn.execute(f"DROP SCHEMA {schema} CASCADE")
+
+
+@pytest.fixture
+def claim_store(postgres_schemas):
+    from zamboni.conformance import ClaimStoreHarness
+
+    from .claims_postgres import PostgresClaimStore
+
+    conninfo, new_schema = postgres_schemas
+
+    def make_store() -> PostgresClaimStore:
+        store = PostgresClaimStore(conninfo, new_schema("zamboni_claims"))
+        store.create_schema()
+        return store
+
+    return ClaimStoreHarness(make_store=make_store, now=lambda store: store.now())
 
 
 def _claim_store_checks():
@@ -1197,3 +1211,125 @@ def _claim_store_checks():
 @pytest.mark.parametrize("check", _claim_store_checks(), ids=lambda c: c.__name__)
 def test_the_postgres_reference_claim_store_passes(claim_store, check):
     check(claim_store)
+
+
+# -- the PostgreSQL reference request table and state rows (#168) ---------------------
+#
+# docs/maintenance-runtime.md §9.2's schemas and statements, read from the
+# document by tests/requests_postgres.py: the request-source checks
+# `LocalRequests` passes in tests/test_requests.py, then two runtimes reading
+# one request table.
+
+
+def _request_source_checks():
+    from zamboni.conformance import REQUEST_SOURCE_CHECKS
+
+    return REQUEST_SOURCE_CHECKS
+
+
+@pytest.mark.parametrize("check", _request_source_checks(), ids=lambda c: c.__name__)
+def test_the_postgres_request_table_passes(postgres_schemas, check):
+    from zamboni.conformance import RequestSourceHarness
+
+    from .requests_postgres import PostgresRequests
+
+    conninfo, new_schema = postgres_schemas
+
+    def make_table() -> PostgresRequests:
+        table = PostgresRequests(conninfo, new_schema("zamboni_requests"))
+        table.create_schema()
+        return table
+
+    check(RequestSourceHarness(make_table=make_table))
+
+
+def test_two_replicas_offer_each_request_once(postgres_schemas, tmp_path):
+    """§9.2 and §9.3 together: two runtimes, as two maintenance replicas, read
+    one request table while a web tier writes to it. Every request is offered
+    by exactly one of them and marked ``offered``; each runtime's observer
+    writes the state rows a dashboard reads."""
+    import time
+    from datetime import timedelta
+
+    from zamboni.observe import handed_off
+    from zamboni.pool import ItemResult, PoolSize, WorkerConfig
+    from zamboni.requests import OFFERED
+    from zamboni.runtime import MaintenanceRuntime, StaticFleet, start_in_thread
+    from zamboni.scheduler import MANUAL
+
+    from .claims_postgres import psycopg
+    from .requests_postgres import PostgresRequests, PostgresStateRows
+    from .test_priorities import TABLES, wide_fleet
+    from .test_runtime import QUIET
+
+    conninfo, new_schema = postgres_schemas
+    schema = new_schema("zamboni_app")
+    table = PostgresRequests(conninfo, schema)
+    table.create_schema()
+    wanted = [f"raw.{t}" for t in TABLES[:40]]
+
+    class Pool:
+        def __init__(self, size, config) -> None:
+            self.ran: list[str] = []
+
+        async def run(self, item):
+            self.ran.append(item.table)
+            return ItemResult(item, 0, {"exit_code": 0, "table": item.table}, "", None, 0.0)
+
+        def kill(self) -> None:
+            pass
+
+        async def close(self) -> None:
+            pass
+
+    offered: list[tuple[str, str]] = []
+    pools: list[Pool] = []
+    handles = []
+    for n in range(2):
+
+        class Offers:
+            def offered(self, receipt, n=n) -> None:
+                offered.extend((f"replica-{n}", t) for t in receipt.queued + receipt.coalesced)
+
+        rows = PostgresStateRows(conninfo, schema)
+        if n == 0:
+            rows.create_schema()
+        runtime = MaintenanceRuntime(
+            fleet=StaticFleet(wide_fleet()),
+            pool=PoolSize(1, 1, "test"),
+            worker=WorkerConfig(workdir=tmp_path),
+            clock=lambda: QUIET,
+            requests=[table.source(f"replica-{n}")],
+            observers=[Offers(), handed_off(rows, name=f"state rows {n}")],
+            pool_factory=lambda size, config: pools.append(Pool(size, config)) or pools[-1],
+        )
+        rows.attach(runtime)
+        handles.append(start_in_thread(runtime))
+    try:
+        ids = []
+        for start in range(0, len(wanted), 10):  # a web tier, in waves
+            ids += [table.submit("acme", [t], reason=MANUAL) for t in wanted[start : start + 10]]
+            time.sleep(0.05)
+        deadline = time.monotonic() + 60
+        while not all(table.outcome(i) for i in ids):
+            assert time.monotonic() < deadline, "requests left unhandled"
+            time.sleep(0.05)
+        while sum(len(p.ran) for p in pools) < len(wanted):
+            assert time.monotonic() < deadline, "offered tables never ran"
+            time.sleep(0.05)
+    finally:
+        for handle in handles:
+            assert handle.stop(grace=timedelta(seconds=10))
+
+    assert {table.outcome(i) for i in ids} == {OFFERED}
+    assert sorted(t for _, t in offered) == sorted(wanted), "each request offered exactly once"
+    assert {replica for replica, _ in offered} == {"replica-0", "replica-1"}, (
+        "both replicas took requests, so they contended for the table"
+    )
+    assert sorted(t for p in pools for t in p.ran) == sorted(wanted)
+    with psycopg.connect(conninfo, options=f"-c search_path={schema}") as conn:
+        phases = dict(conn.execute("SELECT holder, phase FROM zamboni_runtime").fetchall())
+        runs = conn.execute("SELECT table_identifier, record->>'table' FROM zamboni_run").fetchall()
+    assert phases == {h.runtime.holder: "stopped" for h in handles}
+    assert sorted(t for t, _ in runs) == sorted(wanted)
+    assert all(t == recorded for t, recorded in runs), "the run record is stored as jsonb"

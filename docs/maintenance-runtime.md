@@ -308,8 +308,9 @@ As built in R8 (#165):
   (`test_a_sweep_runs_the_tables_maintained_longest_ago_first`).
 - **`zamboni serve` reserves no worker** (`SERVE_RESERVED_HIGH_SLOTS`). Only
   `offer(reason=manual|reclaim)` makes high-class work, and `serve` has no
-  caller of it until R9 lets another process send requests. Until then a
-  reserved worker there would be idle for good
+  caller of it and reads no request source (§9.2), which is for an
+  application's maintenance tier. A reserved worker there would be idle for
+  good
   (`test_serve_keeps_no_worker_idle_for_high_class_work`).
 
 ### 3.5 `RuntimeSettings`
@@ -1044,9 +1045,17 @@ A Lakehouse App is deployed as two tiers from the same image:
   since …") rather than failing.
 - **Requests cross tiers as rows, not calls.** "Run now" and "drop with reclaim"
   are written to a request table; the maintenance tier reads it through a
-  `RequestSource`, which is an `EventSource` (§5.3): a request becomes an
-  `offer(reason="manual" | "reclaim")` and is marked handled — the same path,
-  dedup and acknowledgement rules as an event. No new mechanism.
+  `RequestSource` (`zamboni.requests`, passed as `MaintenanceRuntime(requests=...)`):
+  a request becomes an `offer(reason="manual" | "reclaim")` and is marked
+  handled. It is an `EventSource` (§5.3) in all but two respects, and keeps its
+  acknowledgement rules: **its message is already a `Request`**, since the
+  source reads its own rows, and **its `ack` carries the outcome**, since the
+  row is where the person who asked finds out what became of it. **Nor is it
+  debounced**: an event waits for a burst of writes to settle, but "run now"
+  means now, and two requests for one table coalesce in the queue as any two
+  offers do (§3.2). A request delivered again after a lost acknowledgement is
+  acknowledged with the outcome it had, not offered twice. Each source's
+  counters are in `state().events`, beside the event feeds'.
 - **State crosses tiers as rows.** An observer (§8) writes `RuntimeState` and
   each run record to the database; the dashboard reads them. The web tier never
   needs `state()` directly.
@@ -1054,8 +1063,7 @@ A Lakehouse App is deployed as two tiers from the same image:
   `terminationGracePeriodSeconds` covers its longest table; the web tier's is
   short.
 
-Reference schema for the request table (PostgreSQL). Unlike §6.1, **not yet
-exercised against a database**; R9 does that.
+#### Reference schema for the request table (PostgreSQL)
 
 ```sql
 CREATE TABLE zamboni_request (
@@ -1066,16 +1074,92 @@ CREATE TABLE zamboni_request (
     requested_by text        NOT NULL,
     requested_at timestamptz NOT NULL DEFAULT now(),
     handled_at   timestamptz,
-    outcome      text                    -- offered | unmapped | refused: <why>
+    outcome      text                    -- offered | unmapped | refused, then why
 );
 
--- RequestSource, each poll: one replica takes each request
+-- take: each poll, in a transaction of its own; one replica takes each request
 SELECT id, warehouse, tables, reason FROM zamboni_request
  WHERE handled_at IS NULL ORDER BY id
- FOR UPDATE SKIP LOCKED LIMIT 50;
--- ...offer each, then in the same transaction:
+ FOR UPDATE SKIP LOCKED LIMIT 1;
+
+-- handle: once it is offered, in the same transaction, then COMMIT
 UPDATE zamboni_request SET handled_at = now(), outcome = :outcome WHERE id = :id;
 ```
+
+**One request per transaction**, not a batch. The first design took 50 at a
+time and marked each in the batch's transaction; a replica stopping partway
+would then roll back the marks of requests it had already offered, and
+another replica would offer them again. Taken one at a time, a replica holds
+at most the one request in hand, and the row lock is what keeps every other
+replica off it. A web tier writes perhaps a request a minute; a round trip
+each is nothing.
+
+`requested_by` is never read by the maintenance tier; it is for the
+application's audit. **`outcome`** starts with the best that happened to any
+table -- `offered`, `refused` or `unmapped` -- and says the rest after:
+`offered; unmapped: not in the table config: raw.typo`. A request is `refused`
+when its tables are quarantined (§7.1; a `reclaim` can be, a `manual` never
+is), or when it names no table at all: an empty array is not NULL. It is
+`unmapped` when the fleet does not manage its warehouse or table, and never
+retried. A runtime that is stopping gives a request back unmarked, for another
+replica or its own next start.
+
+**Exercised against PostgreSQL 17**, the dev stack's, by
+`tests/requests_postgres.py`, which reads the statements above from this
+document as `tests/claims_postgres.py` reads §6.1's:
+`test_the_postgres_request_table_passes` runs the request-source checks
+(`zamboni.conformance.REQUEST_SOURCE_CHECKS`), and
+`test_two_replicas_offer_each_request_once` runs two runtimes against one
+table: forty requests, each offered once, each marked `offered`.
+
+#### Reference schema for the state rows (PostgreSQL)
+
+What the dashboard reads, written by an observer (§8): a row per runtime,
+rewritten on each change it reports, and a row per finished table.
+
+```sql
+CREATE TABLE zamboni_runtime (
+    holder     text        PRIMARY KEY,  -- MaintenanceRuntime.holder
+    phase      text        NOT NULL,
+    last_tick  timestamptz,
+    busy       integer     NOT NULL,
+    queued     integer     NOT NULL,
+    last_error text,
+    updated_at timestamptz NOT NULL
+);
+
+CREATE TABLE zamboni_run (
+    id               bigserial   PRIMARY KEY,
+    holder           text        NOT NULL,
+    warehouse        text        NOT NULL,
+    table_identifier text        NOT NULL,
+    reason           text        NOT NULL,
+    exit_code        integer     NOT NULL,
+    died             text,
+    dropped          text,
+    record           jsonb,                -- the run record; NULL if none came back
+    finished_at      timestamptz NOT NULL DEFAULT now()
+);
+
+-- state: on each change the runtime reports
+INSERT INTO zamboni_runtime AS r
+       (holder, phase, last_tick, busy, queued, last_error, updated_at)
+VALUES (:holder, :phase, :last_tick, :busy, :queued, :last_error, now())
+ON CONFLICT (holder) DO UPDATE
+   SET phase = EXCLUDED.phase, last_tick = EXCLUDED.last_tick, busy = EXCLUDED.busy,
+       queued = EXCLUDED.queued, last_error = EXCLUDED.last_error, updated_at = now();
+
+-- run: each table that finished
+INSERT INTO zamboni_run
+       (holder, warehouse, table_identifier, reason, exit_code, died, dropped, record)
+VALUES (:holder, :warehouse, :table, :reason, :exit_code, :died, :dropped, :record::jsonb);
+```
+
+A row whose `last_tick` is old is a runtime that stopped ticking: what the UI
+reports as "maintenance unavailable since …", as liveness does for `serve`.
+`tests/requests_postgres.py`'s `PostgresStateRows` is the observer, handed off
+(§8) because every call is a database write;
+`test_two_replicas_offer_each_request_once` reads both tables back.
 
 **Inside the maintenance tier's process**, the runtime is the process's main
 work; `start_in_thread` exists for hosts that have other work too.
@@ -1126,9 +1210,15 @@ An implementation is conformant when:
    tier never imports `zamboni.runtime` — a test imports the web tier's entry
    point and asserts the module is absent from `sys.modules`;
 4. it pushes every registry change through `update_fleet()`;
-5. its `RequestSource` passes the event-source checks in `zamboni.testing`
-   (handled requests acknowledged once; a request offered on one replica is not
-   offered on another).
+5. its `RequestSource` passes `zamboni.conformance.request_source_conformance`
+   (a request delivered as written; acknowledged once, with its outcome
+   recorded and never delivered again; a nak'd request, or one held by a
+   replica that stopped, delivered again; each request to one replica of
+   three reading at once) — in `conformance`, not `zamboni.testing`, for point
+   2's reason. `zamboni.requests.LocalRequests`, an in-memory request table,
+   passes it (`test_the_in_memory_request_table_passes`), and so does §9.2's
+   PostgreSQL reference; each check is shown to reject a table broken its own
+   way (`test_each_check_rejects_a_table_broken_its_way`).
 
 ---
 

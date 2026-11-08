@@ -80,9 +80,10 @@ class RuntimeState:
     #: The fleet in use is still valid.
     reload_error: str | None = None
     warehouses: Mapping[str, WarehouseState] = field(default_factory=dict)
-    #: Per event source: its feed's counters (`zamboni.events.feed.FeedCounters`).
+    #: Per event source, its feed's counters (`zamboni.events.feed.FeedCounters`);
+    #: per request source, likewise (`zamboni.requests.RequestCounters`).
     events: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
-    #: Whether every event source is connected; ``None`` when there are none,
+    #: Whether every event and request source is connected; ``None`` when there are none,
     #: which is "nothing to wait for" rather than "disconnected".
     sources_connected: bool | None = None
     #: Tables refusing offers after failing in a row, by ``warehouse/table``

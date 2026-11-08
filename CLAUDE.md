@@ -189,7 +189,11 @@ watermark first. The watermark comes from `maintained_at` in the records the
 workers return (`runtime.LastMaintained`); the runtime's process never loads
 a table. `pool.WorkerSlots` keeps `reserved_high_slots` workers for work that
 is high by its reasons, not by ageing, and pressure checks count against the
-same slots. `serve` reserves none until R9 gives it high-class work.
+same slots. `serve` reserves none: it reads no request source, so it has no high-class work.
+Another process asks for work through a `requests.RequestSource` (§9.2): each
+request is offered as `manual` or `reclaim` and acknowledged with its outcome,
+and a source must pass `conformance.request_source_conformance`, which
+`tests/requests_postgres.py` runs against §9.2's SQL read from the design doc.
 Nothing in the runtime decides whether a table needs work; that is still
 `maintain()`'s due-check, run in each worker.
 docs/maintenance-runtime.md is the design and §12 the stories still to build.
