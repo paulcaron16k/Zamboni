@@ -246,6 +246,19 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **A table whose worker died before receiving it is sent to a new worker**
+  (#268). The pool replaced a worker that died between tables only when
+  `is_alive()` said so, and on Linux a SIGKILLed worker whose other threads
+  are still exiting -- the parent-death watcher, DuckDB's -- answers True
+  until it can be reaped. A worker OOM-killed while idle, in that window, had
+  the next table sent into its dying pipe, and that table was reported as
+  `worker died (killed by signal 9)` and counted toward quarantine. A worker
+  now acknowledges each table when it receives it; one that dies before
+  acknowledging never had the table, which goes once more to a new worker. A
+  worker that dies at startup no longer costs a table either. Only once: a
+  second death is the table's failure, as is any death after the
+  acknowledgement, and a table killed on purpose (a lost claim, a forced
+  stop) is never resent.
 - **A runtime loop that raises stops the runtime** (#170). `MaintenanceRuntime.run`
   gathered its loops, so when one raised the others kept running: a scheduler
   firing into a queue no worker took from, with the pool closed under it. Now

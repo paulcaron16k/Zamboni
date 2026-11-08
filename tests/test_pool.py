@@ -880,10 +880,11 @@ def test_a_non_positive_memory_limit_is_a_usage_error(tmp_path, value):
 # -- a worker that dies at the wrong moment (#155) -------------------------------------
 
 
-def test_a_worker_dying_at_startup_costs_one_table_and_the_slot_recovers(tmp_path, monkeypatch):
+def test_a_worker_dying_at_startup_costs_no_table_and_the_slot_recovers(tmp_path, monkeypatch):
     """The worker exits while importing its entry, with the job already sent:
     the parent sees ConnectionResetError, not EOFError. Before #155 that escaped,
-    the slot kept its dead process, and every later table on it failed."""
+    the slot kept its dead process, and every later table on it failed. Until
+    #268 it cost the first table, which the worker never received."""
     marker = tmp_path / "startup-marker"
     # In the real environment, not base_environ: a worker imports its entry
     # before it first restores base_environ, which happens per job.
@@ -903,10 +904,10 @@ def test_a_worker_dying_at_startup_costs_one_table_and_the_slot_recovers(tmp_pat
 
     first, second, third = asyncio.run(scenario())
     assert marker.exists(), "the first worker really did die at startup"
-    assert first.exit_code == 1 and first.died is not None
-    assert (second.exit_code, second.died) == (0, None), "the slot recovered"
-    assert (third.exit_code, third.died) == (0, None)
-    assert second.record["pid"] == third.record["pid"], "one replacement, then reused"
+    assert [(r.exit_code, r.died) for r in (first, second, third)] == [(0, None)] * 3
+    assert first.record["pid"] == second.record["pid"] == third.record["pid"], (
+        "one replacement, then reused"
+    )
 
 
 def test_a_worker_killed_between_tables_does_not_fail_the_next_one(tmp_path):
@@ -941,6 +942,159 @@ def test_a_worker_killed_between_tables_does_not_fail_the_next_one(tmp_path):
     first, second = asyncio.run(scenario())
     assert (second.exit_code, second.died) == (0, None)
     assert second.record["pid"] != first.record["pid"]
+
+
+# -- a table the worker never received (#268) ------------------------------------------
+
+
+class CountingPool(WorkerPool):
+    """Counts the workers it spawns: a table sent again costs one more."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.spawned = 0
+
+    def _spawn(self, slot) -> None:
+        self.spawned += 1
+        super()._spawn(slot)
+
+
+def receipt_config(tmp_path) -> WorkerConfig:
+    return WorkerConfig(
+        entry="tests.pool_entries:record", workdir=tmp_path, base_environ={"PATH": "/usr/bin:/bin"}
+    )
+
+
+def test_a_worker_dead_but_not_yet_reapable_does_not_fail_the_next_table(tmp_path):
+    """SIGKILLed with other threads still exiting, a worker cannot be reaped,
+    so `is_alive()` still answers True and the next table goes into its pipe.
+    That window is made to happen, not raced for: the worker is killed and
+    reaped, then answers True once -- what the pool sees inside the window."""
+    import os
+    import signal
+
+    asked: list[bool] = []
+
+    async def scenario():
+        pool = CountingPool(PoolSize(1, 1, "test"), receipt_config(tmp_path))
+        try:
+            first = await pool.run(item("raw.a"))
+            worker = pool._slots[0].process
+            os.kill(worker.pid, signal.SIGKILL)
+            await asyncio.to_thread(worker.join, 10)
+            really = worker.is_alive
+
+            def not_yet_reapable() -> bool:
+                if not asked:
+                    asked.append(True)
+                    return True
+                return really()
+
+            worker.is_alive = not_yet_reapable
+            return first, await pool.run(item("raw.b")), pool.spawned
+        finally:
+            await pool.close()
+
+    first, second, spawned = asyncio.run(scenario())
+    assert asked, "the pool asked the dead worker whether it was alive"
+    assert (second.exit_code, second.died) == (0, None)
+    assert second.record["pid"] != first.record["pid"]
+    assert spawned == 2
+
+
+def test_a_worker_dying_after_receiving_the_table_fails_it_and_is_not_resent(tmp_path):
+    """Received is the line: past it, the death is the table's, as before."""
+
+    async def scenario():
+        pool = CountingPool(PoolSize(1, 1, "test"), receipt_config(tmp_path))
+        try:
+            died = await pool.run(item("raw.die"))
+            spawned = pool.spawned
+            return died, spawned, await pool.run(item("raw.b"))
+        finally:
+            await pool.close()
+
+    died, spawned, after = asyncio.run(scenario())
+    assert (died.exit_code, died.died) == (1, "worker died (killed by signal 9)")
+    assert spawned == 1, "the table was sent once"
+    assert (after.exit_code, after.died) == (0, None)
+
+
+def test_a_table_whose_worker_dies_on_receipt_every_time_is_sent_twice_then_fails(tmp_path):
+    """At most one resend, so a job that kills every worker cannot loop."""
+    from tests.pool_entries import DiesOnReceipt
+
+    async def scenario():
+        pool = CountingPool(PoolSize(1, 1, "test"), receipt_config(tmp_path))
+        try:
+            died = await pool.run(item(DiesOnReceipt("raw.x")))
+            spawned = pool.spawned
+            return died, spawned, await pool.run(item("raw.b"))
+        finally:
+            await pool.close()
+
+    died, spawned, after = asyncio.run(scenario())
+    assert (died.exit_code, died.died) == (1, "worker died (killed by signal 9)")
+    assert spawned == 2
+    assert (after.exit_code, after.died) == (0, None), "the slot recovered"
+
+
+def test_a_worker_seen_dead_between_tables_does_not_use_up_the_resend(tmp_path):
+    """A worker plainly dead before the send is replaced without a send, so
+    the table still gets its two workers: here both die on receipt."""
+    import os
+    import signal
+
+    from tests.pool_entries import DiesOnReceipt
+
+    async def scenario():
+        pool = CountingPool(PoolSize(1, 1, "test"), receipt_config(tmp_path))
+        try:
+            await pool.run(item("raw.a"))
+            worker = pool._slots[0].process
+            os.kill(worker.pid, signal.SIGKILL)
+            await asyncio.to_thread(worker.join, 10)
+            died = await pool.run(item(DiesOnReceipt("raw.x")))
+            return died, pool.spawned
+        finally:
+            await pool.close()
+
+    died, spawned = asyncio.run(scenario())
+    assert died.died == "worker died (killed by signal 9)"
+    assert spawned == 1 + 2, "the first worker, then two for the table"
+
+
+@pytest.mark.parametrize("stop", ["kill_table", "kill"])
+def test_a_table_killed_on_purpose_before_its_worker_received_it_is_not_resent(
+    tmp_path, monkeypatch, stop
+):
+    """`kill_table` (a lost claim) and `kill` (a forced stop) mean the table
+    must not run: a death they caused is not one to recover from."""
+    from tests.pool_entries import HangsOnReceipt
+
+    pid_file = tmp_path / "pid"
+    monkeypatch.setenv("ZAMBONI_TEST_PID_FILE", str(pid_file))
+
+    async def scenario():
+        pool = CountingPool(PoolSize(1, 1, "test"), receipt_config(tmp_path))
+        try:
+            hung = item(HangsOnReceipt("raw.x"))
+            running = asyncio.create_task(pool.run(hung))
+            deadline = asyncio.get_running_loop().time() + 60
+            while not pid_file.exists():
+                assert asyncio.get_running_loop().time() < deadline, "the worker never hung"
+                await asyncio.sleep(0.05)
+            if stop == "kill_table":
+                assert pool.kill_table(hung)
+            else:
+                pool.kill()
+            return await asyncio.wait_for(running, 60), pool.spawned
+        finally:
+            await pool.close()
+
+    result, spawned = asyncio.run(scenario())
+    assert (result.exit_code, result.died) == (1, "worker died (killed by signal 9)")
+    assert spawned == 1
 
 
 def test_workdir_may_be_a_string_and_must_be_a_path():

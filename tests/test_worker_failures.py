@@ -4,8 +4,9 @@
 Every test here makes its row of the table happen to a real spawned worker and
 asserts what the runtime did and what it reported. Two rows are tested where
 they were built: a worker that dies at startup, in
-tests/test_pool.py::test_a_worker_dying_at_startup_costs_one_table_and_the_slot_recovers
-(#155), and the pipe errors it generalises, in the same file's death tests.
+tests/test_pool.py::test_a_worker_dying_at_startup_costs_no_table_and_the_slot_recovers
+(#155), and the pipe errors it generalises, in the same file's death tests,
+with a table its worker never received (#268).
 """
 
 from __future__ import annotations

@@ -746,6 +746,9 @@ def _worker_main(conn: WorkerConnection, config: WorkerConfig) -> None:
             return
         if job is None:
             return
+        # Received: from here on, the worker dying is this job's failure.
+        # Before it, the job never arrived, and the pool sends it again (#268).
+        conn.send(("received",))
         os.environ.clear()
         os.environ.update(config.base_environ)
         out = io.StringIO()
@@ -853,6 +856,13 @@ class ItemResult:
     progress_reports: int = 0
 
 
+@dataclass(frozen=True)
+class _NotReceived:
+    """The worker died before acknowledging the job: the table never reached it."""
+
+    died: str
+
+
 class _Slot:
     def __init__(self) -> None:
         self.process: Any = None
@@ -880,6 +890,8 @@ class WorkerPool:
         # Spawn, never fork: see the module docstring on native threads.
         self._context = get_context("spawn")
         self._slots = [_Slot() for _ in range(size.workers)]
+        #: :meth:`kill` was called: a table its kill interrupted is not resent.
+        self._stopping = False
         self._idle: asyncio.Queue[_Slot] = asyncio.Queue()
         for slot in self._slots:
             self._idle.put_nowait(slot)
@@ -904,12 +916,37 @@ class WorkerPool:
             if isinstance(item, WorkItem)
             else item
         )
+        result = self._send(slot, item, job, started)
+        if isinstance(result, _NotReceived) and not (slot.doomed or self._stopping):
+            # The worker died before it received the table -- killed or OOM
+            # while idle, or crashed starting up. Not this table's failure, so
+            # it goes once more to a fresh worker. Only once: a worker that
+            # dies on receipt every time must not loop, and the second death
+            # is then reported as the table's (#268).
+            logger.warning(
+                "worker for %s/%s: %s before receiving it; sending it to a new worker",
+                item.warehouse,
+                item.table,
+                result.died,
+            )
+            result = self._send(slot, item, job, started)
+        if isinstance(result, _NotReceived):
+            logger.error("worker for %s/%s: %s", item.warehouse, item.table, result.died)
+            return self._failed(item, started, result.died, None, 0)
+        return result
+
+    def _send(self, slot: _Slot, item: Job, job: Job, started: float) -> ItemResult | _NotReceived:
+        """Run ``job`` on the slot's worker: its result, or :class:`_NotReceived`
+        if the worker died before acknowledging it, leaving the slot empty."""
         progress: str | None = None
         reports = 0
+        received = False
         if slot.process is not None and not slot.process.is_alive():
-            # Died between tables -- killed, OOM, crashed after its last
-            # reply. That is not this table's failure: replace the worker
-            # and run the table, rather than sending it into a dead pipe.
+            # Plainly dead already: replaced without sending into its pipe.
+            # This check is a shortcut, not the guarantee. A SIGKILLed worker
+            # whose other threads are still exiting is not yet reapable, so
+            # `is_alive()` answers True (#268); its death is then seen on the
+            # pipe, before the acknowledgement, below.
             self._reset(slot)
         if slot.process is None:
             self._spawn(slot)
@@ -924,13 +961,14 @@ class WorkerPool:
         # unread in its socket buffer; catching EOFError alone left the slot
         # holding a dead process and failed every later table on it (#155).
         limit, stall = self.config.time_limit(item), self.config.stall_timeout
+        done: tuple[Any, ...] | None = None
         try:
             slot.conn.send(job)
             # Both clocks start here, once the job is sent: a replacement
             # worker's spawn and imports take seconds, and are not the table's.
             heard = time.monotonic()
             deadline = None if limit is None else heard + limit.total_seconds()
-            while True:
+            while done is None:
                 # Woken by a message, the worker exiting, or whichever limit is
                 # nearer: the run's own deadline, or a stall since the last report.
                 due = [] if deadline is None else [deadline]
@@ -945,29 +983,38 @@ class WorkerPool:
                         why = f"stalled: no progress report for {stall}"
                     return self._killed(slot, item, started, progress, reports, why)
                 if slot.conn not in ready:
-                    return self._died(slot, item, started, progress, reports)
+                    break  # exited, with nothing more to say
                 message = slot.conn.recv()
-                if message[0] != "progress":
-                    break
-                progress = message[1]
-                reports += 1
-                heard = time.monotonic()
-            _, code, output, run_record = message
+                if message[0] == "received":
+                    received = True
+                elif message[0] == "progress":
+                    progress = message[1]
+                    reports += 1
+                    heard = time.monotonic()
+                else:
+                    done = message
         except (OSError, EOFError):
-            return self._died(slot, item, started, progress, reports)
-        slot.tables += 1
-        if code not in SOUND_EXITS or slot.tables >= self.recycle_after:
-            self._retire(slot)
-        return ItemResult(
-            item,
-            code,
-            run_record,
-            output,
-            None,
-            time.monotonic() - started,
-            progress=progress,
-            progress_reports=reports,
-        )
+            pass
+        if done is not None:
+            _, code, output, run_record = done
+            slot.tables += 1
+            if code not in SOUND_EXITS or slot.tables >= self.recycle_after:
+                self._retire(slot)
+            return ItemResult(
+                item,
+                code,
+                run_record,
+                output,
+                None,
+                time.monotonic() - started,
+                progress=progress,
+                progress_reports=reports,
+            )
+        died = f"worker died ({self._bury(slot)})"
+        if not received:
+            return _NotReceived(died)
+        logger.error("worker for %s/%s: %s", item.warehouse, item.table, died)
+        return self._failed(item, started, died, progress, reports)
 
     def _spawn(self, slot: _Slot) -> None:
         parent, child = self._context.Pipe()
@@ -984,9 +1031,8 @@ class WorkerPool:
         child.close()
         slot.process, slot.conn, slot.tables = process, parent, 0
 
-    def _died(
-        self, slot: _Slot, item: Job, started: float, progress: str | None, reports: int
-    ) -> ItemResult:
+    def _bury(self, slot: _Slot) -> str:
+        """Reap the slot's dead worker and empty the slot: how it died."""
         slot.process.join(timeout=5)
         if slot.process.is_alive():
             # The pipe failed but the process did not exit: it can no longer be
@@ -994,15 +1040,19 @@ class WorkerPool:
             slot.process.kill()
             slot.process.join()
         code = slot.process.exitcode
-        why = f"killed by signal {-code}" if code is not None and code < 0 else f"exit {code}"
-        logger.error("worker for %s/%s died (%s)", item.warehouse, item.table, why)
         self._reset(slot)
+        return f"killed by signal {-code}" if code is not None and code < 0 else f"exit {code}"
+
+    @staticmethod
+    def _failed(
+        item: Job, started: float, why: str, progress: str | None, reports: int
+    ) -> ItemResult:
         return ItemResult(
             item,
             1,
             None,
             "",
-            f"worker died ({why})",
+            why,
             time.monotonic() - started,
             progress=progress,
             progress_reports=reports,
@@ -1027,16 +1077,7 @@ class WorkerPool:
         slot.process.kill()
         slot.process.join()
         self._reset(slot)
-        return ItemResult(
-            item,
-            1,
-            None,
-            "",
-            why,
-            time.monotonic() - started,
-            progress=progress,
-            progress_reports=reports,
-        )
+        return self._failed(item, started, why, progress, reports)
 
     def _retire(self, slot: _Slot) -> None:
         with contextlib.suppress(OSError):
@@ -1057,6 +1098,7 @@ class WorkerPool:
 
     def kill(self) -> None:
         """SIGKILL every live worker: a forced stop. Their tables report as died."""
+        self._stopping = True
         for slot in self._slots:
             # Read once: the slot's thread may replace or clear it meanwhile.
             process = slot.process

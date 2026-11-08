@@ -888,9 +888,19 @@ As built in R7 (#170). Each row is made to happen, mostly in
   check reports nothing, so `stall_timeout` is its whole limit**
   (`test_a_pressure_check_reports_nothing_so_the_stall_timeout_is_its_limit`).
 - **Crashes:** at startup,
-  `test_a_worker_dying_at_startup_costs_one_table_and_the_slot_recovers`
+  `test_a_worker_dying_at_startup_costs_no_table_and_the_slot_recovers`
   (#155, `tests/test_pool.py`). Any pipe error on send or receive was already a
   death there, as this row asks.
+- **Dies before receiving a table:** a worker acknowledges each job when it
+  receives it, and **a worker that dies before acknowledging never had the
+  table**, which goes once to a new worker rather than counting as its failure
+  (#268). Asking `is_alive()` first is not enough: on Linux a SIGKILLed worker
+  whose other threads are still exiting cannot be reaped yet, and answers True
+  (`test_a_worker_dead_but_not_yet_reapable_does_not_fail_the_next_table`).
+  Once only: a job that kills every worker it reaches fails on the second
+  (`test_a_table_whose_worker_dies_on_receipt_every_time_is_sent_twice_then_fails`).
+  A death after the acknowledgement is the table's, and a table killed on
+  purpose is never resent.
 - **The entry raises:** `test_a_worker_whose_entry_raised_is_retired`. Exits 2,
   3 and 4 keep their worker (`test_a_refusal_or_an_abort_keeps_its_worker`).
   The line is `zamboni.pool.SOUND_EXITS`, and it is drawn on the exit code,

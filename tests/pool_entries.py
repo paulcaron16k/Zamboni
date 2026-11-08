@@ -115,6 +115,37 @@ def not_a_record(item: WorkItem, context: WorkerContext) -> Any:
     return 0
 
 
+class DiesOnReceipt(str):
+    """A table name that SIGKILLs the worker as it is unpickled -- inside
+    ``conn.recv()``, before the worker can acknowledge the job (#268). Every
+    worker it is sent to dies the same way."""
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (_die_on_receipt, (str(self),))
+
+
+class HangsOnReceipt(str):
+    """A table name that, as it is unpickled, writes the worker's pid where
+    ``ZAMBONI_TEST_PID_FILE`` says and then sleeps: a worker that holds the job
+    unacknowledged until the test kills it. The variable comes from the
+    worker's inherited environment, since ``base_environ`` is applied only
+    after a job is received."""
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (_hang_on_receipt, (str(self),))
+
+
+def _die_on_receipt(table: str) -> str:
+    os.kill(os.getpid(), signal.SIGKILL)
+    return table  # pragma: no cover - never reached
+
+
+def _hang_on_receipt(table: str) -> str:
+    Path(os.environ["ZAMBONI_TEST_PID_FILE"]).write_text(str(os.getpid()), encoding="ascii")
+    time.sleep(600)
+    return table  # pragma: no cover - killed first
+
+
 def _cli(argv: list[str], *, progress: Callable[[str], None] | None = None) -> int:
     """Write what the worker saw into the run record, then behave per table."""
     table = argv[1]
