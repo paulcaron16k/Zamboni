@@ -5,13 +5,14 @@
 
   FleetProvider ─update─┐
   EventSource ─▶ EventFeed ─┐
+  RequestSource ─▶ RequestFeed ┤
   pressure checks ──────────┼─offer─▶ CandidateQueue ─▶ run_workers ─▶ WorkerPool
   Scheduler (cron) ─────────┘                                │
   offer() / update_fleet() / state() / request_stop()        └─▶ per-table results
           (the control surface: any thread)
 
 docs/maintenance-runtime.md §3. One object owning one asyncio loop's worth of
-work -- the scheduler loop, one feed loop per event source, the pressure checks,
+work -- the scheduler loop, one feed loop per event or request source, the pressure checks,
 the take-and-run loop and the fleet provider -- with its parts injected.
 ``zamboni serve`` is one assembly of it (`zamboni.service`); an application
 embedding Zamboni is another. Nothing here decides whether a table needs work:
@@ -52,6 +53,7 @@ from .fleet import FleetConfig, FleetWarehouse
 from .observe import Observers
 from .pool import ItemResult, PoolSize, WorkerConfig, WorkerPool, WorkerSlots, run_workers
 from .quarantine import Quarantine
+from .requests import RequestFeed, RequestSource
 from .runstate import Ledger, RuntimeState
 from .scheduler import (
     MAX_SLEEP,
@@ -375,7 +377,9 @@ class MaintenanceRuntime:
     ``pool_factory`` builds the pool when :meth:`run` starts (a test passes a
     fake); ``wait`` replaces the scheduler's sleep, for a test driving
     ``clock``. ``feed_observer`` is told what each event feed does
-    (`zamboni.events.feed.FeedObserver`). A runtime runs once.
+    (`zamboni.events.feed.FeedObserver`). ``requests`` are where another
+    process asks for work (`zamboni.requests.RequestSource`, §9.2). A runtime
+    runs once.
     """
 
     def __init__(
@@ -386,6 +390,7 @@ class MaintenanceRuntime:
         worker: WorkerConfig,
         claims: ClaimStore | None = None,
         events: Sequence[Any] = (),
+        requests: Sequence[RequestSource] = (),
         observers: Sequence[Any] = (),
         settings: RuntimeSettings | None = None,
         feed_observer: Any = None,
@@ -457,6 +462,11 @@ class MaintenanceRuntime:
                 )
                 for source in self._events
             ]
+        self._requests = tuple(requests)
+        self.request_feeds = [
+            RequestFeed(source, offer=self._requested, stopping=self._stop.is_set)
+            for source in self._requests
+        ]
 
     # -- the control surface: safe from any thread ---------------------------------
 
@@ -534,6 +544,12 @@ class MaintenanceRuntime:
         self._observers.notify("offered", receipt)
         return receipt
 
+    def _requested(
+        self, warehouse: str, tables: tuple[str, ...] | None, reason: str
+    ) -> OfferReceipt:
+        # A request feed runs on the loop: `offer` as applied there.
+        return self._offered(warehouse, tables, reason, None)
+
     def _offer(
         self,
         warehouse: str,
@@ -599,9 +615,13 @@ class MaintenanceRuntime:
             last_error=self._ledger.last_error,
             reload_error=self._ledger.reload_error,
             warehouses=self._ledger.warehouses,
-            events={f.source.name: f.counters.as_dict() for f in self.feeds},
+            events={
+                f.source.name: f.counters.as_dict() for f in [*self.feeds, *self.request_feeds]
+            },
             sources_connected=(
-                all(bool(s.connected) for s in self._events) if self._events else None
+                all(bool(s.connected) for s in sources)
+                if (sources := (*self._events, *self._requests))
+                else None
             ),
             quarantined=self._quarantine.quarantined,
         )
@@ -636,6 +656,10 @@ class MaintenanceRuntime:
             await self._run_loops(
                 {
                     **{f"event feed {f.source.name}": f.run(self._stop) for f in self.feeds},
+                    **{
+                        f"request feed {f.source.name}": f.run(self._stop)
+                        for f in self.request_feeds
+                    },
                     "scheduler": run_scheduler(
                         self._scheduler,
                         self._queue,

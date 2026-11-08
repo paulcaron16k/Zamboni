@@ -2,13 +2,14 @@
 """Conformance suites for the runtime's protocols (docs/maintenance-runtime.md §9.5).
 
 An implementation of a protocol the runtime depends on for safety -- a
-:class:`~zamboni.claims.ClaimStore`, and a worker entry (§7) -- is conformant
-when it passes the suite here. Each check is a plain function that raises
+:class:`~zamboni.claims.ClaimStore`, a worker entry (§7), and a
+:class:`~zamboni.requests.RequestSource` (§9.2) -- is conformant when it passes
+the suite here. Each check is a plain function that raises
 :class:`ConformanceError`, so a suite runs under any test runner, or none:
 ``claim_store_conformance(...)`` runs them all, and ``CLAIM_STORE_CHECKS`` lets a
 pytest suite report each check by name (``entry_conformance`` and
 ``ENTRY_CHECKS``, ``health_entry_conformance`` and ``HEALTH_ENTRY_CHECKS``,
-likewise)::
+``request_source_conformance`` and ``REQUEST_SOURCE_CHECKS``, likewise)::
 
     @pytest.mark.parametrize("check", CLAIM_STORE_CHECKS, ids=lambda c: c.__name__)
     def test_my_store(check):
@@ -22,15 +23,17 @@ so a claim-store suite does not load it.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import dataclasses
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from .claims import Claim, ClaimStore
 
@@ -38,6 +41,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from .pool import ItemResult
+    from .requests import ReceivedRequest, Request, RequestSource
     from .scheduler import WorkItem
 
 
@@ -573,4 +577,273 @@ HEALTH_ENTRY_CHECKS: tuple[Callable[[EntryHarness], None], ...] = (
 def health_entry_conformance(harness: EntryHarness) -> None:
     """Run every pressure-check entry check; raises :class:`ConformanceError`."""
     for check in HEALTH_ENTRY_CHECKS:
+        check(harness)
+
+
+# -- request sources (§9.2, §9.5 point 5) -------------------------------------------
+
+
+class RequestTable(Protocol):
+    """Where requests are written and read: what the request checks drive.
+
+    For a database, the table; ``source`` is one replica's reader of it, on a
+    connection of its own.
+    """
+
+    def submit(
+        self,
+        warehouse: str,
+        tables: Sequence[str] | None = None,
+        *,
+        reason: str = ...,
+        requested_by: str = ...,
+    ) -> str:
+        """Write a request, as a web tier would; its id as the source reports it."""
+
+    def outcome(self, id: str) -> str | None:
+        """The outcome recorded for request ``id``; ``None`` while unhandled."""
+
+    def source(self, name: str) -> RequestSource:
+        """A new reader of this table: one replica's source."""
+
+
+@dataclass(frozen=True)
+class RequestSourceHarness:
+    """What the request checks need."""
+
+    #: A request table with nothing in it, called once per check.
+    make_table: Callable[[], RequestTable]
+    #: How long a source may take to deliver a request it has been sent: a
+    #: poll interval and a round trip, with room for a slow machine.
+    timeout: float = 30.0
+
+
+def _consume(
+    h: RequestSourceHarness,
+    source: RequestSource,
+    settle: Callable[[ReceivedRequest], Awaitable[bool]],
+    *,
+    done: threading.Event | None = None,
+) -> list[str]:
+    """Read ``source`` in a loop of its own, settling each request with
+    ``settle``, until it says stop or ``done`` is set; the ids delivered, in
+    order. The source is closed after, as a stopping replica closes it."""
+    delivered: list[str] = []
+
+    async def read() -> None:
+        messages = aiter(source)
+        # One deadline for the whole read, not one per request: a source that
+        # delivers the same request forever must fail the check, not hang it.
+        deadline = time.monotonic() + h.timeout
+
+        def late() -> ConformanceError:
+            return ConformanceError(
+                f"delivery: {source.name} did not deliver what was wanted "
+                f"within {h.timeout}s (it delivered {delivered[:10]})"
+            )
+
+        try:
+            while True:
+                if time.monotonic() > deadline:
+                    raise late()
+                waiting = asyncio.ensure_future(anext(messages))
+                while not waiting.done():
+                    await asyncio.wait({waiting}, timeout=0.05)
+                    if waiting.done():
+                        break
+                    if done is not None and done.is_set():
+                        await _cancelled(waiting)
+                        return
+                    if time.monotonic() > deadline:
+                        await _cancelled(waiting)
+                        raise late()
+                message = waiting.result()
+                delivered.append(message.request.id)
+                if not await settle(message):
+                    return
+        finally:
+            close = getattr(messages, "aclose", None)
+            if close is not None:
+                await close()
+
+    asyncio.run(read())
+    return delivered
+
+
+async def _cancelled(step: asyncio.Future[Any]) -> None:
+    """Cancel a pending read and wait for it to end: a source is closed only
+    once nothing is still running inside it."""
+    step.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await step
+
+
+def _ack(outcome: str) -> Callable[[ReceivedRequest], Awaitable[bool]]:
+    async def settle(message: ReceivedRequest) -> bool:
+        await message.ack(outcome)
+        return False
+
+    return settle
+
+
+def check_a_request_is_delivered_as_written(h: RequestSourceHarness) -> None:
+    """The warehouse, the tables -- or ``None`` for every table -- and the reason."""
+    from .scheduler import MANUAL, RECLAIM
+
+    table = h.make_table()
+    named = table.submit("wh", ["ns.a", "ns.b"], reason=MANUAL, requested_by="conformance")
+    every = table.submit("wh", None, reason=RECLAIM, requested_by="conformance")
+    source = table.source("conformance")
+    _require(
+        isinstance(source.connected, bool), "connected", f"is not a bool: {source.connected!r}"
+    )
+    seen: dict[str, Request] = {}
+
+    async def settle(message: ReceivedRequest) -> bool:
+        seen[message.request.id] = message.request
+        await message.ack("offered")
+        return len(seen) < 2
+
+    _consume(h, source, settle)
+    _require(set(seen) == {named, every}, "delivery", f"delivered {sorted(seen)}")
+    got = {i: (r.warehouse, r.tables, r.reason) for i, r in seen.items()}
+    want = {named: ("wh", ("ns.a", "ns.b"), MANUAL), every: ("wh", None, RECLAIM)}
+    _require(got == want, "the request as written", f"read {got}, wrote {want}")
+
+
+def check_an_acknowledged_request_is_recorded_and_never_delivered_again(
+    h: RequestSourceHarness,
+) -> None:
+    """Handled once: the outcome is what the ack said, and neither the source
+    that acknowledged it nor another delivers it again. Shown by sending a
+    second request after it and reading until that arrives."""
+    table = h.make_table()
+    first = table.submit("wh", ["ns.a"])
+    delivered = _consume(h, table.source("conformance-1"), _ack("offered; unmapped: ns.x"))
+    _require(delivered == [first], "delivery", f"delivered {delivered}, not {[first]}")
+    _require(
+        table.outcome(first) == "offered; unmapped: ns.x",
+        "ack records the outcome",
+        f"recorded {table.outcome(first)!r}",
+    )
+    for name in ("conformance-1", "conformance-2"):
+        marker = table.submit("wh", ["ns.b"])
+
+        async def until_marker(message: ReceivedRequest, marker: str = marker) -> bool:
+            await message.ack("offered")
+            return message.request.id != marker
+
+        again = _consume(h, table.source(name), until_marker)
+        _require(
+            first not in again,
+            "acknowledged once",
+            f"{name} delivered acknowledged request {first} again",
+        )
+
+
+def check_a_nakd_request_is_delivered_again(h: RequestSourceHarness) -> None:
+    """Not handled -- an internal error, or a stopping runtime -- is not lost."""
+    table = h.make_table()
+    wanted = table.submit("wh", ["ns.a"])
+
+    async def nak(message: ReceivedRequest) -> bool:
+        await message.nak()
+        return False
+
+    _consume(h, table.source("conformance-1"), nak)
+    _require(table.outcome(wanted) is None, "nak", "a nak'd request was recorded as handled")
+    again = _consume(h, table.source("conformance-2"), _ack("offered"))
+    _require(again == [wanted], "nak", f"delivered {again} after a nak, not {[wanted]}")
+
+
+def check_a_request_held_by_a_replica_that_stops_goes_to_another(
+    h: RequestSourceHarness,
+) -> None:
+    """A source closed with a request in hand -- its replica stopped or died --
+    has not handled it: another replica gets it."""
+    table = h.make_table()
+    wanted = table.submit("wh", ["ns.a"])
+
+    async def walk_away(message: ReceivedRequest) -> bool:
+        return False
+
+    _consume(h, table.source("conformance-1"), walk_away)
+    again = _consume(h, table.source("conformance-2"), _ack("offered"))
+    _require(again == [wanted], "at least once", f"delivered {again}, not {[wanted]}")
+
+
+def check_each_request_reaches_one_replica(h: RequestSourceHarness) -> None:
+    """§9.5 point 5: three replicas reading at once, each in a loop and thread
+    of its own as each in a process of its own; every request is delivered to
+    exactly one. Submitted while they read, in waves, so they contend."""
+    table = h.make_table()
+    replicas, waves, per_wave = 3, 4, 10
+    total = waves * per_wave
+    lock = threading.Lock()
+    acked: list[str] = []
+    errors: list[BaseException] = []
+    delivered: dict[str, list[str]] = {}
+
+    finished = threading.Event()
+
+    def replica(name: str) -> None:
+        async def settle(message: ReceivedRequest) -> bool:
+            # Held a moment, as a replica holds one while it offers it: the
+            # window in which a source must keep every other replica off it.
+            await asyncio.sleep(0.01)
+            await message.ack("offered")
+            with lock:
+                acked.append(message.request.id)
+                if len(acked) >= total:
+                    finished.set()
+            return True
+
+        try:
+            delivered[name] = _consume(h, table.source(name), settle, done=finished)
+        except BaseException as exc:  # reported below, not lost in a thread
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=replica, args=(f"conformance-{i}",)) for i in range(replicas)
+    ]
+    for thread in threads:
+        thread.start()
+    ids: list[str] = []
+    for _ in range(waves):
+        ids += [table.submit("wh", [f"ns.t{len(ids) + i}"]) for i in range(per_wave)]
+        time.sleep(0.05)
+    deadline = time.monotonic() + h.timeout
+    while not finished.is_set() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    finished.set()
+    for thread in threads:
+        thread.join(h.timeout)
+    _require(not errors, "concurrent readers", f"a replica failed: {errors[:1]!r}")
+    _require(
+        all(table.outcome(i) == "offered" for i in ids),
+        "delivery",
+        f"{sum(table.outcome(i) is None for i in ids)} of {total} requests never handled",
+    )
+    every = [i for got in delivered.values() for i in got]
+    twice = sorted({i for i in every if every.count(i) > 1})
+    _require(
+        not twice,
+        "one replica per request",
+        f"{len(twice)} request(s) delivered to more than one replica: {twice[:5]}",
+    )
+
+
+#: Every request-source check.
+REQUEST_SOURCE_CHECKS: tuple[Callable[[RequestSourceHarness], None], ...] = (
+    check_a_request_is_delivered_as_written,
+    check_an_acknowledged_request_is_recorded_and_never_delivered_again,
+    check_a_nakd_request_is_delivered_again,
+    check_a_request_held_by_a_replica_that_stops_goes_to_another,
+    check_each_request_reaches_one_replica,
+)
+
+
+def request_source_conformance(harness: RequestSourceHarness) -> None:
+    """Run every check; raises :class:`ConformanceError` naming the first rule broken."""
+    for check in REQUEST_SOURCE_CHECKS:
         check(harness)

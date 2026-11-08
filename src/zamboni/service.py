@@ -62,9 +62,10 @@ from .scheduler import MAX_SLEEP, WorkItem
 logger = logging.getLogger(__name__)
 
 #: ``serve`` keeps no worker for high-class work (docs/maintenance-runtime.md
-#: §3.4). Only ``offer(reason=manual|reclaim)`` makes any, and serve has no
-#: caller of it: until requests from another process (R9, #168) a reserved
-#: worker here would sit idle for good -- half of a two-worker pod.
+#: §3.4). Only ``offer(reason=manual|reclaim)`` makes any -- a request from
+#: another process (``zamboni.requests``, #168) among them -- and serve has
+#: neither a caller of it nor a request source, so a reserved worker here
+#: would sit idle for good: half of a two-worker pod.
 SERVE_RESERVED_HIGH_SLOTS = 0
 
 #: Liveness fails when the scheduler has not ticked for this long. The loop
