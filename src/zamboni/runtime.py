@@ -42,7 +42,7 @@ import asyncio
 import concurrent.futures
 import logging
 import threading
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, TypeVar
@@ -50,12 +50,13 @@ from typing import Any, Protocol, TypeVar
 from .claims import Claim, Claimer, ClaimStore, LocalClaimStore, new_holder
 from .fleet import FleetConfig, FleetWarehouse
 from .observe import Observers
-from .pool import ItemResult, PoolSize, WorkerConfig, WorkerPool, run_workers
+from .pool import ItemResult, PoolSize, WorkerConfig, WorkerPool, WorkerSlots, run_workers
 from .quarantine import Quarantine
 from .runstate import Ledger, RuntimeState
 from .scheduler import (
     MAX_SLEEP,
     PRESSURE,
+    PRIORITY_AGE_STEP,
     Candidate,
     CandidateQueue,
     PressureCheck,
@@ -159,6 +160,12 @@ class RuntimeSettings:
     quarantine_backoff: timedelta = timedelta(hours=1)
     #: ...up to this.
     quarantine_backoff_max: timedelta = timedelta(hours=24)
+    #: Workers that take only high-class entries -- ``manual``, ``reclaim``
+    #: (§3.4) -- so "run now" starts as soon as one is free rather than after
+    #: the sweep. Capped at the pool's workers - 1.
+    reserved_high_slots: int = 1
+    #: Waiting this long raises an entry one class (§3.4); ``None`` never ages.
+    priority_age_step: timedelta | None = PRIORITY_AGE_STEP
 
     @property
     def renew_every(self) -> timedelta:
@@ -172,6 +179,68 @@ def _settle(
         done.set_result(fn(*args))
     except BaseException as exc:
         done.set_exception(exc)
+
+
+# -- when each table was last maintained (#165) -----------------------------------
+
+
+def maintained_times(times: Any) -> dict[str, datetime | None]:
+    """``{table: when last maintained}`` from a record's ``maintained_at``.
+
+    A run record (``maintenance --json``) carries it whole; a health record
+    per table, which :func:`run_pressure_checks` gathers. ``None`` is never
+    maintained. Tolerant like :mod:`zamboni.runlog`: the record comes from a
+    worker entry, maybe an application's own, so a table whose value is not a
+    time is left out -- unknown, which sorts as never -- rather than failing
+    the result it arrived with.
+    """
+    found: dict[str, datetime | None] = {}
+    if not isinstance(times, Mapping):
+        return found
+    for table, value in times.items():
+        if value is None:
+            found[table] = None
+            continue
+        try:
+            at = datetime.fromisoformat(value)
+        except (TypeError, ValueError):
+            continue
+        if at.utcoffset() is not None:
+            found[table] = at
+    return found
+
+
+class LastMaintained:
+    """When each table was last maintained, as far as this runtime has heard.
+
+    What the low class is ordered by (docs/maintenance-runtime.md §3.4):
+    oldest first, and a table never maintained or not yet heard of before
+    any. Learned from records the workers already return -- a run's and a
+    pressure check's -- so it costs no metadata load in this process, and a
+    restart loses only an ordering hint: the first sweep after one is taken
+    in the order offered until records arrive. The table stays the record
+    (`zamboni.health.Watermark`); this is a cache of it. Loop-only.
+    """
+
+    def __init__(self) -> None:
+        self._at: dict[tuple[str, str], datetime | None] = {}
+
+    def __call__(self, warehouse: str, table: str) -> datetime | None:
+        return self._at.get((warehouse, table))
+
+    def learned(self, warehouse: str, times: Mapping[str, datetime | None]) -> None:
+        for table, at in times.items():
+            self._at[(warehouse, table)] = at
+
+    def adopted(self, fleet: FleetConfig) -> None:
+        """A new fleet: forget the tables it no longer has."""
+        known = {
+            (warehouse.name, table)
+            for warehouse in fleet.warehouses
+            for table in warehouse.table_config.tables
+        }
+        for key in set(self._at) - known:
+            del self._at[key]
 
 
 # -- delete pressure (#175) -------------------------------------------------------
@@ -206,6 +275,7 @@ async def run_pressure_checks(
     clock: Callable[[], datetime] = now_utc,
     on_check: Callable[[str, dict[str, Any]], None] | None = None,
     wait: Callable[[asyncio.Event, float], Any] | None = None,
+    slots: WorkerSlots | None = None,
 ) -> None:
     """Measure each warehouse every ``check_every_minutes`` and offer what is over.
 
@@ -216,6 +286,10 @@ async def run_pressure_checks(
     queuing behind each other cost latency, not correctness. A check that fails
     is reported and retried at the next interval; the schedule still maintains
     every table.
+
+    With ``slots``, a check waits for a general worker (§3.4) -- the ones the
+    take-and-run loop counts too -- so it never takes a worker kept for
+    high-class work.
     """
     wait = wait or _wait
     due: dict[str, datetime] = {}
@@ -238,9 +312,12 @@ async def run_pressure_checks(
             if stop.is_set():
                 break
             warehouse = current[name]
-            result = await pool.run(
-                PressureCheck(warehouse.name, warehouse.table_config, warehouse.uri)
-            )
+            check = PressureCheck(warehouse.name, warehouse.table_config, warehouse.uri)
+            if slots is None:
+                result = await pool.run(check)
+            else:
+                async with slots.general():
+                    result = await pool.run(check)
             found = pressure_offers(warehouse, result.record)
             offered = 0
             for table, why in sorted(found["over"].items()):
@@ -256,7 +333,23 @@ async def run_pressure_checks(
             if found["errors"]:
                 logger.warning("pressure check of %s could not read: %s", name, found["errors"])
             if on_check is not None:
-                on_check(name, {**found, "offered": offered, "exit_code": result.exit_code})
+                tables = (result.record or {}).get("tables") or {}
+                times = maintained_times(
+                    {
+                        table: signals["maintained_at"]
+                        for table, signals in tables.items()
+                        if isinstance(signals, Mapping) and "maintained_at" in signals
+                    }
+                )
+                on_check(
+                    name,
+                    {
+                        **found,
+                        "offered": offered,
+                        "exit_code": result.exit_code,
+                        "maintained_at": times,
+                    },
+                )
             if warehouse.pressure is not None:
                 interval = timedelta(minutes=warehouse.pressure.check_every_minutes)
                 due[name] = clock() + interval
@@ -327,7 +420,16 @@ class MaintenanceRuntime:
             most=self.settings.quarantine_backoff_max,
         )
         self._events = tuple(events)
-        self._queue = CandidateQueue(admit=lambda c: self._quarantine.admits(c, self._clock()))
+        # Built here, so an age step or reservation it cannot use is refused
+        # by the constructor.
+        self._last_maintained = LastMaintained()
+        self._queue = CandidateQueue(
+            admit=lambda c: self._quarantine.admits(c, self._clock()),
+            clock=self._clock,
+            age_step=self.settings.priority_age_step,
+            watermark=self._last_maintained,
+        )
+        self._slots = WorkerSlots(pool.workers, self.settings.reserved_high_slots)
         self._stop = asyncio.Event()
         self._generation = 1
         self._phase = CREATED
@@ -475,6 +577,7 @@ class MaintenanceRuntime:
             self._scheduler.rearm(fleet, self._clock())
         self._ledger.adopted(fleet, self._clock())
         self._quarantine.adopted(fleet)
+        self._last_maintained.adopted(fleet)
         self._observers.notify("fleet_changed", self._generation, fleet)
         return self._generation
 
@@ -551,6 +654,7 @@ class MaintenanceRuntime:
                         clock=self._clock,
                         on_start=self._started_table,
                         claims=self._claimer,
+                        slots=self._slots,
                     ),
                     "fleet provider": self._provider.run(self._adopt, self._refused, self._stop),
                     "stopping": self._stopping(),
@@ -561,6 +665,7 @@ class MaintenanceRuntime:
                         self._stop,
                         clock=self._clock,
                         on_check=self._pressure_checked,
+                        slots=self._slots,
                     ),
                 }
             )
@@ -643,6 +748,9 @@ class MaintenanceRuntime:
         # Before the queue releases the table, so `state()` still counts it --
         # and so a dirty re-offer on release meets the quarantine this decides.
         at = self._clock()
+        if isinstance(result.record, Mapping):
+            times = maintained_times(result.record.get("maintained_at"))
+            self._last_maintained.learned(result.item.warehouse, times)
         self._ledger.finished(result, at)
         self._observers.notify("finished", result)
         change, held = self._quarantine.finished(result, at)
@@ -651,6 +759,7 @@ class MaintenanceRuntime:
             self._observers.notify(change, *args, *(() if held is None else (held,)))
 
     def _pressure_checked(self, warehouse: str, found: dict[str, Any]) -> None:
+        self._last_maintained.learned(warehouse, found.get("maintained_at") or {})
         self._ledger.pressure_checked(warehouse, found, self._clock())
         self._observers.notify("pressure_checked", warehouse, found)
 

@@ -61,7 +61,7 @@ import threading
 import time
 import traceback
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from multiprocessing import connection, get_context, parent_process
@@ -74,6 +74,7 @@ from .claims import Claim, Claimer
 from .fleet import FleetConfig
 from .scheduler import (
     EVENT,
+    HIGH,
     MANUAL,
     PRESSURE,
     REASON_OPERATIONS,
@@ -82,6 +83,7 @@ from .scheduler import (
     CandidateQueue,
     PressureCheck,
     WorkItem,
+    class_of,
 )
 
 # The parent's end of a worker's pipe. Windows' Pipe() returns a
@@ -1090,6 +1092,100 @@ class WorkerPool:
 # -- feeding it -------------------------------------------------------------------
 
 
+class WorkerSlots:
+    """How many of the pool's workers are busy, and with which class of work.
+
+    ``reserved_high`` workers take only high-class entries
+    (docs/maintenance-runtime.md §3.4), capped at ``workers - 1`` so one
+    worker always serves the other classes; with one worker the reservation
+    is 0. Slots are counts, not particular workers: what is enforced is that
+    no more than ``workers - reserved`` are busy with anything else. "High"
+    is by an entry's reasons (:func:`~zamboni.scheduler.class_of`), never by
+    ageing -- a sweep left waiting ages into high, and would otherwise fill
+    the worker kept for an operator's "run now".
+
+    A pressure check is not high, so it takes a general worker too
+    (:meth:`general`). Before #165 checks went to the pool beside the
+    take-and-run loop's count, and could take the one worker a "run now"
+    was waiting for.
+
+    Loop-only, like the queue: :meth:`hold` and :meth:`release` are
+    synchronous, and :meth:`changed` registers its waiter when called, so a
+    release between the check and the wait is never missed.
+    """
+
+    def __init__(self, workers: int, reserved_high: int = 0) -> None:
+        if workers < 1:
+            raise ValueError(f"a pool has at least one worker; got {workers}")
+        if reserved_high < 0:
+            raise ValueError(f"reserved_high_slots must be at least 0; got {reserved_high}")
+        self.workers = workers
+        self.reserved = min(reserved_high, workers - 1)
+        if self.reserved < reserved_high:
+            logger.info(
+                "reserving %d of %d worker(s) for high-class work, not %d: "
+                "one always serves the other classes",
+                self.reserved,
+                workers,
+                reserved_high,
+            )
+        self._high = 0
+        self._other = 0
+        self._waiters: list[asyncio.Future[None]] = []
+
+    @property
+    def busy(self) -> int:
+        return self._high + self._other
+
+    @property
+    def free(self) -> bool:
+        """Some worker is free, if only for high-class work."""
+        return self.busy < self.workers
+
+    @property
+    def general_free(self) -> bool:
+        """A worker is free for any class."""
+        return self.free and self._other < self.workers - self.reserved
+
+    def hold(self, high: bool) -> None:
+        if not (self.free if high else self.general_free):
+            raise RuntimeError(f"no {'free' if high else 'general'} worker to hold")
+        if high:
+            self._high += 1
+        else:
+            self._other += 1
+
+    def release(self, high: bool) -> None:
+        if high:
+            self._high -= 1
+        else:
+            self._other -= 1
+        waiters, self._waiters = self._waiters, []
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+
+    def changed(self) -> asyncio.Future[None]:
+        """Resolved at the next :meth:`release`. Registered now, not when awaited."""
+        waiter = asyncio.get_running_loop().create_future()
+        # Waiters the take-and-run loop gave up on: without this they would
+        # pile up between releases, one per offer that woke it for nothing.
+        self._waiters = [each for each in self._waiters if not each.done()]
+        self._waiters.append(waiter)
+        return waiter
+
+    @contextlib.asynccontextmanager
+    async def general(self) -> AsyncIterator[None]:
+        """Hold a general worker for the block, waiting for one if none is free."""
+        while not self.general_free:
+            await self.changed()
+        self.hold(False)
+        try:
+            yield
+        finally:
+            self.release(False)
+
+
 async def run_workers(
     queue: CandidateQueue,
     fleet: Callable[[], FleetConfig],
@@ -1100,6 +1196,7 @@ async def run_workers(
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     on_start: Callable[[WorkItem, Claim | None], None] | None = None,
     claims: Claimer | None = None,
+    slots: WorkerSlots | None = None,
 ) -> None:
     """Take from ``queue`` into ``pool`` until ``stop``; then let in-flight tables finish.
 
@@ -1125,8 +1222,13 @@ async def run_workers(
     store that cannot answer fails it, exit 1, because an unclaimed table must
     not start. A claim lost while the table runs kills its worker
     (``pool.kill_table``), and the result says why.
+
+    **``slots`` decides what a free worker may take** (§3.4): with every
+    general worker busy, only a high-class entry, on a reserved one. The
+    default reserves none. A runtime passes the one its pressure checks
+    share, so a check counts against the same workers.
     """
-    free = asyncio.Semaphore(pool.size.workers)
+    slots = slots or WorkerSlots(pool.size.workers)
     running: set[asyncio.Task[None]] = set()
 
     async def start(item: WorkItem, claim: Claim | None) -> ItemResult:
@@ -1155,7 +1257,7 @@ async def run_workers(
             )
         return result
 
-    async def one(item: WorkItem) -> None:
+    async def one(item: WorkItem, high: bool) -> None:
         try:
             try:
                 if item.not_after is not None and clock() > item.not_after:
@@ -1180,29 +1282,43 @@ async def run_workers(
                     logger.exception("on_result for %s/%s", item.warehouse, item.table)
         finally:
             queue.finish(item)
-            free.release()
+            slots.release(high)
 
     while not stop.is_set():
-        # Waiting for a worker is raced against stop too. A loop blocked here
-        # without watching stop takes the next table the moment a worker frees
-        # up -- after stop -- which is how an earlier draft dropped one.
-        if not await _unless_stopped(free.acquire(), stop):
-            break
-        work = await _unless_stopped(queue.get(fleet), stop)
-        if work is None or stop.is_set():
-            free.release()
-            if work is not None:
-                # Taken in the same instant stop arrived. Put back rather than
-                # dropped, so a stop never loses a table from the queue.
-                queue.finish(work)
-                queue.offer(work.candidate())
-            break
-        task = asyncio.create_task(one(work))
+        # Registered before looking, so a worker freed after the look wakes us.
+        freed = slots.changed()
+        work = None
+        if slots.free:
+            work = queue.take(fleet(), high_only=not slots.general_free)
+        if work is None:
+            # A worker frees up, or -- if one is free -- something it may take
+            # is offered. Raced against stop: a loop blocked here without
+            # watching stop takes the next table the moment a worker frees up
+            # -- after stop -- which is how an earlier draft dropped one.
+            wakers: list[Any] = [freed]
+            if slots.free:
+                wakers.append(queue.changed())
+            await _unless_stopped(_first(wakers), stop)
+            continue
+        freed.cancel()
+        high = class_of(work.reasons) == HIGH
+        slots.hold(high)
+        task = asyncio.create_task(one(work, high))
         running.add(task)
         task.add_done_callback(running.discard)
 
     if running:
         await asyncio.gather(*running)
+
+
+async def _first(awaitables: list[Any]) -> None:
+    """Return when any of ``awaitables`` does; cancel the rest."""
+    tasks = [asyncio.ensure_future(each) for each in awaitables]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
+            task.cancel()
 
 
 async def _unless_stopped(awaitable: Any, stop: asyncio.Event) -> Any:

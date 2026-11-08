@@ -270,12 +270,18 @@ def test_every_stamp_is_its_operations_enum_value():
     built-in engines at import time, which reaches `committer.py`, so importing
     the enum there would be a cycle resolved only by definition order.
     """
-    from zamboni.health import REMOVE_DANGLING_DELETES_STAMP, REWRITE_MANIFESTS_STAMP
+    from zamboni.health import (
+        REMOVE_DANGLING_DELETES_STAMP,
+        REWRITE_MANIFESTS_STAMP,
+        STAMPED,
+    )
     from zamboni.maintainers import Operation
 
     assert Operation.COMPACT.value == COMPACT_STAMP
     assert Operation.REWRITE_MANIFESTS.value == REWRITE_MANIFESTS_STAMP
     assert Operation.REMOVE_DANGLING_DELETES.value == REMOVE_DANGLING_DELETES_STAMP
+    stamping = (Operation.COMPACT, Operation.REWRITE_MANIFESTS, Operation.REMOVE_DANGLING_DELETES)
+    assert {operation.value for operation in stamping} == STAMPED
 
 
 def test_only_the_committing_operations_have_a_stamp():

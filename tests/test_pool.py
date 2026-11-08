@@ -15,6 +15,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import psutil
 import pytest
 
 from zamboni.fleet import CronSchedule, FleetConfig, FleetWarehouse
@@ -42,6 +43,18 @@ def table_config(*tables: str, namespace: str = "raw", warehouse: str = "acme") 
         warehouse=warehouse,
         namespaces={namespace: NamespaceSettings(tables={t: TableSettings() for t in tables})},
     )
+
+
+async def dead(pid: int) -> None:
+    """Return once ``pid`` has exited: gone, or a zombie its parent has not
+    reaped yet -- the pool's ``is_alive()`` reaps it and answers False."""
+    while True:
+        try:
+            if psutil.Process(pid).status() == psutil.STATUS_ZOMBIE:
+                return
+        except psutil.NoSuchProcess:
+            return
+        await asyncio.sleep(0.01)
 
 
 def item(table: str = "raw.events", **kw) -> WorkItem:
@@ -924,7 +937,9 @@ def test_a_worker_killed_between_tables_does_not_fail_the_next_one(tmp_path):
         try:
             first = await pool.run(item("raw.a"))
             os.kill(first.record["pid"], signal.SIGKILL)
-            await asyncio.sleep(0.2)
+            # Dead, not merely signalled: a fixed sleep lost that race at a
+            # load average of 48 and sent raw.b into the dying worker.
+            await asyncio.wait_for(dead(first.record["pid"]), 10)
             return first, await pool.run(item("raw.b"))
         finally:
             await pool.close()

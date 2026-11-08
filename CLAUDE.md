@@ -183,6 +183,13 @@ The pool enforces §7.1: `WorkerConfig.table_timeout` (per reason) and
 `oom_score_adj`. Failing outside `SOUND_EXITS` in a row quarantines a table
 (`quarantine.py`, gated in `CandidateQueue.offer`; `manual` overrides). A
 runtime loop that raises stops the runtime and `run` re-raises it.
+The queue is taken by class (§3.4, `REASON_CLASS`): high before medium before
+low, ageing one class per `priority_age_step`, and the low class oldest
+watermark first. The watermark comes from `maintained_at` in the records the
+workers return (`runtime.LastMaintained`); the runtime's process never loads
+a table. `pool.WorkerSlots` keeps `reserved_high_slots` workers for work that
+is high by its reasons, not by ageing, and pressure checks count against the
+same slots. `serve` reserves none until R9 gives it high-class work.
 Nothing in the runtime decides whether a table needs work; that is still
 `maintain()`'s due-check, run in each worker.
 docs/maintenance-runtime.md is the design and §12 the stories still to build.

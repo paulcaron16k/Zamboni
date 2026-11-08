@@ -52,6 +52,7 @@ from .runtime import (
     CREATED,
     STOPPED,
     MaintenanceRuntime,
+    RuntimeSettings,
     now_utc,
     pressure_offers,  # noqa: F401 -- moved to zamboni.runtime; imported from here too
     run_pressure_checks,  # noqa: F401 -- likewise
@@ -59,6 +60,12 @@ from .runtime import (
 from .scheduler import MAX_SLEEP, WorkItem
 
 logger = logging.getLogger(__name__)
+
+#: ``serve`` keeps no worker for high-class work (docs/maintenance-runtime.md
+#: §3.4). Only ``offer(reason=manual|reclaim)`` makes any, and serve has no
+#: caller of it: until requests from another process (R9, #168) a reserved
+#: worker here would sit idle for good -- half of a two-worker pod.
+SERVE_RESERVED_HIGH_SLOTS = 0
 
 #: Liveness fails when the scheduler has not ticked for this long. The loop
 #: ticks at least every :data:`~zamboni.scheduler.MAX_SLEEP` (60 s), so three
@@ -485,6 +492,7 @@ class Service:
             events=self.events,
             observers=observers,
             feed_observer=self.feed_observer,
+            settings=RuntimeSettings(reserved_high_slots=SERVE_RESERVED_HIGH_SLOTS),
             clock=self.clock,
             pool_factory=self.pool_factory,
             wait=self.scheduler_wait,

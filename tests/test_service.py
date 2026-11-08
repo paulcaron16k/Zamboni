@@ -586,3 +586,27 @@ def test_zamboni_serve_end_to_end(tmp_path):
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+
+
+def test_serve_keeps_no_worker_idle_for_high_class_work(tmp_path):
+    """Nothing in serve offers manual or reclaim work until R9 (#168), so a
+    worker reserved for it would never run anything (#165)."""
+    pools: list[FakePool] = []
+
+    async def scenario():
+        hold = asyncio.Event()
+        svc = service(tmp_path, "a", "b", "c", pools=pools, hold=hold)
+        task = asyncio.create_task(svc.run())
+        workers = svc.size.workers
+        try:
+            async with asyncio.timeout(5):
+                while not pools or len(pools[0].ran) < workers:
+                    await asyncio.sleep(0.01)
+        finally:
+            ran = len(pools[0].ran) if pools else 0
+            svc.request_stop()
+            hold.set()
+        assert ran == workers, "every worker ran a table of the sweep at once"
+        return await asyncio.wait_for(task, 5)
+
+    assert asyncio.run(scenario()) == 0

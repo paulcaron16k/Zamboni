@@ -941,6 +941,14 @@ one JSON object per run, and `zamboni runs /var/log/zamboni` aggregates a series
 of them into the fleet view. [devops.md](devops.md) is the operator procedure:
 §6 for what each number means, §7 for the monthly review that acts on them.
 
+Each run record also carries `maintained_at`: per table the run reached, when
+Zamboni last committed to it, after the run, or `null` for a table never
+maintained. A table whose watermark could not be read is left out. `health
+--json` carries the same field per table. `MaintenanceReport.maintained_at` is
+the same mapping for a library caller. The maintenance runtime orders its
+scheduled sweep by it, oldest first
+([maintenance-runtime.md](maintenance-runtime.md) §3.4).
+
 A `skipped` operation is one that ran nothing and was right to: disabled in the
 config, unsupported by the engine, fulfilled by another operation, or *unchanged
 since the last maintenance* — nothing has written to the table, so the

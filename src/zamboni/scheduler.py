@@ -32,8 +32,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
+import itertools
 import logging
-from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -89,6 +90,26 @@ _REPORT_ORDER = (MANUAL, SCHEDULE, RECLAIM, EVENT, PRESSURE)
 #: pressure asks for compacts, and the next check measures the table it left.
 _REOFFER_AFTER_RUN = frozenset({EVENT})
 
+#: Priority classes (docs/maintenance-runtime.md §3.4). A free worker takes the
+#: highest class first; ordered so a higher class is a larger number.
+LOW, MEDIUM, HIGH = 0, 1, 2
+CLASS_NAMES = {LOW: "low", MEDIUM: "medium", HIGH: "high"}
+
+#: Each reason's class. An operator asking, or tables dropped and owed their
+#: reclaim, before writes; writes before the clock. A test checks it names every
+#: reason :data:`REASON_OPERATIONS` does.
+REASON_CLASS: dict[str, int] = {
+    MANUAL: HIGH,
+    RECLAIM: HIGH,
+    EVENT: MEDIUM,
+    PRESSURE: MEDIUM,
+    SCHEDULE: LOW,
+}
+
+#: Waiting this long raises an entry one class (§3.5 ``priority_age_step``), so
+#: a busy event stream cannot starve the schedule.
+PRIORITY_AGE_STEP = timedelta(hours=2)
+
 
 class UnknownReasonError(ValueError):
     """A work reason :data:`REASON_OPERATIONS` does not name."""
@@ -126,6 +147,21 @@ def operations_of(reasons: Iterable[str]) -> tuple[str, ...] | None:
             return None
         wanted.update(operations)
     return tuple(op for op in DEFAULT_OPERATIONS if op in wanted)
+
+
+def class_of(reasons: Iterable[str]) -> int:
+    """The class of an entry offered for ``reasons``: the highest of theirs.
+
+    So coalescing keeps the higher class (§3.4): a schedule entry an operator
+    also asked for is high. An unknown reason is refused, as everywhere.
+    """
+    classes = []
+    for reason in reasons:
+        operations_for(reason)  # refuses an unknown reason, with the list of known ones
+        classes.append(REASON_CLASS[reason])
+    if not classes:
+        raise ValueError("an entry has at least one reason")
+    return max(classes)
 
 
 def covers(running: tuple[str, ...] | None, asked: tuple[str, ...] | None) -> bool:
@@ -284,11 +320,12 @@ class PressureCheck:
 
 
 class CandidateQueue:
-    """FIFO over tables, coalesced per table.
+    """The tables waiting for a worker: coalesced per table, taken by class.
 
     * Offering a table already queued **merges** (:func:`_merged`): fifty
       events during one load are one candidate, which runs the union of every
-      merged reason's operations, under the later deadline or none.
+      merged reason's operations, under the later deadline or none. The entry
+      keeps its place and its first offer's time.
     * Offering a table **being maintained** never queues it behind itself. An
       offer whose operations the run in flight already does is dropped -- a
       schedule tick during a scheduled run, pressure during any run that
@@ -297,18 +334,46 @@ class CandidateQueue:
       an event because the run in flight may have read the table before the
       write it reports (decided on #110, 2026-10-06), anything else for the
       operations the run in flight is not doing (#163). The due-check makes a
-      re-run that finds nothing new cost one metadata load.
+      re-run that finds nothing new cost one metadata load. It has been
+      waiting since it went dirty, so that is when it counts as offered.
     * An offer ``admit`` refuses is dropped before any of that, whichever path
       it came by -- a firing, an event, pressure, a caller, a dirty re-offer.
       The runtime's :class:`~zamboni.quarantine.Quarantine` is the one.
+
+    **Taking is by class** (docs/maintenance-runtime.md §3.4), never first
+    come first served overall: an operator's "run now" does not wait behind a
+    nightly sweep. :meth:`take` returns the entry of the highest class, where
+    an entry's class is its reasons' highest (:func:`class_of`) raised one for
+    every ``age_step`` it has waited, up to high. Within high and medium, the
+    first offered; within low, the table with the **oldest watermark** --
+    ``watermark(warehouse, table)``, ``None`` for one never maintained or not
+    known, which goes first -- and then the first offered. ``high_only`` takes
+    only an entry high by its reasons, not by ageing: a reserved worker's
+    (:mod:`zamboni.pool`), which a sweep left waiting would otherwise fill.
     """
 
-    def __init__(self, admit: Callable[[Candidate], bool] | None = None) -> None:
+    def __init__(
+        self,
+        admit: Callable[[Candidate], bool] | None = None,
+        *,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        age_step: timedelta | None = PRIORITY_AGE_STEP,
+        watermark: Callable[[str, str], datetime | None] | None = None,
+    ) -> None:
+        """``age_step`` ``None`` never ages; ``watermark`` ``None`` knows none."""
+        if age_step is not None and age_step <= timedelta(0):
+            raise ValueError(f"priority_age_step must be positive, or None; got {age_step}")
         self._admit = admit
-        self._queued: OrderedDict[tuple[str, str], Candidate] = OrderedDict()
+        self._clock = clock
+        self._age_step = age_step
+        self._watermark = watermark
+        self._queued: dict[tuple[str, str], _Entry] = {}
         #: Each table in flight, and what its run does.
         self._in_flight: dict[tuple[str, str], tuple[str, ...] | None] = {}
-        self._dirty: dict[tuple[str, str], Candidate] = {}
+        self._dirty: dict[tuple[str, str], _Entry] = {}
+        self._offers = itertools.count()
+        #: Set by an offer that added or changed an entry; cleared by a
+        #: :meth:`take` that found nothing it could take.
         self._ready = asyncio.Event()
 
     def __len__(self) -> int:
@@ -320,12 +385,19 @@ class CandidateQueue:
 
     @property
     def queued(self) -> tuple[tuple[str, str], ...]:
-        """The queued tables, in the order they will be taken."""
-        return tuple(self._queued)
+        """The queued tables, in the order they would be taken now."""
+        return tuple(entry.candidate.key for entry in self._ordered(self._clock()))
+
+    def class_now(self, key: tuple[str, str]) -> int:
+        """A queued table's class at this moment, ageing included."""
+        return self._class(self._queued[key], self._clock())
 
     def offer(self, candidate: Candidate) -> bool:
         """Queue ``candidate``; ``False`` if it coalesced into existing work, or
         ``admit`` refused it."""
+        return self._offer(candidate, None)
+
+    def _offer(self, candidate: Candidate, since: _Entry | None) -> bool:
         if self._admit is not None and not self._admit(candidate):
             logger.debug(
                 "not offering %s/%s (%s): refused",
@@ -340,55 +412,93 @@ class CandidateQueue:
                 self._in_flight[key], candidate.operations
             ):
                 earlier = self._dirty.get(key)
-                self._dirty[key] = candidate if earlier is None else _merged(earlier, candidate)
+                self._dirty[key] = (
+                    self._entry(candidate) if earlier is None else earlier.merged(candidate)
+                )
             return False
         if key in self._queued:
-            # Merge in place: the entry keeps its position.
-            self._queued[key] = _merged(self._queued[key], candidate)
+            # Merge in place: the entry keeps its position and its time.
+            self._queued[key] = self._queued[key].merged(candidate)
+            self._ready.set()
             return False
-        self._queued[key] = candidate
+        self._queued[key] = self._entry(candidate) if since is None else since
         self._ready.set()
         return True
 
-    def take(self, fleet: FleetConfig) -> WorkItem | None:
+    def take(self, fleet: FleetConfig, *, high_only: bool = False) -> WorkItem | None:
         """The next item, resolved against ``fleet``, and mark it in flight.
 
         Candidates for a warehouse or table ``fleet`` no longer declares are
         discarded on the way -- the reload that removed them is the decision.
         """
-        while self._queued:
-            key, candidate = self._queued.popitem(last=False)
-            item = _resolve(candidate, fleet)
+        now = self._clock()
+        for entry in self._ordered(now):
+            if high_only and class_of(entry.candidate.reasons) < HIGH:
+                continue
+            key = entry.candidate.key
+            del self._queued[key]
+            item = _resolve(entry.candidate, fleet)
             if item is None:
-                logger.info(
-                    "dropping %s/%s: no longer in the fleet", candidate.warehouse, candidate.table
-                )
+                logger.info("dropping %s/%s: no longer in the fleet", *key)
                 continue
             self._in_flight[key] = item.operations
-            if not self._queued:
-                self._ready.clear()
             return item
         self._ready.clear()
         return None
 
-    async def get(self, fleet: Callable[[], FleetConfig]) -> WorkItem:
-        """Wait for the next item. ``fleet`` is called at take time, not before."""
-        while True:
-            item = self.take(fleet())
-            if item is not None:
-                return item
-            await self._ready.wait()
+    async def changed(self) -> None:
+        """Return once an offer has added or changed an entry since the last
+        :meth:`take` that found nothing to take."""
+        await self._ready.wait()
 
     def finish(self, item: WorkItem) -> None:
         """The worker is done with ``item``; re-offer it once if it went dirty."""
         self._in_flight.pop(item.key, None)
         dirty = self._dirty.pop(item.key, None)
         if dirty is not None:
-            self.offer(dirty)
+            self._offer(dirty.candidate, dirty)
 
     @property
     def dirty(self) -> frozenset[tuple[str, str]]:
         return frozenset(self._dirty)
+
+    def _entry(self, candidate: Candidate) -> _Entry:
+        return _Entry(candidate, self._clock(), next(self._offers))
+
+    def _class(self, entry: _Entry, now: datetime) -> int:
+        base = class_of(entry.candidate.reasons)
+        if self._age_step is None or now <= entry.offered_at:
+            return base
+        return min(HIGH, base + (now - entry.offered_at) // self._age_step)
+
+    def _ordered(self, now: datetime) -> list[_Entry]:
+        def rank(entry: _Entry) -> tuple[int, datetime, int]:
+            cls = self._class(entry, now)
+            seen = _NEVER
+            if cls == LOW and self._watermark is not None:
+                mark = self._watermark(*entry.candidate.key)
+                seen = _NEVER if mark is None else mark
+            return (-cls, seen, entry.order)
+
+        return sorted(self._queued.values(), key=rank)
+
+
+#: What an unknown watermark sorts as: older than any, so a table never
+#: maintained -- or one this runtime has not yet heard about -- goes first.
+_NEVER = datetime.min.replace(tzinfo=UTC)
+
+
+@dataclass(frozen=True)
+class _Entry:
+    """A queued candidate, when it was first offered, and in what order."""
+
+    candidate: Candidate
+    offered_at: datetime
+    #: Breaks ties between entries offered in the same instant: first offered first.
+    order: int
+
+    def merged(self, candidate: Candidate) -> _Entry:
+        return dataclasses.replace(self, candidate=_merged(self.candidate, candidate))
 
 
 def _merged(a: Candidate, b: Candidate) -> Candidate:
