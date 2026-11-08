@@ -23,8 +23,8 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
@@ -289,6 +289,12 @@ class MaintenanceReport:
     #: to completion. A stop is not a failure, so it does not touch
     #: :attr:`exit_code`; an integrator that needs to know reads this.
     stopped: Stopped | None = None
+    #: Per table this run reached, when Zamboni last committed to it -- its
+    #: watermark's time after the run, ``None`` if never maintained. A table
+    #: whose watermark could not be read is absent: unknown, not never. The
+    #: runtime takes a sweep's tables oldest first by it
+    #: (docs/maintenance-runtime.md §3.4).
+    maintained_at: Mapping[str, datetime | None] = field(default_factory=dict)
 
     @property
     def duration_seconds(self) -> float | None:
@@ -375,6 +381,7 @@ class MaintenanceReport:
             "failures": len(self.failures),
             "counters": self.counters.as_dict(),
             "stopped": self.stopped.as_dict() if self.stopped is not None else None,
+            "maintained_at": {table: _iso(at) for table, at in self.maintained_at.items()},
             "outcomes": [o.as_dict() for o in self.outcomes],
         }
 
@@ -575,6 +582,7 @@ def maintain(
             progress_failed = True
 
     not_run: list[tuple[str, Operation]] = []
+    maintained_at: dict[str, datetime | None] = {}
     for position, table in enumerate(wanted):
         if stopping():
             not_run += [(t, o) for t in wanted[position:] for o in order]
@@ -642,6 +650,12 @@ def maintain(
                     )
                 )
                 break
+        if commit and any(o.table == table and _stamps(o) for o in outcomes):
+            # A stamping operation ran with consent, so the mark read before
+            # the table is stale. One `load_table`; otherwise that mark stands.
+            mark = _watermark(session, table)
+        if mark is not None:
+            maintained_at[table] = mark.maintained_at
         if not_run:
             break
 
@@ -651,6 +665,7 @@ def maintain(
         started_at=started_at,
         ended_at=datetime.now(UTC),
         stopped=Stopped(stop_reason, tuple(not_run)) if stop_seen and stop_reason else None,
+        maintained_at=maintained_at,
     )
 
 
@@ -713,6 +728,14 @@ def _compaction_unfinished(outcome: Outcome) -> str | None:
         reason = outcome.detail.strip().splitlines()[0] if outcome.detail.strip() else ""
         return f"compaction did not finish (exit {outcome.exit_code}): {reason}"
     return None
+
+
+def _stamps(outcome: Outcome) -> bool:
+    """Whether ``outcome`` may have stamped its table: a stamping operation that
+    produced a result. Unsure answers yes -- the cost is one metadata load."""
+    from .health import STAMPED  # deferred, as in _watermark
+
+    return outcome.operation.value in STAMPED and outcome.result is not None
 
 
 def _watermark(session: CatalogSession, table: str) -> Watermark | None:

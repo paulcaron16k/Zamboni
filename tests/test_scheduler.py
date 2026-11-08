@@ -219,14 +219,16 @@ def test_a_work_item_is_config_that_pickles():
     }, "a new WorkItem field must be serialisable config, and must not bypass the due-check"
 
 
-def test_get_waits_for_an_offer():
+def test_changed_waits_for_an_offer_after_a_take_that_found_nothing():
     async def scenario():
         queue, current = CandidateQueue(), fleet()
-        waiter = asyncio.create_task(queue.get(lambda: current))
+        assert queue.take(current) is None
+        waiter = asyncio.create_task(queue.changed())
         await asyncio.sleep(0)
         assert not waiter.done()
         queue.offer(Candidate("acme", "raw.events"))
-        return await asyncio.wait_for(waiter, timeout=1)
+        await asyncio.wait_for(waiter, timeout=1)
+        return queue.take(current)
 
     assert asyncio.run(scenario()).table == "raw.events"
 

@@ -81,6 +81,9 @@ COMPACT_STAMP = "compact"
 REWRITE_MANIFESTS_STAMP = "rewrite-manifests"
 REMOVE_DANGLING_DELETES_STAMP = "remove-dangling-deletes"
 
+#: Every operation that stamps: the ones whose commit moves the watermark.
+STAMPED = frozenset({COMPACT_STAMP, REWRITE_MANIFESTS_STAMP, REMOVE_DANGLING_DELETES_STAMP})
+
 #: What compaction stamped before ZMBNI-135. Snapshots carrying it are still out
 #: there in every table maintained by an earlier Zamboni, and nothing reads the
 #: stamp by comparing it to a literal -- :func:`maintenance_watermark` reports
@@ -318,12 +321,18 @@ class Watermark:
         """Has Zamboni ever left a stamp on this table that still survives?"""
         return self.snapshot_id is not None
 
+    @property
+    def maintained_at(self) -> dt.datetime | None:
+        """When the stamp was committed, UTC; ``None`` if never, or unknown."""
+        if self.timestamp_ms is None:
+            return None
+        return dt.datetime.fromtimestamp(self.timestamp_ms / 1000, dt.UTC)
+
     def describe(self) -> str:
         if not self.maintained:
             return f"  {'last maintenance':<24} never, or its snapshot has been expired away"
         when = ""
-        if self.timestamp_ms is not None:
-            at = dt.datetime.fromtimestamp(self.timestamp_ms / 1000, dt.UTC)
+        if (at := self.maintained_at) is not None:
             when = f", {at:%Y-%m-%d %H:%M} UTC"
         lines = (
             f"  {'last maintenance':<24} {self.operation}{when}\n"
@@ -427,11 +436,18 @@ def table_signals(health: TableHealth, mark: Watermark) -> dict[str, Any]:
     What ``zamboni health --json`` writes for a table it could load, and what
     a pressure check's decision (``zamboni.pressure``) reads: every
     :class:`TableHealth` field but ``unseen`` -- a constant about the method,
-    not the table -- plus the two watermark answers that make a table due.
+    not the table -- plus the two watermark answers that make a table due, and
+    when it was last maintained (``None``: never), by which the runtime takes
+    a sweep's tables oldest first (docs/maintenance-runtime.md §3.4).
     """
     signals = dataclasses.asdict(health)
     signals.pop("unseen")
-    return signals | {"written_since": mark.written_since, "incomplete": mark.incomplete}
+    at = mark.maintained_at
+    return signals | {
+        "written_since": mark.written_since,
+        "incomplete": mark.incomplete,
+        "maintained_at": None if at is None else at.isoformat(),
+    }
 
 
 def unreadable(exc: BaseException) -> dict[str, Any]:

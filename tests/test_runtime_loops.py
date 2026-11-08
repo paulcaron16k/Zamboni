@@ -34,21 +34,9 @@ class BrokenProvider(StaticFleet):
         raise Boom("the fleet provider")
 
 
-class PoolWithoutASize:
-    """Fails the workers loop at its first line, which reads ``pool.size``."""
-
-    def __init__(self, size=None, config=None) -> None:
-        self.killed = self.closed = False
-
-    @property
-    def size(self):
-        raise Boom("the workers")
-
-    def kill(self) -> None:
-        self.killed = True
-
-    async def close(self) -> None:
-        self.closed = True
+def take_fails(fleet, *, high_only=False):
+    """The workers loop's own step, outside any one table's handling."""
+    raise Boom("the workers")
 
 
 class PoolThatCannotCheck(FakePool):
@@ -82,8 +70,6 @@ def build(tmp_path, loop: str) -> tuple[MaintenanceRuntime, list]:
         wait = scheduler_fails
     elif loop == "fleet provider":
         provider = BrokenProvider(fleet())
-    elif loop == "workers":
-        make_pool = PoolWithoutASize
     elif loop == "pressure checks":
         checked = warehouse()
         provider = StaticFleet(
@@ -118,6 +104,8 @@ def build(tmp_path, loop: str) -> tuple[MaintenanceRuntime, list]:
     )
     if loop == "event feed broken":
         rt.feeds = [BrokenFeed()]
+    if loop == "workers":
+        rt._queue.take = take_fails
     return rt, pools
 
 

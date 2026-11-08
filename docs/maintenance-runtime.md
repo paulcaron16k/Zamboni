@@ -268,6 +268,50 @@ class first:
 - **No pre-emption.** A running table is never stopped to make room for a
   higher class; it finishes, and the next free worker takes the higher entry.
 
+As built in R8 (#165):
+
+- **The classes are declared once**, as `zamboni.scheduler.REASON_CLASS`, and
+  `test_every_reason_has_the_class_the_design_gives_it` reads them from the
+  table above. An entry's class is the highest of its reasons'
+  (`class_of`), so a merge keeps the higher class. A merged entry keeps its
+  place and the time it was first offered, so its waiting time carries over.
+  A table re-offered after the run it was dirty during has waited since it
+  went dirty.
+- **Ageing counts from that time**, one class per `priority_age_step`, never
+  above high
+  (`test_ageing_prevents_starvation_under_a_constant_stream_of_events`).
+- **A reserved worker goes by an entry's class before ageing.** Otherwise a
+  sweep left waiting two steps would age into high and fill the worker kept
+  for "run now"
+  (`test_a_reserved_worker_takes_only_what_is_high_by_its_reasons`).
+  `zamboni.pool.WorkerSlots` keeps the count. Slots are counts, not
+  particular workers: no more than `workers - reserved` may be busy with
+  anything but high-class work
+  (`test_run_now_starts_on_a_reserved_worker_while_every_other_runs_the_sweep`).
+- **A pressure check takes a general worker.** Checks used to go to the pool
+  beside the take-and-run loop's count, so one could take the worker a "run
+  now" was waiting for
+  (`test_a_pressure_check_waits_for_a_general_worker_not_a_reserved_one`).
+- **The watermark is learned, not loaded.** The runtime's process never loads
+  table metadata. Each run record (`maintenance --json`) carries
+  `maintained_at`: per table, when Zamboni last committed to it, after the
+  run, or `null` for never. A health record carries the same per table.
+  `maintain()` reads a table's watermark again only after a stamping
+  operation produced a result with consent, so the field costs a second
+  metadata load on those tables only
+  (`test_the_watermark_is_read_again_only_after_a_stamping_commit`). The
+  runtime keeps the latest it has heard per table
+  (`zamboni.runtime.LastMaintained`). A table it has heard nothing of sorts
+  with the never-maintained ones, first. So the first sweep after a restart
+  is taken in the order offered until records arrive. The table is still the
+  record; this is a cache of it
+  (`test_a_sweep_runs_the_tables_maintained_longest_ago_first`).
+- **`zamboni serve` reserves no worker** (`SERVE_RESERVED_HIGH_SLOTS`). Only
+  `offer(reason=manual|reclaim)` makes high-class work, and `serve` has no
+  caller of it until R9 lets another process send requests. Until then a
+  reserved worker there would be idle for good
+  (`test_serve_keeps_no_worker_idle_for_high_class_work`).
+
 ### 3.5 `RuntimeSettings`
 
 | Setting | Default | Meaning |
@@ -326,9 +370,14 @@ R7 (#170) built the rest of §7.1's settings, in two places:
   `test_each_reason_has_the_limit_the_design_gives_it`, so the two cannot
   disagree.
 
-`recycle_after_tables`, `reserved_high_slots` and `priority_age_step` are not
-built yet: the first is still `WorkerPool`'s `recycle_after` argument, and the
-other two arrive with R8.
+R8 (#165) built `reserved_high_slots` and `priority_age_step` on
+`RuntimeSettings`; the constructor refuses a negative reservation or an age
+step that is not positive. `priority_age_step=None` never ages. A reservation
+above `workers - 1` is capped there, not refused, because the pool is sized
+from the host and the same settings must work on a one-worker pod.
+
+`recycle_after_tables` is not built yet: it is still `WorkerPool`'s
+`recycle_after` argument.
 
 ---
 

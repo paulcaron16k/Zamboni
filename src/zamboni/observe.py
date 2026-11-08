@@ -97,7 +97,8 @@ class Observer:
 
     def pressure_checked(self, warehouse: str, found: Mapping[str, Any]) -> None:
         """A delete-pressure check of ``warehouse`` (#175): ``checked``, ``over``,
-        ``errors``, ``offered`` and the check's ``exit_code``."""
+        ``errors``, ``offered``, the check's ``exit_code``, and ``maintained_at``
+        -- each table's last maintenance, ``None`` if never (#165)."""
 
     def quarantined(self, warehouse: str, table: str, state: QuarantineState) -> None:
         """``table`` failed again with too many failures in a row: offers of it,

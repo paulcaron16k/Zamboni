@@ -924,7 +924,16 @@ def test_a_worker_killed_between_tables_does_not_fail_the_next_one(tmp_path):
         try:
             first = await pool.run(item("raw.a"))
             os.kill(first.record["pid"], signal.SIGKILL)
-            await asyncio.sleep(0.2)
+            # Reaped, not merely signalled. A fixed sleep lost that race at a
+            # load average of 48. Waiting for psutil's "zombie" lost it on
+            # every Linux CI job: a SIGKILLed process whose other threads are
+            # still exiting already shows `Z`, but cannot be reaped, so the
+            # pool's `is_alive()` still answers True. `join` waits for what
+            # the pool checks, through multiprocessing's own bookkeeping.
+            worker = pool._slots[0].process
+            assert worker.pid == first.record["pid"]
+            await asyncio.to_thread(worker.join, 10)
+            assert not worker.is_alive()
             return first, await pool.run(item("raw.b"))
         finally:
             await pool.close()

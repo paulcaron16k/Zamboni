@@ -51,6 +51,25 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **The maintenance runtime takes work by priority** (#165, R8 of
+  [docs/maintenance-runtime.md](docs/maintenance-runtime.md) §3.4). A free
+  worker takes `manual` and `reclaim` first, then `event` and `pressure`, then
+  the schedule's sweep, oldest-maintained table first. An entry waiting
+  `RuntimeSettings.priority_age_step` (2 h) rises one class, so a busy event
+  stream cannot starve the sweep. `RuntimeSettings.reserved_high_slots` (1,
+  capped at the worker count less one) keeps workers for `manual` and
+  `reclaim` only, so an application's "run now" starts while every other
+  worker is on the sweep. Pressure checks now count against the same workers
+  rather than beside them. `zamboni serve` reserves none, since nothing in it
+  offers that work yet. What a `serve` deployment sees is the new order: an
+  event or pressure offer runs ahead of a queued sweep, and the sweep runs the
+  tables maintained longest ago first.
+  `CandidateQueue.get` is gone (`changed()` replaces it), and `run_workers`
+  takes a `WorkerSlots`. Provisional, with the rest of the runtime.
+- **`maintained_at` in `maintenance --json` and `health --json`** (#165): per
+  table, when Zamboni last committed to it, or `null` for never;
+  `MaintenanceReport.maintained_at` for a library caller. It costs a second
+  metadata load only on a table where a stamping operation ran with `--yes`.
 - **`zamboni serve --spill-budget-bytes N`**, or `ZAMBONI_SPILL_BUDGET_BYTES`
   (#205): the spill disk for the whole pod, divided equally between the
   workers as each one's `--max-temp-directory-bytes`, as memory already is.
