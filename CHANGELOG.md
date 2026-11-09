@@ -23,6 +23,23 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### BREAKING
 
+- **A table config's `ordering.mode: "none"` now compacts in the table's
+  declared sort order** (#209). On the local engine it used to mean
+  unordered, so every compaction undid the clustering a writer did by that
+  order. Now a table that declares an order is compacted in it, and its files
+  are stamped with that order's id. Spark's binpack already wrote each task's
+  rows in the declared order, but every output file still spanned the whole
+  range. It now uses the `sort` strategy, so output files hold disjoint
+  ranges. A table with no declared order is
+  compacted unordered, as before. `sort` and `zorder` still win. On the local
+  engine, a declared order with a `bucket` or `truncate` field is left out with
+  a warning, where `--sort-by-table-order` refuses it. Trino is unchanged,
+  because `optimize` always applied the declared order. The CLI without
+  `--table-config` is unchanged too. `CompactionConfig` gains
+  `sort_by_declared_order_if_any`, which `config_from_table_settings` sets for
+  `none`. To keep the old behaviour for a table, remove its declared order;
+  there is no `ordering` setting that asks for unordered.
+
 - **`storage.gcs.default_location` and `GCSSettings.default_location` are
   removed** (#263). They set the location of buckets PyIceberg creates, and
   Zamboni never creates a bucket on any store; provisioning them is a DevOps

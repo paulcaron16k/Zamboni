@@ -17,6 +17,7 @@ credentials and permissions rather than about round-tripping data.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import os
 import uuid
 from pathlib import Path
@@ -770,6 +771,160 @@ def test_zorder_is_accepted_by_the_server(spark_env, session, spark_table):
 
     assert "zorder(id, category)" in result.statement
     assert session.table(spark_table).scan().to_arrow().num_rows == 12
+
+
+def _declared_order_run(
+    engine: str, env, session, request, *, declared: bool, per_file: int = 2, **block
+):
+    """Six appends to a table declaring ``id DESC`` (or nothing), each holding
+    every sixth id, compacted through ``maintain()`` with a table config that
+    sets no ordering (#209). The ids it reads back, the live files, and the
+    declared order's id."""
+    from pyiceberg.table.sorting import NullOrder, SortDirection, SortField, SortOrder
+
+    from zamboni import maintain
+    from zamboni.maintainers import Operation
+    from zamboni.tableconfig import TableConfig
+
+    namespace = f"zo209_{uuid.uuid4().hex[:8]}"
+    session.catalog.create_namespace(namespace)
+    request.addfinalizer(lambda: _drop_namespace(session, namespace))
+    order = (
+        SortOrder(
+            SortField(
+                source_id=1,
+                transform=IdentityTransform(),
+                direction=SortDirection.DESC,
+                null_order=NullOrder.NULLS_LAST,
+            )
+        )
+        if declared
+        else SortOrder()
+    )
+    tbl = session.catalog.create_table(
+        f"{namespace}.events", schema=SCHEMA, sort_order=order, properties={"format-version": "2"}
+    )
+    for i in range(6):
+        tbl.append(
+            pa.table(
+                {
+                    "id": pa.array(range(i, 6 * per_file, 6), type=pa.int32()),
+                    "category": pa.array(["a"] * per_file, type=pa.string()),
+                },
+                schema=ARROW,
+            )
+        )
+    options = (
+        {
+            "host": "localhost",
+            "port": env["TRINO_PORT"],
+            "catalog": "iceberg",
+            "version": env.get("TRINO_VERSION"),
+        }
+        if engine == "trino"
+        else {"remote": f"sc://localhost:{env['SPARK_CONNECT_PORT']}", "catalog": "iceberg"}
+    )
+    config = TableConfig.from_dict(
+        {
+            "version": 2,
+            "warehouse": env["WAREHOUSE_NAME"],
+            "namespaces": {
+                namespace: {"tables": {"events": {"ordering": {"mode": "none"}, **block}}}
+            },
+        }
+    )
+    report = maintain(
+        session,
+        table_config=config,
+        engine=engine,
+        engine_options=options,
+        operations=[Operation.COMPACT],
+        commit=True,
+    )
+    (outcome,) = report.outcomes
+    assert outcome.exit_code == 0, outcome.detail
+
+    after = session.table(f"{namespace}.events")
+    return (
+        after.scan().to_arrow()["id"].to_pylist(),
+        after.inspect.files().to_pylist(),
+        after.sort_order().order_id,
+    )
+
+
+@pytest.mark.parametrize(
+    "engine",
+    [
+        pytest.param("trino", marks=pytest.mark.trino),
+        pytest.param("spark", marks=pytest.mark.spark),
+    ],
+)
+def test_mode_none_compacts_in_the_declared_order(engine, env, session, request):
+    """#209 on the server engines: ordered by the declared order and stamped
+    with its id, through the same table config the local engine reads."""
+    if not (trino_up if engine == "trino" else spark_up)(env):
+        pytest.skip(f"{engine} not running")
+    if engine == "spark":
+        pytest.importorskip("pyspark", reason="install zamboni[spark]")
+
+    ids, files, declared = _declared_order_run(engine, env, session, request, declared=True)
+
+    assert len(files) == 1, "nothing was compacted"
+    assert ids == list(range(11, -1, -1))
+    assert declared != 0
+    assert {f["sort_order_id"] for f in files} == {declared}
+
+
+@pytest.mark.spark
+def test_on_spark_mode_none_clusters_across_files_not_only_within_them(env, session, request):
+    """What the `sort` strategy adds on Spark. Its binpack already writes each
+    task's rows in the declared order and stamps the id -- measured: 6 files of
+    every sixth id, a 4000-byte target, gave 12 files each spanning the whole
+    range -- so the order inside one file cannot tell the two apart. Sorted,
+    the same input gave 18 files over disjoint ranges: a filter on `id` reads
+    one of them, not all."""
+    if not spark_up(env):
+        pytest.skip("spark not running")
+    pytest.importorskip("pyspark", reason="install zamboni[spark]")
+
+    _, files, declared = _declared_order_run(
+        "spark", env, session, request, declared=True, per_file=2000, target_file_size_bytes=4000
+    )
+
+    assert len(files) > 1
+    assert {f["sort_order_id"] for f in files} == {declared}
+    ranges = sorted(
+        (
+            int.from_bytes(dict(f["lower_bounds"])[1], "little", signed=True),
+            int.from_bytes(dict(f["upper_bounds"])[1], "little", signed=True),
+        )
+        for f in files
+    )
+    overlapping = [(a, b) for a, b in itertools.pairwise(ranges) if b[0] <= a[1]]
+    assert not overlapping, f"{len(overlapping)} of {len(ranges)} files overlap: {overlapping[:3]}"
+
+
+@pytest.mark.parametrize(
+    "engine",
+    [
+        pytest.param("trino", marks=pytest.mark.trino),
+        pytest.param("spark", marks=pytest.mark.spark),
+    ],
+)
+def test_mode_none_without_a_declared_order_stays_binpack(engine, env, session, request):
+    """No error: Spark's `sort` strategy refuses an unsorted table, so the
+    maintainer must not ask for it."""
+    if not (trino_up if engine == "trino" else spark_up)(env):
+        pytest.skip(f"{engine} not running")
+    if engine == "spark":
+        pytest.importorskip("pyspark", reason="install zamboni[spark]")
+
+    ids, files, declared = _declared_order_run(engine, env, session, request, declared=False)
+
+    assert len(files) == 1, "nothing was compacted"
+    assert sorted(ids) == list(range(12))
+    assert declared == 0
+    assert {f["sort_order_id"] for f in files} <= {None, 0}
 
 
 @pytest.mark.spark

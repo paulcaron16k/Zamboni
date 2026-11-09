@@ -130,7 +130,9 @@ and they are often conflated:
 - **Sort order** determines how tight those per-file bounds are. Clustered data means
   non-overlapping ranges and aggressive skipping; scattered data means every file's range
   covers the predicate and nothing is skipped. This is what `ordering` in
-  `table-config.json` exists to control.
+  `table-config.json` exists to control. Its default, `none`, keeps the order the table
+  declares, which is usually the order its writer clusters by; a compaction that ignored
+  it would undo that clustering on every run (#209).
 
 The planning path is: read the catalog pointer (1 request) → load `metadata.json` (1 read) →
 read the manifest list, skipping irrelevant manifests → read the surviving manifests to
@@ -403,7 +405,7 @@ wrong tenant's directory is an error before anything is touched.
 | `namespaces.<ns>.tables.<name>` | Per-table settings; the name may not contain a dot | — |
 | `partition` | Iceberg partition fields | none (unpartitioned) |
 | `partition_evolution` | How partitioning ages | **enabled**, day→month at 90 days |
-| `ordering` | `none` \| `sort` \| `zorder` | `none` |
+| `ordering` | `none` \| `sort` \| `zorder` | `none`: the table's declared sort order, if it has one |
 | `target_file_size_bytes` | Output size | table property, else 128 MiB |
 | `min_input_files` | Compaction threshold | 2 |
 

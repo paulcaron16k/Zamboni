@@ -18,6 +18,7 @@ from .config import (
     CompactionConfig,
     MemoryMode,
     config_from_table_settings,
+    orders_by_declared_order,
 )
 from .evolution import EvolutionPlan, MultiSpecReplaceFiles, ensure_specs, plan_evolution
 from .health import COMPACT_INCOMPLETE
@@ -242,6 +243,16 @@ class TableCompactor:
         profile = profile_table(tbl)
         result = CompactionResult(identifier=profile.identifier, dry_run=dry_run)
         result.warnings = [str(f) for f in profile.warnings]
+        declared = tbl.sort_order()
+        if orders_by_declared_order(
+            self._config, declared, identity_only=False
+        ) and not orders_by_declared_order(self._config, declared, identity_only=True):
+            # Applied by an engine that can, left out here: say so, or a table
+            # that sorts on Spark reads as sorted on the local engine too.
+            result.warnings.append(
+                f"declared sort order {declared.order_id} not applied: the local engine "
+                "renders identity transforms only, so this rewrite is unordered"
+            )
         result.dangling_delete_files = profile.position_delete_files
 
         blockers = profile.blockers

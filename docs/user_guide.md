@@ -1870,7 +1870,7 @@ default; `test_cli_defaults_match_the_dataclass` keeps them honest.
 | `--snapshot-operation` | `replace` | How the snapshot is labelled |
 | `--dangling-delete-policy` | `report` | `block` refuses to compact rather than touch delete files |
 | `--sort-by` | — | Arbitrary DuckDB `ORDER BY`. Output keeps `sort_order_id = None`, because the rows are ordered but not by any order the table declares |
-| `--sort-by-table-order` | off | Order by the table's declared sort order, and stamp its id |
+| `--sort-by-table-order` | off | Order by the table's declared sort order, and stamp its id. Refuses a table that declares none. A table config's `ordering.mode: "none"` sets the soft form, `CompactionConfig.sort_by_declared_order_if_any`: the declared order where there is one, unordered where there is not ([table-config.md](table-config.md#mode-none-the-default)) |
 | `--yes` | off | **Actually commit.** Without it every mutating verb previews |
 
 ---

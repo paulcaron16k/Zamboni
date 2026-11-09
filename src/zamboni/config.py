@@ -5,8 +5,14 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from pyiceberg.transforms import IdentityTransform
 
 from .zorder import quote_identifier
+
+if TYPE_CHECKING:
+    from pyiceberg.table.sorting import SortOrder
 
 # Matches DEFAULT_TARGET_FILE_SIZE_BYTES in duckdb-iceberg's rewrite planner
 # (src/maintenance/rewrite_data_files_planner.cpp), so plans line up if you ever
@@ -153,7 +159,19 @@ class CompactionConfig:
         sort_by_table_order: Order rewritten rows by the table's declared sort
             order, and stamp that order's id onto the output files. This is the
             only case where stamping is truthful, because the ordering we apply
-            is by construction the one the id names.
+            is by construction the one the id names. Refuses a table that
+            declares no order: asked for explicitly, binpack would be a silent
+            no.
+        sort_by_declared_order_if_any: The soft form of
+            ``sort_by_table_order``, and what a table config's ``ordering.mode:
+            "none"`` means (#209): when no other ordering is set, order by the
+            table's declared sort order if it declares one this engine can
+            apply, and stamp its id; otherwise rewrite unordered. Each engine
+            decides against the table it loads, through
+            :func:`orders_by_declared_order`, because this config is built
+            before any table is. Without it the local engine rewrote unordered,
+            undoing whatever clustering the writer did by that order, and Spark
+            sorted only within each write task.
         sort_expression: An arbitrary DuckDB ``ORDER BY`` expression list, e.g.
             ``"customer_id, event_ts"``. Iceberg has no clustering or z-order
             concept, so a z-order is expressed here as a hand-rolled
@@ -208,6 +226,7 @@ class CompactionConfig:
     temp_directory: str | None = None
     max_temp_directory_bytes: int | None = None
     sort_by_table_order: bool = False
+    sort_by_declared_order_if_any: bool = False
     sort_expression: str | None = None
     zorder_columns: tuple[str, ...] | None = None
     zorder_precision_bits: int = 16
@@ -324,7 +343,36 @@ def config_from_table_settings(settings, base: CompactionConfig | None = None) -
         min_input_files=settings.min_input_files,
         skip_partitions_newer_than_windows=settings.skip_partitions_newer_than_windows,
         sort_by_table_order=False,
+        # "none" is "no ordering of this file's own" (#209, shape (a)): the
+        # table's declared order still applies where it has one, as Trino's
+        # `optimize` has always applied it. "sort" and "zorder" win over it.
+        sort_by_declared_order_if_any=ordering.mode == "none",
         sort_expression=sort_expression,
         zorder_columns=zorder_columns,
         zorder_precision_bits=zorder_bits,
+    )
+
+
+def orders_by_declared_order(
+    config: CompactionConfig, sort_order: SortOrder, *, identity_only: bool
+) -> bool:
+    """Whether a rewrite under ``config`` orders by ``sort_order``, the table's
+    declared order, and so may stamp its id.
+
+    ``sort_by_table_order`` always does -- and refuses later if it cannot.
+    ``sort_by_declared_order_if_any`` does only when nothing else orders the
+    rewrite, the table declares an order, and the engine can apply every field
+    of it: ``identity_only`` for an engine that renders the order itself and
+    has no way to apply a bucket or truncate transform. Such an order is left
+    out rather than refused, since nobody asked for it by name; ordering by the
+    raw column instead would satisfy a different order than the id says.
+    """
+    if config.sort_by_table_order:
+        return True
+    if not config.sort_by_declared_order_if_any:
+        return False
+    if config.sort_expression or config.zorder_columns or not sort_order.fields:
+        return False
+    return not identity_only or all(
+        isinstance(field.transform, IdentityTransform) for field in sort_order.fields
     )

@@ -627,6 +627,11 @@ def test_every_operational_knob_is_reachable_from_the_command_line():
         "target_file_size_bytes",  # flag exists too, but the file wins
         "zorder_columns",
         "zorder_precision_bits",
+        # `ordering.mode: "none"` (#209). On the command line, no flag already
+        # means no ordering and `--sort-by-table-order` asks for the declared
+        # one; a flag for "the declared one if any" would be a third answer to
+        # a question the file owns.
+        "sort_by_declared_order_if_any",
     }
 
     parser = _build_parser()

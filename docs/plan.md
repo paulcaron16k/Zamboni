@@ -98,6 +98,7 @@ test stops existing, so this table cannot rot silently.
 | FR-3.5 | An over-budget or single-column z-order is rejected at load | `test_rejects_an_over_budget_key`, `test_rejects_a_single_column`, `test_zorder_bit_budget_is_enforced` |
 | FR-3.6 | `sort_order_id` is stamped only when output satisfies the declared order | `test_sort_expression_orders_output_but_never_stamps_sort_order`, `test_sort_by_table_order_applies_and_stamps_the_declared_order`, `test_no_sort_expression_leaves_sort_order_unset` |
 | FR-3.7 | Sorting by table order on an unsorted table is refused | `test_sort_by_table_order_refuses_an_unsorted_table`, `test_sort_options_are_mutually_exclusive` |
+| FR-3.8 | A table config's `ordering.mode: none` applies the declared sort order where there is one, stays unordered where there is none, and yields to `sort` and `zorder` | `test_mode_none_orders_by_the_declared_order_and_stamps_its_id`, `test_mode_none_on_a_table_with_no_declared_order_stays_binpack`, `test_an_explicit_ordering_wins_over_the_declared_one`, `test_mode_none_compacts_in_the_declared_order` |
 
 ### FR-4 — Partition evolution
 

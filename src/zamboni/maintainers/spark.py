@@ -30,9 +30,10 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
+from ..config import orders_by_declared_order
 from ..properties import ApplyResult
 from . import (
     EngineConfigProblem,
@@ -664,6 +665,41 @@ class SparkMaintainer(Maintainer):
         )
         return config
 
+    def _settle_declared_order(
+        self, operation: Operation, table: str, request: MaintenanceRequest
+    ) -> MaintenanceRequest:
+        """``sort_by_declared_order_if_any`` decided against the table (#209).
+
+        Spark applies every transform a declared order can hold, so the one
+        question is whether the table declares an order at all -- and it must
+        be asked, not left to Spark: the ``sort`` strategy with no
+        ``sort_order`` on an unsorted table is an error there, not a binpack.
+        Answered with the PyIceberg catalog, one ``load_table``, so
+        :meth:`statement_for` stays a pure function of the request.
+        """
+        compaction = request.compaction
+        if (
+            operation not in (Operation.COMPACT, Operation.REMOVE_DANGLING_DELETES)
+            or compaction is None
+            or not compaction.sort_by_declared_order_if_any
+        ):
+            return request
+        if (
+            compaction.sort_by_table_order
+            or compaction.sort_expression
+            or compaction.zorder_columns
+        ):
+            # Decided without the table; not worth a load_table to confirm.
+            return request
+        declared = self._session.table(table).sort_order()
+        applies = orders_by_declared_order(compaction, declared, identity_only=False)
+        return replace(
+            request,
+            compaction=replace(
+                compaction, sort_by_table_order=applies, sort_by_declared_order_if_any=False
+            ),
+        )
+
     def execute(
         self,
         operation: Operation,
@@ -672,6 +708,7 @@ class SparkMaintainer(Maintainer):
         request: MaintenanceRequest,
         dry_run: bool,
     ) -> Reportable:
+        request = self._settle_declared_order(operation, table, request)
         statement = self.statement_for(operation, table, request, dry_run=dry_run)
         if statement is None:
             # Nothing to run, so nothing to commit and no session to open. See
