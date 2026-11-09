@@ -2538,9 +2538,14 @@ def _table_config_summary(args: argparse.Namespace) -> int:
             if s.partition
             else "none"
         )
+        # "none" is not "unordered": the table's declared sort order applies
+        # wherever it has one (#209), which this file cannot see.
+        declared = ""
+        if s.ordering.mode == "none":
+            declared = " -- the table's declared sort order, if any"
         print(
             f"  layout     partition {mark(parts, 'partition')}, "
-            f"ordering {mark(s.ordering.mode, 'ordering')}"
+            f"ordering {mark(s.ordering.mode, 'ordering')}{declared}"
         )
         if s.ordering.mode == "zorder" and s.ordering.zorder:
             columns = ", ".join(s.ordering.zorder.columns)

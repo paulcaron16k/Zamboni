@@ -35,7 +35,7 @@ from pyiceberg.transforms import IdentityTransform
 
 from ..capabilities import detect
 from ..committer import cleanup_orphans
-from ..config import MemoryMode
+from ..config import MemoryMode, orders_by_declared_order
 from ..planner import FileGroup
 from ..workdir import WorkspaceUnavailable, resolve_temp_directory
 from ..zorder import build_zorder_sql, quote_identifier
@@ -455,7 +455,7 @@ class DuckDBArrowBackend(RewriteBackend):
         # duckdb-iceberg's native compactor stamps unconditionally while never
         # sorting at all, and an arbitrary sort_expression is not the declared
         # order either. Both would make the metadata a lie.
-        if ctx.config.sort_by_table_order:
+        if orders_by_table(ctx):
             sort_order_id = ctx.table.sort_order().order_id
             for data_file in files:
                 _set_sort_order_id(data_file, ctx.table.format_version, sort_order_id)
@@ -520,13 +520,21 @@ def ordering_sql(relation: str, columns: list[str], ctx: RewriteContext) -> str 
     order_by = None
     if ctx.config.sort_expression:
         order_by = ctx.config.sort_expression
-    elif ctx.config.sort_by_table_order:
+    elif orders_by_table(ctx):
         order_by = _table_order_sql(ctx.table)
     if not order_by:
         return None
 
     projected = ", ".join(quote_identifier(c) for c in columns)
     return f"SELECT {projected} FROM {relation} ORDER BY {order_by}"
+
+
+def orders_by_table(ctx: RewriteContext) -> bool:
+    """Whether this rewrite orders by the table's declared sort order: the one
+    question both the ``ORDER BY`` and the ``sort_order_id`` stamp ask, so the
+    two cannot disagree. Identity transforms only -- :func:`_table_order_sql`
+    renders nothing else."""
+    return orders_by_declared_order(ctx.config, ctx.table.sort_order(), identity_only=True)
 
 
 def _table_order_sql(table) -> str | None:

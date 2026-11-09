@@ -368,6 +368,32 @@ as compaction's superseded data files do; expiry and orphan removal free the byt
 How rows are arranged inside each output file. `mode` is a closed choice because sort and
 z-order both define row order and only one can apply.
 
+### `mode: "none"` (the default)
+
+No ordering of this file's own. **The table's declared sort order still applies** where it
+has one (#209): compaction writes the rows in that order and stamps its id on the files, so
+it keeps the clustering the writer did rather than undoing it. A table that declares no
+order is compacted unordered (bin-packed), and that is not an error. `sort` and `zorder`
+below win over a declared order.
+
+What each engine does with a declared order:
+
+| Engine | Applies | Notes |
+|---|---|---|
+| `local` | identity transforms | An order with a `bucket` or `truncate` field is left out, and the run says so in its warnings: ordering by the raw column would satisfy a different order than the stamped id. |
+| `spark` | every transform | Runs `rewrite_data_files` with the `sort` strategy, which range-partitions each file group, so the output files hold disjoint ranges. Spark's binpack already wrote each task in the declared order; it did not cluster across files. |
+| `trino` | identity transforms | Unchanged: `optimize` has always sorted by the declared order, whatever this file says, and stamps `unsorted` when it skips a field. |
+
+All three were run against the dev stack's Spark 4.1 / Iceberg 1.11 and Trino
+(`test_mode_none_compacts_in_the_declared_order`,
+`test_on_spark_mode_none_clusters_across_files_not_only_within_them`,
+`test_mode_none_without_a_declared_order_stays_binpack`).
+
+Before #209, `none` meant unordered on the local engine and binpack on Spark, so a table
+with a declared order now compacts differently on both. The CLI without `--table-config` is unchanged:
+no flag still means no ordering, and `--sort-by-table-order` still refuses a table that
+declares none.
+
 ### `mode: "sort"`
 
 ```json
@@ -382,8 +408,8 @@ z-order both define row order and only one can apply.
 
 Clusters the leading column tightly and progressively less thereafter. Output files are
 left with `sort_order_id = null` unless the ordering *is* the table's declared sort order —
-claiming otherwise would assert an ordering the data does not satisfy. (Use
-`zamboni compact --sort-by-table-order` for the case where it does.)
+claiming otherwise would assert an ordering the data does not satisfy. (To order by the
+declared order, use `mode: "none"`, above, or `zamboni compact --sort-by-table-order`.)
 
 ### `mode: "zorder"`
 

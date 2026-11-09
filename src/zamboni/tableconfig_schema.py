@@ -173,6 +173,12 @@ DESCRIPTIONS: dict[tuple[type, str], str] = {
         "Must exceed the longest write the warehouse performs: a file written but "
         "not yet committed is indistinguishable from an orphan."
     ),
+    (tc.Ordering, "mode"): (
+        "How compaction orders the rows it rewrites. 'none' sets no ordering of "
+        "this file's own: the table's declared sort order applies where it has "
+        "one, and the rewrite is unordered where it has none. 'sort' and 'zorder' "
+        "win over a declared order."
+    ),
     (tc.ZOrder, "precision_bits"): (
         "Bits of resolution kept per column before interleaving. More bits means "
         "finer locality per column but fewer columns fit the 62-bit ordering key."

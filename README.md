@@ -986,7 +986,9 @@ snapshot expiry will clear; the count is reported as `CompactionResult.dangling_
 ### Sort, clustering, z-order
 
 Declared as `ordering.mode` in table-config (`sort` | `zorder` | `none`), or with the CLI
-flags below. Z-order is implemented here — dense-rank each key, scale to `precision_bits`,
+flags below. `none` is not "unordered": it applies the table's declared sort order where
+the table has one, and compacts unordered only where it has none
+([table-config.md](docs/table-config.md#mode-none-the-default)). Z-order is implemented here — dense-rank each key, scale to `precision_bits`,
 bit-interleave — because nothing in Iceberg, PyIceberg or duckdb-iceberg has any notion of
 it. The SQL is checked against an independent Morton-encoding reference, and against the
 query cost it exists to reduce: blocks touched by a filter on the *second* key.
