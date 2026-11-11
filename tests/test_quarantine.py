@@ -226,6 +226,20 @@ def test_a_table_failing_in_a_row_is_quarantined_and_reported(tmp_path):
         assert handle.stop(grace=timedelta(seconds=5))
 
 
+def idle(rt: MaintenanceRuntime) -> bool:
+    """Nothing queued and nothing in flight, read from **one** snapshot.
+
+    Two calls to `state()` are two moments. Asking `in_flight` of one and
+    `queued` of the next passed when the first was taken after `raw.b`
+    finished, with `raw.c` still queued, and the second after `raw.c` was
+    taken: neither saw it, and it had not reached the pool. That failed this
+    test about 2 runs in 100 (#273). One snapshot cannot: the queue moves a
+    table from queued to in flight within one call (`CandidateQueue.take`).
+    """
+    state = rt.state()
+    return not state.queued and not state.in_flight
+
+
 def test_a_schedule_firing_skips_a_quarantined_table(tmp_path):
     """A firing offers straight to the queue, not through `offer()`, so this is
     the queue's own gate: the warehouse's other tables run, the failing one
@@ -257,7 +271,7 @@ def test_a_schedule_firing_skips_a_quarantined_table(tmp_path):
 
         now[0] = QUIET + timedelta(days=1)  # past the next 02:00 firing
         eventually(lambda: rt.state().warehouses["acme"].last_fired is not None)
-        eventually(lambda: not rt.state().in_flight and not rt.state().queued)
+        eventually(lambda: idle(rt))
 
         tables = [item.table for item in pools[0].items]
         assert tables.count(TABLE) == AFTER, "the firing did not run the quarantined table"
