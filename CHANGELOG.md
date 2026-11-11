@@ -77,6 +77,14 @@ Two categories beyond the usual set, because this tool deletes files:
   `update_fleet()`; its claim store, worker entries and request table each
   pass their `zamboni.conformance` suite against the dev stack's PostgreSQL.
   `ruff` and `mypy` now cover `examples/` too.
+- **The reference Lakehouse App's web tier** (#172, epic #161):
+  `python -m lakehouse_app.web`, a deliberately minimal dashboard that never
+  imports `zamboni.runtime`. It registers warehouses and edits their schedules
+  in the registry, writes "run now" as a request row and follows the run from
+  waiting to finished, and shows the maintenance replicas, running tables,
+  quarantine and run history from the rows the maintenance tier writes. When
+  no replica has ticked for three scheduler sleeps, every page still renders,
+  under "maintenance unavailable since ...".
 - **Requests from another process** (#168, R9 of
   [docs/maintenance-runtime.md](docs/maintenance-runtime.md) §9.2). A web tier
   asks for "run now" or "drop with reclaim" by writing a row; the maintenance

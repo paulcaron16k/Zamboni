@@ -13,6 +13,7 @@ dependencies = [
 
 [project.scripts]
 lakehouse-maintenance = "lakehouse_app.maintenance:main"
+lakehouse-web = "lakehouse_app.web:main"
 
 [build-system]
 requires = ["hatchling"]

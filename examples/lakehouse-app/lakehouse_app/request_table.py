@@ -95,6 +95,17 @@ class RequestTable:
             raise KeyError(id)
         return row[0]
 
+    def get(self, id: str) -> RequestRow:
+        with self.database.connect() as conn:
+            row = conn.execute(
+                "SELECT id, warehouse, tables, reason, requested_by, requested_at,"
+                " handled_at, outcome FROM zamboni_request WHERE id = %s",
+                (int(id),),
+            ).fetchone()
+        if row is None:
+            raise KeyError(id)
+        return RequestRow(row[0], row[1], None if row[2] is None else tuple(row[2]), *row[3:])
+
     def recent(self, limit: int = 50) -> list[RequestRow]:
         """The newest requests first, for the dashboard."""
         with self.database.connect() as conn:
