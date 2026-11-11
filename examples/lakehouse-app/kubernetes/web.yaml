@@ -1,0 +1,55 @@
+# The web tier (docs/maintenance-runtime.md §9.2): the dashboard. It never
+# imports zamboni.runtime and never runs maintenance, so a crash, hang or OOM
+# in the maintenance tier cannot reach it. Same image, default command.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lakehouse-web
+  labels: {app: lakehouse, tier: web}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: lakehouse, tier: web}
+  template:
+    metadata:
+      labels: {app: lakehouse, tier: web}
+    spec:
+      # Short: a page in flight is all a web pod has to lose.
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: web
+          image: registry.example/lakehouse-app:0.1.0
+          ports:
+            - {name: http, containerPort: 8080}
+          envFrom:
+            # LAKEHOUSE_DATABASE_URL only. The web tier holds no catalog
+            # credential: it never touches a catalog.
+            - secretRef: {name: lakehouse-web}
+          # Its own, and small: it renders pages from rows.
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+          # Neither probe asks about maintenance: a web pod restarted because
+          # maintenance is down would turn one outage into two. Readiness
+          # asks the database, without which no page renders.
+          #
+          # timeoutSeconds 2: /healthz answered in 1-23 ms and /readyz in
+          # 12-14 ms, ten requests each inside the container (#173).
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 2
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 2
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: tmp, emptyDir: {}}

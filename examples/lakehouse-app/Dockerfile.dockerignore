@@ -1,0 +1,17 @@
+# The build context is the repository root (see Dockerfile); BuildKit reads
+# this file in place of a root .dockerignore for this Dockerfile only.
+.git
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+dist
+build
+dev-stack/.env
+data/healthims/warehouse
+data/healthims/*.db
+foo
+todo.txt
+pyiceberg.yaml.*

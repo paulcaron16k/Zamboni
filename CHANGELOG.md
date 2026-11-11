@@ -85,6 +85,13 @@ Two categories beyond the usual set, because this tool deletes files:
   quarantine and run history from the rows the maintenance tier writes. When
   no replica has ticked for three scheduler sleeps, every page still renders,
   under "maintenance unavailable since ...".
+- **The reference Lakehouse App's deployment** (#173, epic #161): one image
+  for both tiers (`examples/lakehouse-app/Dockerfile`, Zamboni from this tree
+  and its lock), a compose file that adds them to the dev stack, and two
+  Kubernetes Deployments. The maintenance tier writes `zamboni serve`'s state
+  file when `LAKEHOUSE_STATE_FILE` is set, so serve's probes work unchanged;
+  its grace period is derived from the longest `TABLE_TIMEOUTS` limit, and
+  each probe's timeout sits over the time measured in the image.
 - **Requests from another process** (#168, R9 of
   [docs/maintenance-runtime.md](docs/maintenance-runtime.md) §9.2). A web tier
   asks for "run now" or "drop with reclaim" by writing a row; the maintenance

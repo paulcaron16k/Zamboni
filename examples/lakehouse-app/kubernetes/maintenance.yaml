@@ -1,0 +1,88 @@
+# The maintenance tier (docs/maintenance-runtime.md §9.2): the runtime, its
+# workers and nothing else. Same image as the web tier, another command.
+#
+# Every number here says where it came from; tests/test_lakehouse_app.py holds
+# the ones that must agree with Zamboni's own declarations.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lakehouse-maintenance
+  labels: {app: lakehouse, tier: maintenance}
+spec:
+  # More than one is safe: replicas share claims in the app's database, so
+  # each table is claimed by exactly one at a time (§6, §9.3). No leader
+  # election, and losing a replica loses only the leases it held.
+  replicas: 2
+  # A rolling update briefly runs old and new pods together, which claims make
+  # harmless -- unlike `zamboni serve`, which needs Recreate (devops.md §8).
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels: {app: lakehouse, tier: maintenance}
+  template:
+    metadata:
+      labels: {app: lakehouse, tier: maintenance}
+    spec:
+      # Longer than the longest table, so a SIGTERM lets every table in flight
+      # finish: the longest TABLE_TIMEOUTS limit is 6 h (zamboni.pool -- a
+      # table past it is killed anyway), plus five minutes. A table killed at
+      # the end of this is still safe (§7.1); it is only wasted.
+      terminationGracePeriodSeconds: 21900
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: maintenance
+          image: registry.example/lakehouse-app:0.1.0
+          command: [python, -m, lakehouse_app.maintenance]
+          env:
+            - {name: LAKEHOUSE_MAINTENANCE_COMMIT, value: "yes"}
+            - {name: LAKEHOUSE_STATE_FILE, value: /run/lakehouse/state.json}
+            - {name: LAKEHOUSE_WORKDIR, value: /tmp}
+            # This process's own baseline, kept out of the workers' plan
+            # (§9.4). Chosen, not measured: the runtime process holds no
+            # table's data, and 512 MiB is generous for a Python process
+            # with PyIceberg imported.
+            - {name: LAKEHOUSE_RESERVED_MEMORY_BYTES, value: "536870912"}
+          envFrom:
+            # LAKEHOUSE_DATABASE_URL, and the catalog's credential if it needs
+            # one (LAKEHOUSE_CATALOG_CREDENTIAL or _TOKEN). Never the registry.
+            - secretRef: {name: lakehouse-maintenance}
+          # Its own, and the pool sizes itself from them: the cgroup's CPU
+          # quota and memory limit, not the node's (§9.4).
+          resources:
+            requests: {cpu: "2", memory: 8Gi}
+            limits: {cpu: "2", memory: 8Gi}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+          # serve's state file and probe (lakehouse_app.maintenance's
+          # LAKEHOUSE_STATE_FILE). Liveness asks only that the scheduler
+          # ticked in the last 180 s: a catalog or database outage is not
+          # fixed by a restart. Readiness is "running on a registered fleet",
+          # so a fresh install with no warehouse yet is alive and unready.
+          #
+          # timeoutSeconds 10: the probe measured 0.74-0.95 s at 1-2 CPUs and
+          # 4.7-5.6 s at 0.25 CPU, five runs each in this image (#173). The
+          # 1 s default would fail it at its own limit on a slow node -- the
+          # failure devops.md §8 records for serve before 0.6.0.
+          readinessProbe:
+            exec:
+              command: [zamboni, service-status, --state-file=/run/lakehouse/state.json, --probe=readiness]
+            periodSeconds: 30
+            timeoutSeconds: 10
+          livenessProbe:
+            exec:
+              command: [zamboni, service-status, --state-file=/run/lakehouse/state.json, --probe=liveness]
+            initialDelaySeconds: 30
+            periodSeconds: 60
+            failureThreshold: 3
+            timeoutSeconds: 10
+          volumeMounts:
+            - {name: run, mountPath: /run/lakehouse}
+            - {name: scratch, mountPath: /tmp}
+      volumes:
+        - {name: run, emptyDir: {}}
+        # Workers' scratch files and DuckDB's spill.
+        - {name: scratch, emptyDir: {sizeLimit: 20Gi}}

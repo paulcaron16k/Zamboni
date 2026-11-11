@@ -638,6 +638,15 @@ orphans for the next `remove-orphans`. With `--partial-progress` the groups
 already committed stay committed. But a service killed mid-compaction on every
 deploy never finishes a large table — which is why the grace period matters.
 
+**More than one replica, and a web tier beside it.** `zamboni serve` is one
+process with no claim protocol. An application that wants a dashboard, "run
+now" and more than one maintenance replica embeds the runtime instead, as
+[maintenance-runtime.md §9](maintenance-runtime.md#9-the-lakehouse-app-the-integration-contract)
+describes: [examples/lakehouse-app/](../examples/lakehouse-app/README.md) is
+that application, with a compose stack and two Kubernetes Deployments -- the
+maintenance tier with several replicas sharing claims in its database, and a
+web tier that never imports the runtime (#173).
+
 ### Outside Kubernetes
 
 Under systemd, `KillMode=control-group` — the default — sends SIGTERM to every
