@@ -326,6 +326,7 @@ As built in R8 (#165):
 | `max_sleep` | 60 s | the longest the scheduler sleeps in one step |
 | `table_timeout` | `schedule`, `manual`, `reclaim`: 6 h; `event`: 1 h; `pressure`: 2 h | wall-clock limit for one table, then SIGKILL (§7.1) |
 | `stall_timeout` | 1 h | no progress report from a running table for this long, then SIGKILL (§7.1) |
+| `startup_timeout` | 5 min | a worker that has not acknowledged its table this long after it was sent is SIGKILLed, and the table goes once to a new worker (§7.1) |
 | `recycle_after_tables` | 50 | a worker is replaced after this many tables; `1` gives a fresh process per table |
 | `quarantine_after` | 3 | consecutive failures of one table before it backs off (§7.1) |
 | `quarantine_backoff` | 1 h, doubling, at most 24 h | how long a quarantined table is skipped |
@@ -361,15 +362,15 @@ R7 (#170) built the rest of §7.1's settings, in two places:
   values it cannot use are refused by the constructor
   (`test_a_quarantine_it_cannot_use_is_refused_by_the_runtimes_constructor`).
 - **On `zamboni.pool.WorkerConfig`, not `RuntimeSettings`:** `table_timeout`,
-  `stall_timeout`, `worker_nice` (as `nice`) and `worker_oom_score_adj` (as
+  `stall_timeout`, `startup_timeout` (#272), `worker_nice` (as `nice`) and `worker_oom_score_adj` (as
   `oom_score_adj`). The worker applies the last two to itself, so they have to
   travel to it, and `WorkerConfig` is what travels. The pool enforces the two
   timeouts on its own side, as it already stamps `commit`. Keeping them there
   also leaves `pool_factory(size, config)` unchanged. `table_timeout` must name
   every reason (`test_a_limit_table_that_leaves_a_reason_out_is_refused`), and
-  its defaults are read from this table by
-  `test_each_reason_has_the_limit_the_design_gives_it`, so the two cannot
-  disagree.
+  its defaults, with those of `stall_timeout` and `startup_timeout`, are read
+  from this table by `test_each_limit_has_the_default_the_design_gives_it`, so
+  the two cannot disagree.
 
 R8 (#165) built `reserved_high_slots` and `priority_age_step` on
 `RuntimeSettings`; the constructor refuses a negative reservation or an age
@@ -831,6 +832,7 @@ criterion with a test that makes the failure happen.**
 |---|---|---|---|
 | **A table runs too long** | wall clock, `table_timeout` by reason | SIGKILL the worker | `timed out`, a failure |
 | **Hung or deadlocked** — including inside native code, where no Python runs | no progress report for `stall_timeout` | SIGKILL the worker | `stalled`, a failure |
+| **Hung starting up**, before it acknowledges the table | no acknowledgement for `startup_timeout` | SIGKILL the worker; the table goes once to a new worker | not a failure the first time; `worker did not start within …` the second |
 | **Worker crashes**, including during startup | the pipe closes or errors — **any** `OSError` or `EOFError`, on send or receive | reset the slot; the next table gets a new worker | `died`, a failure. #155 fixes the startup case today |
 | **The entry raises** | an uncaught exception (exit 1) — not exits 2, 3 or 4, which are the contract's refusals and aborts, and leave the process sound | **retire the worker**: a process that just raised is not trusted with the next table | exit 1, with the traceback in the run record |
 | **Out of memory** | the kernel | workers set `oom_score_adj` high so **the kernel picks a worker**, never the runtime process; DuckDB is capped per worker (#147) | `died` |
@@ -881,8 +883,20 @@ As built in R7 (#170). Each row is made to happen, mostly in
 - **Hung:** `test_a_table_that_stops_reporting_is_killed_and_reported_stalled`
   gives `stalled: no progress report for 1:00:00`. Each report restarts the
   clock (`test_a_table_that_keeps_reporting_outlives_the_stall_timeout`).
-  **Both clocks start when the job is sent**, not when the slot was taken: a
-  replacement worker's spawn takes seconds, and it is not the table's time.
+  **Both clocks start when the worker acknowledges the job**, not when the
+  slot was taken or the job sent. Until #272 they started at the send, but
+  `send` returns once the job is buffered, and a new worker reads it only
+  after spawning and importing its entry: 0.2 s on an idle 4-CPU machine,
+  1.1–1.4 s with 16 busy processes on it (measured for #272). That was the
+  table's time, and under load it killed tests with 1-second limits before
+  their entry ran
+  (`test_a_slow_starting_worker_does_not_spend_its_tables_limits`). **Before
+  the acknowledgement only `startup_timeout` runs.** A worker past it is
+  treated as one that died before receiving the table, and the table goes once
+  to a new worker
+  (`test_a_worker_hung_in_startup_is_replaced_and_its_table_runs`). A second
+  hang is the table's failure
+  (`test_a_table_whose_workers_both_hang_in_startup_fails_and_says_so`).
   **A merged item gets the longest of its reasons' limits**, since it runs all
   of their operations
   (`test_a_merged_item_gets_the_longest_of_its_reasons_limits`). **A pressure

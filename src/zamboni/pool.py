@@ -148,6 +148,15 @@ TABLE_TIMEOUTS: Mapping[str, timedelta] = {
 #: included. A pressure check reports nothing, so this is its whole limit.
 STALL_TIMEOUT = timedelta(hours=1)
 
+#: How long a worker may take to acknowledge a job before it is SIGKILLed as
+#: hung in startup (§7.1, #272). Until it acknowledges, a new worker is still
+#: spawning and importing its entry, which is not the table's time, so this is
+#: the only limit running; the table's own two start at the acknowledgement.
+#: **Chosen, not measured**: a spawned worker reached its first acknowledgement
+#: in 0.2 s on an idle 4-CPU machine and in 1.1-1.4 s with 16 busy processes on
+#: it (#272), so five minutes is a startup that will not finish, not a slow one.
+STARTUP_TIMEOUT = timedelta(minutes=5)
+
 #: The share of the memory limit the pool plans to use. The rest is headroom for
 #: what `memory_budget_bytes` does not bound -- Arrow buffers in flight, DuckDB's
 #: own working set -- because the kernel answers an overrun with SIGKILL.
@@ -431,7 +440,11 @@ class WorkerConfig:
         default_factory=lambda: dict(TABLE_TIMEOUTS)
     )
     #: How long a job may go without a progress report; ``None`` for no limit.
+    #: Like ``table_timeout``, counted from the worker's acknowledgement.
     stall_timeout: timedelta | None = STALL_TIMEOUT
+    #: How long a worker may take to acknowledge a job; ``None`` for no limit.
+    #: A worker past it never had the table, which goes once to a new worker.
+    startup_timeout: timedelta | None = STARTUP_TIMEOUT
     #: Where per-table config and run-record files go.
     workdir: Path = field(default_factory=lambda: Path.cwd())
 
@@ -858,7 +871,8 @@ class ItemResult:
 
 @dataclass(frozen=True)
 class _NotReceived:
-    """The worker died before acknowledging the job: the table never reached it."""
+    """The worker died, or was killed hung in startup, before acknowledging the
+    job: the table never reached it."""
 
     died: str
 
@@ -919,12 +933,12 @@ class WorkerPool:
         result = self._send(slot, item, job, started)
         if isinstance(result, _NotReceived) and not (slot.doomed or self._stopping):
             # The worker died before it received the table -- killed or OOM
-            # while idle, or crashed starting up. Not this table's failure, so
-            # it goes once more to a fresh worker. Only once: a worker that
-            # dies on receipt every time must not loop, and the second death
-            # is then reported as the table's (#268).
+            # while idle, or crashed or hung starting up (#272). Not this
+            # table's failure, so it goes once more to a fresh worker. Only
+            # once: a worker that dies on receipt every time must not loop, and
+            # the second death is then reported as the table's (#268).
             logger.warning(
-                "worker for %s/%s: %s before receiving it; sending it to a new worker",
+                "worker for %s/%s: %s, without receiving it; sending it to a new worker",
                 item.warehouse,
                 item.table,
                 result.died,
@@ -961,22 +975,37 @@ class WorkerPool:
         # unread in its socket buffer; catching EOFError alone left the slot
         # holding a dead process and failed every later table on it (#155).
         limit, stall = self.config.time_limit(item), self.config.stall_timeout
+        startup = self.config.startup_timeout
         done: tuple[Any, ...] | None = None
         try:
             slot.conn.send(job)
-            # Both clocks start here, once the job is sent: a replacement
-            # worker's spawn and imports take seconds, and are not the table's.
-            heard = time.monotonic()
-            deadline = None if limit is None else heard + limit.total_seconds()
+            # The table's two clocks start at the acknowledgement, not here.
+            # `send` returns once the job is buffered, and a new worker reads
+            # it only after spawning and importing its entry: up to 1.4 s on a
+            # loaded machine, which is not the table's time (#272). Until then
+            # only `startup` runs.
+            sent = time.monotonic()
+            heard = sent
+            deadline: float | None = None
             while done is None:
                 # Woken by a message, the worker exiting, or whichever limit is
-                # nearer: the run's own deadline, or a stall since the last report.
-                due = [] if deadline is None else [deadline]
-                if stall is not None:
-                    due.append(heard + stall.total_seconds())
+                # nearer: before the acknowledgement, startup; after it, the
+                # run's own deadline or a stall since the last report.
+                if not received:
+                    due = [] if startup is None else [sent + startup.total_seconds()]
+                else:
+                    due = [] if deadline is None else [deadline]
+                    if stall is not None:
+                        due.append(heard + stall.total_seconds())
                 timeout = max(0.0, min(due) - time.monotonic()) if due else None
                 ready = connection.wait([slot.conn, slot.process.sentinel], timeout)
                 if not ready:
+                    if not received:
+                        # Hung before the table reached it: not the table's
+                        # failure, so the caller sends it on (#268).
+                        logger.error("killing a worker that did not start within %s", startup)
+                        self._kill(slot)
+                        return _NotReceived(f"worker did not start within {startup}")
                     if deadline is not None and time.monotonic() >= deadline:
                         why = f"timed out after {limit} ({item.reason})"
                     else:
@@ -987,6 +1016,8 @@ class WorkerPool:
                 message = slot.conn.recv()
                 if message[0] == "received":
                     received = True
+                    heard = time.monotonic()
+                    deadline = None if limit is None else heard + limit.total_seconds()
                 elif message[0] == "progress":
                     progress = message[1]
                     reports += 1
@@ -1074,10 +1105,14 @@ class WorkerPool:
         nothing further, and what it wrote is orphans for a later sweep (§7.1).
         """
         logger.error("killing the worker for %s/%s: %s", item.warehouse, item.table, why)
+        self._kill(slot)
+        return self._failed(item, started, why, progress, reports)
+
+    def _kill(self, slot: _Slot) -> None:
+        """SIGKILL the slot's worker, reap it and empty the slot."""
         slot.process.kill()
         slot.process.join()
         self._reset(slot)
-        return self._failed(item, started, why, progress, reports)
 
     def _retire(self, slot: _Slot) -> None:
         with contextlib.suppress(OSError):

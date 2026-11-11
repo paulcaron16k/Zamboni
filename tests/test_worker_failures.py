@@ -30,6 +30,7 @@ from tests.test_pool import item, run_items, table_config
 from zamboni.pool import (
     SOUND_EXITS,
     STALL_TIMEOUT,
+    STARTUP_TIMEOUT,
     TABLE_TIMEOUTS,
     ItemResult,
     PoolSize,
@@ -280,6 +281,65 @@ def test_a_killed_tables_slot_runs_the_next_table_on_a_new_worker(tmp_path):
     assert (after.exit_code, after.died) == (0, None)
 
 
+# -- a worker still starting up: not the table's time (#272) ----------------------------
+
+
+def slow_start(tmp_path, *, every: timedelta | None, stall: timedelta | None, startup):
+    return dataclasses.replace(
+        limited(tmp_path, "record", every=every, stall=stall),
+        entry="tests.pool_entries_slow_start:record",
+        startup_timeout=startup,
+    )
+
+
+def test_a_slow_starting_worker_does_not_spend_its_tables_limits(tmp_path, monkeypatch):
+    """Both of the table's clocks start when the worker acknowledges the job.
+    Started at the send, a new worker's imports -- 1.1-1.4 s with 16 busy
+    processes on 4 CPUs -- were charged to the table, and this test's 1-second
+    limits killed it before its entry ran."""
+    monkeypatch.setenv("ZAMBONI_TEST_STARTUP_SECONDS", "3")
+    limit = timedelta(seconds=1.5)
+    config = slow_start(tmp_path, every=limit, stall=limit, startup=STARTUP_TIMEOUT)
+
+    result = run_one(config, item("raw.a"))
+
+    assert (result.exit_code, result.died) == (0, None)
+    assert result.seconds > 2 * limit.total_seconds(), "its startup really outlasted both"
+
+
+def test_a_worker_hung_in_startup_is_replaced_and_its_table_runs(tmp_path, monkeypatch):
+    """Hung before the table reached it, as a worker dying there is: not the
+    table's failure, so the table goes once to a new worker (#268)."""
+    marker = tmp_path / "hung-worker.pid"
+    monkeypatch.setenv("ZAMBONI_TEST_HANG_ONCE_MARKER", str(marker))
+    # Five seconds, not one: the replacement must start inside it, at up to
+    # 1.4 s on a loaded machine.
+    config = slow_start(tmp_path, every=None, stall=None, startup=timedelta(seconds=5))
+
+    result = run_one(config, item("raw.a"))
+
+    hung = int(marker.read_text(encoding="ascii"))
+    assert (result.exit_code, result.died) == (0, None)
+    assert result.record["pid"] != hung, "a new worker ran it"
+    assert wait_for(lambda: gone(hung), seconds=5), "the hung worker was killed"
+
+
+def test_a_table_whose_workers_both_hang_in_startup_fails_and_says_so(tmp_path, monkeypatch):
+    """Sent twice, as #268 sends a table whose worker dies on receipt, then the
+    table's failure -- never an endless wait, which is what no limit before the
+    acknowledgement would have been."""
+    monkeypatch.setenv("ZAMBONI_TEST_STARTUP_SECONDS", "600")
+    config = slow_start(tmp_path, every=None, stall=None, startup=SECOND)
+
+    started = time.monotonic()
+    result = run_one(config, item("raw.a"))
+
+    assert result.exit_code == 1
+    assert result.died == f"worker did not start within {SECOND}"
+    assert result.progress_reports == 0
+    assert time.monotonic() - started < 15, "killed at the startup limit, twice"
+
+
 # -- which limit a job gets -------------------------------------------------------------
 
 
@@ -290,23 +350,25 @@ def design_default(setting: str) -> str:
     return row
 
 
-def hours(text: str) -> timedelta:
-    (number,) = re.fullmatch(r"\s*(\d+) h\s*", text).groups()
-    return timedelta(hours=int(number))
+def duration(text: str) -> timedelta:
+    """``"6 h"`` or ``"5 min"``, as §3.5's table writes a default."""
+    number, unit = re.fullmatch(r"\s*(\d+) (h|min)\s*", text).groups()
+    return timedelta(**{"hours" if unit == "h" else "minutes": int(number)})
 
 
-def test_each_reason_has_the_limit_the_design_gives_it():
+def test_each_limit_has_the_default_the_design_gives_it():
     """Read from §3.5's table, so the code and the design cannot disagree:
     "`schedule`, `manual`, `reclaim`: 6 h; `event`: 1 h; ...", every reason named."""
     designed = {}
     for part in design_default("table_timeout").split(";"):
         reasons, _, limit = part.partition(":")
         for reason in re.findall(r"`(\w+)`", reasons):
-            designed[reason] = hours(limit)
+            designed[reason] = duration(limit)
 
     assert set(designed) == set(REASON_OPERATIONS), "the design names every reason"
     assert dict(TABLE_TIMEOUTS) == designed
-    assert hours(design_default("stall_timeout")) == STALL_TIMEOUT
+    assert duration(design_default("stall_timeout")) == STALL_TIMEOUT
+    assert duration(design_default("startup_timeout")) == STARTUP_TIMEOUT
 
 
 def test_a_merged_item_gets_the_longest_of_its_reasons_limits():
