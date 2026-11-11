@@ -282,6 +282,20 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **A new worker's startup no longer counts against its first table's limits**
+  (#272). The pool started a table's `table_timeout` and `stall_timeout` when
+  it sent the job, and its comment said a new worker's spawn and imports were
+  excluded. They were not. `send` returns once the job is buffered, and the
+  worker imports its entry before reading it, which took 0.2 s on an idle
+  4-CPU machine and 1.1–1.4 s with 16 busy processes on it. With the default
+  limits that is noise. With the tests' 1-second limits on a loaded machine,
+  it killed the worker before its entry ran, which is why three tests in
+  `tests/test_worker_failures.py` flaked. Both clocks now start when the worker
+  acknowledges the job. Before that, a new `WorkerConfig.startup_timeout`
+  (default 5 min) is the only limit. A worker past it is killed and treated as
+  one that died before receiving the table (#268): the table goes once to a
+  new worker, and a second hang is the table's failure, reported as
+  `worker did not start within …`.
 - **A table whose worker died before receiving it is sent to a new worker**
   (#268). The pool replaced a worker that died between tables only when
   `is_alive()` said so, and on Linux a SIGKILLed worker whose other threads
