@@ -332,10 +332,11 @@ explicit-preview-rules = true
 "tests/*" = ["SLF001", "PLW1514"]
 
 [tool.mypy]
-# Scoped to the shipped packages and the scripts, not to tests. Test code
+# Scoped to the shipped packages, the scripts and the example app (#161), not
+# to tests: the app is code an integrator copies, so it is held to src's bar. Test code
 # deliberately reaches into private internals and monkeypatches types; checking
 # it would generate noise that trains people to ignore the checker.
-files = ["src", "scripts"]
+files = ["src", "scripts", "examples/lakehouse-app/lakehouse_app"]
 python_version = "3.11"
 # PyIceberg ships no stubs for several modules we depend on.
 ignore_missing_imports = true

@@ -22,7 +22,7 @@ SHELL := /bin/bash
 
 VENV  := .venv
 PY    := $(VENV)/bin/python
-SRC   := src tests scripts
+SRC   := src tests scripts examples
 
 STACK    := dev-stack
 COMPOSE  := docker compose
@@ -222,7 +222,7 @@ venv-frozen: ## same, but fail if uv.lock is stale against pyproject.toml (CI: l
 
 lint: ruff format-check ruff-pin typecheck precommit ## everything the `lint` job runs
 
-ruff: ## ruff check over src, tests and scripts
+ruff: ## ruff check over src, tests, scripts and examples
 	$(require_venv)
 	uv run ruff check $(SRC)
 
@@ -235,7 +235,7 @@ format-check: ## ruff format --check; fails rather than writing
 	$(require_venv)
 	uv run ruff format --check $(SRC)
 
-typecheck: ## mypy over src and scripts, as this OS and as Windows (config declares the files)
+typecheck: ## mypy over src, scripts and the example app, as this OS and as Windows (config declares the files)
 	$(require_venv)
 	uv run mypy
 	uv run mypy --platform win32
@@ -293,7 +293,7 @@ ci: lint test test-executables version-watch ## every CI check that needs no con
 
 test-local: local-stack ## dev-stack tests against a stack with no engine (CI: dev-stack)
 	$(require_venv)
-	$(call pytest_no_skips,tests/test_dev_stack.py -v -m "not spark and not trino")
+	$(call pytest_no_skips,tests/test_dev_stack.py tests/test_lakehouse_app_live.py -v -m "not spark and not trino")
 
 test-trino: trino-stack ## the live Trino tests (CI: dev-stack, with the trino profile)
 	$(require_venv)

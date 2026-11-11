@@ -59,11 +59,19 @@ ROOT_DOCS = ("README.md", "CHANGELOG.md", "SECURITY.md", "CONTRIBUTING.md", "ONB
 CITING_NON_DOCS = ("pyproject.toml", "CLAUDE.md")
 
 
+#: The example apps' own documents (#161). They cite tests and link into
+#: docs/, so they rot as the rest would.
+EXAMPLE_DOCS = (ROOT / "examples" / "lakehouse-app" / "README.md",)
+
+
 def all_docs() -> list[Path]:
-    """Everything whose claims are checked: docs/*.md plus the root documents."""
-    return sorted(DOCS.glob("*.md")) + [
-        path for path in (ROOT / name for name in ROOT_DOCS) if path.exists()
-    ]
+    """Everything whose claims are checked: docs/*.md, the root documents and
+    the examples' READMEs."""
+    return (
+        sorted(DOCS.glob("*.md"))
+        + [path for path in (ROOT / name for name in ROOT_DOCS) if path.exists()]
+        + [path for path in EXAMPLE_DOCS if path.exists()]
+    )
 
 
 def linking_docs() -> list[Path]:

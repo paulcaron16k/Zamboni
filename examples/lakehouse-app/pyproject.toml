@@ -1,0 +1,22 @@
+[project]
+name = "lakehouse-app"
+version = "0.1.0"
+description = "The reference Lakehouse App: Zamboni's runtime embedded as docs/maintenance-runtime.md §9 says"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+    # The `sql` extra only for the tests' local SQL catalog; a REST catalog
+    # such as Lakekeeper needs nothing more than the base install.
+    "iceberg-zamboni[sql]",
+    "psycopg[binary]>=3.2",
+]
+
+[project.scripts]
+lakehouse-maintenance = "lakehouse_app.maintenance:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["lakehouse_app"]

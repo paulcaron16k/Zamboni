@@ -21,8 +21,8 @@ uv run pytest                                    # full suite, no Docker (test_d
 uv run pytest --ignore=tests/test_dev_stack.py   # what CI's `test` job runs
 uv run pytest tests/test_orphans.py::test_name   # one test
 uv run pytest -m spark                           # live Spark tests (need the dev stack up)
-uv run ruff check src tests scripts
-uv run ruff format --check src tests scripts
+uv run ruff check src tests scripts examples
+uv run ruff format --check src tests scripts examples
 uv run mypy                                      # config declares its own file set; no arguments
 uv run mypy --platform win32                     # native Windows' only check (#236); CI runs both
 uv run pre-commit run --all-files

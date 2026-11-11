@@ -68,6 +68,15 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
+- **The reference Lakehouse App's maintenance tier** (#171, epic #161), in
+  [examples/lakehouse-app/](examples/lakehouse-app/README.md). Not shipped in
+  the wheel: an application that embeds the runtime as
+  [docs/maintenance-runtime.md](docs/maintenance-runtime.md) §9 says one must,
+  run in CI so the contract is proven by something that runs. Its fleet comes
+  from a warehouse registry in PostgreSQL, each change pushed through
+  `update_fleet()`; its claim store, worker entries and request table each
+  pass their `zamboni.conformance` suite against the dev stack's PostgreSQL.
+  `ruff` and `mypy` now cover `examples/` too.
 - **Requests from another process** (#168, R9 of
   [docs/maintenance-runtime.md](docs/maintenance-runtime.md) §9.2). A web tier
   asks for "run now" or "drop with reclaim" by writing a row; the maintenance
