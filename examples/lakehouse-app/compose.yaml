@@ -65,6 +65,9 @@ services:
       LAKEHOUSE_MAINTENANCE_COMMIT: "yes"
       LAKEHOUSE_REGISTRY_POLL_SECONDS: "5"
       LAKEHOUSE_STATE_FILE: /run/lakehouse/state.json
+      # Unset: as many workers as the limits below fit. The end-to-end suite
+      # sets it, to know which slot is the reserved one.
+      LAKEHOUSE_WORKERS: ${LAKEHOUSE_WORKERS:-}
     depends_on:
       db:
         condition: service_healthy
