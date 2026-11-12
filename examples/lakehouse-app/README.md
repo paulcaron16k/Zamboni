@@ -231,3 +231,28 @@ The manifests are examples: an image registry, a Secret and a database are
 yours to supply. They have not been applied to a cluster in this repository's
 CI; the tests above check what they say against Zamboni's declarations and the
 measured figures.
+
+## End to end, failure cases included
+
+`tests/test_lakehouse_app_e2e.py` runs the app as deployed -- its image built
+from this tree, its two tiers added to the dev stack by `compose.yaml`, the
+real Lakekeeper -- and kills and degrades the maintenance tier from outside,
+asserting what docs/maintenance-runtime.md §7.1 and §9 say happens:
+
+| Case | Done to it | Asserted |
+|---|---|---|
+| two maintenance replicas (§9.3) | `--scale maintenance=2`, a sweep of eight tables | both replicas did work, a replica dropped a table the other held as `claimed elsewhere`, and no table's run records overlap in time (`test_two_replicas_claim_each_table_exactly_once_at_a_time`) |
+| "run now" during a sweep (§3.4) | two workers, one reserved for high-class work; a sweep of ten tables, then a request for another warehouse's table | it ran as `manual` and started while the sweep still had tables queued (`test_run_now_during_a_sweep_starts_ahead_of_the_queue`) |
+| a worker killed as an OOM would (§7.1) | one worker, SIGKILLed inside the container four seconds into a sorted rewrite of fifteen million rows | that table reports `worker died (killed by signal 9)`, and the sweep's other tables still run (`test_a_worker_killed_mid_table_reports_died_and_the_sweep_goes_on`) |
+| the maintenance tier killed (§9.2) | `docker compose kill -s SIGKILL maintenance` | every page still renders; once the tick is stale every page says "maintenance unavailable since"; restarted, maintenance resumes under a new replica, the banner clears, and no table's runs overlap (`test_with_the_maintenance_tier_killed_the_web_tier_carries_on`) |
+
+```bash
+make test-lakehouse-app        # or, with the dev stack up:
+ZAMBONI_REQUIRE_DEV_STACK=1 uv run pytest tests/test_lakehouse_app_e2e.py -v
+```
+
+Opt-in like the other dev-stack suites: skipped without the stack or Docker,
+failing with `ZAMBONI_REQUIRE_DEV_STACK=1`, which is how CI's dev-stack job
+runs it. It takes several minutes, most of them spent waiting out the three
+missed ticks that raise the banner -- the behaviour under test, so not
+shortened.

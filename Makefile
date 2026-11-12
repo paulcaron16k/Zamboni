@@ -295,6 +295,10 @@ test-local: local-stack ## dev-stack tests against a stack with no engine (CI: d
 	$(require_venv)
 	$(call pytest_no_skips,tests/test_dev_stack.py tests/test_lakehouse_app_live.py -v -m "not spark and not trino")
 
+test-lakehouse-app: local-stack ## the reference Lakehouse App end to end: builds its image, kills its tiers (CI: dev-stack)
+	$(require_venv)
+	$(call pytest_no_skips,tests/test_lakehouse_app_e2e.py -v)
+
 test-trino: trino-stack ## the live Trino tests (CI: dev-stack, with the trino profile)
 	$(require_venv)
 	$(call pytest_no_skips,tests/test_dev_stack.py -v -m trino)
@@ -443,7 +447,7 @@ clean-venv: ## delete .venv; `make venv` rebuilds it from uv.lock
 .PHONY: all help venv venv-frozen doctor \
         lint ruff format format-check typecheck precommit ruff-pin \
         test test-matrix test-docs test-executables ci \
-        test-local test-trino test-spark test-demo \
+        test-local test-lakehouse-app test-trino test-spark test-demo \
         local-stack-start trino-stack-start spark-stack-start \
         local-stack-stop trino-stack-stop spark-stack-stop \
         stack-stop stack-clean stack-status stack-logs stack-bootstrap \

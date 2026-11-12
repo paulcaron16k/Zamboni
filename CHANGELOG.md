@@ -92,6 +92,13 @@ Two categories beyond the usual set, because this tool deletes files:
   file when `LAKEHOUSE_STATE_FILE` is set, so serve's probes work unchanged;
   its grace period is derived from the longest `TABLE_TIMEOUTS` limit, and
   each probe's timeout sits over the time measured in the image.
+- **The reference Lakehouse App, end to end** (#174, completing epic #161):
+  `tests/test_lakehouse_app_e2e.py` runs the app's compose stack on the dev
+  stack and kills and degrades it -- two maintenance replicas sharing claims,
+  "run now" starting on the reserved slot during a sweep, a worker SIGKILLed
+  mid-table, the whole maintenance tier SIGKILLed under a running web tier --
+  asserting what docs/maintenance-runtime.md §7.1 and §9 say happens. In CI's
+  dev-stack job, and as `make test-lakehouse-app`.
 - **Requests from another process** (#168, R9 of
   [docs/maintenance-runtime.md](docs/maintenance-runtime.md) §9.2). A web tier
   asks for "run now" or "drop with reclaim" by writing a row; the maintenance

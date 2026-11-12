@@ -337,10 +337,23 @@ jobs:
           ./bin/zamboni-demo --catalog lakekeeper query
           ./bin/zamboni-demo --catalog lakekeeper clear
 
+      # The reference Lakehouse App as a deployment: its image built from this
+      # tree, its two tiers added to the stack above by its own compose file,
+      # and the maintenance tier killed, scaled and degraded under it (#174).
+      # After the demo, which wants the stack to itself. Several minutes: one
+      # test waits out the three missed ticks that raise the dashboard's
+      # banner, which is the behaviour under test.
+      - name: The reference Lakehouse App, end to end
+        env:
+          ZAMBONI_REQUIRE_DEV_STACK: "1"
+        run: uv run pytest tests/test_lakehouse_app_e2e.py -v
+
       - name: Stack logs
         if: failure()
         working-directory: dev-stack
-        run: docker compose logs --tail 200
+        run: |
+          docker compose logs --tail 200
+          docker compose -f ../examples/lakehouse-app/compose.yaml logs --tail 200 web maintenance || true
 
       - name: Tear down
         if: always()
