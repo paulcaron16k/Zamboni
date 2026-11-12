@@ -22,6 +22,14 @@ Settings, from the environment, besides the database's (:mod:`lakehouse_app.db`)
   kept out of what the pool plans its workers against (§9.4).
 - ``LAKEHOUSE_WORKDIR``: where workers write scratch files (default: a
   temporary directory).
+- ``LAKEHOUSE_WORKERS``: at most this many workers. The pool sizes itself from
+  the container's limits (§9.4); this can lower that and never raise it.
+- ``LAKEHOUSE_STATE_FILE``: write ``zamboni serve``'s state file here, so
+  ``zamboni service-status --probe liveness|readiness`` answers for this
+  process as it does for ``serve`` -- the same file, written by the same
+  observer, read by the same probe (the Kubernetes manifests use it). While no
+  warehouse is registered yet the file says ``starting`` with a fresh tick:
+  alive, and not ready.
 
 SIGTERM or SIGINT stops it gracefully, letting tables in flight finish; a
 second one kills them, which is safe for the reason any kill is (§7.1).
@@ -36,7 +44,7 @@ import os
 import signal
 import sys
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +52,9 @@ from zamboni import CompactionConfig
 from zamboni.fleet import FleetConfig
 from zamboni.observe import handed_off
 from zamboni.pool import PoolSize, WorkerConfig, plan_pool
-from zamboni.runtime import MaintenanceRuntime, RuntimeSettings, StaticFleet
+from zamboni.runstate import RuntimeState
+from zamboni.runtime import CREATED, MaintenanceRuntime, RuntimeSettings, StaticFleet, now_utc
+from zamboni.service import EVENTS_OBSERVE_SECONDS, ServiceState, StateFileObserver
 
 from .claims import PostgresClaimStore
 from .db import Database
@@ -60,7 +70,61 @@ COMMIT = "LAKEHOUSE_MAINTENANCE_COMMIT"
 POLL = "LAKEHOUSE_REGISTRY_POLL_SECONDS"
 RESERVED_MEMORY = "LAKEHOUSE_RESERVED_MEMORY_BYTES"
 WORKDIR = "LAKEHOUSE_WORKDIR"
+WORKERS = "LAKEHOUSE_WORKERS"
+STATE_FILE = "LAKEHOUSE_STATE_FILE"
 DEFAULT_POLL_SECONDS = 10.0
+
+
+class ProbeFile:
+    """``zamboni serve``'s state file, for this process.
+
+    Written by serve's own `StateFileObserver` once the runtime exists, so
+    ``zamboni service-status --probe`` reads it exactly as it reads serve's.
+    Before that -- while no warehouse is registered -- :meth:`waiting` writes
+    ``starting`` with a fresh tick on every registry poll, so a liveness
+    probe passes and a readiness probe does not.
+    """
+
+    def __init__(self, path: Path, *, dry_run: bool, database: Database) -> None:
+        self.path = path
+        self.service = ServiceState(fleet_path=f"registry:{database.schema}", dry_run=dry_run)
+
+    def waiting(self) -> None:
+        state = RuntimeState(
+            phase=CREATED,
+            generation=0,
+            workers=0,
+            last_tick=now_utc(),
+            queued=(),
+            in_flight=(),
+            dirty=(),
+        )
+        try:
+            self.service.write(self.path, state)
+        except OSError:
+            logger.exception("could not write the state file %s", self.path)
+
+    def observer(self, state: Callable[[], RuntimeState]) -> StateFileObserver:
+        self._observer = StateFileObserver(self.path, self.service, state)
+        return self._observer
+
+    async def watch_sources(self, runtime: MaintenanceRuntime, stop: asyncio.Event) -> None:
+        """Rewrite the file when the request source connects or disconnects.
+
+        Nothing the runtime tells observers says so, and a scheduler can sleep
+        a minute between ticks: without this, a fresh replica stayed unready
+        for up to a minute after its source connected -- seen in this image,
+        unready 15 s after start -- which is why `zamboni serve` does the same.
+        A write happens only on a change.
+        """
+        last = None
+        while not stop.is_set():
+            connected = runtime.state().sources_connected
+            if connected != last:
+                last = connected
+                self._observer.write()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), EVENTS_OBSERVE_SECONDS)
 
 
 class RegistryWatcher:
@@ -111,15 +175,20 @@ class RegistryWatcher:
 
 
 async def wait_for_rows(
-    registry: Registry, stop: asyncio.Event, interval: float
+    registry: Registry,
+    stop: asyncio.Event,
+    interval: float,
+    waiting: Callable[[], None] = lambda: None,
 ) -> list[WarehouseRow]:
     """The registry's rows, once there is at least one. A fresh install has
-    none until someone registers a warehouse in the web tier."""
+    none until someone registers a warehouse in the web tier. ``waiting`` is
+    called on every poll that finds none."""
     said = False
     while True:
         rows = await asyncio.to_thread(registry.warehouses)
         if rows:
             return rows
+        waiting()
         if not said:
             logger.info("no warehouse registered yet; waiting for one")
             said = True
@@ -146,10 +215,12 @@ def build(
     size: PoolSize,
     worker: WorkerConfig,
     settings: RuntimeSettings | None = None,
+    observers: Sequence[Any] = (),
     **runtime_options: Any,
 ) -> MaintenanceRuntime:
-    """The runtime, wired to the app's database. ``runtime_options`` are
-    `MaintenanceRuntime`'s own, for a test that drives the clock or the pool."""
+    """The runtime, wired to the app's database. ``observers`` are in
+    addition to the state rows; ``runtime_options`` are `MaintenanceRuntime`'s
+    own, for a test that drives the clock or the pool."""
     rows = StateRows(database)
     runtime = MaintenanceRuntime(
         fleet=StaticFleet(fleet),
@@ -157,7 +228,7 @@ def build(
         worker=worker,
         claims=PostgresClaimStore(database),
         requests=[RequestTable(database).source()],
-        observers=[handed_off(rows, name="state rows")],
+        observers=[handed_off(rows, name="state rows"), *observers],
         settings=settings,
         **runtime_options,
     )
@@ -179,21 +250,29 @@ async def serve(
     stopping = asyncio.Event()
     holder: list[MaintenanceRuntime] = []
     (install_signals or _install_signals)(holder, stopping)
+    commit = environ.get(COMMIT, "").lower() == "yes"
+    probe = None
+    if path := environ.get(STATE_FILE):
+        probe = ProbeFile(Path(path), dry_run=not commit, database=database)
     try:
-        rows = await wait_for_rows(registry, stopping, interval)
+        rows = await wait_for_rows(
+            registry, stopping, interval, probe.waiting if probe else lambda: None
+        )
     except asyncio.CancelledError:
         return 0
     fleet = watcher.first(rows)
 
     size = plan_pool(
         memory_budget_bytes=CompactionConfig().memory_budget_bytes,
+        requested=int(environ[WORKERS]) if environ.get(WORKERS) else None,
         reserved_memory_bytes=int(environ.get(RESERVED_MEMORY) or 0),
     )
     workdir = Path(environ.get(WORKDIR) or tempfile.mkdtemp(prefix="lakehouse-app-"))
     worker = worker_config(size, environ, workdir=workdir)
     if not worker.commit:
         logger.warning("%s is not 'yes': every table previews and nothing is committed", COMMIT)
-    runtime = build(database, fleet, size=size, worker=worker)
+    observers = [] if probe is None else [probe.observer(lambda: holder[0].state())]
+    runtime = build(database, fleet, size=size, worker=worker, observers=observers)
     holder.append(runtime)
     if stopping.is_set():  # a signal while starting still counts
         runtime.request_stop()
@@ -204,12 +283,14 @@ async def serve(
         runtime.holder,
     )
 
-    watching = asyncio.create_task(watcher.run(runtime, stopping))
+    tasks = [asyncio.create_task(watcher.run(runtime, stopping))]
+    if probe is not None:
+        tasks.append(asyncio.create_task(probe.watch_sources(runtime, stopping)))
     try:
         await runtime.run()
     finally:
         stopping.set()
-        await watching
+        await asyncio.gather(*tasks)
     return 0
 
 

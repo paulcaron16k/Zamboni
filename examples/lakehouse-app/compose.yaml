@@ -1,0 +1,89 @@
+# The reference Lakehouse App on the dev stack: PostgreSQL, Lakekeeper, the
+# object store and NATS from dev-stack/docker-compose.yaml, plus the app's two
+# tiers from one image (docs/maintenance-runtime.md §9.2).
+#
+#   cp dev-stack/.env.sample dev-stack/.env        # once, as for the dev stack
+#   docker compose -f examples/lakehouse-app/compose.yaml up -d --build --wait
+#   uv run dev-stack/bootstrap.py                  # the Lakekeeper warehouse, as for the dev stack
+#   open http://localhost:8090/
+#
+# **The same project as the dev stack** (`name: zamboni-dev`), so this adds two
+# services to it rather than starting a second stack beside it: the dev stack
+# pins its network's subnet (S3_GATEWAY), and two stacks would both claim it.
+# `docker compose -f dev-stack/docker-compose.yaml ...` then reports the app's
+# two containers as orphans; that is harmless.
+#
+# The tiers share nothing but the database. The web tier is not even told
+# where Lakekeeper is: everything it shows, it reads from rows.
+name: zamboni-dev
+
+include:
+  - path: ../../dev-stack/docker-compose.yaml
+    env_file: ../../dev-stack/.env
+
+x-app: &app
+  image: lakehouse-app:dev
+  build:
+    context: ../..
+    dockerfile: examples/lakehouse-app/Dockerfile
+  networks: [zamboni]
+  init: true
+
+# The app's database is the dev stack's PostgreSQL, in a schema of its own. The
+# defaults are dev-stack/.env.sample's throwaway values; pass
+# `--env-file dev-stack/.env` if yours differ.
+x-database: &database
+  LAKEHOUSE_DATABASE_URL: >-
+    host=db port=5432 dbname=${POSTGRES_DB:-lakekeeper}
+    user=${POSTGRES_USER:-lakekeeper} password=${POSTGRES_PASSWORD:-lakekeeper}
+  LAKEHOUSE_DATABASE_SCHEMA: lakehouse
+
+services:
+  web:
+    <<: *app
+    environment:
+      <<: *database
+    ports:
+      - "${LAKEHOUSE_WEB_PORT:-8090}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/readyz', timeout=5)"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 10s
+    # Short: a page in flight is all there is to lose.
+    stop_grace_period: 10s
+
+  maintenance:
+    <<: *app
+    command: ["python", "-m", "lakehouse_app.maintenance"]
+    environment:
+      <<: *database
+      LAKEHOUSE_MAINTENANCE_COMMIT: "yes"
+      LAKEHOUSE_REGISTRY_POLL_SECONDS: "5"
+      LAKEHOUSE_STATE_FILE: /run/lakehouse/state.json
+    depends_on:
+      db:
+        condition: service_healthy
+      lakekeeper:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "zamboni", "service-status", "--state-file=/run/lakehouse/state.json", "--probe=liveness"]
+      interval: 10s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    # Its own limits, so the pool sizes itself from them rather than the host
+    # (§9.4), and a runaway worker is this tier's problem alone.
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 4g
+    # Longer than the longest table: the longest TABLE_TIMEOUTS limit (6 h,
+    # zamboni.pool) plus five minutes, as kubernetes/maintenance.yaml.
+    # test_the_grace_period_outlasts_the_longest_table holds both to it.
+    stop_grace_period: 21900s

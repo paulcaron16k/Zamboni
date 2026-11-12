@@ -75,6 +75,8 @@ All from the environment:
 | `LAKEHOUSE_REGISTRY_POLL_SECONDS` | `10` | how often the registry is re-read |
 | `LAKEHOUSE_RESERVED_MEMORY_BYTES` | `0` | this process's own baseline, kept out of the pool's plan (§9.4) |
 | `LAKEHOUSE_WORKDIR` | a temporary directory | workers' scratch files |
+| `LAKEHOUSE_WORKERS` | as many as fit | at most this many workers; lowers the pool's own plan, never raises it |
+| `LAKEHOUSE_STATE_FILE` | unset | write `zamboni serve`'s state file here, for `zamboni service-status --probe` |
 | `LAKEHOUSE_CATALOG_CREDENTIAL` | unset | a REST catalog's OAuth2 `client_id:client_secret` |
 | `LAKEHOUSE_CATALOG_TOKEN` | unset | a REST catalog's bearer token |
 
@@ -138,6 +140,7 @@ loaded it.
 | `/warehouses/new` | the registration form | — |
 | `/requests/<id>` | one "run now": waiting, running, finished, and its outcome | `zamboni_request`, `zamboni_claim`, `zamboni_run` |
 | `/healthz` | `ok`: liveness of this process only | nothing |
+| `/readyz` | `ok` when the app's database answers | `SELECT 1` |
 
 **"Run now" is a row.** It writes a `zamboni_request`; a maintenance replica
 offers it as `manual`, claims the table and runs it, and the request's page
@@ -163,3 +166,68 @@ thing. Put it behind your own.
 ```bash
 PYTHONPATH=examples/lakehouse-app uv run python -m lakehouse_app.web
 ```
+
+## Deploying it
+
+One image, two tiers: [Dockerfile](Dockerfile), built from the repository root
+so Zamboni comes from this tree and its lock -- the PyIceberg maintenance fork
+included -- rather than from whatever PyPI resolves. The default command is the
+web tier; the maintenance tier is the same image with
+`python -m lakehouse_app.maintenance`. It runs as a non-root user with a
+read-only root filesystem; the maintenance tier writes only to
+`/run/lakehouse` and `/tmp`.
+
+```bash
+docker build -f examples/lakehouse-app/Dockerfile -t lakehouse-app .
+```
+
+### docker compose, on the dev stack
+
+[compose.yaml](compose.yaml) adds the two tiers to the dev stack: PostgreSQL,
+Lakekeeper, the object store and NATS come from
+`dev-stack/docker-compose.yaml`, which it includes. It shares the dev stack's
+project name, so it extends a running dev stack rather than starting a second
+one -- the dev stack pins its network's subnet, and two stacks would both claim
+it.
+
+```bash
+cp dev-stack/.env.sample dev-stack/.env         # once, as for the dev stack
+docker compose -f examples/lakehouse-app/compose.yaml up -d --build --wait
+uv run dev-stack/bootstrap.py                   # Lakekeeper's warehouse, as for the dev stack
+```
+
+Then open <http://localhost:8090/>, register a warehouse with the catalog
+properties `{"type": "rest", "uri": "http://lakekeeper:8181/catalog",
+"warehouse": "zamboni"}` and press "run now". The web tier never learns where
+Lakekeeper is; only the maintenance tier connects to it, from the registry
+row. Done by hand on 2026-11-11: a table of six small files in Lakekeeper,
+registered and run from the dashboard, was compacted to one file by the
+maintenance container and its request page read "finished: ok".
+
+### Kubernetes
+
+[kubernetes/maintenance.yaml](kubernetes/maintenance.yaml) and
+[kubernetes/web.yaml](kubernetes/web.yaml) (with [its Service](kubernetes/web-service.yaml)): two Deployments from the one
+image, each with its own resources. What differs from `zamboni serve`'s
+manifest in [docs/devops.md §8](../../docs/devops.md#8-zamboni-serve--a-fleet-with-no-crontab),
+and why:
+
+| Setting | Here | Why |
+|---|---|---|
+| maintenance `replicas: 2`, `RollingUpdate` | serve needs 1 and `Recreate` | claims in the app's database make each table one replica's at a time (§9.3) |
+| maintenance `terminationGracePeriodSeconds: 21900` | longest table plus margin | a table can run no longer than its reason's `TABLE_TIMEOUTS` limit, 6 h at most, so that is the longest table; `test_the_grace_period_outlasts_the_longest_table` holds it to the declaration |
+| maintenance probes | serve's own | `LAKEHOUSE_STATE_FILE` makes this process write serve's state file, so `zamboni service-status --probe` reads it unchanged. A replica with no warehouse registered yet is alive and not ready (`test_a_tier_waiting_for_its_first_warehouse_is_alive_and_not_ready`) |
+| maintenance `timeoutSeconds: 10` | over the measured time | the probe took 0.74–0.95 s at 1–2 CPUs and 4.7–5.6 s at 0.25 CPU in this image, five runs each; the 1 s default would fail it |
+| web probes, `timeoutSeconds: 2` | HTTP, never about maintenance | `/healthz` answered in 1–23 ms and `/readyz` (the database) in 12–14 ms, ten requests each; a web pod restarted because maintenance is down would turn one outage into two |
+| web `terminationGracePeriodSeconds: 10` | short | a page in flight is all it has to lose |
+
+`test_every_probe_has_a_timeout_over_its_measured_time` and
+`test_each_tier_has_its_own_resources` hold the rest. Secrets come from
+`lakehouse-maintenance` and `lakehouse-web` Secrets by `envFrom`: the database
+URL for both, a catalog credential for the maintenance tier only. The web tier
+never touches a catalog.
+
+The manifests are examples: an image registry, a Secret and a database are
+yours to supply. They have not been applied to a cluster in this repository's
+CI; the tests above check what they say against Zamboni's declarations and the
+measured figures.

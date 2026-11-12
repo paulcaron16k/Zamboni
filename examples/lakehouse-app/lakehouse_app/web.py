@@ -80,6 +80,7 @@ class App:
         self.routes: list[tuple[str, re.Pattern[str], Callable[..., tuple[HTTPStatus, str]]]] = [
             ("GET", re.compile(r"/"), self.index),
             ("GET", re.compile(r"/healthz"), self.healthz),
+            ("GET", re.compile(r"/readyz"), self.readyz),
             ("GET", re.compile(r"/warehouses/new"), self.new_warehouse),
             ("POST", re.compile(r"/warehouses"), self.create_warehouse),
             ("GET", re.compile(r"/warehouses/(?P<name>[^/]+)"), self.warehouse),
@@ -119,6 +120,17 @@ class App:
         """Liveness: this process answers. Not the database, and never the
         maintenance tier -- a web pod restarted because maintenance is down
         would turn one outage into two."""
+        return HTTPStatus.OK, "ok"
+
+    def readyz(self, environ: dict[str, Any]) -> tuple[HTTPStatus, str]:
+        """Readiness: the app's database answers, so a page can render. Still
+        not the maintenance tier, for the reason liveness is not."""
+        try:
+            with self.database.connect() as conn:
+                conn.execute("SELECT 1")
+        except Exception as exc:
+            logger.warning("not ready: %s", exc)
+            return HTTPStatus.SERVICE_UNAVAILABLE, "the app's database is unreachable"
         return HTTPStatus.OK, "ok"
 
     def index(self, environ: dict[str, Any]) -> tuple[HTTPStatus, str]:

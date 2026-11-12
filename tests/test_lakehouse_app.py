@@ -227,3 +227,105 @@ def test_a_registry_emptied_or_broken_keeps_the_fleet_in_use(caplog):
     assert fleets == []
     refusals = [r for r in caplog.records if "not to a usable fleet" in r.getMessage()]
     assert len(refusals) == 2, "the empty registry, then the broken one: each said once"
+
+
+# -- deployment (#173) -----------------------------------------------------------------
+
+import yaml  # noqa: E402
+
+from zamboni.pool import TABLE_TIMEOUTS  # noqa: E402
+from zamboni.service import PROBES, probe, read_state  # noqa: E402
+
+KUBERNETES = APP / "kubernetes"
+COMPOSE = APP / "compose.yaml"
+
+#: The longest each probe took, measured in the image (#173), the figures the
+#: manifests' comments give: the maintenance tier's exec probe at 0.25 CPU, the
+#: web tier's slower HTTP probe.
+MEASURED_PROBE_SECONDS = {"maintenance": 5.6, "web": 0.023}
+
+
+def deployments() -> dict[str, dict]:
+    found = {}
+    for path in sorted(KUBERNETES.glob("*.yaml")):
+        for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+            if doc and doc["kind"] == "Deployment":
+                found[doc["metadata"]["labels"]["tier"]] = doc
+    return found
+
+
+def container(deployment: dict) -> dict:
+    (only,) = deployment["spec"]["template"]["spec"]["containers"]
+    return only
+
+
+def compose() -> dict:
+    return yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+
+
+def test_there_are_two_tiers_from_one_image():
+    tiers = deployments()
+    assert set(tiers) == {"web", "maintenance"}
+    assert container(tiers["web"])["image"] == container(tiers["maintenance"])["image"]
+    assert container(tiers["maintenance"])["command"][-1] == "lakehouse_app.maintenance"
+    assert "command" not in container(tiers["web"]), "the image's default is the web tier"
+    services = compose()["services"]
+    assert services["web"]["image"] == services["maintenance"]["image"]
+
+
+def test_the_grace_period_outlasts_the_longest_table():
+    """§9.2: the maintenance tier's grace period covers its longest table, so a
+    rollout lets every table in flight finish. A table can run no longer than
+    its reason's TABLE_TIMEOUTS limit, so the longest limit is the bound."""
+    longest = max(limit.total_seconds() for limit in TABLE_TIMEOUTS.values() if limit)
+    tiers = deployments()
+    grace = tiers["maintenance"]["spec"]["template"]["spec"]["terminationGracePeriodSeconds"]
+    assert grace > longest
+    assert f"{grace}s" == compose()["services"]["maintenance"]["stop_grace_period"]
+    web = tiers["web"]["spec"]["template"]["spec"]["terminationGracePeriodSeconds"]
+    assert web < 60, "the web tier's is short: it has only a page to lose"
+
+
+def test_every_probe_has_a_timeout_over_its_measured_time():
+    """devops.md §8: before 0.6.0 serve's probe took longer than the 1 s
+    default, and every probe failed, restarting the pod forever."""
+    for tier, deployment in deployments().items():
+        probes = {k: v for k, v in container(deployment).items() if k.endswith("Probe")}
+        assert probes, tier
+        for kind, spec in probes.items():
+            assert spec["timeoutSeconds"] > MEASURED_PROBE_SECONDS[tier], (tier, kind)
+
+
+def test_the_maintenance_probes_are_serves():
+    """The app writes serve's state file, so serve's probe reads it; a probe
+    name serve does not know would fail every time."""
+    for kind in ("livenessProbe", "readinessProbe"):
+        command = container(deployments()["maintenance"])[kind]["exec"]["command"]
+        assert command[:2] == ["zamboni", "service-status"]
+        (named,) = [a.split("=", 1)[1] for a in command if a.startswith("--probe=")]
+        assert named in PROBES and kind.startswith(named)
+
+
+def test_each_tier_has_its_own_resources():
+    """§9.2: the tiers scale and fail independently, and the pool sizes itself
+    from its own container's limits (§9.4)."""
+    limits = {}
+    for tier, deployment in deployments().items():
+        resources = container(deployment)["resources"]
+        assert resources["requests"] and resources["limits"], tier
+        limits[tier] = resources["limits"]
+    assert limits["web"] != limits["maintenance"]
+    assert "limits" in compose()["services"]["maintenance"]["deploy"]["resources"]
+
+
+def test_a_tier_waiting_for_its_first_warehouse_is_alive_and_not_ready(tmp_path):
+    """A fresh install has no warehouse until someone registers one: the
+    maintenance pod must not be restarted for that, nor sent work."""
+    from lakehouse_app.db import Database
+    from lakehouse_app.maintenance import ProbeFile
+
+    path = tmp_path / "state.json"
+    ProbeFile(path, dry_run=False, database=Database("host=nowhere")).waiting()
+    state = read_state(path)
+    assert probe(state, "liveness")[0]
+    assert not probe(state, "readiness")[0]

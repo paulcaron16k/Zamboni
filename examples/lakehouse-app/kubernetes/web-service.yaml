@@ -1,0 +1,10 @@
+# The web tier's Service: the dashboard, inside the cluster. Put your own
+# ingress and authentication in front of it (the app has none, by design).
+apiVersion: v1
+kind: Service
+metadata:
+  name: lakehouse-web
+spec:
+  selector: {app: lakehouse, tier: web}
+  ports:
+    - {name: http, port: 80, targetPort: http}
