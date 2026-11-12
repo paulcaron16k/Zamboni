@@ -239,3 +239,188 @@ class WatcherThread:
         self._loop.call_soon_threadsafe(self._stop.set)
         self._thread.join(10)
         self._loop.close()
+
+
+# -- the web tier (#172) -----------------------------------------------------------------
+
+
+class Client:
+    """The web tier's WSGI app, called directly: no server, no port."""
+
+    def __init__(self, database: Database) -> None:
+        from lakehouse_app.web import App
+
+        self.app = App(database)
+
+    def request(self, method: str, path: str, form: dict[str, str] | None = None):
+        import io
+        from urllib.parse import urlencode
+        from wsgiref.util import setup_testing_defaults
+
+        body = urlencode(form or {}).encode()
+        environ: dict = {
+            "REQUEST_METHOD": method,
+            "PATH_INFO": path,
+            "CONTENT_LENGTH": str(len(body)),
+            "CONTENT_TYPE": "application/x-www-form-urlencoded",
+            "wsgi.input": io.BytesIO(body),
+        }
+        setup_testing_defaults(environ)
+        seen: dict = {}
+
+        def start_response(status, headers):
+            seen["status"], seen["headers"] = int(status.split()[0]), dict(headers)
+
+        text = b"".join(self.app(environ, start_response)).decode()
+        return seen["status"], seen["headers"], text
+
+    def get(self, path: str) -> str:
+        status, _, text = self.request("GET", path)
+        assert status == 200, (path, status, text)
+        return text
+
+    def post(self, path: str, form: dict[str, str]) -> tuple[int, str]:
+        status, headers, text = self.request("POST", path, form)
+        return status, headers.get("Location", text)
+
+
+BANNER = "Maintenance unavailable"
+
+
+@pytest.fixture
+def web(new_database):
+    database = new_database()
+    Registry(database).put(WarehouseRow("acme", "0 2 * * *", RAW))
+    return database, Client(database)
+
+
+def every_page(client: Client, database: Database) -> dict[str, str]:
+    request = RequestTable(database).submit("acme", ["raw.a"], requested_by="test")
+    return {
+        path: client.get(path)
+        for path in ("/", "/warehouses/acme", "/warehouses/new", f"/requests/{request}")
+    }
+
+
+def test_with_no_maintenance_tier_ever_every_page_renders_under_the_banner(web):
+    database, client = web
+    for path, text in every_page(client, database).items():
+        assert f"{BANNER}: no maintenance replica has reported yet" in text, path
+
+
+def test_with_the_maintenance_tier_stopped_every_page_says_since_when(web):
+    """A SIGKILLed tier writes no `stopped`: its row still says `running`, and
+    only the age of its last tick tells. That is what the banner reads."""
+    database, client = web
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO zamboni_runtime (holder, phase, last_tick, busy, queued, updated_at)"
+            " VALUES ('dead-replica', 'running', now() - interval '1 hour', 1, 0, now())"
+        )
+    for path, text in every_page(client, database).items():
+        assert f"{BANNER} since" in text, path
+    assert client.get("/healthz") == "ok", "liveness never depends on maintenance"
+
+
+def running_tier(database: Database, tmp_path, *, hold: bool = False):
+    """A maintenance tier on this database, its pool a fake that can hold a table."""
+    pools: list[FakePool] = []
+    runtime = build(
+        database,
+        Registry(database).fleet(),
+        size=PoolSize(1, 1, "test"),
+        worker=WorkerConfig(workdir=tmp_path),
+        pool_factory=lambda size, config: (
+            pools.append(FakePool(size, config, hold=hold)) or pools[-1]
+        ),
+    )
+    return runtime, pools
+
+
+def test_with_the_maintenance_tier_running_there_is_no_banner(web, tmp_path):
+    database, client = web
+    runtime, _ = running_tier(database, tmp_path)
+    handle = start_in_thread(runtime)
+    try:
+        eventually(lambda: BANNER not in client.get("/"), timeout=15)
+    finally:
+        assert handle.stop(grace=timedelta(seconds=5))
+    assert BANNER in client.get("/"), "and it comes back once the tier has stopped"
+
+
+def test_run_now_writes_a_request_and_its_page_follows_the_run_to_the_end(web, tmp_path):
+    """#172: "run now" is a row; the maintenance tier takes it, claims the
+    table, runs it; the request's page shows it waiting, running, finished."""
+    database, client = web
+    status, location = client.post("/warehouses/acme/run", {"table": "raw.a"})
+    assert status == 303 and location.startswith("/requests/"), (status, location)
+    id = location.rsplit("/", 1)[1]
+    with database.connect() as conn:
+        row = conn.execute(
+            "SELECT warehouse, tables, reason, requested_by FROM zamboni_request WHERE id = %s",
+            (int(id),),
+        ).fetchone()
+    assert row == ("acme", ["raw.a"], "manual", "dashboard")
+    assert "waiting for a maintenance replica" in client.get(location)
+
+    runtime, pools = running_tier(database, tmp_path, hold=True)
+    handle = start_in_thread(runtime)
+    try:
+        eventually(lambda: "running since" in client.get(location), timeout=15)
+        assert "offered" in client.get(location)
+        assert "raw.a" in client.get("/"), "and the dashboard lists it as running"
+        pools[0].release.set()
+        eventually(lambda: "finished" in client.get(location), timeout=15)
+    finally:
+        assert handle.stop(grace=timedelta(seconds=5))
+    assert ": ok" in client.get(location)
+    assert [i.table for i in pools[0].items] == ["raw.a"], "only the table asked for"
+
+
+def test_a_warehouse_is_registered_and_rescheduled_from_the_web_tier(web):
+    database, client = web
+    status, location = client.post(
+        "/warehouses",
+        {
+            "name": "globex",
+            "schedule": "30 1 * * *",
+            "table_config": '{"namespaces": {"raw": {"tables": {"x": {}}}}}',
+            "catalog": '{"type": "rest", "uri": "http://lakekeeper:8181/catalog"}',
+        },
+    )
+    assert (status, location) == (303, "/warehouses/globex")
+    assert client.post("/warehouses/globex/schedule", {"schedule": "0 5 * * *"})[0] == 303
+    assert Registry(database).warehouse("globex").schedule == "0 5 * * *"
+    assert "0 5 * * *" in client.get("/warehouses/globex")
+
+
+@pytest.mark.parametrize(
+    ("form", "why"),
+    [
+        ({"schedule": "*/0 * * * *"}, "globex"),
+        ({"catalog": '{"credential": "id:secret"}'}, "credential"),
+        ({"table_config": "not json"}, "not JSON"),
+    ],
+    ids=["schedule", "credential", "json"],
+)
+def test_a_registration_zamboni_would_refuse_is_refused_and_the_form_kept(web, form, why):
+    _, client = web
+    sent = {
+        "name": "globex",
+        "schedule": "0 2 * * *",
+        "table_config": '{"namespaces": {"raw": {"tables": {"x": {}}}}}',
+        "catalog": "{}",
+        **form,
+    }
+    status, text = client.request("POST", "/warehouses", sent)[0::2]
+    assert status == 400
+    assert why in text
+    assert 'value="globex"' in text, "what was typed is kept"
+
+
+def test_what_a_row_holds_is_escaped_never_rendered(web):
+    """Rows come from other people: a request's requester, a run's error."""
+    database, client = web
+    id = RequestTable(database).submit("acme", ["raw.a"], requested_by="<script>x</script>")
+    text = client.get(f"/requests/{id}")
+    assert "<script>x" not in text and "&lt;script&gt;x" in text

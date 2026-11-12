@@ -83,7 +83,12 @@ def test_the_schema_creates_the_documents_tables(schema):
 
 # -- the tiers ---------------------------------------------------------------------------
 
-SHARED = ("lakehouse_app.db", "lakehouse_app.registry", "lakehouse_app.request_table")
+SHARED = (
+    "lakehouse_app.db",
+    "lakehouse_app.registry",
+    "lakehouse_app.request_table",
+    "lakehouse_app.dashboard",
+)
 
 
 @pytest.mark.parametrize("module", SHARED)
@@ -94,6 +99,18 @@ def test_a_module_the_web_tier_shares_never_loads_the_runtime(module):
         f"import sys; sys.path.insert(0, {str(APP)!r}); import {module}; "
         "assert 'zamboni.runtime' not in sys.modules, sorted("
         "m for m in sys.modules if m.startswith('zamboni'))"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True, cwd=ROOT)
+
+
+def test_the_web_tier_never_imports_the_runtime():
+    """§9.5 point 3, as #172 states it: import the web tier's entry point and
+    find ``zamboni.runtime`` absent from ``sys.modules``. A crash, hang or OOM
+    in maintenance cannot reach a process that never loaded it."""
+    code = (
+        f"import sys; sys.path.insert(0, {str(APP)!r}); import lakehouse_app.web; "
+        "loaded = sorted(m for m in sys.modules if m.startswith('zamboni.runtime')); "
+        "assert not loaded, loaded"
     )
     subprocess.run([sys.executable, "-c", code], check=True, cwd=ROOT)
 

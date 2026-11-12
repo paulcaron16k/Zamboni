@@ -16,7 +16,7 @@ It is not part of the `iceberg-zamboni` distribution
 
 ```
   web tier                                     maintenance tier
-  (lakehouse_app.web)                          (python -m lakehouse_app.maintenance)
+  (python -m lakehouse_app.web)                (python -m lakehouse_app.maintenance)
   ┌───────────────────────────┐                ┌──────────────────────────────────────┐
   │ registry: add, edit       ├──── rows ────▶ │ RegistryWatcher ──▶ update_fleet()    │
   │ "run now"                 ├──── rows ────▶ │ RequestSource ──▶ offer(manual)       │
@@ -99,11 +99,11 @@ PYTHONPATH=examples/lakehouse-app uv run python -m lakehouse_app.maintenance
 
 Those are the dev stack's own throwaway credentials, from `dev-stack/.env.sample`.
 To install it elsewhere instead, `pip install ./examples/lakehouse-app`
-gives the same module and a `lakehouse-maintenance` command.
+gives the same modules and the `lakehouse-maintenance` and `lakehouse-web` commands.
 
 ### Registering a warehouse
 
-Until the web tier exists, from Python:
+In the web tier, at `/warehouses/new`, or from Python:
 
 ```python
 from lakehouse_app.db import Database
@@ -120,4 +120,46 @@ Registry(Database.from_environ()).put(
 ```
 
 `schedule` and `table_config` are exactly a fleet file's entry, and
-`Registry.put` refuses one Zamboni would refuse.
+`Registry.put` refuses one Zamboni would refuse -- the web tier shows why and
+keeps what was typed (`test_a_registration_zamboni_would_refuse_is_refused_and_the_form_kept`).
+
+## The web tier
+
+`python -m lakehouse_app.web` ([web.py](lakehouse_app/web.py)), serving on
+`LAKEHOUSE_WEB_HOST`:`LAKEHOUSE_WEB_PORT` (`0.0.0.0:8080`). **It never imports
+`zamboni.runtime`** (`test_the_web_tier_never_imports_the_runtime`): a crash,
+hang or out-of-memory kill in maintenance cannot reach a process that never
+loaded it.
+
+| Page | Shows | Reads |
+|---|---|---|
+| `/` | warehouses, running now, maintenance replicas, quarantine, recent runs and requests | every table above |
+| `/warehouses/<name>` | each table's state and last run; edit the schedule; "run now" for one table or all | the registry, `zamboni_claim`, `zamboni_run` |
+| `/warehouses/new` | the registration form | — |
+| `/requests/<id>` | one "run now": waiting, running, finished, and its outcome | `zamboni_request`, `zamboni_claim`, `zamboni_run` |
+| `/healthz` | `ok`: liveness of this process only | nothing |
+
+**"Run now" is a row.** It writes a `zamboni_request`; a maintenance replica
+offers it as `manual`, claims the table and runs it, and the request's page
+follows it from "waiting for a maintenance replica" through "running since" to
+"finished" (`test_run_now_writes_a_request_and_its_page_follows_the_run_to_the_end`).
+It works while maintenance is down too: the row waits for a replica.
+
+**"Maintenance unavailable" is a stale tick.** A running runtime's scheduler
+ticks at least every 60 s (`zamboni.scheduler.MAX_SLEEP`) and its observer
+rewrites `zamboni_runtime.last_tick` each time. When no replica has ticked in
+three of those, every page carries "maintenance unavailable since …" -- read
+from the age of the tick, not the row's `phase`, because a SIGKILLed tier
+writes no `stopped`
+(`test_with_the_maintenance_tier_stopped_every_page_says_since_when`). Every
+page still renders, from the database. `/healthz` never asks about maintenance:
+a web pod restarted because maintenance is down would turn one outage into two.
+
+**Deliberately minimal**: the standard library's WSGI server, hand-written HTML
+with every value escaped, no JavaScript. **No authentication**: users and roles
+are the app's to own (§9.1), and inventing them here would teach the wrong
+thing. Put it behind your own.
+
+```bash
+PYTHONPATH=examples/lakehouse-app uv run python -m lakehouse_app.web
+```
