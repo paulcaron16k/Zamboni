@@ -1021,6 +1021,9 @@ render the present without keeping its own copy.
 ## 9. The Lakehouse App: the integration contract
 
 What an application embedding the runtime must do, in full.
+[examples/lakehouse-app/](../examples/lakehouse-app/README.md) is this section
+running: a reference app whose every part names the point here it implements,
+tested against PostgreSQL in CI (#161).
 
 ### 9.1 What it owns, and what it does not
 

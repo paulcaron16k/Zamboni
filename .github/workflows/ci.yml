@@ -31,8 +31,8 @@ jobs:
       # --frozen fails if uv.lock is stale against pyproject.toml, so a
       # dependency edit that forgot to re-lock cannot reach main.
       - run: uv sync --frozen
-      - run: uv run ruff check src tests scripts
-      - run: uv run ruff format --check src tests scripts
+      - run: uv run ruff check src tests scripts examples
+      - run: uv run ruff format --check src tests scripts examples
 
       # A hook on a different ruff than CI rewrites files CI considers correct,
       # so every commit churns. Caught this locally: the two disagreed on one
@@ -318,11 +318,13 @@ jobs:
       # tests/test_nats.py too: its live half -- JetStream detection, Msg-Id
       # dedup, and NATS stopped and restarted under a real `zamboni serve` --
       # needs the stack's nats service, and skips everywhere else. The `test`
-      # job runs the rest of the file.
+      # job runs the rest of the file. tests/test_lakehouse_app_live.py is the
+      # reference Lakehouse App against the stack's PostgreSQL (#161), and
+      # likewise skips everywhere else.
       - name: Run the dev-stack tests
         env:
           ZAMBONI_REQUIRE_DEV_STACK: "1"
-        run: uv run pytest tests/test_dev_stack.py tests/test_nats.py -v
+        run: uv run pytest tests/test_dev_stack.py tests/test_nats.py tests/test_lakehouse_app_live.py -v
 
       - name: The demo, end to end on Lakekeeper and MinIO
         env:
