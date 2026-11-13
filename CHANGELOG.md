@@ -21,6 +21,28 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-12
+
+**The maintenance runtime is new, and provisional.** `zamboni serve`'s
+scheduler, queue and worker pool are now a library runtime that cron, `serve`
+and an embedding application share (docs/maintenance-runtime.md). Its public
+surface is provisional in this release: `zamboni.runtime`
+(`MaintenanceRuntime`, `RuntimeSettings`, `FleetProvider`, `StaticFleet`,
+`start_in_thread`), `zamboni.claims` (`ClaimStore`, `Claim`),
+`zamboni.requests` (`RequestSource`, `Request`), `zamboni.observe` (the
+`Observer` events), `zamboni.pool`'s worker contract (`WorkerConfig`,
+`WorkerContext`, worker and health entries), `WindowSchedule`, `Firing`,
+`MinimumInterval`, and the `zamboni.conformance` suites. The first consumer's
+adoption is what proves them: they become stable in the release after this one,
+and any change before then is called out as `BREAKING` (§12). The command
+line, exit codes, `table-config.json` and the destructive defaults are covered
+by docs/releasing.md exactly as before. The reference Lakehouse App
+(`examples/lakehouse-app/`, not in the wheel) shows the runtime embedded as
+§9 says, and CI runs it end to end.
+
+Security review (docs/releasing.md §3a) before tagging: see the release
+commit.
+
 ### BREAKING
 
 - **A table config's `ordering.mode: "none"` now compacts in the table's
