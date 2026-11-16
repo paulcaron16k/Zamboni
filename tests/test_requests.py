@@ -332,6 +332,27 @@ class Shares(LocalRequests):
         return None
 
 
+class SharesOnASlowRunner(Shares):
+    """`Shares`, with submission slow enough that the replicas' duplicate
+    acknowledgements reach the request count before the last wave arrives: the
+    timing macOS CI hit (#284). Deterministic here rather than left to a runner."""
+
+    def submit(self, *args, **kwargs):
+        time.sleep(0.02)
+        return super().submit(*args, **kwargs)
+
+
+def test_a_sharing_source_is_named_for_sharing_however_slow_the_runner():
+    """The check stops on distinct requests acknowledged, not on the number of
+    acknowledgements, so a source that hands requests out twice is caught by the
+    rule it breaks instead of failing `delivery` on the wave not yet submitted.
+    Counting acknowledgements, this failed with "delivery: ... never handled"."""
+    with pytest.raises(ConformanceError, match="one replica per request"):
+        check_each_request_reaches_one_replica(
+            RequestSourceHarness(make_table=SharesOnASlowRunner, timeout=10)
+        )
+
+
 @pytest.mark.parametrize(
     ("broken", "check", "rule"),
     [

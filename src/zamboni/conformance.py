@@ -780,7 +780,14 @@ def check_each_request_reaches_one_replica(h: RequestSourceHarness) -> None:
     replicas, waves, per_wave = 3, 4, 10
     total = waves * per_wave
     lock = threading.Lock()
-    acked: list[str] = []
+    # Distinct ids, not a count of acknowledgements (#284). A source that hands
+    # one request to several replicas acknowledges it several times, so a count
+    # reached `total` before the last wave was even submitted, on a slow enough
+    # runner. The check then stopped early and failed on "delivery" (10 of 40
+    # never handled, seen in macOS CI run 43794407533) instead of reaching the
+    # rule it exists to test. For a source that delivers each request once, the two are
+    # always equal.
+    acked: set[str] = set()
     errors: list[BaseException] = []
     delivered: dict[str, list[str]] = {}
 
@@ -793,7 +800,7 @@ def check_each_request_reaches_one_replica(h: RequestSourceHarness) -> None:
             await asyncio.sleep(0.01)
             await message.ack("offered")
             with lock:
-                acked.append(message.request.id)
+                acked.add(message.request.id)
                 if len(acked) >= total:
                     finished.set()
             return True

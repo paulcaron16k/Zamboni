@@ -39,6 +39,14 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **`check_each_request_reaches_one_replica` names a sharing source for
+  sharing, however slow the runner** (#284). It stopped reading once the
+  acknowledgements numbered the requests, counting duplicates, so a source that
+  hands one request to several replicas could reach the count before the last
+  wave was submitted, and fail `delivery` ("10 of 40 requests never handled",
+  seen on macOS CI) instead of `one replica per request`. It now stops on
+  distinct requests acknowledged. A conforming source acknowledges each
+  request once, so its result is unchanged.
 - **The release workflow runs the suite under CI's environment** (#282).
   `release.yml`'s `verify` job lacked `PYTHONWARNDEFAULTENCODING=1`, which
   `ci.yml` sets, so `test_ci_runs_the_suite_with_encoding_warnings_on` failed
