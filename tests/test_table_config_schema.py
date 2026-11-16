@@ -196,7 +196,16 @@ UNKNOWN_KEY_SITES: dict[str, dict] = {
         "warehouse": "w",
         "namespaces": {"db": {"tables": {"t": {"retention": {"metadata": {"nope": 1}}}}}},
     },
+    "$.namespaces.*.tables.*.write": {
+        "warehouse": "w",
+        "namespaces": {"db": {"tables": {"t": {"write": {"nope": 1}}}}},
+    },
 }
+
+#: Objects whose keys the author chooses -- namespace names, table names, column
+#: names -- so there is no unknown key to refuse; their *values* are checked by
+#: the sweeps below instead.
+FREE_KEY_OBJECTS = {"$.namespaces", "$.namespaces.*.tables", "$.namespaces.*.tables.*.columns"}
 
 
 def node_at(schema: dict, path: str) -> dict:
@@ -233,7 +242,7 @@ def test_every_object_in_the_schema_has_an_unknown_key_site(schema):
     both.
     """
     reached = {path.replace("$.defaults", "$.namespaces.*.tables.*") for path, _ in objects(schema)}
-    unchecked = reached - set(UNKNOWN_KEY_SITES) - {"$.namespaces.*.tables", "$.namespaces"}
+    unchecked = reached - set(UNKNOWN_KEY_SITES) - FREE_KEY_OBJECTS
     assert not unchecked, f"object nodes with no unknown-key site: {sorted(unchecked)}"
 
 
@@ -294,7 +303,12 @@ def test_the_schema_never_rejects_what_the_loader_accepts(validator):
     accepted = {
         "warehouse": "w",
         "version": SPEC_VERSION,
-        "defaults": {"target_file_size_bytes": None, "description": None},
+        "defaults": {
+            "target_file_size_bytes": None,
+            "description": None,
+            "write": {"write_mode": None},
+            "columns": {"_sdc_extracted_at": "timestamptz"},
+        },
         "namespaces": {
             "raw.telemetry": {
                 "tables": {
@@ -309,6 +323,13 @@ def test_the_schema_never_rejects_what_the_loader_accepts(validator):
                             "rules": [{"from": "day", "to": "month", "older_than_days": 90}],
                         },
                         "ordering": {"mode": "zorder", "zorder": {"columns": ["a", "b"]}},
+                        "write": {
+                            "write_mode": "merge-on-read",
+                            "identifier_fields": ["id"],
+                            "append_only": False,
+                            "full_refresh": False,
+                        },
+                        "columns": {"id": "bigint", "ts": "timestamptz"},
                         "retention": {
                             "expire_snapshots": {
                                 "enabled": True,
@@ -463,6 +484,9 @@ def test_the_sweep_reaches_the_fields_it_claims_to():
         "$.namespaces.*.tables.*.retention.expire_snapshots.enabled",
         "$.namespaces.*.tables.*.partition[].column",
         "$.namespaces.*.tables.*.partition_evolution.rules[].from",
+        "$.namespaces.*.tables.*.write.write_mode",
+        "$.namespaces.*.tables.*.write.identifier_fields",
+        "$.namespaces.*.tables.*.columns",
     ):
         assert expected in paths, f"the sweep never reached {expected}"
 
@@ -474,3 +498,30 @@ def test_the_sweep_reaches_the_fields_it_claims_to():
         "namespaces": {"chosen": {"tables": {"chosen": {"partition": [{"column": None}]}}}},
         "warehouse": "w",
     }
+
+
+# -- write and columns (#281) ---------------------------------------------
+#
+# `field_paths` names only keyed positions, so a list of strings
+# (`identifier_fields`) and a free-key map of strings (`columns`) have element
+# positions the null sweep never builds. These cover the elements directly, and
+# assert the schema and the loader agree on each.
+
+
+@pytest.mark.parametrize(
+    ("block", "refused"),
+    [
+        ({"write": {"write_mode": "copy-on-write"}}, False),
+        ({"write": {"write_mode": "copy-on-read"}}, True),
+        ({"write": {"identifier_fields": ["id", "ts"]}}, False),
+        ({"write": {"identifier_fields": [None]}}, True),
+        ({"write": {"identifier_fields": "id"}}, True),
+        ({"columns": {"created_at": "timestamptz"}}, False),
+        ({"columns": {"created_at": None}}, True),
+        ({"columns": {"created_at": 3}}, True),
+    ],
+)
+def test_the_schema_and_the_loader_agree_on_write_and_columns(validator, block, refused):
+    document = {"warehouse": "w", "namespaces": {"db": {"tables": {"t": block}}}}
+    assert validator.is_valid(document) is not refused, f"schema on {block}"
+    assert loader_accepts(document) is not refused, f"loader on {block}"

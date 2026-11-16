@@ -49,7 +49,7 @@ field position:
   legal spelling and they are typed as a union with ``"null"``.
 * **Scalars with a real default reject it**, because a ``null`` there does not
   take the default -- it silently becomes ``None``. See ``NULL_MEANS_EMPTY``
-  below for the four container fields that are the exception.
+  below for the container fields that are the exception.
 
 This was the messy part of the format and it is now the tidy part, but only
 because ZMBNI-53 fixed the loader rather than the schema being taught to describe
@@ -133,6 +133,7 @@ NULL_MEANS_EMPTY: frozenset[tuple[type, str]] = frozenset(
         (tc.TableSettings, "partition"),
         (tc.PartitionEvolution, "rules"),
         (tc.Ordering, "sort"),
+        (tc.WriteSettings, "identifier_fields"),
     }
 )
 

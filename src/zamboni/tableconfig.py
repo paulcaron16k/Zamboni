@@ -47,6 +47,13 @@ PARTITION_TRANSFORMS = frozenset(
 #: mean splitting files, which compaction does not do.
 TIME_GRANULARITIES = ("hour", "day", "month", "year")
 
+#: How a writer applies row-level changes to a table: the one value of Iceberg's
+#: ``write.delete.mode``, ``write.update.mode`` and ``write.merge.mode`` taken
+#: together. A loader performs MERGE (an upsert) and DELETE and never mixes modes
+#: per operation, so one value is the authored form; per-property values are a
+#: possible later addition, for a table an Iceberg expert tunes by hand (#281).
+WRITE_MODES = ("copy-on-write", "merge-on-read")
+
 
 class TableConfigError(ValueError):
     """The config is malformed or self-contradictory."""
@@ -335,6 +342,52 @@ class Retention:
 
 
 @dataclass(frozen=True)
+class WriteSettings:
+    """How the table is *written*, as its writer declares it (#281).
+
+    Zamboni does not write rows; this section is here so that the writer that
+    loads a table and the maintainer that compacts it read one document and
+    cannot disagree. It is carried and validated, and nothing in this release
+    acts on it.
+    """
+
+    #: ``None`` means the file says nothing about how the table is written.
+    write_mode: Literal["copy-on-write", "merge-on-read"] | None = None
+    #: The table's upsert key. Empty for a table written by appending only.
+    identifier_fields: tuple[str, ...] = ()
+    #: A keyed table that is nonetheless only ever appended to.
+    append_only: bool = False
+    #: Each run replaces the table's whole contents.
+    full_refresh: bool = False
+
+    def validate(self, where: str) -> None:
+        # The loader reads `write_mode` as a string; the closed set is checked
+        # here, so a misspelling is a located refusal rather than a value nobody
+        # recognises.
+        if self.write_mode is not None and self.write_mode not in WRITE_MODES:
+            raise TableConfigError(
+                f"{where}.write_mode: {self.write_mode!r} is not one of {list(WRITE_MODES)}"
+            )
+        for i, column in enumerate(self.identifier_fields):
+            if not isinstance(column, str) or not column:
+                raise TableConfigError(
+                    f"{where}.identifier_fields[{i}]: expected a column name, found {column!r}"
+                )
+        if len(set(self.identifier_fields)) != len(self.identifier_fields):
+            raise TableConfigError(
+                f"{where}.identifier_fields: a column is named twice in "
+                f"{list(self.identifier_fields)}"
+            )
+        # A run that replaces the whole table appends nothing, so declaring both
+        # is a contradiction, and saying so beats picking one silently.
+        if self.append_only and self.full_refresh:
+            raise TableConfigError(
+                f"{where}: append_only and full_refresh are both true. A full refresh "
+                "replaces the table each run, so it is never append-only; set one."
+            )
+
+
+@dataclass(frozen=True)
 class TableSettings:
     """The resolved layout target for one table."""
 
@@ -348,6 +401,11 @@ class TableSettings:
     #: ``None`` turns the hold off.
     skip_partitions_newer_than_windows: int | None = 1
     description: str | None = None
+    write: WriteSettings = field(default_factory=WriteSettings)
+    #: Each column's declared type, for writers that coerce incoming values to it
+    #: (#281). Zamboni checks the shape and otherwise ignores it. Out of the hash
+    #: because a dict cannot be hashed; equality still compares it.
+    columns: dict[str, str] = field(default_factory=dict, hash=False)
     #: The block as written in the file -- only the keys it contains -- or
     #: ``None`` for settings built in code, which then count as setting every
     #: key. Inheritance is decided on this, not on the field values: a value
@@ -407,6 +465,15 @@ class TableSettings:
             and self.skip_partitions_newer_than_windows < 0
         ):
             raise TableConfigError(f"{where}.skip_partitions_newer_than_windows: must be >= 0")
+        self.write.validate(f"{where}.write")
+        for column, type_name in self.columns.items():
+            if not column:
+                raise TableConfigError(f"{where}.columns: a column name cannot be empty")
+            if not isinstance(type_name, str) or not type_name:
+                raise TableConfigError(
+                    f"{where}.columns.{column}: expected a type name, found "
+                    f"{_JSON_TYPE_NAME.get(type(type_name), repr(type_name))}"
+                )
 
         # An evolution rule that names a granularity the table does not
         # partition by is almost always a typo, and silently doing nothing is
@@ -805,6 +872,8 @@ def _settings_from_dict(raw: dict[str, Any], where: str) -> TableSettings:
             "min_input_files",
             "skip_partitions_newer_than_windows",
             "description",
+            "write",
+            "columns",
         },
         where,
     )
@@ -827,6 +896,8 @@ def _settings_from_dict(raw: dict[str, Any], where: str) -> TableSettings:
         if "retention" in raw
         else Retention()
     )
+    write = _write_from_dict(raw["write"], f"{where}.write") if "write" in raw else WriteSettings()
+    columns = dict(_value(raw, "columns", where, expect=dict, default={}))
     return TableSettings(
         partition=partition,
         partition_evolution=evolution,
@@ -845,7 +916,21 @@ def _settings_from_dict(raw: dict[str, Any], where: str) -> TableSettings:
             default=TableSettings.skip_partitions_newer_than_windows,
         ),
         description=_value(raw, "description", where, expect=str, nullable=True),
+        write=write,
+        columns=columns,
         block=copy.deepcopy(raw),
+    )
+
+
+def _write_from_dict(raw: dict[str, Any], where: str) -> WriteSettings:
+    _reject_unknown(raw, {"write_mode", "identifier_fields", "append_only", "full_refresh"}, where)
+    return WriteSettings(
+        write_mode=_value(raw, "write_mode", where, expect=str, nullable=True),
+        identifier_fields=tuple(
+            _value(raw, "identifier_fields", where, expect=list, nullable=True) or ()
+        ),
+        append_only=_value(raw, "append_only", where, expect=bool, default=False),
+        full_refresh=_value(raw, "full_refresh", where, expect=bool, default=False),
     )
 
 
@@ -1046,6 +1131,13 @@ def _full_block(s: TableSettings) -> dict[str, Any]:
         "target_file_size_bytes": s.target_file_size_bytes,
         "min_input_files": s.min_input_files,
         "skip_partitions_newer_than_windows": s.skip_partitions_newer_than_windows,
+        "write": {
+            "write_mode": s.write.write_mode,
+            "identifier_fields": list(s.write.identifier_fields),
+            "append_only": s.write.append_only,
+            "full_refresh": s.write.full_refresh,
+        },
+        "columns": dict(s.columns),
     }
     return out
 

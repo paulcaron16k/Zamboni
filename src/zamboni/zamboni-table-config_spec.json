@@ -278,6 +278,40 @@
             "string",
             "null"
           ]
+        },
+        "write": {
+          "type": "object",
+          "properties": {
+            "write_mode": {
+              "enum": [
+                "copy-on-write",
+                "merge-on-read",
+                null
+              ]
+            },
+            "identifier_fields": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "append_only": {
+              "type": "boolean"
+            },
+            "full_refresh": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        "columns": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false,
@@ -557,6 +591,40 @@
                     "string",
                     "null"
                   ]
+                },
+                "write": {
+                  "type": "object",
+                  "properties": {
+                    "write_mode": {
+                      "enum": [
+                        "copy-on-write",
+                        "merge-on-read",
+                        null
+                      ]
+                    },
+                    "identifier_fields": {
+                      "type": [
+                        "array",
+                        "null"
+                      ],
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "append_only": {
+                      "type": "boolean"
+                    },
+                    "full_refresh": {
+                      "type": "boolean"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "columns": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
                 }
               },
               "additionalProperties": false
