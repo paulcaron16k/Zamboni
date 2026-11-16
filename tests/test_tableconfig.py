@@ -664,3 +664,96 @@ def test_settings_built_in_code_set_every_key():
 def test_description_belongs_to_one_table():
     s = resolved({"description": "fleet"}, {})
     assert s.description is None
+
+
+# -- write and columns (#281) -----------------------------------------------
+
+
+def test_a_document_without_write_or_columns_says_nothing_about_them():
+    """Every existing version-2 file stays valid and means what it meant."""
+    settings = resolved({}, {})
+    assert settings.write.write_mode is None
+    assert settings.write.identifier_fields == ()
+    assert (settings.write.append_only, settings.write.full_refresh) == (False, False)
+    assert settings.columns == {}
+
+
+def test_write_in_defaults_alone_reaches_every_table():
+    settings = resolved({"write": {"write_mode": "merge-on-read"}}, {})
+    assert settings.write.write_mode == "merge-on-read"
+
+
+def test_write_in_a_table_alone_applies_to_that_table():
+    settings = resolved({}, {"write": {"identifier_fields": ["id"]}})
+    assert settings.write.identifier_fields == ("id",)
+    assert settings.write.write_mode is None
+
+
+def test_write_merges_key_by_key_and_its_list_replaces_whole():
+    """`write` is a set of settings, so a table setting one key keeps the rest
+    from `defaults`; `identifier_fields` is a list, so it is never blended."""
+    settings = resolved(
+        {"write": {"write_mode": "merge-on-read", "identifier_fields": ["tenant", "id"]}},
+        {"write": {"identifier_fields": ["id"]}},
+    )
+    assert settings.write.write_mode == "merge-on-read"
+    assert settings.write.identifier_fields == ("id",)
+
+
+def test_a_table_null_write_mode_overrides_a_default_one():
+    settings = resolved({"write": {"write_mode": "merge-on-read"}}, {"write": {"write_mode": None}})
+    assert settings.write.write_mode is None
+
+
+def test_columns_merge_by_column_so_a_table_adds_to_the_defaults():
+    settings = resolved(
+        {"columns": {"_sdc_extracted_at": "timestamptz"}},
+        {"columns": {"id": "bigint"}},
+    )
+    assert settings.columns == {"_sdc_extracted_at": "timestamptz", "id": "bigint"}
+
+
+@pytest.mark.parametrize(
+    ("write", "names"),
+    [
+        ({"write_mode": "copy-on-read"}, "write.write_mode"),
+        ({"identifier_fields": "id"}, "write.identifier_fields"),
+        ({"identifier_fields": [""]}, "write.identifier_fields[0]"),
+        ({"identifier_fields": ["id", "id"]}, "write.identifier_fields"),
+        ({"append_only": True, "full_refresh": True}, "tables.b.write"),
+        ({"append_only": "yes"}, "write.append_only"),
+    ],
+)
+def test_a_malformed_write_section_is_refused_naming_its_path(write, names):
+    with pytest.raises(TableConfigError, match=names.replace(".", r"\.").replace("[", r"\[")):
+        resolved({}, {"write": write})
+
+
+def test_a_column_without_a_type_is_refused_naming_it():
+    with pytest.raises(TableConfigError, match=r"columns\.created_at"):
+        resolved({}, {"columns": {"created_at": ""}})
+
+
+def test_write_and_columns_survive_a_dump_and_reload(tmp_path):
+    doc = v2(
+        {
+            "a.keyed": {
+                "write": {"identifier_fields": ["id"], "full_refresh": True},
+                "columns": {"id": "bigint"},
+            },
+            "a.inherits": {},
+        },
+        defaults={"write": {"write_mode": "copy-on-write"}},
+    )
+    path = tmp_path / "table-config.json"
+    TableConfig.from_dict(doc).dump(path)
+    reloaded = TableConfig.load(path)
+
+    keyed, inherits = reloaded.for_table("a.keyed"), reloaded.for_table("a.inherits")
+    assert keyed.write.identifier_fields == ("id",)
+    assert keyed.write.full_refresh is True
+    assert keyed.write.write_mode == "copy-on-write"
+    assert keyed.columns == {"id": "bigint"}
+    assert inherits.write.identifier_fields == ()
+    assert reloaded.source_of("a.keyed", "write", "write_mode") == "defaults"
+    assert reloaded.source_of("a.keyed", "write", "full_refresh") == "table"

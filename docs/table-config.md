@@ -35,7 +35,7 @@ this document is stale.
 "use the default".** Omit a key to take its default; a `null` is refused, naming
 the path — except on the settings documented below as *"leave whatever is
 there"* (the `expire_snapshots` windows, the `metadata` properties,
-`target_file_size_bytes`, `description`) and on the list-valued keys, where it
+`target_file_size_bytes`, `description`, `write.write_mode`) and on the list-valued keys, where it
 means "empty". The distinction matters because a `null` does **not** fall back to
 the default: `{"remove_orphan_files": {"enabled": null}}` used to load and
 silently turn reclamation off.
@@ -164,6 +164,9 @@ for every key at every depth:
   table that writes `ordering` takes none of the default ordering. Merged key by key, a
   table choosing `zorder` under a `defaults` that sorts would carry both.
 - **`description` is not inherited**; it describes one table.
+- **`write` and `columns` follow the same rule.** `write` merges key by key, and its
+  `identifier_fields` list replaces whole; `columns` merges column by column, so a table adds
+  its own columns to any `defaults` declares.
 
 | `defaults` | table block | The table gets |
 |---|---|---|
@@ -175,6 +178,9 @@ for every key at every depth:
 | `"retention": {"remove_orphan_files": {"older_than_days": 10}}` | `"retention": {"remove_orphan_files": {"older_than_days": 3}}` | `retention.remove_orphan_files.older_than_days = 3`, though 3 is the built-in |
 | `"partition": [{"column": "ts", "transform": "day"}]` | `"partition": []` | `partition = []`: unpartitioned |
 | `"ordering": {"mode": "sort", "sort": [{"column": "a"}]}` | `"ordering": {"mode": "none"}` | `ordering.mode = "none"` |
+| `"write": {"write_mode": "merge-on-read"}` | `"write": {"identifier_fields": ["id"]}` | `write.write_mode = "merge-on-read"`, beside its own identifier fields |
+| `"write": {"identifier_fields": ["tenant", "id"]}` | `"write": {"identifier_fields": ["id"]}` | `write.identifier_fields = ["id"]`: the list replaces whole |
+| `"columns": {"_sdc_extracted_at": "timestamptz"}` | `"columns": {"id": "bigint"}` | `columns._sdc_extracted_at = "timestamptz"`, beside its own `id` |
 
 Validation runs on the merged result, so a table block is checked against what it inherits:
 an evolution rule may name the `day` transform of a `partition` set in `defaults`.
@@ -436,6 +442,51 @@ ordering key.
 
 Iceberg has no clustering concept distinct from sort order, so "clustering" here means
 choosing `sort` or `zorder`.
+
+---
+
+## `write`
+
+How the table is **written**, as its writer declares it. Zamboni does not write rows; the
+section is here so the writer that loads a table and the maintainer that compacts it read one
+document and cannot disagree. Today it is carried and validated, and **nothing in Zamboni
+acts on it yet** (#281).
+
+```json
+"write": {
+  "write_mode": "copy-on-write",
+  "identifier_fields": ["id"],
+  "append_only": false,
+  "full_refresh": false
+}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `write_mode` | `null` | `copy-on-write` or `merge-on-read`: the one value of Iceberg's `write.delete.mode`, `write.update.mode` and `write.merge.mode` together. `null` means the file says nothing about it |
+| `identifier_fields` | `[]` | The table's upsert key |
+| `append_only` | `false` | A keyed table that is nonetheless only ever appended to |
+| `full_refresh` | `false` | Each run replaces the table's whole contents |
+
+**One `write_mode`, not three.** A loader performs MERGE (an upsert) and DELETE, and does not
+mix modes between them, so one value covers the three Iceberg properties. Per-property values
+are a possible later addition, for a table an Iceberg expert tunes by hand.
+
+`append_only` and `full_refresh` cannot both be true: a full refresh replaces the table each
+run, so it is never append-only, and the file is refused rather than one of them winning.
+
+---
+
+## `columns`
+
+Each column's declared type, by name, for writers that coerce incoming values to it:
+
+```json
+"columns": {"id": "bigint", "created_at": "timestamptz"}
+```
+
+Zamboni checks that each value is a non-empty string, and otherwise ignores the section. The
+type names are not checked against a vocabulary: they belong to the writer that reads them.
 
 ---
 

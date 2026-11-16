@@ -21,6 +21,22 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### Added
+
+- **`table-config.json` can say how a table is written** (#281). Two optional
+  sections, in `defaults` and in any table block, as an additive change to
+  version 2: `version` stays 2 and every existing file loads unchanged.
+  - **`write`** holds `write_mode` (`copy-on-write` or `merge-on-read`, one
+    value for Iceberg's three `write.*.mode` properties), `identifier_fields`,
+    `append_only` and `full_refresh`.
+  - **`columns`** maps a column name to its declared type, for writers that
+    coerce values to it.
+
+  Both inherit by presence like every other key. Zamboni validates both and
+  does not act on either yet, so the writer that loads a table and the
+  maintainer that compacts it can read one document. Not `BREAKING`: no
+  default changes, and nothing is deleted differently.
+
 ### Fixed
 
 - **The release workflow runs the suite under CI's environment** (#282).
