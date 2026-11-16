@@ -21,6 +21,8 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-16
+
 ### Added
 
 - **`table-config.json` can say how a table is written** (#281). Two optional
