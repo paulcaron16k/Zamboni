@@ -29,6 +29,17 @@ on:
 permissions:
   contents: read
 
+# The same environment ci.yml runs the suite under (#282). `verify` re-runs that
+# suite against the tagged tree, so a variable CI sets and the suite relies on
+# must be set here too: v0.8.0's run lacked PYTHONWARNDEFAULTENCODING, failed
+# test_ci_runs_the_suite_with_encoding_warnings_on after the tag was pushed,
+# and never published. tests/test_release_assets.py holds the two env blocks
+# together.
+env:
+  UV_VERSION: "0.11.26"
+  # PEP 597: see ci.yml. Without it the suite's encoding filter checks nothing.
+  PYTHONWARNDEFAULTENCODING: "1"
+
 jobs:
   # The full suite runs again here rather than trusting the run from the commit
   # this tag points at. Cheap, and the alternative is publishing an artifact
@@ -39,7 +50,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: "0.11.26"
+          version: ${{ env.UV_VERSION }}
           enable-cache: true
       - run: uv sync --frozen
       - run: uv run ruff check src tests scripts examples
@@ -52,7 +63,7 @@ jobs:
       - name: The tag matches the declared version
         run: |
           tagged="${GITHUB_REF_NAME#v}"
-          declared=$(uv run python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          declared=$(uv run python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])")
           test "$tagged" = "$declared" \
             || { echo "::error::tag $GITHUB_REF_NAME does not match pyproject version $declared"; exit 1; }
 
@@ -63,7 +74,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: "0.11.26"
+          version: ${{ env.UV_VERSION }}
       - run: uv build
       # Catches a malformed README before PyPI rejects the upload, which it does
       # after the version is already consumed.
