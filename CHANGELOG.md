@@ -21,7 +21,21 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### Fixed
+
+- **The release workflow runs the suite under CI's environment** (#282).
+  `release.yml`'s `verify` job lacked `PYTHONWARNDEFAULTENCODING=1`, which
+  `ci.yml` sets, so `test_ci_runs_the_suite_with_encoding_warnings_on` failed
+  only after the `v0.8.0` tag was pushed, and nothing was built or published.
+  The release now mirrors ci.yml's top-level `env`, and a test fails if the
+  two differ.
+
 ## [0.8.0] - 2026-11-12
+
+> **Tagged, never published** (#282). The `v0.8.0` release workflow failed
+> before building, so 0.8.0 is not on PyPI and has no GitHub release. Its
+> changes below first ship in **0.8.1**. The tag is left where it is rather
+> than moved, because a pushed tag is the record of what was released.
 
 **The maintenance runtime is new, and provisional.** `zamboni serve`'s
 scheduler, queue and worker pool are now a library runtime that cron, `serve`

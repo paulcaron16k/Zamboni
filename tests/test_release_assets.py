@@ -20,6 +20,7 @@ from zamboni import events, tableconfig_schema
 
 ROOT = Path(__file__).resolve().parent.parent
 RELEASE = ROOT / ".github" / "workflows" / "release.yml"
+CI = ROOT / ".github" / "workflows" / "ci.yml"
 REPO_URL = "paulcaron16k/Zamboni"
 
 #: Each published schema: the accessor's path, and the doc that promises it.
@@ -126,3 +127,28 @@ def test_only_the_release_jobs_can_write_to_the_repository():
         if (job.get("permissions") or {}).get("contents") == "write"
     }
     assert writers == {"draft-release", "release"}
+
+
+def test_the_release_suite_runs_under_the_environment_ci_sets():
+    """`verify` re-runs the suite on the tagged tree, after the tag is pushed (#282).
+
+    A variable ci.yml sets for every job and the suite relies on, missing here,
+    passes on every pull request and fails only at release: v0.8.0 lacked
+    PYTHONWARNDEFAULTENCODING and never reached PyPI. Derived from ci.yml, so a
+    variable CI gains tomorrow is held here without editing this test.
+    """
+    ci_env: dict = yaml.safe_load(CI.read_text())["env"]
+    release_env: dict = workflow().get("env") or {}
+    missing = {k: v for k, v in ci_env.items() if release_env.get(k) != v}
+    assert not missing, f"release.yml's env lacks or differs from ci.yml's: {missing}"
+
+
+def test_every_uv_install_in_the_release_reads_the_shared_version():
+    """A literal uv version in one step drifts from UV_VERSION in the env block."""
+    versions = {
+        step["with"]["version"]
+        for job in workflow()["jobs"].values()
+        for step in job.get("steps", [])
+        if step.get("uses", "").startswith("astral-sh/setup-uv@")
+    }
+    assert versions == {"${{ env.UV_VERSION }}"}
