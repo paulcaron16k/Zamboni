@@ -277,6 +277,16 @@ reason names them: `older_than_days` is measured from a partition window's end, 
 fields give two answers about when the data ages, and picking one would be a guess about
 which column dates the row.
 
+**Every aged window converges to the coarse spec, however its files arrive** (#290). An
+aged window is rewritten even when it holds a single fine-grained file: a source that
+stopped after one day of a month leaves one day file that no later write will join. A
+late file landing in a window already evolved is rewritten together with the coarse-spec
+files there that are **below the target file size**, so the window ends as one coarse file
+rather than two. A coarse file at or above the target is left alone, as compaction would
+leave it, so one late row rewrites at most a target's worth of data and not the whole month.
+Up to 0.8.1 a lone file was skipped as "fewer than 2 files to merge" and stayed under the
+day spec for good, and two late files became a second month file beside the first.
+
 ---
 
 ## `retention`

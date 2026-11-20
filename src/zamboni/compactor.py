@@ -19,6 +19,7 @@ from .config import (
     MemoryMode,
     config_from_table_settings,
     orders_by_declared_order,
+    resolve_target_file_size,
 )
 from .evolution import EvolutionPlan, MultiSpecReplaceFiles, ensure_specs, plan_evolution
 from .health import COMPACT_INCOMPLETE
@@ -495,7 +496,14 @@ class TableCompactor:
         # and where the installed build does not, `MultiSpecReplaceFiles` does it
         # in the committer -- so there is no build on which planning evolution is
         # unsafe, and nothing here to skip.
-        return plan_evolution(tbl, self._settings, profile.live_files)
+        # The same target compaction plans with, so a coarse file evolution
+        # leaves alone as full-size is one compaction leaves alone too.
+        return plan_evolution(
+            tbl,
+            self._settings,
+            profile.live_files,
+            target_file_size_bytes=resolve_target_file_size(self._config, dict(tbl.properties)),
+        )
 
     def _rewrite_evolution_group(self, tbl, group) -> RewriteOutput:
         """Rewrite one aged group under the coarser spec. No commit."""

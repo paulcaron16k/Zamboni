@@ -221,8 +221,9 @@ def _assess(tbl: Table, profile: TableProfile) -> list[Finding]:
                 Severity.WARNING,
                 "partition-spec-evolution",
                 f"Live data files span partition specs {sorted(profile.spec_ids)}. "
-                "Each spec is planned and committed separately; files are never "
-                "mixed across specs within one output file.",
+                "Compaction plans each spec separately and never mixes specs within "
+                "one output file; only partition evolution does, folding a finer-spec "
+                "file into the coarser spec its window was evolved to.",
             )
         )
 

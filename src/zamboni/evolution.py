@@ -49,6 +49,7 @@ from pyiceberg.typedef import EMPTY_DICT
 
 from .capabilities import detect
 from .committer import _ReplaceFiles
+from .config import CompactionConfig, resolve_target_file_size
 from .profile import LiveFile
 from .tableconfig import EvolutionRule, TableSettings
 from .windows import EPOCH
@@ -319,9 +320,26 @@ def plan_evolution(
     live_files: list[LiveFile],
     *,
     today: dt.date | None = None,
+    target_file_size_bytes: int | None = None,
 ) -> EvolutionPlan:
-    """Find aged partitions eligible to be condensed into a coarser granularity."""
+    """Find aged partitions eligible to be condensed into a coarser granularity.
+
+    Every aged partition is planned, however few files it has, so a coarsened
+    window always converges to the coarse spec (#290). A month whose source
+    stopped after one day holds one day file and will never get a second, and a
+    late file arriving in a month already coarsened is one file beside the
+    month file evolution wrote earlier. Either way a "fewer than 2 files" skip
+    left the file under the fine spec for good.
+
+    A late file is folded together with the coarse-spec files already in its
+    window that are **below** ``target_file_size_bytes`` -- the files compaction
+    would merge anyway. A file at or above the target is left alone, so one late
+    row rewrites at most a target's worth of data, not the whole month. The
+    target defaults to the table's, resolved as compaction resolves it.
+    """
     today = today or dt.datetime.now(dt.UTC).date()
+    if target_file_size_bytes is None:
+        target_file_size_bytes = resolve_target_file_size(CompactionConfig(), dict(tbl.properties))
     plan = EvolutionPlan(groups=[], skipped=[], required_specs={})
 
     if not settings.partition_evolution.enabled:
@@ -383,11 +401,22 @@ def plan_evolution(
             coarse[position] = _coarse_value(rule.to_transform, window_end)
             buckets[tuple(coarse)].append(live)
 
+        # The coarse-spec files a window already holds, keyed the same way. The
+        # target spec keeps the current spec's field order with only the aged
+        # field's transform changed, so its partition tuple *is* the bucket key.
+        # Only small ones: see the docstring for why a full file is not an input.
+        already_coarse: dict[tuple, list[LiveFile]] = defaultdict(list)
+        for live in live_files:
+            if live.spec_id == spec_id and live.size_bytes < target_file_size_bytes:
+                values = _partition_values(live, len(target_spec.fields))
+                if values is not None:
+                    already_coarse[values].append(live)
+
         for key, files in sorted(buckets.items(), key=lambda kv: str(kv[0])):
             label = _group_label(current_spec, target_spec, position, key, rule)
-            if len(files) < 2:
-                plan.skipped.append((label, "fewer than 2 files to merge"))
-                continue
+            # A window with no fine-spec file left has nothing to evolve; its
+            # coarse files are compaction's, and are not looked at here.
+            files = files + already_coarse.get(key, [])
             plan.groups.append(
                 EvolutionGroup(
                     rule=rule,
