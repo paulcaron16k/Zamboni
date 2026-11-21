@@ -299,6 +299,11 @@ class EvolutionPlan:
     skipped: list[tuple[str, str]]
     #: Specs that must be registered on the table before the groups can commit.
     required_specs: dict[int, PartitionSpec]
+    #: The first day, UTC, on which a partition still waiting for its rule's
+    #: ``older_than_days`` would be planned; ``None`` if none is waiting. It is
+    #: what releases that partition, not a write, so the run stamps it and the
+    #: write-driven skip lets compaction run once it has passed (#217).
+    release_at: dt.date | None = None
 
     @property
     def is_empty(self) -> bool:
@@ -396,7 +401,12 @@ def plan_evolution(
                 continue
             window_end = _window_end(rule.from_transform, int(values[position]))
             if window_end > cutoff:
-                continue  # still inside the retention window
+                # Still inside the retention window. Planned on the first day
+                # `window_end <= today - older_than_days` holds.
+                ages = window_end + dt.timedelta(days=rule.older_than_days)
+                if plan.release_at is None or ages < plan.release_at:
+                    plan.release_at = ages
+                continue
             coarse = list(values)
             coarse[position] = _coarse_value(rule.to_transform, window_end)
             buckets[tuple(coarse)].append(live)

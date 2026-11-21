@@ -25,7 +25,7 @@ import logging
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -596,7 +596,9 @@ def maintain(
             progress=partial(tell, table),
         )
         mark = _watermark(session, table)
-        unchanged = _unchanged_since_maintenance(mark) or {}
+        if mark is not None:
+            request = replace(request, evolution_release_at=mark.release_at)
+        unchanged = _unchanged_since_maintenance(mark, started_at.date()) or {}
         recent = _maintained_within(mark, min_interval, started_at)
         done: set[Operation] = set()
         # Operations a stop must wait for: the clean-up after a compaction that
@@ -628,6 +630,8 @@ def maintain(
             owed.discard(operation)
             if operation is Operation.COMPACT:
                 request = replace(request, compaction_unfinished=_compaction_unfinished(outcome))
+                if isinstance(outcome.result, CompactionResult):
+                    request = replace(request, evolution_release_at=outcome.result.release_at)
                 if commit and _compaction_wrote(outcome):
                     # The due-check ran before compaction did, so its "nothing
                     # written since" is stale now: compaction just wrote.
@@ -775,7 +779,9 @@ def _maintained_within(
     )
 
 
-def _unchanged_since_maintenance(mark: Watermark | None) -> dict[Operation, str] | None:
+def _unchanged_since_maintenance(
+    mark: Watermark | None, today: date | None = None
+) -> dict[Operation, str] | None:
     """Which :data:`WRITE_DRIVEN` operations have nothing to do here, and why.
 
     One metadata load per table, ~20-38 ms measured -- against ~400 ms to profile
@@ -792,6 +798,12 @@ def _unchanged_since_maintenance(mark: Watermark | None) -> dict[Operation, str]
     forever. A run that leaves compaction work says so on every stamp it writes
     (:data:`~zamboni.health.COMPACT_INCOMPLETE`), and that keeps compaction running.
 
+    **And whether a partition evolution waits for has aged** (#217), the same
+    shape: ``older_than_days`` is crossed by the clock. Every stamp carries the
+    first day one does (:data:`~zamboni.health.EVOLUTION_RELEASE`), and from
+    ``today`` -- the run's UTC date -- on that day compaction runs again. A date
+    rather than the marker, so the skip still holds between cutoffs.
+
     **Any doubt answers ``None``, which skips nothing.** A watermark that could
     not be read (:func:`_watermark`): the run proceeds and the operations decide
     for themselves, exactly as before. A skip is an optimisation and must never
@@ -805,7 +817,7 @@ def _unchanged_since_maintenance(mark: Watermark | None) -> dict[Operation, str]
         return {}
     unchanged = f"nothing written since {mark.operation}"
     skips = dict.fromkeys(WRITE_DRIVEN, unchanged)
-    if mark.incomplete:
+    if mark.compaction_left(today):
         del skips[Operation.COMPACT]
     return skips
 

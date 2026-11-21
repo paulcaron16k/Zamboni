@@ -1303,16 +1303,17 @@ def _health(session: CatalogSession, args: argparse.Namespace) -> int:
             continue
         health = table_health(table)
         mark = maintenance_watermark(table)
-        # Due on either count: a write since the last run, or a last run that
-        # said it left compaction work. The second needs no write to become
-        # doable -- a held partition is released by the clock (ZMBNI-196).
+        # Due on either count: a write since the last run, or compaction work
+        # the clock released -- a held partition (ZMBNI-196), or one partition
+        # evolution was waiting for (#217). The second needs no write.
+        left = mark.compaction_left()
         if mark.written_since:
             reason = f"{mark.snapshots_since} snapshot(s) written since maintenance"
-        elif mark.incomplete:
-            reason = f"the last run left compaction work: {mark.incomplete}"
+        elif left:
+            reason = left
         else:
             reason = "nothing has written since maintenance last ran"
-        is_due = mark.written_since or mark.incomplete is not None
+        is_due = mark.written_since or left is not None
         due += is_due
         print(f"{health.identifier}: {'due' if is_due else 'not due'} -- {reason}")
         print(mark.describe())

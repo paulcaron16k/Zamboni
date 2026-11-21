@@ -23,6 +23,17 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **Partition evolution no longer waits for a write that a quiet table never
+  makes** (#217). A partition becomes old enough to condense on a date, but
+  maintenance skipped compaction, which runs evolution, whenever nothing had
+  been written since its last stamp. On a table whose writes had stopped,
+  partitions that aged afterwards kept their day layout for good. Every
+  snapshot maintenance commits now records the first day a waiting partition
+  ages, as `zamboni.evolution.release-at`; from that day compaction runs
+  without a write, and `zamboni health` reports the table due. The skip still
+  holds before that day. Stamps written by earlier versions carry no date and
+  are read exactly as before, so upgrading forces no runs.
+
 - **Partition evolution now finishes a window however its files arrive** (#290).
   An aged window holding a single fine-grained file was skipped as "fewer than 2
   files to merge" and kept that file under the day spec for good -- the state a
