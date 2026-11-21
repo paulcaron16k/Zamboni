@@ -137,9 +137,18 @@ maintained.
 written since. A partition held by `skip_partitions_newer_than_windows`, a group
 a group-by-group run never reached, a refused or failed compaction: the run
 records each as `zamboni.compact.incomplete` on every snapshot it commits, and
-`zamboni health db.events` prints it as `left for later`. So a table that runs
-`compact` every night while nothing writes to it is either still releasing
-held partitions or still being refused. The `compact` line says which.
+`zamboni health db.events` prints it as `left for later`.
+
+**Nor once a partition that evolution was waiting for has aged.** A partition
+`partition_evolution` will condense becomes eligible on the day its window is
+`older_than_days` old, with no write. Every snapshot the run commits records the
+first such day as `zamboni.evolution.release-at`, `zamboni health` prints it as
+`evolution waits until`, and from that day `compact` runs again. Between those
+days the skip holds.
+
+So a table that runs `compact` while nothing writes to it is still releasing
+held partitions, being refused, or evolving a partition that aged that day. The
+`compact` line says which.
 
 The word after "since" is the operation that last stamped the table. Tables
 maintained by a Zamboni older than the stamp fix will say `compaction` where

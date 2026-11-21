@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ..capabilities import detect
-from ..health import COMPACT_INCOMPLETE
+from ..health import COMPACT_INCOMPLETE, EVOLUTION_RELEASE
 from . import (
     EngineConfigProblem,
     LayoutFeature,
@@ -396,4 +396,7 @@ def _left_by_compaction(request: MaintenanceRequest) -> dict[str, str]:
     reads the *newest* stamp, which is normally one of these (ZMBNI-196).
     """
     unfinished = request.compaction_unfinished
-    return {COMPACT_INCOMPLETE: unfinished} if unfinished else {}
+    stamp = {COMPACT_INCOMPLETE: unfinished} if unfinished else {}
+    if request.evolution_release_at is not None:
+        stamp[EVOLUTION_RELEASE] = request.evolution_release_at
+    return stamp

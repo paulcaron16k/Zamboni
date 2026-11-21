@@ -1498,6 +1498,14 @@ partition held on a table whose writes then stopped was never compacted
 with too few files to merge is not counted, because it would have nothing to do
 when the hold lifts.
 
+**Partition evolution works the same way** ([#217](https://github.com/paulcaron16k/Zamboni/issues/217)).
+A partition waiting for its rule's `older_than_days` is released by the clock,
+so every snapshot the run commits records the first day one crosses its cutoff,
+as `zamboni.evolution.release-at`. From that day the next run compacts, and so
+evolves, instead of skipping as "nothing written since". Before it, the skip
+holds, so a quiet table is not re-planned every day for nothing. Up to 0.8.1
+partitions that aged after a table's last write were never condensed.
+
 A temporal field whose value is `null` — rows with no timestamp — has no window,
 so that field does not hold the partition; another temporal field in the same
 spec still can. A held partition is never silent: `zamboni plan` prints which

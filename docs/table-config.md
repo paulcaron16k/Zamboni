@@ -245,7 +245,9 @@ into.
   month→day rule is rejected at load.
 - `older_than_days` is measured from the **end** of the partition window. A rule at 90 days
   leaves a partition alone until every row it could contain is at least 90 days old, so
-  late-arriving rows do not get rewritten out from under.
+  late-arriving rows do not get rewritten out from under. A partition that ages after the
+  table's last write is still condensed: each run records when the next one ages, and
+  maintenance runs compaction again on that day (#217).
 - Only one rule per `from` granularity — a field can age one way.
 - A rule naming a granularity the table does not partition by is an error, not a no-op.
 

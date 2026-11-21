@@ -22,7 +22,7 @@ from .config import (
     resolve_target_file_size,
 )
 from .evolution import EvolutionPlan, MultiSpecReplaceFiles, ensure_specs, plan_evolution
-from .health import COMPACT_INCOMPLETE
+from .health import COMPACT_INCOMPLETE, EVOLUTION_RELEASE
 from .planner import CompactionPlan, CompactionPlanner, FileGroup
 from .profile import Severity, TableProfile, profile_table
 from .session import CatalogSession
@@ -71,6 +71,10 @@ class CompactionResult:
     #: Rewrite groups a stop request left unrewritten -- work this run gave up
     #: for a later one, like `held` (ZMBNI-201).
     not_reached: int = 0
+    #: The first day, ISO and UTC, a partition evolution is waiting for ages
+    #: past its cutoff (`EvolutionPlan.release_at`), or ``None``. Not left work:
+    #: nothing is due until then, so it is not part of `unfinished` (#217).
+    release_at: str | None = None
     #: Whether this was a preview. Every other operation's result carried this
     #: and compaction's did not, which mattered once `as_dict()` made the
     #: counters machine-readable: they are what *would* happen, so without this
@@ -286,6 +290,8 @@ class TableCompactor:
 
         result.skipped = list(plan.skipped) + list(evolution_plan.skipped)
         result.held = plan.held
+        if evolution_plan.release_at is not None:
+            result.release_at = evolution_plan.release_at.isoformat()
         if dry_run:
             logger.info("dry run:\n%s\n%s", evolution_plan.describe(), plan.describe())
             # Report what the plan would rewrite. Returning the empty result
@@ -395,7 +401,9 @@ class TableCompactor:
                 producer_cls=MultiSpecReplaceFiles,
                 snapshot_properties={
                     **_evolution_labels(evolved_labels),
-                    **_left_for_later(held=plan.held, remaining=result.not_reached),
+                    **_left_for_later(
+                        held=plan.held, remaining=result.not_reached, release_at=result.release_at
+                    ),
                 },
             )
             outcome = committer.commit(tbl, removed=removed, added=added)
@@ -440,7 +448,9 @@ class TableCompactor:
                 producer_cls=MultiSpecReplaceFiles,
                 snapshot_properties={
                     "zamboni.evolution": group.label,
-                    **_left_for_later(held=plan.held, remaining=remaining),
+                    **_left_for_later(
+                        held=plan.held, remaining=remaining, release_at=result.release_at
+                    ),
                 },
             )
             outcome = self._commit_one(tbl, committer, group.files, output)
@@ -459,7 +469,9 @@ class TableCompactor:
             committer = ReplaceCommitter(
                 branch=self._config.branch,
                 snapshot_operation=self._config.snapshot_operation,
-                snapshot_properties=_left_for_later(held=plan.held, remaining=remaining),
+                snapshot_properties=_left_for_later(
+                    held=plan.held, remaining=remaining, release_at=result.release_at
+                ),
             )
             outcome = self._commit_one(tbl, committer, group.files, output)
             result.groups.append(
@@ -597,13 +609,17 @@ def _quiet(note: str) -> None:
     pass
 
 
-def _left_for_later(*, held: int, remaining: int) -> dict[str, str]:
+def _left_for_later(*, held: int, remaining: int, release_at: str | None) -> dict[str, str]:
     """The stamp that says this commit is not the end of compaction's work.
 
-    Empty when it is, so a finished run's snapshot reads exactly as before.
+    Also when evolution next has work (`health.EVOLUTION_RELEASE`). Empty when
+    neither applies, so a finished run's snapshot reads exactly as before.
     """
     unfinished = _unfinished(held=held, remaining=remaining)
-    return {COMPACT_INCOMPLETE: unfinished} if unfinished else {}
+    stamp = {COMPACT_INCOMPLETE: unfinished} if unfinished else {}
+    if release_at is not None:
+        stamp[EVOLUTION_RELEASE] = release_at
+    return stamp
 
 
 def _unfinished(*, held: int, remaining: int) -> str | None:

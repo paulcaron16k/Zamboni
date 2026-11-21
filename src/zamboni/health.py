@@ -111,6 +111,22 @@ LEGACY_COMPACT_STAMP = "compaction"
 #: nothing, so nothing would ever replace that stamp.
 COMPACT_INCOMPLETE = "zamboni.compact.incomplete"
 
+#: Written beside :data:`OPERATION_STAMP`, on any stamp, when partition
+#: evolution has partitions still waiting for their rule's ``older_than_days``:
+#: the first day, UTC and ISO-formatted (``2026-12-01``), on which one of them
+#: crosses its cutoff. From that day the write-driven skip lets compaction --
+#: which runs evolution -- run without a write (#217).
+#:
+#: A date, not :data:`COMPACT_INCOMPLETE`. An evolving table nearly always has
+#: partitions waiting, so "left work" would be stamped on every run and the skip
+#: lost for good; the date keeps the skip between cutoffs. Carried on every
+#: stamp the run writes for the same reason that marker is: the newest stamp is
+#: the one the next run reads.
+#:
+#: Absent means nothing is waiting, which is also how every stamp written before
+#: #217 reads, so upgrading forces no runs.
+EVOLUTION_RELEASE = "zamboni.evolution.release-at"
+
 #: Iceberg's own summary keys. Spelled here rather than inlined so a rename
 #: upstream is one edit and a grep finds every use.
 TOTAL_DATA_FILES = "total-data-files"
@@ -315,11 +331,38 @@ class Watermark:
     #: What compaction left undone in the run that wrote that stamp, from
     #: :data:`COMPACT_INCOMPLETE`, or ``None`` if it finished.
     incomplete: str | None = None
+    #: When a partition evolution was waiting for ages past its cutoff, from
+    #: :data:`EVOLUTION_RELEASE` as written, or ``None`` if none was waiting.
+    #: Kept as the text so an unreadable value can answer the safe way.
+    release_at: str | None = None
 
     @property
     def maintained(self) -> bool:
         """Has Zamboni ever left a stamp on this table that still survives?"""
         return self.snapshot_id is not None
+
+    def compaction_left(self, today: dt.date | None = None) -> str | None:
+        """Why compaction has work whether or not anyone has written, or ``None``.
+
+        The run that wrote the stamp said it left some (:data:`COMPACT_INCOMPLETE`),
+        or a partition it was waiting on has aged into evolution
+        (:data:`EVOLUTION_RELEASE`) -- both released by the clock, not a write.
+        ``today`` is a UTC date, now if not given. An unreadable date answers
+        as passed: a skip must never be the thing that stops a table being
+        maintained.
+        """
+        if self.incomplete:
+            return f"the last run left compaction work: {self.incomplete}"
+        if self.release_at is None:
+            return None
+        today = today or dt.datetime.now(dt.UTC).date()
+        try:
+            due = dt.date.fromisoformat(self.release_at) <= today
+        except ValueError:
+            return f"unreadable {EVOLUTION_RELEASE} {self.release_at!r}; compacting to be safe"
+        if not due:
+            return None
+        return f"a waiting partition aged past its evolution cutoff on {self.release_at}"
 
     @property
     def maintained_at(self) -> dt.datetime | None:
@@ -340,6 +383,8 @@ class Watermark:
         )
         if self.incomplete:
             lines += f"\n  {'left for later':<24} {self.incomplete}"
+        if self.release_at:
+            lines += f"\n  {'evolution waits until':<24} {self.release_at}"
         return lines
 
     def as_dict(self) -> dict[str, object]:
@@ -353,6 +398,7 @@ class Watermark:
             "maintained": self.maintained,
             "written_since": self.written_since,
             "incomplete": self.incomplete,
+            "release_at": self.release_at,
         }
 
     @property
@@ -419,6 +465,7 @@ def maintenance_watermark(tbl: Table) -> Watermark:
         timestamp_ms=snapshot.timestamp_ms,
         snapshots_since=len(snapshots) - position - 1,
         incomplete=summary.additional_properties.get(COMPACT_INCOMPLETE) if summary else None,
+        release_at=summary.additional_properties.get(EVOLUTION_RELEASE) if summary else None,
     )
 
 
@@ -446,6 +493,7 @@ def table_signals(health: TableHealth, mark: Watermark) -> dict[str, Any]:
     return signals | {
         "written_since": mark.written_since,
         "incomplete": mark.incomplete,
+        "release_at": mark.release_at,
         "maintained_at": None if at is None else at.isoformat(),
     }
 

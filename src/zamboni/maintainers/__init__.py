@@ -257,6 +257,13 @@ class MaintenanceRequest:
     #: :data:`zamboni.health.COMPACT_INCOMPLETE` -- the newest stamp is the one
     #: the next run reads, and is normally not compaction's (ZMBNI-196).
     compaction_unfinished: str | None = None
+    #: When partition evolution next has work, as
+    #: :data:`zamboni.health.EVOLUTION_RELEASE` records it, or ``None``. Set by
+    #: :func:`zamboni.maintenance.maintain` from the table's newest stamp and
+    #: replaced by compaction's own answer when it plans, so a stamp written in
+    #: a run that did not plan evolution keeps the date instead of dropping it
+    #: (#217).
+    evolution_release_at: str | None = None
     #: Asked between units of work that each end in a whole commit, never during
     #: one; true means start nothing more. Set by
     #: :func:`zamboni.maintenance.maintain` from its ``should_stop``. The local
