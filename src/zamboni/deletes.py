@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, Set
 from dataclasses import dataclass, field
 
 from pyiceberg.manifest import (
@@ -171,13 +171,21 @@ class DanglingReport:
         return "\n".join(lines)
 
 
-def find_dangling(tbl: Table) -> DanglingReport:
+def find_dangling(tbl: Table, *, assuming_rewritten: Set[str] = frozenset()) -> DanglingReport:
     """Delete files the current snapshot references but no live data file needs.
 
     Applicability is delegated to PyIceberg's own ``DeleteFileIndex`` -- the
     index the scan planner builds -- so "dangling" here means precisely "no scan
     would apply it", rather than a restatement of the rule that could drift from
     it.
+
+    ``assuming_rewritten`` answers the same question for the table a rewrite of
+    those data files (by path) would leave, which is how a compaction preview
+    says what it would leave dangling (#289). Their replacements need no delete
+    file this snapshot references: a rewrite commits them at a sequence number
+    above every existing delete's, and a delete applies only to data files at or
+    below its own (position) or below it (equality). So they are left out of
+    the live set rather than replaced in it.
     """
     from pyiceberg.table.delete_file_index import DeleteFileIndex
 
@@ -207,6 +215,8 @@ def find_dangling(tbl: Table) -> DanglingReport:
     # Every delete file some live data file would pull in.
     applied: set[DataFile] = set()
     for entry in data_entries:
+        if entry.data_file.file_path in assuming_rewritten:
+            continue
         applied |= index.for_data_file(
             entry.sequence_number or 0, entry.data_file, entry.data_file.partition
         )
