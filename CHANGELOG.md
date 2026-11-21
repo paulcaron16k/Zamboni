@@ -21,6 +21,19 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### Fixed
+
+- **Partition evolution now finishes a window however its files arrive** (#290).
+  An aged window holding a single fine-grained file was skipped as "fewer than 2
+  files to merge" and kept that file under the day spec for good -- the state a
+  source that stops one day into a month leaves behind. A late file
+  in a window already evolved was skipped too, and two late files became a
+  second month file beside the first. Evolution now rewrites every aged window,
+  folding in the coarse-spec files already there that are below the target
+  file size; a full-size one is left alone, so one late row rewrites at most a
+  target's worth of data. The first run after upgrading rewrites each such
+  window once.
+
 ## [0.8.1] - 2026-11-16
 
 ### Added

@@ -607,3 +607,128 @@ def test_every_file_we_replace_is_marked_deleted(session, daily):
         f"{len(replaced - deleted)} replaced file(s) were never marked deleted, so "
         "they stay live beside their replacements"
     )
+
+
+# -- a coarsened month converges, however its files arrive (#290) -------------
+
+
+def _evolve(session, identifier: str = "db.daily", **base) -> object:
+    config = TableConfig(warehouse="w", defaults=settings())
+    return TableCompactor.from_table_config(
+        session, identifier, config, base=CompactionConfig(**base)
+    ).execute()
+
+
+def _january(tbl) -> dict[str, int]:
+    """January's live files, counted by the transform of the spec each sits under."""
+    specs = tbl.metadata.specs()
+    counts: dict[str, int] = {}
+    for live in profile_table(tbl).live_files:
+        spec = specs[live.spec_id]
+        transform = str(spec.fields[0].transform)
+        value = live.partition[0]
+        month = value if transform == "month" else None
+        if transform == "day":
+            day = dt.date(1970, 1, 1) + dt.timedelta(days=value)
+            month = (day.year - 1970) * 12 + day.month - 1 if day.year == 2026 else None
+        if month == (2026 - 1970) * 12:  # January 2026
+            counts[transform] = counts.get(transform, 0) + 1
+    return counts
+
+
+def _late_january_row(tbl, row_id: int, day: int) -> None:
+    tbl.append(pa.table({"id": [row_id], "ts": [dt.datetime(2026, 1, day)]}, schema=TS_ARROW))
+
+
+@pytest.mark.parametrize("library_honours_spec", [True, False], ids=["library", "fallback"])
+@pytest.mark.parametrize("late_files", [1, 2], ids=["one-late-file", "two-late-files"])
+def test_late_day_files_fold_into_their_coarsened_month(
+    session, daily, monkeypatch, late_files, library_honours_spec
+):
+    """A late arrival ends in the month's one month-spec file, not beside it.
+
+    Before #290 one late file was skipped as "fewer than 2 files to merge" and
+    stayed under the day spec indefinitely, and two became a *second* month
+    file: evolution grouped only files under the current spec, so it never saw
+    the month file it had already written.
+
+    Through both committers, as `test_evolution_condenses_days_into_a_month`
+    is: this is the first group whose *removed* files span two specs, and the
+    fallback writes its own delete manifests.
+    """
+    from dataclasses import replace as _replace
+
+    from zamboni import evolution as _evolution
+    from zamboni.capabilities import detect as _detect
+
+    if library_honours_spec and not _detect().added_files_honour_spec:
+        pytest.skip("installed PyIceberg does not honour an added file's own spec")
+    probes = _replace(_detect(), added_files_honour_spec=library_honours_spec)
+    monkeypatch.setattr(_evolution, "detect", lambda: probes)
+
+    _evolve(session)
+    assert _january(session.table("db.daily")) == {"month": 1}, "the fixture did not coarsen"
+
+    tbl = session.table("db.daily")
+    for n in range(late_files):
+        _late_january_row(tbl, 200 + n, 10 + n)
+        tbl = session.table("db.daily")
+    expected = sorted(tbl.scan().to_arrow()["id"].to_pylist())
+
+    result = _evolve(session)
+
+    assert result.evolved, f"nothing evolved; skipped: {result.skipped}"
+    tbl = session.table("db.daily")
+    assert _january(tbl) == {"month": 1}
+    assert sorted(tbl.scan().to_arrow()["id"].to_pylist()) == expected
+    assert all(m == f for m, f in manifest_spec_agreement(tbl))
+
+
+def test_a_month_left_with_one_aged_day_file_still_moves_to_the_month_spec(session):
+    """The source that stopped: its last month holds one day file and nothing else.
+
+    No later write will give it a second file, so skipping a single file kept
+    that month under the day spec for good. Rewriting it alone is one file
+    rewritten once.
+    """
+    tbl = session.catalog.create_table(
+        "db.stopped", schema=TS_SCHEMA, partition_spec=DAY_SPEC, properties={"format-version": "2"}
+    )
+    _late_january_row(tbl, 1, 3)
+
+    result = _evolve(session, "db.stopped")
+
+    assert result.evolved, f"nothing evolved; skipped: {result.skipped}"
+    tbl = session.table("db.stopped")
+    assert _january(tbl) == {"month": 1}
+    assert tbl.scan().to_arrow()["id"].to_pylist() == [1]
+    assert all(m == f for m, f in manifest_spec_agreement(tbl))
+
+
+def test_a_late_file_folds_only_month_files_below_the_target_size(session, daily):
+    """A full-size month file is left alone; the late file still leaves the day spec.
+
+    Folding every month file would rewrite a whole large month for one late
+    row. A file at or above the target is one compaction would not touch
+    either, so it is not an input here.
+    """
+    _evolve(session)
+    tbl = session.table("db.daily")
+    _late_january_row(tbl, 200, 10)
+    tbl = session.table("db.daily")
+    live = profile_table(tbl).live_files
+    month_file = next(f for f in live if f.spec_id != tbl.spec().spec_id)
+
+    small_target = plan_evolution(
+        tbl, settings(), live, target_file_size_bytes=month_file.size_bytes
+    )
+    large_target = plan_evolution(
+        tbl, settings(), live, target_file_size_bytes=month_file.size_bytes + 1
+    )
+
+    [alone] = small_target.groups
+    assert month_file.path not in {f.path for f in alone.files}
+    assert len(alone.files) == 1, "the late day file is still rewritten under the month spec"
+    [folded] = large_target.groups
+    assert month_file.path in {f.path for f in folded.files}
+    assert len(folded.files) == 2
