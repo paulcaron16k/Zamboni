@@ -967,8 +967,11 @@ compares against a delete-aware count (`RewriteOutput.source_live_rows`), comput
 Comparing against `record_count` would reject every correct MoR rewrite.
 
 Delete files are left referenced after compaction. `_OverwriteFiles._deleted_entries` only
-marks `DataFileContent.DATA` entries deleted. This is correct but adds metadata that only
-snapshot expiry will clear; the count is reported as `CompactionResult.dangling_delete_files`.
+marks `DataFileContent.DATA` entries deleted. Those that no longer apply to any live data
+file are cleared by `remove-dangling-deletes`, which the maintenance run does right after
+compacting. `CompactionResult.dangling_delete_files` counts them with the same function
+(`deletes.find_dangling`), so it agrees with what that operation then finds: on a preview,
+what the planned rewrite would leave dangling.
 
 ### Partitioning
 
