@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 
 import pytest
 
@@ -683,6 +684,101 @@ def test_every_operational_knob_is_reachable_from_the_command_line():
     ]
 
     assert not missing, f"CompactionConfig settings with no CLI flag: {missing}"
+
+
+#: A valid value other than the default for every compaction flag, by dest.
+_NON_DEFAULT_FLAG_VALUES = {
+    "target_file_size_bytes": 64 * 1024 * 1024,
+    "min_input_files": 7,
+    "delete_ratio_threshold": 0.75,
+    "delete_file_threshold": None,
+    "skip_partitions_newer_than_windows": 3,
+    "rewrite_all": True,
+    "only_changed_partitions": True,
+    "partial_progress": True,
+    "memory_mode": "chunked",
+    "streaming_writes": True,
+    "memory_budget_bytes": 12345678,
+    "read_ahead_bytes": 0,
+    "max_read_ahead_files": 3,
+    "temp_directory": "/var/spill",
+    "max_temp_directory_bytes": 1 << 30,
+    "sort_by_table_order": True,
+    "sort_expression": "a DESC",
+    "branch": "audit",
+    "snapshot_operation": "overwrite",
+    "dangling_delete_policy": "block",
+}
+
+
+def test_every_compaction_flag_reaches_the_config():
+    """A flag that parses is not a flag that does anything (#295).
+
+    The test above only proves each setting has a dest. `--streaming-writes` had
+    one, and `_config_from` -- what a run without a table config uses -- never
+    read it, so the flag silently did nothing there from 12f6481 until #295.
+    Each flag is set alone, to a value other than its default, and must arrive.
+    """
+    from dataclasses import fields
+
+    from zamboni import CompactionConfig
+    from zamboni.cli import _build_parser, _config_from
+    from zamboni.config import MemoryMode
+
+    args = _build_parser().parse_args(["compact", "db.t"])
+    dests = {f.name for f in fields(CompactionConfig)} & set(vars(args))
+    assert dests == set(_NON_DEFAULT_FLAG_VALUES), (
+        "a compaction flag was added or removed: give it a non-default value above"
+    )
+
+    for dest, value in _NON_DEFAULT_FLAG_VALUES.items():
+        default = getattr(_config_from(args), dest)
+        expected = MemoryMode(value) if dest == "memory_mode" else value
+        assert expected != default, f"{dest}: {value!r} is the default, so proves nothing"
+
+        flagged = argparse.Namespace(**{**vars(args), dest: value})
+        assert getattr(_config_from(flagged), dest) == expected, f"--{dest} never arrives"
+
+
+@pytest.mark.parametrize(
+    ("verb", "argv", "flag"),
+    [
+        ("plan", ["--delete-ratio-threshold", "0"], "--delete-ratio-threshold"),
+        ("compact", ["--delete-ratio-threshold", "1.5"], "--delete-ratio-threshold"),
+        ("describe", ["--delete-file-threshold", "0"], "--delete-file-threshold"),
+        ("plan", ["--min-input-files", "0"], "--min-input-files"),
+        ("compact", ["--target-file-size-bytes", "0"], "--target-file-size-bytes"),
+        ("maintenance", ["--read-ahead-bytes", "-1"], "--read-ahead-bytes"),
+        ("maintenance", ["--max-read-ahead-files", "0"], "--max-read-ahead-files"),
+        (
+            "plan",
+            ["--skip-partitions-newer-than-windows", "-1"],
+            "--skip-partitions-newer-than-windows",
+        ),
+        # The dest is sort_expression; the operator typed --sort-by.
+        ("compact", ["--sort-by", "a", "--sort-by-table-order"], "--sort-by"),
+    ],
+)
+def test_a_rejected_compaction_flag_exits_2_before_any_catalog_opens(
+    verb, argv, flag, monkeypatch, capsys
+):
+    """A usage error, not a traceback and exit 1 after connecting (#295)."""
+    from zamboni import cli
+
+    def no_session(_args):
+        raise AssertionError("a catalog session was opened for a usage error")
+
+    monkeypatch.setattr(cli, "_session_from", no_session)
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main([verb, "db.t", *argv])
+
+    assert exit_info.value.code == 2
+    message = capsys.readouterr().err
+    assert "Traceback" not in message
+    assert re.search(rf"{re.escape(flag)}\b(?!-)", message), message
+    named_fields = [f for f in _NON_DEFAULT_FLAG_VALUES if re.search(rf"\b{f}\b", message)]
+    assert not named_fields, f"the message names fields, not flags: {named_fields}"
 
 
 # -- secret handling (ZMBNI-1811, ZMBNI-1812) -----------------------------
