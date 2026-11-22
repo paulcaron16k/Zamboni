@@ -140,12 +140,16 @@ jobs:
           uv pip install --python /tmp/bare/bin/python "$(ls dist/*.whl)"
           cd "$RUNNER_TEMP" && /tmp/bare/bin/zamboni doctor
 
+      # The test-only packages after the wheel are the dev group's, named by
+      # hand because this venv deliberately does not read the lockfile.
+      # hatchling is there for tests/test_packaging.py (ZMBNI-212), which
+      # builds the sdist from the checkout.
       - name: Install it from PyPI resolution, with no source redirect
         run: |
           uv venv --python 3.13 /tmp/consumer
           uv pip install --python /tmp/consumer/bin/python \
             "$(ls dist/*.whl)[sql,s3,trino,cloud,nats,otel]" \
-            pytest jsonschema "pyspark-client>=4.1.3,<4.2"
+            pytest jsonschema "pyspark-client>=4.1.3,<4.2" "hatchling>=1.33"
 
       # Asserted rather than assumed. A leg that resolved the fork by mistake
       # would agree with whatever it found and look green while testing the
