@@ -47,6 +47,23 @@ PARTITION_TRANSFORMS = frozenset(
 #: mean splitting files, which compaction does not do.
 TIME_GRANULARITIES = ("hour", "day", "month", "year")
 
+#: Rewrite a data file once its file-scoped deletes remove this fraction of its
+#: rows (#288). Iceberg Java's ``DELETE_RATIO_THRESHOLD_DEFAULT`` in
+#: ``BinPackRewriteFilePlanner``, so Zamboni and Spark's ``rewrite_data_files``
+#: choose the same files by default. Here because `config` reads it too, and
+#: this module imports nothing of Zamboni's.
+DELETE_RATIO_THRESHOLD_DEFAULT = 0.3
+
+#: Rewrite a data file once this many delete files apply to it (#288). **Not**
+#: Java's: its ``DELETE_FILE_THRESHOLD_DEFAULT`` is ``Integer.MAX_VALUE``, off.
+#: The ratio counts only file-scoped deletes, so with the count off a table
+#: whose writer produces partition-scoped deletes (Spark before Iceberg 1.8,
+#: or with ``write.delete.granularity=partition``) was never compacted for
+#: them -- the case #288 was filed for. 10 is a judgement, not a measurement:
+#: enough that a partition's first few merge-on-read commits do not trigger a
+#: rewrite, few enough that a reader is not merging dozens of files.
+DELETE_FILE_THRESHOLD_DEFAULT = 10
+
 #: How a writer applies row-level changes to a table: the one value of Iceberg's
 #: ``write.delete.mode``, ``write.update.mode`` and ``write.merge.mode`` taken
 #: together. A loader performs MERGE (an upsert) and DELETE and never mixes modes
@@ -397,6 +414,10 @@ class TableSettings:
     retention: Retention = field(default_factory=Retention)
     target_file_size_bytes: int | None = None
     min_input_files: int = 2
+    #: `CompactionConfig.delete_ratio_threshold`: Java's, in (0, 1].
+    delete_ratio_threshold: float = DELETE_RATIO_THRESHOLD_DEFAULT
+    #: `CompactionConfig.delete_file_threshold`: ``None`` turns it off.
+    delete_file_threshold: int | None = DELETE_FILE_THRESHOLD_DEFAULT
     #: On by default: hold the open window and the one before it (docs/table-config.md).
     #: ``None`` turns the hold off.
     skip_partitions_newer_than_windows: int | None = 1
@@ -460,6 +481,15 @@ class TableSettings:
             raise TableConfigError(f"{where}.target_file_size_bytes: must be >= 100")
         if self.min_input_files < 1:
             raise TableConfigError(f"{where}.min_input_files: must be >= 1")
+        if not 0 < self.delete_ratio_threshold <= 1:
+            raise TableConfigError(
+                f"{where}.delete_ratio_threshold: must be above 0 and at most 1; "
+                "1 rewrites only files deleted in full"
+            )
+        if self.delete_file_threshold is not None and self.delete_file_threshold < 1:
+            raise TableConfigError(
+                f"{where}.delete_file_threshold: must be >= 1, or null to turn it off"
+            )
         if (
             self.skip_partitions_newer_than_windows is not None
             and self.skip_partitions_newer_than_windows < 0
@@ -844,6 +874,10 @@ def _value(
     # being read as one that means something.
     if isinstance(value, expect) and not (expect is not bool and isinstance(value, bool)):
         return value
+    # JSON has one number type: `1` is as much a ratio as `1.0`, and Python's
+    # json reads it as an int.
+    if expect is float and isinstance(value, int) and not isinstance(value, bool):
+        return float(value)
     raise TableConfigError(
         f"{where}.{key}: expected {_EXPECTED_NAME[expect]}, found "
         f"{_JSON_TYPE_NAME.get(type(value), repr(value))}."
@@ -853,7 +887,8 @@ def _value(
 #: What each expected Python type is called in the file's own vocabulary.
 _EXPECTED_NAME = {
     bool: "true or false",
-    int: "a number",
+    int: "a whole number",
+    float: "a number",
     str: "a string",
     list: "a list",
     dict: "a JSON object",
@@ -870,6 +905,8 @@ def _settings_from_dict(raw: dict[str, Any], where: str) -> TableSettings:
             "retention",
             "target_file_size_bytes",
             "min_input_files",
+            "delete_ratio_threshold",
+            "delete_file_threshold",
             "skip_partitions_newer_than_windows",
             "description",
             "write",
@@ -907,6 +944,21 @@ def _settings_from_dict(raw: dict[str, Any], where: str) -> TableSettings:
             raw, "target_file_size_bytes", where, expect=int, nullable=True
         ),
         min_input_files=_value(raw, "min_input_files", where, expect=int, default=2),
+        delete_ratio_threshold=_value(
+            raw,
+            "delete_ratio_threshold",
+            where,
+            expect=float,
+            default=TableSettings.delete_ratio_threshold,
+        ),
+        delete_file_threshold=_value(
+            raw,
+            "delete_file_threshold",
+            where,
+            expect=int,
+            nullable=True,
+            default=TableSettings.delete_file_threshold,
+        ),
         skip_partitions_newer_than_windows=_value(
             raw,
             "skip_partitions_newer_than_windows",
@@ -1130,6 +1182,8 @@ def _full_block(s: TableSettings) -> dict[str, Any]:
         },
         "target_file_size_bytes": s.target_file_size_bytes,
         "min_input_files": s.min_input_files,
+        "delete_ratio_threshold": s.delete_ratio_threshold,
+        "delete_file_threshold": s.delete_file_threshold,
         "skip_partitions_newer_than_windows": s.skip_partitions_newer_than_windows,
         "write": {
             "write_mode": s.write.write_mode,

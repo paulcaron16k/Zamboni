@@ -83,7 +83,11 @@ attached, is present."
 Zamboni counterparts: `target-file-size-bytes` (512 MB), `min-input-files` (5),
 `partial-progress.enabled` (false), `use-starting-sequence-number` (true),
 `output-spec-id`, `remove-dangling-deletes` (false), `delete-ratio-threshold`
-(0.3), `rewrite-job-order`.
+(0.3, since Iceberg 1.8.0), `delete-file-threshold` (off), `rewrite-job-order`.
+Zamboni passes `delete-ratio-threshold` only when a config sets it away from 0.3,
+which is its default too, because a runtime before 1.8.0 refuses an option it
+does not know; `delete-file-threshold` it passes whenever set, which by default
+it is, at 10 (#288).
 
 ---
 

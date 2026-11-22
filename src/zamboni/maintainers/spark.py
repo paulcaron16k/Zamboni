@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..config import orders_by_declared_order
 from ..properties import ApplyResult
+from ..tableconfig import DELETE_RATIO_THRESHOLD_DEFAULT
 from . import (
     EngineConfigProblem,
     LayoutFeature,
@@ -452,6 +453,16 @@ class SparkMaintainer(Maintainer):
                 options.append(("target-file-size-bytes", str(compaction.target_file_size_bytes)))
             if compaction.min_input_files:
                 options.append(("min-input-files", str(compaction.min_input_files)))
+            # Sent only where it differs from Java's default, which is ours
+            # (#288): Iceberg before 1.8.0 does not have the option and refuses a
+            # rewrite naming one it does not know, and leaving it out on 1.8+
+            # selects exactly what sending 0.3 would. The file threshold has been
+            # there since 2021, and ours is on where Java's is off, so it is sent
+            # whenever set -- which is by default.
+            if compaction.delete_ratio_threshold != DELETE_RATIO_THRESHOLD_DEFAULT:
+                options.append(("delete-ratio-threshold", repr(compaction.delete_ratio_threshold)))
+            if compaction.delete_file_threshold is not None:
+                options.append(("delete-file-threshold", str(compaction.delete_file_threshold)))
             # Iceberg's own default is false, and ZMBNI-106 chose the same for
             # the local engine. Pass it explicitly so the two agree visibly
             # rather than by coincidence.

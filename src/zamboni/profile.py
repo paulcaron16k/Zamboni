@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-from pyiceberg.manifest import DataFile, DataFileContent
+from pyiceberg.manifest import DataFile, DataFileContent, ManifestEntry
 from pyiceberg.partitioning import PartitionSpec
 from pyiceberg.table import Table
 from pyiceberg.typedef import Record
@@ -46,6 +46,11 @@ class LiveFile:
     sequence_number: int | None
     spec_id: int
     partition: Record
+    #: The delete files a scan would apply to this file, as PyIceberg's own
+    #: ``DeleteFileIndex`` answers it -- so a delete at a lower sequence number
+    #: than the file (one a rewrite already applied) is not among them. What the
+    #: planner reads to find files worth rewriting for their deletes (#288).
+    deletes: tuple[DataFile, ...] = ()
 
     @property
     def path(self) -> str:
@@ -58,6 +63,40 @@ class LiveFile:
     @property
     def record_count(self) -> int:
         return self.data_file.record_count
+
+    @property
+    def deleted_fraction(self) -> float:
+        """The fraction of this file's rows its deletes are *known* to remove.
+
+        Known means file-scoped: a delete naming this file alone, by
+        ``referenced_data_file`` or by equal ``file_path`` bounds, so its record
+        count is rows of this file. A partition-scoped delete spans files and
+        says how many rows of each only when read, so it counts for nothing here
+        -- as in Java's ``BinPackRewriteFilePlanner.tooHighDeleteRatio``, which
+        this mirrors, including capping the count at the file's rows.
+        """
+        if not self.deletes or not self.record_count:
+            return 0.0
+        known = sum(d.record_count for d in self.deletes if _referenced_data_file_path(d))
+        return min(known, self.record_count) / self.record_count
+
+
+def _referenced_data_file_path(delete_file: DataFile) -> str | None:
+    """The one data file a delete file applies to, or None if it may span several.
+
+    PyIceberg's own answer -- the one ``DeleteFileIndex`` files a delete under --
+    so a delete counted here as file-scoped is one the scan applies to that file
+    alone. Equality deletes are never file-scoped.
+    """
+    from pyiceberg.table.delete_file_index import _referenced_data_file_path as referenced
+
+    if delete_file.content != DataFileContent.POSITION_DELETES:
+        return None
+    # Stock PyIceberg 0.12.0's DataFile has no referenced_data_file property
+    # (the maintenance fork adds it), and its index files a delete by the path
+    # bounds alone -- so asking with getattr gives the answer the installed
+    # index gives, on either build.
+    return getattr(delete_file, "referenced_data_file", None) or referenced(delete_file)
 
 
 @dataclass
@@ -130,30 +169,47 @@ class TableProfile:
 
 def profile_table(tbl: Table) -> TableProfile:
     """Walk the current snapshot's manifests and assess compaction eligibility."""
+    from pyiceberg.table.delete_file_index import DeleteFileIndex
+
     snapshot = tbl.current_snapshot()
-    live: list[LiveFile] = []
+    data_entries: list[ManifestEntry] = []
+    index = DeleteFileIndex()
     position_deletes = 0
     equality_deletes = 0
-    spec_ids: set[int] = set()
 
     if snapshot is not None:
         for manifest in snapshot.manifests(io=tbl.io):
             for entry in manifest.fetch_manifest_entry(io=tbl.io, discard_deleted=True):
                 data_file = entry.data_file
                 if data_file.content == DataFileContent.DATA:
-                    spec_ids.add(data_file.spec_id)
-                    live.append(
-                        LiveFile(
-                            data_file=data_file,
-                            sequence_number=entry.sequence_number,
-                            spec_id=data_file.spec_id,
-                            partition=data_file.partition,
-                        )
-                    )
-                elif data_file.content == DataFileContent.POSITION_DELETES:
+                    data_entries.append(entry)
+                    continue
+                if data_file.content == DataFileContent.POSITION_DELETES:
                     position_deletes += 1
                 elif data_file.content == DataFileContent.EQUALITY_DELETES:
                     equality_deletes += 1
+                index.add_delete_file(entry, data_file.partition)
+
+    # Every delete file has been seen before any is looked up: a manifest
+    # listing need not put delete manifests first.
+    live = [
+        LiveFile(
+            data_file=entry.data_file,
+            sequence_number=entry.sequence_number,
+            spec_id=entry.data_file.spec_id,
+            partition=entry.data_file.partition,
+            deletes=tuple(
+                sorted(
+                    index.for_data_file(
+                        entry.sequence_number or 0, entry.data_file, entry.data_file.partition
+                    ),
+                    key=lambda d: d.file_path,
+                )
+            ),
+        )
+        for entry in data_entries
+    ]
+    spec_ids = {f.spec_id for f in live}
 
     profile = TableProfile(
         identifier=".".join(tbl.name()),

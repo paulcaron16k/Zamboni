@@ -1418,11 +1418,18 @@ planner builds them like this:
 
 1. Take every live data file.
 2. Drop the ones already at or above `target_file_size_bytes` — they need no
-   rewriting. (Unless `rewrite_all` is set, which keeps them.)
+   rewriting. (Unless `rewrite_all` is set, which keeps them, or the file is
+   *delete-heavy*: see 5.)
 3. Bucket what remains by **(partition spec id, partition value)**.
 4. Drop buckets whose partition window is still open, or closed too recently —
    see `skip_partitions_newer_than_windows` below.
-5. Drop buckets with fewer than `min_input_files` files, and buckets of one.
+5. Drop buckets with fewer than `min_input_files` files, and buckets of one —
+   unless the bucket holds a delete-heavy file. A file is delete-heavy when its
+   file-scoped deletes remove at least `delete_ratio_threshold` of its rows
+   (0.3), or when at least `delete_file_threshold` delete files apply to it
+   (10). Rewriting it applies the deletes, so readers stop merging them; the
+   rules are Iceberg Java's, and
+   [table-config.md](table-config.md#deletes) has the detail.
 6. Every surviving bucket is one group.
 
 ### Leaving partitions that are still being written (`skip_partitions_newer_than_windows`)
@@ -1866,6 +1873,8 @@ default; `test_cli_defaults_match_the_dataclass` keeps them honest.
 |---|---|---|
 | `--target-file-size-bytes` | from table properties, else 128 MiB | Output size, and the threshold above which a file is left alone |
 | `--min-input-files` | 2 | Skip partitions with fewer candidates than this |
+| `--delete-ratio-threshold` | 0.3 | Rewrite a file once deletes naming it alone remove this fraction of its rows, whatever its size or `--min-input-files` ([#288](table-config.md#deletes)) |
+| `--delete-file-threshold` | 10 | The same, once this many delete files of any scope apply to it. `off` turns it off |
 | `--rewrite-all` | off | Rewrite everything, including files already at target. **The most reliable way to run out of memory on a large partition** |
 | `--memory-mode` | `auto` | `auto`, `in_memory`, `chunked` |
 | `--memory-budget-bytes` | 256 MiB | Group size above which `auto` streams instead of materialising |

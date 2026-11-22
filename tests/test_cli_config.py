@@ -442,6 +442,44 @@ def test_summary_shows_the_compaction_settings_a_table_ends_up_with(tmp_path, ca
     assert "target 1000000 bytes" in raw
 
 
+def test_summary_shows_the_delete_thresholds_a_table_ends_up_with(tmp_path, capsys):
+    """#288: which files compaction rewrites for their deletes, and from where."""
+    from zamboni.tableconfig import DELETE_RATIO_THRESHOLD_DEFAULT
+
+    config = tmp_path / "tc.json"
+    config.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "warehouse": "acme",
+                "defaults": {"delete_file_threshold": 5},
+                "namespaces": {
+                    "db": {
+                        "tables": {
+                            "events": {},
+                            "raw": {"delete_ratio_threshold": 1, "delete_file_threshold": None},
+                        }
+                    }
+                },
+            }
+        )
+    )
+
+    assert main(["table-config", "summary", str(config)]) == 0
+    out = capsys.readouterr().out
+
+    def deletes_line(table: str) -> str:
+        block = out.split(f"{table}   [")[1]
+        return next(ln for ln in block.splitlines() if "deletes remove" in ln)
+
+    events = deletes_line("db.events")
+    assert f"remove {DELETE_RATIO_THRESHOLD_DEFAULT} (built-in) of its rows" in events
+    assert "once 5 (defaults) delete files apply" in events
+    raw = deletes_line("db.raw")
+    assert "remove 1.0 of its rows" in raw, "a JSON integer is a ratio too"
+    assert "delete files apply" not in raw, "a table's null turns the default's count off"
+
+
 def test_summary_warns_when_apply_properties_would_have_nothing_to_do(tmp_path, capsys):
     """`apply-properties` raises when neither metadata knob is set. Better to
     learn that from a summary than from a maintenance run's exit code."""

@@ -128,6 +128,9 @@ def test_round_trips_through_json(tmp_path):
         ),
         ({"ordering": {"sort": [{"column": "a"}]}}, "mode is 'none' but an ordering is defined"),
         ({"min_input_files": 0}, "must be >= 1"),
+        ({"delete_ratio_threshold": 0}, "above 0 and at most 1"),
+        ({"delete_ratio_threshold": 1.01}, "above 0 and at most 1"),
+        ({"delete_file_threshold": 0}, "must be >= 1, or null"),
     ],
 )
 def test_rejects_contradictory_blocks(block, message):
@@ -393,11 +396,18 @@ def test_a_table_overrides_the_default_retention():
         ({"min_input_files": None}, "null is not a value"),
         ({"retention": {"remove_orphan_files": {"older_than_days": None}}}, "null is not a value"),
         ({"retention": {"rewrite_manifests": {"min_input_manifests": None}}}, "null is not a"),
-        ({"min_input_files": "day"}, "expected a number, found a string"),
+        ({"min_input_files": "day"}, "expected a whole number, found a string"),
+        # Said "expected a number, found a number" until #288 gave the format a
+        # key that does take a fraction.
+        ({"min_input_files": 2.5}, "expected a whole number, found a number"),
+        ({"delete_file_threshold": 2.5}, "expected a whole number, found a number"),
+        ({"delete_ratio_threshold": "high"}, "expected a number, found a string"),
+        ({"delete_ratio_threshold": True}, "expected a number, found a boolean"),
+        ({"delete_ratio_threshold": None}, "null is not a value"),
         # `bool` is a subclass of `int`, so an unguarded isinstance would read
         # this as the integer 1 -- a config that means nothing accepted as one
         # that means something.
-        ({"min_input_files": True}, "expected a number, found a boolean"),
+        ({"min_input_files": True}, "expected a whole number, found a boolean"),
         # Slipped past `"column" not in key` and produced a sort key on None.
         ({"ordering": {"mode": "sort", "sort": [{"column": None}]}}, "needs a string"),
         # Thirteen of fourteen nested blocks raised TypeError from `set(raw)`.

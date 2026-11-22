@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from pyiceberg.transforms import IdentityTransform
 
+from .tableconfig import DELETE_FILE_THRESHOLD_DEFAULT, DELETE_RATIO_THRESHOLD_DEFAULT
 from .zorder import quote_identifier
 
 if TYPE_CHECKING:
@@ -101,7 +102,19 @@ class CompactionConfig:
             compacting a partition that is still being written makes every later
             update more expensive in proportion to how well it was compacted.
         min_input_files: A partition is only compacted when it has at least this
-            many rewrite candidates. Ignored when ``rewrite_all`` is set.
+            many rewrite candidates. Ignored when ``rewrite_all`` is set, and
+            for a partition holding a file selected for its deletes.
+        delete_ratio_threshold: A data file whose file-scoped deletes remove at
+            least this fraction of its rows is rewritten whatever its size, and
+            its partition whatever ``min_input_files`` says, so the deletes are
+            applied and left for remove-dangling-deletes (#288). In ``(0, 1]``;
+            ``1`` selects only files deleted in full. Iceberg Java's
+            ``delete-ratio-threshold``, with its default.
+        delete_file_threshold: The same for a data file at least this many
+            delete files apply to, of any scope, so partition-scoped deletes --
+            which the ratio cannot weigh -- are compacted too. Defaults to
+            ``10``; ``None`` turns it off, which is Java's default
+            (``Integer.MAX_VALUE``). See ``DELETE_FILE_THRESHOLD_DEFAULT``.
         rewrite_all: Rewrite every live data file, including files that already
             meet the target size.
         memory_mode: See :class:`MemoryMode`.
@@ -203,6 +216,8 @@ class CompactionConfig:
 
     target_file_size_bytes: int | None = None
     min_input_files: int = 2
+    delete_ratio_threshold: float = DELETE_RATIO_THRESHOLD_DEFAULT
+    delete_file_threshold: int | None = DELETE_FILE_THRESHOLD_DEFAULT
     skip_partitions_newer_than_windows: int | None = 1
     #: Restrict compaction's candidates to partitions written to since
     #: maintenance last ran. **Off by default, deliberately**: the saving is
@@ -254,6 +269,14 @@ class CompactionConfig:
             )
         if self.min_input_files < 1:
             raise ValueError(f"min_input_files must be >= 1, got {self.min_input_files}")
+        if not 0 < self.delete_ratio_threshold <= 1:
+            raise ValueError(
+                f"delete_ratio_threshold must be in (0, 1], got {self.delete_ratio_threshold}"
+            )
+        if self.delete_file_threshold is not None and self.delete_file_threshold < 1:
+            raise ValueError(
+                f"delete_file_threshold must be >= 1, got {self.delete_file_threshold}"
+            )
         if (
             self.skip_partitions_newer_than_windows is not None
             and self.skip_partitions_newer_than_windows < 0
@@ -341,6 +364,8 @@ def config_from_table_settings(settings, base: CompactionConfig | None = None) -
         base,
         target_file_size_bytes=settings.target_file_size_bytes,
         min_input_files=settings.min_input_files,
+        delete_ratio_threshold=settings.delete_ratio_threshold,
+        delete_file_threshold=settings.delete_file_threshold,
         skip_partitions_newer_than_windows=settings.skip_partitions_newer_than_windows,
         sort_by_table_order=False,
         # "none" is "no ordering of this file's own" (#209, shape (a)): the

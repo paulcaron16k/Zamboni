@@ -649,6 +649,28 @@ def test_partial_progress_is_passed_explicitly_not_left_to_a_default():
     assert "'partial-progress.enabled', 'true'" in on
 
 
+def test_delete_thresholds_reach_spark_only_where_they_differ_from_javas():
+    """Iceberg before 1.8.0 refuses `delete-ratio-threshold` as an unknown option,
+    and its default there is ours, so the default is left to Spark (#288)."""
+    from zamboni.config import CompactionConfig
+
+    default = spark().statement_for(Operation.COMPACT, "db.events", spark_request())
+    tuned = spark().statement_for(
+        Operation.COMPACT,
+        "db.events",
+        spark_request(delete_ratio_threshold=0.5, delete_file_threshold=4),
+    )
+
+    assert CompactionConfig().delete_ratio_threshold == 0.3, "Java's DELETE_RATIO_THRESHOLD_DEFAULT"
+    assert "delete-ratio-threshold" not in default
+    assert "'delete-file-threshold', '10'" in default, "ours is on where Java's is off"
+    assert "delete-file-threshold" not in spark().statement_for(
+        Operation.COMPACT, "db.events", spark_request(delete_file_threshold=None)
+    ), "off is Java's default, so nothing to send"
+    assert "'delete-ratio-threshold', '0.5'" in tuned
+    assert "'delete-file-threshold', '4'" in tuned
+
+
 def test_procedure_arguments_take_a_plain_identifier_not_quoted_sql():
     """`table => 'db.events'` is a string argument. Backticks belong in
     ALTER TABLE and would be part of the name here."""
