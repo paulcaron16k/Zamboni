@@ -323,6 +323,14 @@ usually holds a key-file path or `google_default`: deciding per value would make
 a file a credential file on Tuesday and not on Wednesday, and being wrong the
 safe way costs one `chmod`.
 
+**Not in a URL.** A catalog `uri` with credentials written into it
+(`https://user:password@catalog/...`) is refused at load, whether it comes
+from `zamboni.yml`, `ZAMBONI_URI` or `--uri`, and so is the fleet file's
+warehouse `uri` and a NATS server URL. A credential in a URL is outside the
+mode rule, which matches key names, and gets printed wherever the URL is shown.
+For the catalog it also never authenticated: PyIceberg's REST client does not
+send URL userinfo. Use `credential` or `token` instead (#211).
+
 ### Removed flags
 
 Every secret that once had a flag arrives through the environment instead:

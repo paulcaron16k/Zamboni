@@ -23,6 +23,8 @@ import duckdb
 from pyiceberg.catalog import Catalog, load_catalog
 from pyiceberg.table import Table
 
+from .urls import carries_userinfo
+
 if TYPE_CHECKING:
     from pyiceberg.io import FileIO
 
@@ -33,7 +35,10 @@ logger = logging.getLogger(__name__)
 # re-exported here so `zamboni.session.CredentialUse` keeps working. Defining it
 # here made validating a profile import PyIceberg -- the ~0.8 s still left
 # in `zamboni service-status` after the package import went lazy (ZMBNI-154).
-from .settings import CredentialUse  # noqa: E402 - re-export, see above
+from .settings import (  # noqa: E402 - CredentialUse is a re-export, see above
+    CredentialUse,
+    catalog_uri_userinfo_error,
+)
 
 
 class StorageCredentialsRequired(RuntimeError):
@@ -207,6 +212,10 @@ class CatalogSession:
         Catalog leg only — the storage FileIO has no TLS property, so the object store's trust rides
         on the container trust store / ``AWS_CA_BUNDLE``, not a setting here.
         """
+        # The backstop for a library caller, the demo and anything else that
+        # builds a session without going through the profile (ZMBNI-211).
+        if carries_userinfo(uri):
+            raise ValueError(catalog_uri_userinfo_error("uri"))
         props: dict[str, Any] = {"type": "rest", "uri": uri, "warehouse": warehouse}
         if credential:
             props["credential"] = credential

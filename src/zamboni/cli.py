@@ -83,6 +83,7 @@ from .tableconfig import (
     TableConfigError,
     TableSettings,
 )
+from .urls import carries_userinfo
 from .workdir import describe_temp_directory
 
 if TYPE_CHECKING:
@@ -182,6 +183,10 @@ def _settle(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     except settings.ProfileError as exc:
         parser.error(str(exc))
     _apply_environment(parser, args)
+    # The profile and ZAMBONI_URI were judged by `settings.resolve` above, so a
+    # URI still carrying userinfo here came from the flag (ZMBNI-211).
+    if (uri := getattr(args, "uri", None)) and carries_userinfo(uri):
+        parser.error(settings.catalog_uri_userinfo_error("--uri"))
     _apply_profile(args, args.zamboni_profile)
 
 
