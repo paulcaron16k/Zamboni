@@ -52,6 +52,16 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **An invalid compaction flag is a usage error** (#295). A value
+  `CompactionConfig` rejects -- `--min-input-files 0`,
+  `--delete-ratio-threshold 1.5`, `--sort-by` with `--sort-by-table-order` --
+  ended `plan`, `describe` and `compact` in a traceback and exit 1, after the
+  catalog was opened. Every verb that takes these flags, `maintenance`
+  included, now exits 2 before connecting, with a message naming the flag.
+- **`compact --streaming-writes` works without a table config** (#295). With
+  no `--table-config` the flag was parsed and then never read, so the run
+  bin-packed locally as if it had not been given. It has been ignored that way
+  since the flag was added.
 - **Compaction's dangling-delete count is the number remove-dangling-deletes
   then finds** (#289). `N delete file(s) now dangling` counted every position
   delete file in the table, read before anything was rewritten, so a delete

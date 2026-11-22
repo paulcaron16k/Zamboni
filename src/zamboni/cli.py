@@ -46,6 +46,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import sys
 from collections.abc import Callable, Iterator
 from dataclasses import replace
@@ -200,6 +201,7 @@ def main(argv: list[str] | None = None, *, progress: Callable[[str], None] | Non
     )
 
     _settle(parser, args)
+    _check_compaction_flags(parser, args)
     if args.verbose:
         logging.getLogger(__name__).debug(
             "profile: %s, env: %s", args.zamboni_profile.source, args.zamboni_env_file
@@ -916,7 +918,14 @@ def _count_or_off(value: str) -> int | None:
         ) from None
 
 
+#: Set on a subcommand's namespace by `_add_config_args`, so `main` knows to
+#: check its compaction flags; asking for one flag's dest would break the day
+#: that flag moved.
+_COMPACTION_FLAGS = "zamboni_compaction_flags"
+
+
 def _add_config_args(p: argparse.ArgumentParser) -> None:
+    p.set_defaults(**{_COMPACTION_FLAGS: True})
     g = p.add_argument_group("compaction")
     g.add_argument("--target-file-size-bytes", type=int)
     g.add_argument("--min-input-files", type=int, default=_DEFAULTS.min_input_files)
@@ -1382,27 +1391,54 @@ def _operational_config(args: argparse.Namespace) -> CompactionConfig:
 
 
 def _config_from(args: argparse.Namespace) -> CompactionConfig:
-    return CompactionConfig(
+    """The operational config plus the layout flags: what a run without a file uses.
+
+    Built on :func:`_operational_config` rather than beside it. Two hand-kept
+    lists of the same fields disagreed: this one never had ``streaming_writes``,
+    so ``compact --streaming-writes`` without a table config silently ignored the
+    flag from 12f6481 until #295.
+    """
+    return replace(
+        _operational_config(args),
         target_file_size_bytes=args.target_file_size_bytes,
         min_input_files=args.min_input_files,
         delete_ratio_threshold=args.delete_ratio_threshold,
         delete_file_threshold=args.delete_file_threshold,
         skip_partitions_newer_than_windows=args.skip_partitions_newer_than_windows,
-        rewrite_all=args.rewrite_all,
-        only_changed_partitions=args.only_changed_partitions,
-        partial_progress=args.partial_progress,
-        memory_mode=MemoryMode(args.memory_mode),
-        memory_budget_bytes=args.memory_budget_bytes,
-        read_ahead_bytes=args.read_ahead_bytes,
-        max_read_ahead_files=args.max_read_ahead_files,
-        temp_directory=args.temp_directory,
-        max_temp_directory_bytes=args.max_temp_directory_bytes,
         sort_by_table_order=args.sort_by_table_order,
         sort_expression=args.sort_expression,
-        branch=args.branch,
-        snapshot_operation=args.snapshot_operation,
-        dangling_delete_policy=args.dangling_delete_policy,
     )
+
+
+def _check_compaction_flags(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Exit 2 on a compaction flag ``CompactionConfig`` rejects, before any catalog opens.
+
+    The rules stay in ``CompactionConfig.__post_init__`` alone; this only asks
+    it, early. Without it the ``ValueError`` surfaced after the session was open,
+    as a traceback and exit 1, for every verb that takes these flags (#295). The
+    message names the flags as typed (``--sort-by``, not ``sort_expression``).
+    """
+    if not getattr(args, _COMPACTION_FLAGS, False):
+        return
+    try:
+        _config_from(args)
+    except ValueError as exc:
+        message = str(exc)
+        for dest, flag in _flags_by_dest(parser, args.command).items():
+            message = re.sub(rf"\b{re.escape(dest)}\b", flag, message)
+        parser.error(f"{args.command}: {message}")
+
+
+def _flags_by_dest(parser: argparse.ArgumentParser, command: str) -> dict[str, str]:
+    """Each option of subcommand ``command``, by the dest it sets, as first spelled."""
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction) and command in action.choices:
+            return {
+                a.dest: a.option_strings[0]
+                for a in action.choices[command]._actions
+                if a.option_strings
+            }
+    return {}
 
 
 def _compactor_for(session: CatalogSession, args: argparse.Namespace) -> TableCompactor:
