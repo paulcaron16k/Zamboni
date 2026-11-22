@@ -166,6 +166,16 @@ DESCRIPTIONS: dict[tuple[type, str], str] = {
         "recently closed ones. 1 if omitted; null turns the hold off. In a table's "
         "block, omitting it inherits defaults, while null or a number overrides them."
     ),
+    (tc.TableSettings, "delete_ratio_threshold"): (
+        "Rewrite a data file once deletes naming it alone remove at least this "
+        "fraction of its rows, whatever its size or min_input_files. Above 0, at "
+        "most 1; 0.3 if omitted, as in Iceberg Java."
+    ),
+    (tc.TableSettings, "delete_file_threshold"): (
+        "Rewrite a data file once at least this many delete files apply to it, "
+        "whatever its size or min_input_files. Counts partition-scoped deletes, "
+        "which the ratio cannot. 10 if omitted; null turns it off."
+    ),
     (tc.EvolutionRule, "older_than_days"): (
         "Measured from the end of the partition window, so a partition is left "
         "alone until every row it could contain is at least this old."
@@ -212,9 +222,12 @@ def _is_dataclass_type(annotation: Any) -> typing.TypeGuard[type]:
 
 
 def _scalar(annotation: Any) -> dict[str, Any] | None:
-    return {bool: {"type": "boolean"}, int: {"type": "integer"}, str: {"type": "string"}}.get(
-        annotation
-    )
+    return {
+        bool: {"type": "boolean"},
+        int: {"type": "integer"},
+        float: {"type": "number"},
+        str: {"type": "string"},
+    }.get(annotation)
 
 
 def _for_annotation(annotation: Any) -> dict[str, Any]:

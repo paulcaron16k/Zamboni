@@ -904,10 +904,41 @@ def _add_catalog_args(p: argparse.ArgumentParser) -> None:
 _DEFAULTS = CompactionConfig()
 
 
+def _count_or_off(value: str) -> int | None:
+    """A whole number, or ``off`` for the ``null`` table-config.json spells it."""
+    if value.lower() == "off":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected a whole number or 'off', got {value!r}"
+        ) from None
+
+
 def _add_config_args(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("compaction")
     g.add_argument("--target-file-size-bytes", type=int)
     g.add_argument("--min-input-files", type=int, default=_DEFAULTS.min_input_files)
+    g.add_argument(
+        "--delete-ratio-threshold",
+        type=float,
+        default=_DEFAULTS.delete_ratio_threshold,
+        help=(
+            "rewrite a file once deletes naming it alone remove this fraction of "
+            "its rows, whatever its size or --min-input-files (default %(default)s, "
+            "as in Iceberg Java; 1 selects only files deleted in full)"
+        ),
+    )
+    g.add_argument(
+        "--delete-file-threshold",
+        type=_count_or_off,
+        default=_DEFAULTS.delete_file_threshold,
+        help=(
+            "the same, once this many delete files of any scope apply to it "
+            "(default %(default)s; 'off' turns it off)"
+        ),
+    )
     g.add_argument(
         "--skip-partitions-newer-than-windows",
         type=int,
@@ -1354,6 +1385,8 @@ def _config_from(args: argparse.Namespace) -> CompactionConfig:
     return CompactionConfig(
         target_file_size_bytes=args.target_file_size_bytes,
         min_input_files=args.min_input_files,
+        delete_ratio_threshold=args.delete_ratio_threshold,
+        delete_file_threshold=args.delete_file_threshold,
         skip_partitions_newer_than_windows=args.skip_partitions_newer_than_windows,
         rewrite_all=args.rewrite_all,
         only_changed_partitions=args.only_changed_partitions,
@@ -2564,6 +2597,18 @@ def _table_config_summary(args: argparse.Namespace) -> int:
             + mark(s.target_file_size_bytes, "target_file_size_bytes", unset=_UNSET_TARGET)
             + f" bytes, at least {mark(s.min_input_files, 'min_input_files')} file(s) "
             f"per partition, {hold}"
+        )
+        count = (
+            ""
+            if s.delete_file_threshold is None
+            else ", or once "
+            + mark(s.delete_file_threshold, "delete_file_threshold")
+            + " delete files apply to it"
+        )
+        print(
+            "             and a file once deletes remove "
+            + mark(s.delete_ratio_threshold, "delete_ratio_threshold")
+            + f" of its rows{count}"
         )
 
         r = s.retention

@@ -680,6 +680,8 @@ def test_the_documented_sizing_defaults_are_the_code_defaults():
     assert set(documented) == {
         "target_file_size_bytes",
         "min_input_files",
+        "delete_ratio_threshold",
+        "delete_file_threshold",
         "skip_partitions_newer_than_windows",
     }, "the Sizing table's rows changed; update this check with them"
 
@@ -691,6 +693,8 @@ def test_the_documented_sizing_defaults_are_the_code_defaults():
     assert documented["skip_partitions_newer_than_windows"] == str(
         got.skip_partitions_newer_than_windows
     )
+    assert documented["delete_ratio_threshold"] == str(got.delete_ratio_threshold)
+    assert documented["delete_file_threshold"] == str(got.delete_file_threshold)
     assert got.target_file_size_bytes is None
     assert documented["target_file_size_bytes"].endswith(
         f"else {DEFAULT_TARGET_FILE_SIZE_BYTES // 2**20} MiB"

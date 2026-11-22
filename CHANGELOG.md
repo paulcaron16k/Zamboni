@@ -21,6 +21,35 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### Changed
+
+- **Compaction rewrites files for their deletes, not only for their size**
+  (#288). A partition left with one or two data files and a pile of position
+  deletes -- keys that moved away by upsert -- was skipped on every run as
+  `single candidate file` or `N candidate file(s) < min_input_files`, so the
+  deletes were never applied and every reader merged them. A data file is now
+  a candidate, whatever its size, when deletes naming it alone remove at least
+  `delete_ratio_threshold` of its rows (**default 0.3**), or when at least
+  `delete_file_threshold` delete files apply to it (**default 10**), and its
+  partition is rewritten whatever `min_input_files` says. Both are new
+  `table-config.json` keys, `CompactionConfig` fields and `compact` flags
+  (`--delete-ratio-threshold`, `--delete-file-threshold`). The rules are
+  Iceberg Java's `delete-ratio-threshold` and `delete-file-threshold`, and so
+  is the ratio's default, which Spark's `rewrite_data_files` has applied since
+  Iceberg 1.8.0. The count's default is not: Java leaves it off, but the ratio
+  cannot weigh partition-scoped deletes, so with it off those were still never
+  compacted. Zamboni now sends `delete-file-threshold` to Spark too.
+
+  **This changes which partitions an existing config compacts.** A table
+  with a data file that 10 or more delete files apply to, or whose file-scoped
+  deletes (deletion vectors, or Spark's file-granularity position deletes)
+  remove 30% or more of it, will see that file rewritten on the next run --
+  including files already at the target size -- and remove-dangling-deletes
+  then drops the applied deletes. Nothing is deleted that a reader still sees.
+  On Spark the count changes the selection too, since it is now sent. To keep
+  the old selection, set `delete_ratio_threshold` to `1` (only files deleted
+  in full) and `delete_file_threshold` to `null`.
+
 ### Fixed
 
 - **Compaction's dangling-delete count is the number remove-dangling-deletes

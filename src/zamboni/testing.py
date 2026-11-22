@@ -140,7 +140,11 @@ def data_file_partitions(tbl: Table) -> dict[str, tuple[int, Record]]:
 
 
 def write_position_deletes(
-    tbl: Table, deletes: dict[str, list[int]], *, name_hint: str = "sim"
+    tbl: Table,
+    deletes: dict[str, list[int]],
+    *,
+    name_hint: str = "sim",
+    file_scoped: bool = False,
 ) -> int:
     """Register position delete files covering ``deletes`` and commit them.
 
@@ -153,6 +157,11 @@ def write_position_deletes(
         deletes: data file path -> row positions to mark deleted.
         name_hint: included in the file name so a reader can tell where it came
             from.
+        file_scoped: write one delete file **per data file** instead, naming it
+            in ``referenced_data_file`` -- what a deletion vector always does,
+            and Spark's ``write.delete.granularity=file``. Only a file-scoped
+            delete says which file it deletes from without being read, so only
+            those count towards a delete ratio (#288).
 
     Returns the number of delete files written.
     """
@@ -160,15 +169,18 @@ def write_position_deletes(
         return 0
 
     partitions = data_file_partitions(tbl)
-    grouped: dict[tuple[int, Record], list[tuple[str, int]]] = {}
+    grouped: dict[tuple[int, Record, str | None], list[tuple[str, int]]] = {}
     for path, positions in deletes.items():
         spec_id, partition = partitions.get(path, (tbl.metadata.default_spec_id, Record()))
-        grouped.setdefault((spec_id, partition), []).extend((path, pos) for pos in positions)
+        key = (spec_id, partition, path if file_scoped else None)
+        grouped.setdefault(key, []).extend((path, pos) for pos in positions)
 
     snapshot_id = tbl.metadata.current_snapshot_id or 0
     written: list[DataFile] = []
 
-    for index, ((spec_id, partition), rows) in enumerate(sorted(grouped.items(), key=_group_key)):
+    for index, ((spec_id, partition, referenced), rows) in enumerate(
+        sorted(grouped.items(), key=_group_key)
+    ):
         # Ordering by (file_path, pos) is required by the spec and lets readers
         # binary-search the delete file instead of scanning it.
         rows.sort()
@@ -205,6 +217,7 @@ def write_position_deletes(
             spec_id=spec_id,
             equality_ids=None,
             key_metadata=None,
+            referenced_data_file=referenced,
         )
         delete_file.spec_id = spec_id
         written.append(delete_file)
@@ -278,14 +291,21 @@ class _CommitDeleteFiles(_OverwriteFiles):
         return added + self._existing_manifests()
 
 
-def _group_key(item: tuple[tuple[int, Record], list]) -> tuple[int, str]:
-    (spec_id, partition), _ = item
-    return spec_id, str(partition)
+def _group_key(item: tuple[tuple[int, Record, str | None], list]) -> tuple[int, str, str]:
+    (spec_id, partition, referenced), _ = item
+    return spec_id, str(partition), referenced or ""
 
 
 def add_position_deletes(
-    tbl: Table, target_path: str, positions: list[int], *, name_hint: str = "test"
+    tbl: Table,
+    target_path: str,
+    positions: list[int],
+    *,
+    name_hint: str = "test",
+    file_scoped: bool = False,
 ) -> Table:
     """Convenience wrapper: delete ``positions`` from a single data file."""
-    write_position_deletes(tbl, {target_path: positions}, name_hint=name_hint)
+    write_position_deletes(
+        tbl, {target_path: positions}, name_hint=name_hint, file_scoped=file_scoped
+    )
     return tbl

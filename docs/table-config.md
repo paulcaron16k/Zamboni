@@ -508,10 +508,33 @@ type names are not checked against a vocabulary: they belong to the writer that 
 |---|---|---|
 | `target_file_size_bytes` | table property, else 128 MiB | Falls back to `write.parquet.target-file-size-bytes`, then `write.target-file-size-bytes` |
 | `min_input_files` | 2 | A partition is only compacted with at least this many candidates |
+| `delete_ratio_threshold` | 0.3 | Rewrite a data file once the deletes naming it alone remove at least this fraction of its rows, whatever its size, and its partition whatever `min_input_files` says. Above 0, at most 1. See [Deletes](#deletes) |
+| `delete_file_threshold` | 10 | The same, once at least this many delete files of any scope apply to one data file. `null` turns it off |
 | `skip_partitions_newer_than_windows` | 1 | Hold the open partition window plus this many recently closed ones, so compaction does not rewrite data a loader is still writing (which inflates every later copy-on-write update). Temporal partitions only. `null` turns the hold off. Up to 0.6.1 a config that left this key out got no hold at all (#216) |
 
 A table block inherits each of these from `defaults` unless it contains the key, like every
 other key; see [Inheritance](#inheritance).
+
+### Deletes
+
+A merge-on-read writer (Spark, Trino, Flink) deletes or updates a row by writing a delete file
+beside the data, and every reader merges the two until the data file is rewritten. Where keys
+move between partitions by upsert, a partition can end up with one or two data files and a
+growing pile of deletes: too few files to count as fragmented, so before #288 compaction
+skipped it on every run and the deletes were never applied. A data file is now a candidate when
+its deletes cross either threshold, and its partition is rewritten even if that one file is all
+there is. The rewrite applies the deletes; remove-dangling-deletes, which runs straight after
+compaction, then drops them.
+
+The rules are Iceberg Java's `delete-ratio-threshold` and `delete-file-threshold`, and so is the
+0.3 ratio. The ratio counts only *file-scoped* deletes, which name the one data file they apply
+to: deletion vectors, and position deletes written at file granularity (Spark's default since
+Iceberg 1.8). A partition-scoped delete file covers several data files, and how many of its
+rows fall in each is known only by reading it, so it counts towards `delete_file_threshold` but
+not the ratio. That is why the count is **on** at 10 here where Java leaves it off: with it
+off, a table whose writer produces partition-scoped deletes is never compacted for them. Zamboni
+passes it to Spark's `rewrite_data_files`, so the two engines still choose the same files.
+Trino's `optimize` takes neither setting: it rewrites every file that has a delete attached.
 
 ---
 

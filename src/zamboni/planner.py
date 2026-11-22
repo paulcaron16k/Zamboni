@@ -11,6 +11,15 @@ that extension as an oracle.
 One deliberate divergence: the native planner *refuses* a table whose files span
 multiple partition specs. We split by spec instead, so each group holds a single
 ``(spec_id, partition tuple)`` and can be rewritten without mixing specs.
+
+Delete files are the other half of a file's case for rewriting (#288), and there
+the rules are Iceberg Java's ``BinPackRewriteFilePlanner``, which duckdb-iceberg
+does not have: a file whose deletes cross ``delete_ratio_threshold`` or
+``delete_file_threshold`` is a candidate whatever its size, and its partition is
+rewritten whatever ``min_input_files`` says. Without them a partition whose rows
+had all moved away by upsert -- one data file, a pile of position deletes -- was
+"a single candidate file" on every run, and every reader merged the deletes for
+good.
 """
 
 from __future__ import annotations
@@ -48,11 +57,18 @@ class FileGroup:
     def paths(self) -> list[str]:
         return [f.path for f in self.files]
 
+    @property
+    def delete_files(self) -> int:
+        """Distinct delete files applying to this group's files."""
+        return len({d.file_path for f in self.files for d in f.deletes})
+
     def describe(self) -> str:
         part = _partition_label(self.partition)
+        deletes = f" deletes={self.delete_files}" if self.delete_files else ""
         return (
             f"spec={self.spec_id} partition={part} "
             f"files={len(self.files)} bytes={self.input_bytes} rows={self.input_records}"
+            f"{deletes}"
         )
 
 
@@ -114,7 +130,7 @@ class CompactionPlanner:
 
         buckets: dict[tuple[int, Record], list[LiveFile]] = {}
         for live in profile.live_files:
-            if not self._config.rewrite_all and live.size_bytes >= target:
+            if not self._config.rewrite_all and live.size_bytes >= target and not self._heavy(live):
                 continue
             buckets.setdefault((live.spec_id, live.partition), []).append(live)
 
@@ -166,9 +182,26 @@ class CompactionPlanner:
 
         return plan
 
+    def _heavy(self, live: LiveFile) -> bool:
+        """Whether ``live`` is worth rewriting for its deletes alone.
+
+        Java's ``tooHighDeleteRatio`` and ``tooManyDeletes``, which is also why
+        the ratio is inclusive: ``deleteRatio >= deleteRatioThreshold``.
+        """
+        if not live.deletes:
+            return False
+        threshold = self._config.delete_file_threshold
+        return live.deleted_fraction >= self._config.delete_ratio_threshold or (
+            threshold is not None and len(live.deletes) >= threshold
+        )
+
     def _too_few(self, files: list[LiveFile]) -> str | None:
         """Why this partition has too little to rewrite, or ``None``."""
         if self._config.rewrite_all:
+            return None
+        if any(self._heavy(f) for f in files):
+            # Rewriting even one file applies its deletes, which is the point:
+            # the file-count rules below measure fragmentation, not this.
             return None
         if len(files) < self._config.min_input_files:
             return (

@@ -266,6 +266,17 @@
         "min_input_files": {
           "type": "integer"
         },
+        "delete_ratio_threshold": {
+          "type": "number",
+          "description": "Rewrite a data file once deletes naming it alone remove at least this fraction of its rows, whatever its size or min_input_files. Above 0, at most 1; 0.3 if omitted, as in Iceberg Java."
+        },
+        "delete_file_threshold": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Rewrite a data file once at least this many delete files apply to it, whatever its size or min_input_files. Counts partition-scoped deletes, which the ratio cannot. 10 if omitted; null turns it off."
+        },
         "skip_partitions_newer_than_windows": {
           "type": [
             "integer",
@@ -578,6 +589,17 @@
                 },
                 "min_input_files": {
                   "type": "integer"
+                },
+                "delete_ratio_threshold": {
+                  "type": "number",
+                  "description": "Rewrite a data file once deletes naming it alone remove at least this fraction of its rows, whatever its size or min_input_files. Above 0, at most 1; 0.3 if omitted, as in Iceberg Java."
+                },
+                "delete_file_threshold": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "description": "Rewrite a data file once at least this many delete files apply to it, whatever its size or min_input_files. Counts partition-scoped deletes, which the ratio cannot. 10 if omitted; null turns it off."
                 },
                 "skip_partitions_newer_than_windows": {
                   "type": [
