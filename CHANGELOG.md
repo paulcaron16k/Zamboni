@@ -52,6 +52,14 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **The sdist contains only what rebuilds the wheel** (#212). It was the
+  working tree minus `.gitignore`, so a local `uv build` shipped untracked
+  files -- `todo.txt` and `.claude/settings.local.json` among them. It is now
+  an allow-list: the package, the demo inputs, `README.md`, `LICENSE` and
+  `CHANGELOG.md`. Published sdists were not affected, since the release builds
+  from a clean checkout of the tag. Tests, docs and examples are no longer in
+  the sdist; a clone of the tag has them.
+
 - **An invalid compaction flag is a usage error** (#295). A value
   `CompactionConfig` rejects -- `--min-input-files 0`,
   `--delete-ratio-threshold 1.5`, `--sort-by` with `--sort-by-table-order` --
