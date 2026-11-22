@@ -23,6 +23,15 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **Compaction's dangling-delete count is the number remove-dangling-deletes
+  then finds** (#289). `N delete file(s) now dangling` counted every position
+  delete file in the table, read before anything was rewritten, so a delete
+  still applying to a partition the run skipped was reported as dangling, and
+  the next phase disagreed (`6 delete file(s), 0 dangling`). It now asks the
+  same question remove-dangling-deletes does, through the same function. On a
+  preview it is what the planned rewrite would leave dangling, and
+  `dangling_delete_files` in `--json` changes the same way.
+
 - **Partition evolution no longer waits for a write that a quiet table never
   makes** (#217). A partition becomes old enough to condense on a date, but
   maintenance skipped compaction, which runs evolution, whenever nothing had

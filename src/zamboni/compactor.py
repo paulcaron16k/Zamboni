@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import itertools
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Set
 from dataclasses import dataclass, field, replace
 
 from pyiceberg.manifest import DataFile
@@ -21,6 +21,7 @@ from .config import (
     orders_by_declared_order,
     resolve_target_file_size,
 )
+from .deletes import find_dangling
 from .evolution import EvolutionPlan, MultiSpecReplaceFiles, ensure_specs, plan_evolution
 from .health import COMPACT_INCOMPLETE, EVOLUTION_RELEASE
 from .planner import CompactionPlan, CompactionPlanner, FileGroup
@@ -258,7 +259,6 @@ class TableCompactor:
                 f"declared sort order {declared.order_id} not applied: the local engine "
                 "renders identity transforms only, so this rewrite is unordered"
             )
-        result.dangling_delete_files = profile.position_delete_files
 
         blockers = profile.blockers
         if profile.position_delete_files and self._config.dangling_delete_policy == "block":
@@ -305,8 +305,12 @@ class TableCompactor:
             for planned in (*result.evolved, *result.groups):
                 result.rewritten_data_files += planned.rewritten_data_files
                 result.rewritten_bytes += planned.rewritten_bytes
+            planned_paths = {f.path for g in evolution_plan.groups for f in g.files}
+            planned_paths |= {f.path for g in plan.groups for f in g.files}
+            result.dangling_delete_files = _dangling(tbl, profile, planned_paths)
             return result
         if plan.is_empty and evolution_plan.is_empty:
+            result.dangling_delete_files = _dangling(tbl, profile)
             return result
 
         # Adding a partition spec is a metadata update that leaves
@@ -336,6 +340,7 @@ class TableCompactor:
             self._run_incrementally(tbl, evolution_plan, plan, result, proceed)
         else:
             self._run_atomically(tbl, evolution_plan, plan, result, proceed)
+        result.dangling_delete_files = _dangling(self._session.table(self._identifier), profile)
         return result
 
     # -- the two commit strategies ---------------------------------------
@@ -607,6 +612,23 @@ def _never() -> bool:
 
 def _quiet(note: str) -> None:
     pass
+
+
+def _dangling(tbl, profile: TableProfile, rewritten: Set[str] = frozenset()) -> int:
+    """Delete files no live data file needs once ``rewritten`` is replaced.
+
+    The question remove-dangling-deletes asks, through the same function
+    (:func:`~zamboni.deletes.find_dangling`), so the two cannot disagree. It
+    used to be ``profile.position_delete_files``: every delete file in the
+    table, counted before anything was rewritten, so one still applying to a
+    partition this run skipped was reported as dangling (#289).
+
+    Costs a manifest read, so it is asked only of a table with delete files.
+    After a commit, ask with ``tbl`` loaded fresh and nothing in ``rewritten``.
+    """
+    if not (profile.position_delete_files or profile.equality_delete_files):
+        return 0
+    return find_dangling(tbl, assuming_rewritten=rewritten).dangling_files
 
 
 def _left_for_later(*, held: int, remaining: int, release_at: str | None) -> dict[str, str]:

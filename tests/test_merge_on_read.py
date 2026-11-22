@@ -65,3 +65,49 @@ def test_block_policy_refuses_a_mor_table(session, mor_table):
     config = CompactionConfig(dangling_delete_policy="block")
     with pytest.raises(CompactionBlocked, match="dangling-delete-files"):
         TableCompactor(session, "db.mor", config).execute()
+
+
+# -- compaction counts only what it left dangling (#289) -----------------------
+
+
+@pytest.fixture
+def partly_compacted(session, partitioned):
+    """Partitions a and b compact (4 files each); c is one file and is skipped.
+
+    One position delete on a file in each. After compaction the deletes on a
+    and b no longer apply to anything; c's still applies to its file.
+    """
+    from tests.conftest import add_position_deletes, batch
+
+    partitioned.append(batch(900, 10, "c"))
+    tbl = session.catalog.load_table("db.partitioned")
+    for category in ("a", "b", "c"):
+        target = sorted(
+            t.file.file_path for t in tbl.scan(row_filter=f"category == '{category}'").plan_files()
+        )[0]
+        add_position_deletes(tbl, target, [0])
+        tbl = session.catalog.load_table("db.partitioned")
+    assert profile_table(tbl).position_delete_files == 3
+    return tbl
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["commit", "dry-run"])
+def test_compaction_counts_only_the_deletes_it_left_dangling(session, partly_compacted, dry_run):
+    """The count agrees with what remove-dangling-deletes then finds.
+
+    Before #289 it was every position delete file in the table, read before
+    anything was rewritten, so a delete still applying to a partition
+    compaction skipped was reported as dangling.
+    """
+    from zamboni.deletes import find_dangling
+
+    result = TableCompactor(session, "db.partitioned", CompactionConfig()).execute(dry_run=dry_run)
+
+    assert result.rewritten_data_files == 8, "precondition: a and b compacted, c left alone"
+    if dry_run:
+        # What a commit would leave: the same table compacted for real.
+        TableCompactor(session, "db.partitioned", CompactionConfig()).execute()
+    expected = find_dangling(session.table("db.partitioned")).dangling_files
+    assert expected == 2, "precondition: a's and b's deletes dangle, c's still applies"
+    assert result.dangling_delete_files == expected
+    assert f"{expected} delete file(s) now dangling" in result.describe()
