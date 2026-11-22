@@ -230,6 +230,11 @@ dev = [
     # against the dev stack's Postgres. Test-only on purpose: the reference
     # proves the §6.1 schema, and a deployment brings its own driver and store.
     "psycopg[binary]>=3.2",
+    # Builds the sdist and both wheels in-process in tests/test_packaging.py
+    # (ZMBNI-212), so that test needs no network and no `uv build` subprocess.
+    # The floor is the version that test was first run against; the release
+    # build itself still takes the build-system's unpinned `hatchling`.
+    "hatchling>=1.33",
 ]
 
 [tool.uv.sources]
@@ -280,6 +285,36 @@ packages = ["src/zamboni"]
 "data/healthims/day3" = "zamboni/demo/data/day3"
 "data/healthims/day4" = "zamboni/demo/data/day4"
 "data/healthims/day5" = "zamboni/demo/data/day5"
+
+# What an sdist contains: an allow-list, not hatchling's default of "the tree
+# minus .gitignore". The default put `foo`, `todo.txt`, two pyiceberg.yaml
+# samples and `.claude/settings.local.json` into a local `uv build` on
+# 2026-10-16 (ZMBNI-212) -- an untracked file is exactly where a credential
+# lives, and an exclude list only names the leaks someone has already thought of.
+#
+# The sdist's job is to rebuild the wheel, so it carries the wheel's inputs and
+# no more: the package, the demo inputs force-included above (path by path, for
+# the same reason), and the metadata files. Not tests, docs or examples: the
+# suite reads `docs/`, `examples/` and `dev-stack/` and runs against live
+# services, so a partial copy would be a suite that fails, not one that checks.
+# `pyproject.toml` and PKG-INFO are written by hatchling regardless.
+#
+# Untracked files *inside* these paths would still ship; that is what
+# tests/test_packaging.py checks, against `git ls-files`.
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "src/zamboni",
+    "data/healthims/table_schema.json",
+    "data/healthims/table-config.json",
+    "data/healthims/day1",
+    "data/healthims/day2",
+    "data/healthims/day3",
+    "data/healthims/day4",
+    "data/healthims/day5",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
