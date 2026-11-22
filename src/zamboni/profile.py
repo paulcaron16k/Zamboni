@@ -92,7 +92,11 @@ def _referenced_data_file_path(delete_file: DataFile) -> str | None:
 
     if delete_file.content != DataFileContent.POSITION_DELETES:
         return None
-    return delete_file.referenced_data_file or referenced(delete_file)
+    # Stock PyIceberg 0.12.0's DataFile has no referenced_data_file property
+    # (the maintenance fork adds it), and its index files a delete by the path
+    # bounds alone -- so asking with getattr gives the answer the installed
+    # index gives, on either build.
+    return getattr(delete_file, "referenced_data_file", None) or referenced(delete_file)
 
 
 @dataclass

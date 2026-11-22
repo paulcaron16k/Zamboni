@@ -158,8 +158,11 @@ def write_position_deletes(
         name_hint: included in the file name so a reader can tell where it came
             from.
         file_scoped: write one delete file **per data file** instead, naming it
-            in ``referenced_data_file`` -- what a deletion vector always does,
-            and Spark's ``write.delete.granularity=file``. Only a file-scoped
+            in ``referenced_data_file`` and in equal ``file_path`` bounds --
+            what a deletion vector always does, and Spark's
+            ``write.delete.granularity=file``. Both, because stock PyIceberg
+            0.12.0 reads only the bounds: its ``DataFile`` has no
+            ``referenced_data_file`` property, which the fork adds. Only a file-scoped
             delete says which file it deletes from without being read, so only
             those count towards a delete ratio (#288).
 
@@ -198,6 +201,12 @@ def write_position_deletes(
         ):
             writer.write_table(table)
 
+        # Equal bounds on the file_path column are how a reader without
+        # referenced_data_file tells the delete names one file: stock
+        # PyIceberg 0.12.0's DeleteFileIndex.add_delete_file files it by them
+        # alone (delete_file_index._referenced_data_file_path).
+        path_bound = {DELETE_FILE_PATH_FIELD_ID: referenced.encode()} if referenced else None
+
         # spec_id is deliberately not stored in the manifest entry -- the reader
         # derives it from the manifest. from_args therefore does not set the
         # backing attribute, so assign it explicitly for our own grouping below.
@@ -218,6 +227,8 @@ def write_position_deletes(
             equality_ids=None,
             key_metadata=None,
             referenced_data_file=referenced,
+            lower_bounds=path_bound,
+            upper_bounds=path_bound,
         )
         delete_file.spec_id = spec_id
         written.append(delete_file)
