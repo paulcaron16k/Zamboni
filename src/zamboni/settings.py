@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from .events.nats import NatsConfigError, NatsSettings
+from .urls import carries_userinfo
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +228,31 @@ class CredentialUse(StrEnum):
 
 class ProfileError(ValueError):
     """The profile is unusable. Raised at load, never mid-run."""
+
+
+def catalog_uri_userinfo_error(where: str) -> str:
+    """The refusal for a catalog URI with ``user:password@`` in it (ZMBNI-211).
+
+    Shared by every place the catalog URI enters -- ``zamboni.yml``,
+    ``ZAMBONI_URI``, ``--uri`` and :meth:`CatalogSession.lakekeeper_properties`
+    -- so they say the same thing. ``where`` names the source to correct. The
+    URI itself is never echoed: the part that matters is the secret.
+
+    Refused rather than supported because the credentials never authenticate.
+    PyIceberg's REST client does not send URL userinfo: measured 2026-10-16 on
+    stock 0.12.0, and again 2026-11-22 on the maintenance fork (0.12.0,
+    dfdcc4d), a `RestCatalog` with ``uri="http://alice:pw@127.0.0.1:PORT/catalog"``
+    sent ``GET /catalog/v1/config`` with ``Authorization: Bearer None``. The only
+    effects were the password printed in ``repr(Profile)`` and kept outside the
+    ``.env`` mode rule, which matches key names. The fleet file's ``uri`` and
+    the NATS ``servers`` refuse it for the same reason (ZMBNI-194).
+    """
+    return (
+        f"{where}: the catalog URI has credentials written into it, and the REST "
+        "catalog would not send them. Put them in zamboni.yml's 'credential' "
+        "(client_id:client_secret) or 'token', or in ZAMBONI_CREDENTIAL / "
+        "ZAMBONI_TOKEN in .env, and remove them from the URI."
+    )
 
 
 @dataclass(frozen=True)
@@ -660,6 +686,9 @@ def load_profile(path: Path | None) -> Profile:
         raise ProfileError(f"{path}: 'nats' must be a block of settings")
     nats = _nats(nats_block, source=path)
 
+    if isinstance(raw.get("uri"), str) and carries_userinfo(raw["uri"]):
+        raise ProfileError(catalog_uri_userinfo_error(f"{path}: uri"))
+
     # Once it holds a secret it is a credential file, and gets `.env`'s mode
     # rule. Checked after parsing so a malformed profile fails on its contents
     # rather than on its permissions.
@@ -727,6 +756,10 @@ def _nats(block: dict[str, Any], *, source: Path | None) -> NatsSettings | None:
 
 def _from_environment(*, source: Path | None) -> Profile:
     root = os.environ.get("ZAMBONI_ROOT")
+    # Read on every load, with or without a profile, and after `.env` is
+    # applied -- so this is where ZAMBONI_URI is judged, whichever file set it.
+    if (uri := os.environ.get("ZAMBONI_URI")) and carries_userinfo(uri):
+        raise ProfileError(catalog_uri_userinfo_error("ZAMBONI_URI"))
     return Profile(
         uri=os.environ.get("ZAMBONI_URI"),
         warehouse=os.environ.get("ZAMBONI_WAREHOUSE"),

@@ -21,6 +21,22 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ## [Unreleased]
 
+### BREAKING
+
+- **A catalog URI with credentials in it is refused** (#211). A `uri` like
+  `https://user:password@catalog/catalog` in `zamboni.yml`, `ZAMBONI_URI`
+  (including from `.env`) or `--uri` now stops the run with exit 2 before
+  anything connects, and so does passing one to
+  `CatalogSession.for_lakekeeper`. It never authenticated: PyIceberg's REST
+  client sends no URL userinfo (measured on 0.12.0 and on the maintenance
+  fork). Its only effects were printing the password in `repr(Profile)` and
+  keeping it outside the `.env` mode check. The setups this breaks are those
+  that authenticated with `credential` or `token` *and* also had userinfo in
+  the URI. **What to do:** delete the userinfo from the URI, and put the
+  credential in `credential` / `token` in `zamboni.yml`, or `ZAMBONI_CREDENTIAL` /
+  `ZAMBONI_TOKEN` in `.env`. The fleet file's `uri` and NATS URLs have refused
+  this since 0.6.0 (ZMBNI-194).
+
 ### Changed
 
 - **Compaction rewrites files for their deletes, not only for their size**
