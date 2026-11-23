@@ -15,11 +15,21 @@ numbers here are applied to that record as data -- a mapping with
 nothing from the engine, and the service process that evaluates it stays light
 (#154). The measuring happens in a worker.
 
-**Equality deletes make a table ineligible**, not merely uncounted. Compaction
-refuses a table carrying them (ZMBNI-11), so a trigger that fired on one would
-be refused and fire again every check. And the summary's ``total-delete-files``
-counts equality and position delete *files* together, so "count only position
-delete files" cannot be read from it.
+**Equality deletes make a table ineligible unless the engine both compacts
+them and removes their files.** The local engine refuses a table carrying them
+while PyIceberg cannot read them (ZMBNI-11), so a trigger that fired on one
+would be refused and fire again every check. Spark applies them but keeps the
+files, so the table still reports its delete files after a successful
+compaction and would be offered again every check just the same. Trino does
+both, so there such a table is as eligible as any other (#300). Which engine,
+this module cannot know: it is told, by the health record's
+``equality_deletes_eligible``, which the worker took from the engine's
+declarations. A record that does not say -- an application's own entry, say --
+reads as "not eligible", the old rule. An unreported count stays ineligible on
+every engine, because a table the summary says nothing about might be one the
+engine refuses. And the summary's ``total-delete-files`` counts equality and
+position delete *files* together, so "count only position delete files" cannot
+be read from it.
 
 **The defaults are chosen starting values, not measurements** (Paul,
 2026-10-08): on, at 10 delete files, a delete-file ratio of 0.10, or a
@@ -113,20 +123,27 @@ class PressureSettings:
             raise ValueError(f"pressure: unknown key(s) {unknown}; allowed: {sorted(cls.keys())}")
         return replace(start, **value)
 
-    def triggered(self, health: Mapping[str, Any]) -> str | None:
+    def triggered(
+        self, health: Mapping[str, Any], *, equality_deletes_eligible: bool = False
+    ) -> str | None:
         """Why this table is over a threshold, or ``None``.
 
         ``health`` is a health record: TableHealth's fields, as data. A counter
         the summary did not report is ``None`` and meets no threshold -- "not
         reported" is not "zero", and neither is it "over".
+        ``equality_deletes_eligible`` is the record's own answer for the engine
+        that would run the offer; the default is the safe one.
         """
         delete_files = health.get("delete_files")
         if not delete_files:  # copy-on-write, a table without deletes, or unreported
             return None
         equality = health.get("equality_deletes")
-        if equality is None or equality > 0:
-            # Compaction refuses equality deletes; and unreported, they might be
-            # there. Either way an offer would only be refused.
+        if equality is None:
+            # Unreported, they might be there, and the engine might refuse them.
+            return None
+        if equality > 0 and not equality_deletes_eligible:
+            # This engine refuses them, or keeps their files: either way the
+            # next check would find the table as it is now and offer it again.
             return None
         if self.delete_files is not None and delete_files >= self.delete_files:
             return f"{delete_files} delete files (threshold {self.delete_files})"

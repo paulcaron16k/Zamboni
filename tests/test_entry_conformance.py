@@ -50,6 +50,12 @@ def commits_anyway(item: WorkItem, context: WorkerContext) -> dict[str, Any]:
     return run_cli(dataclasses.replace(item, commit=True), context)
 
 
+def says_true_as_a_string(check: PressureCheck, context: WorkerContext) -> dict[str, Any]:
+    """Breaks rule 3 (#300): the runtime reads only the boolean, so this entry
+    would mean "not eligible" while appearing to say the opposite."""
+    return run_health(check, context) | {"equality_deletes_eligible": "true"}
+
+
 def bare_exit_code(item: WorkItem, context: WorkerContext) -> dict[str, Any]:
     """Breaks rule 3: an exit code, but not the record ``maintenance --json`` writes."""
     run_table(item, context)
@@ -201,6 +207,14 @@ def test_a_claim_store_suite_does_not_load_the_worker_pool():
 @pytest.mark.parametrize("check", HEALTH_ENTRY_CHECKS, ids=lambda c: c.__name__)
 def test_the_default_health_entry_passes(harness, check):
     check(harness)
+
+
+def test_a_health_entry_saying_true_as_a_string_is_refused(harness):
+    broken = dataclasses.replace(
+        harness, health_entry="tests.test_entry_conformance:says_true_as_a_string"
+    )
+    with pytest.raises(ConformanceError, match="rule 3: equality_deletes_eligible must be"):
+        check_health_entry_returns_a_health_record(broken)
 
 
 def test_the_health_suite_runs_every_check(harness, monkeypatch):

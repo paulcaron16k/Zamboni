@@ -597,6 +597,99 @@ def test_trino_compaction_actually_compacts(trino_env, session, trino_table):
     assert tbl.scan().to_arrow().num_rows == 12, "compaction changed the data"
 
 
+#: Rows the equality-delete tests remove from the six-file fixture's ids 0..11.
+EQUALITY_DELETED = {3, 7}
+
+
+def physically_live(session, identifier) -> list[int]:
+    """Each live data file's own record count -- what is in the files, not what
+    a reader shows after applying deletes. PyIceberg cannot scan a table that
+    still carries equality deletes, but it can list its files."""
+    files = session.table(identifier).inspect.files().to_pylist()
+    return [f["record_count"] for f in files if f["content"] == 0]
+
+
+def equality_delete_signals(session, identifier) -> tuple[int | None, int | None]:
+    """What a pressure check reads afterwards: the summary's delete-file and
+    equality-delete counts, through the same `table_health` the check uses."""
+    from zamboni.health import table_health
+
+    health = table_health(session.table(identifier))
+    return health.delete_files, health.equality_deletes
+
+
+@pytest.mark.trino
+def test_trino_compaction_applies_equality_deletes(trino_env, session, trino_table):
+    """#300: Trino's `compacts_equality_deletes` and `clears_equality_deletes`
+    rest on this.
+
+    Three things, because each alone proves less than it looks: the engine
+    reads the deleted rows as gone before and after (no resurrection); the
+    rewritten data file physically holds only the survivors, so the deletes
+    were applied by the rewrite rather than still masking it; and the table
+    reports no delete files after, so a pressure check sees it relieved.
+    """
+    from zamboni.maintainers import Operation
+    from zamboni.testing import write_equality_deletes
+
+    write_equality_deletes(session.table(trino_table), {"id": sorted(EQUALITY_DELETED)})
+    engine = maintainer(trino_env, session)
+    namespace, name = trino_table.split(".")
+
+    def ids() -> list[int]:
+        with engine.connect() as connection:
+            cursor = connection.cursor()
+            cursor.execute(f'SELECT id FROM "iceberg"."{namespace}"."{name}"')
+            return sorted(row[0] for row in cursor.fetchall())
+
+    survivors = sorted(set(range(12)) - EQUALITY_DELETED)
+    assert ids() == survivors, "Trino does not read the simulated delete: this proves nothing"
+
+    engine.execute(Operation.COMPACT, trino_table, request=live_request(), dry_run=False)
+
+    assert ids() == survivors, "compaction resurrected deleted rows"
+    assert physically_live(session, trino_table) == [len(survivors)]
+    assert equality_delete_signals(session, trino_table) == (0, 0), (
+        "the delete files outlived the rewrite: clears_equality_deletes is wrong for Trino"
+    )
+
+
+@pytest.mark.trino
+def test_trino_clears_equality_deletes_on_a_one_file_table(trino_env, session, request):
+    """The shape trinodb/trino#25952 reports OPTIMIZE leaving delete files
+    behind on: a data file alone in its partition, which OPTIMIZE may skip.
+    A small CDC table is often exactly one file, and a delete file left there
+    would have a pressure check offer it at every interval. Not reproduced on
+    the dev stack's Trino: the file is rewritten and the delete file goes."""
+    from zamboni.maintainers import Operation
+    from zamboni.testing import write_equality_deletes
+
+    namespace = f"zt300_{uuid.uuid4().hex[:8]}"
+    session.catalog.create_namespace(namespace)
+    request.addfinalizer(lambda: _drop_namespace(session, namespace))
+    identifier = f"{namespace}.events"
+    tbl = session.catalog.create_table(
+        identifier, schema=SCHEMA, properties={"format-version": "2"}
+    )
+    tbl.append(
+        pa.table(
+            {
+                "id": pa.array(range(6), type=pa.int32()),
+                "category": pa.array(["a"] * 6, type=pa.string()),
+            },
+            schema=ARROW,
+        )
+    )
+    write_equality_deletes(session.table(identifier), {"id": [1, 2]})
+
+    maintainer(trino_env, session).execute(
+        Operation.COMPACT, identifier, request=live_request(), dry_run=False
+    )
+
+    assert physically_live(session, identifier) == [4], "the one file was not rewritten"
+    assert equality_delete_signals(session, identifier) == (0, 0)
+
+
 @pytest.mark.trino
 def test_trino_enforces_the_retention_floor_we_validate_against(trino_env, session, trino_table):
     """Pins the premise of TrinoMaintainer.validate(). If a deployment lowers
@@ -752,6 +845,46 @@ def test_spark_compaction_actually_compacts(spark_env, session, spark_table):
     tbl = session.table(spark_table)
     assert len(tbl.inspect.files().to_pylist()) == 1
     assert tbl.scan().to_arrow().num_rows == 12, "compaction changed the data"
+
+
+@pytest.mark.spark
+def test_spark_compaction_applies_equality_deletes(spark_env, session, spark_table):
+    """#300: Spark's half of test_trino_compaction_applies_equality_deletes,
+    with the opposite answer on the last of its three checks.
+
+    Spark applies the deletes and keeps the delete file, even with
+    `remove-dangling-deletes` on, so the table still reports it and a pressure
+    check would read the relieved table as still under pressure. That is why
+    Spark declares `clears_equality_deletes=False`; the assertion pins it, so
+    a Spark that starts removing them fails here and the declaration can flip.
+
+    `delete_file_threshold=1` so the files are chosen for their deletes and
+    not only for their size: Iceberg's default threshold is Integer.MAX_VALUE.
+    """
+    from zamboni.config import CompactionConfig
+    from zamboni.maintainers import Operation
+    from zamboni.testing import write_equality_deletes
+
+    write_equality_deletes(session.table(spark_table), {"id": sorted(EQUALITY_DELETED)})
+    engine = spark_maintainer(spark_env, session)
+    spark = engine.connect()
+
+    def ids() -> list[int]:
+        return sorted(
+            row[0] for row in spark.sql(f"SELECT id FROM iceberg.{spark_table}").collect()
+        )
+
+    survivors = sorted(set(range(12)) - EQUALITY_DELETED)
+    assert ids() == survivors, "Spark does not read the simulated delete: this proves nothing"
+
+    request = spark_request(compaction=CompactionConfig(delete_file_threshold=1))
+    engine.execute(Operation.COMPACT, spark_table, request=request, dry_run=False)
+
+    assert ids() == survivors, "compaction resurrected deleted rows"
+    assert physically_live(session, spark_table) == [len(survivors)]
+    assert equality_delete_signals(session, spark_table) == (1, len(EQUALITY_DELETED)), (
+        "Spark now removes the delete file: clears_equality_deletes can become True"
+    )
 
 
 @pytest.mark.spark

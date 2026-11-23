@@ -192,6 +192,18 @@ class TrinoMaintainer(Maintainer):
             # `file_size_threshold` selects inputs rather than sizing outputs.
             # Partition evolution has no procedure at all.
             layout=frozenset({LayoutFeature.SORT}),
+            # OPTIMIZE reads through the connector, which applies equality
+            # deletes, writes the surviving rows, and drops the delete files
+            # that no longer apply to anything. Run, not read, on Trino 483:
+            # test_trino_compaction_applies_equality_deletes. Two upstream
+            # defects bear on it, neither on what Zamboni sends:
+            # trinodb/trino#31399 drops an equality delete from a scan by a
+            # *query predicate* on a non-key column (our OPTIMIZE has no WHERE),
+            # and trinodb/trino#25952 reports OPTIMIZE leaving them behind
+            # when it skips a data file that is alone in its partition -- not
+            # reproduced: test_trino_clears_equality_deletes_on_a_one_file_table.
+            compacts_equality_deletes=True,
+            clears_equality_deletes=True,
             operations={
                 Operation.COMPACT: OperationSupport(
                     Operation.COMPACT,

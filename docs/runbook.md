@@ -272,7 +272,8 @@ memory section of [user_guide.md](user_guide.md).
 **Exit 3 on a table that used to work.** Something started writing equality
 deletes to it — usually a Flink or merge-on-read pipeline. PyIceberg cannot read
 them, so the table is refused rather than compacted into something that
-resurrects deleted rows.
+resurrects deleted rows. The Trino and Spark engines compact such a table
+(`--engine`, or `engine:` in `zamboni.yml`).
 
 **Exit 3 naming `max_temp_directory_bytes`.** A rewrite group needed more spill
 than the cap allows, and the cap refused it rather than let it fill the disk. On

@@ -61,6 +61,7 @@ decided by one row of this table.
 | Snapshot expiry | yes | yes³ | yes³ |
 | Orphan-file removal | yes⁴ | yes⁵ | yes⁵ ⁶ |
 | Dangling-delete removal | partial⁷ | **no**⁸ | yes |
+| Compact a table carrying equality deletes | **no**¹¹ | yes | yes¹² |
 | Manifest rewriting | yes | yes⁹ | yes |
 | Metadata retention properties | yes | yes¹⁰ | yes |
 | Preview before committing (no `--yes`) | **every operation** | none | orphans only |
@@ -76,6 +77,13 @@ to 7 days, Spark's 24 hours is hard-coded. ⁶ Lists through Hadoop S3A, so it
 needs its own credentials — see [Mode 4](#mode-4-spark-from-cron). ⁷ Drops whole
 delete manifests only. ⁸ No procedure and no side effect achieves it; run this
 one elsewhere. ⁹ No size control. ¹⁰ Translated to Trino's own property names.
+¹¹ PyIceberg cannot read them, so the table is refused (exit 3) rather than
+compacted into one that resurrects deleted rows; the refusal lifts on its own
+when a PyIceberg build can. ¹² Applies them but keeps the delete files, so the
+table still reports them afterwards; `zamboni serve`'s pressure check therefore
+offers such a table to Trino and not to Spark (#300). Both measured on the dev
+stack (`test_trino_compaction_applies_equality_deletes`,
+`test_spark_compaction_applies_equality_deletes`).
 
 `zamboni engines` prints this from the code, with the reason attached to every
 limitation. **When this table and that command disagree, the command is right** —
@@ -91,6 +99,7 @@ $ zamboni engines
         filter on any other column reads every file in every surviving partition
   ...
   layout: sort
+  equality deletes: applied by compaction, which removes their files
 ```
 
 That `layout:` line is what `zamboni table-config summary` consults when it
@@ -1702,7 +1711,8 @@ deleting every live file. Expiry answers to the clock, not to writes.
 - **Equality deletes block compaction.** PyIceberg cannot read them, so a table
   carrying them is refused rather than compacted into something that resurrects
   deleted rows. Merge-on-read tables written by Flink are the usual source. This
-  is a refusal, not a failure — exit code 3.
+  is a refusal, not a failure — exit code 3. The Trino and Spark engines compact
+  such tables; see [what each engine can do](#what-each-engine-can-actually-do).
 - **Orphan removal needs a bucket listing.** A remote-signing catalog refuses
   `ListObjectsV2`, so `remove-orphans` cannot run at all and `expire` will commit
   while freeing nothing. Check this *before* your first run; it looks perfectly

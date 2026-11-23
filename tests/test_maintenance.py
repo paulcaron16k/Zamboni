@@ -728,3 +728,59 @@ def test_an_unreadable_watermark_is_due(warehouse, tmp_path, monkeypatch):
 def test_a_minimum_interval_must_be_a_positive_duration(interval):
     with pytest.raises(ValueError, match="positive timedelta"):
         MinimumInterval(interval)
+
+
+# -- equality deletes, per engine (#300) ----------------------------------------------
+
+
+class _RecordingTrino:
+    """A DBAPI connection that records statements and answers like OPTIMIZE."""
+
+    def __init__(self, sent: list[str]) -> None:
+        self.sent = sent
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def cursor(self):
+        return self
+
+    def execute(self, statement: str) -> None:
+        self.sent.append(statement)
+
+    def fetchall(self):
+        return []
+
+
+def test_equality_deletes_block_the_local_engine_and_reach_trino(warehouse, tmp_path, monkeypatch):
+    """The refusal is the local engine's, not the run's: the same table that
+    the local engine blocks (exit 3) goes to Trino as an OPTIMIZE, because
+    Trino's compaction applies equality deletes. Without a server: the
+    statement is what is asserted. Whether Trino then keeps the deleted rows
+    deleted is test_dev_stack.py's test_trino_compaction_applies_equality_deletes."""
+    from zamboni.capabilities import detect
+    from zamboni.maintainers.trino import TrinoMaintainer
+    from zamboni.testing import write_equality_deletes
+
+    if detect().equality_deletes_readable:
+        pytest.skip("this PyIceberg reads equality deletes, so nothing here is refused")
+    write_equality_deletes(warehouse.table("db.events"), {"id": [2, 4]})
+
+    local = maintain(warehouse, table_config=config(tmp_path), operations=["compact"], commit=True)
+    assert local.exit_code == 3, "the local engine refuses rather than resurrect rows"
+    assert "equality delete" in local.outcomes[0].describe()
+
+    sent: list[str] = []
+    monkeypatch.setattr(TrinoMaintainer, "connect", lambda self: _RecordingTrino(sent))
+    trino = maintain(
+        warehouse,
+        table_config=config(tmp_path),
+        engine="trino",
+        operations=["compact"],
+        commit=True,
+    )
+    assert trino.exit_code == 0, trino.outcomes[0].describe()
+    assert len(sent) == 1 and "EXECUTE optimize" in sent[0] and '"db"."events"' in sent[0]

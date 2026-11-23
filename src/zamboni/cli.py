@@ -545,6 +545,16 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="exit 0 when the table is due and 1 when it is not, for scripting",
     )
+    # The choice alone, not the connection flags: health connects to no engine.
+    # It only asks the engine's declarations whether a table carrying equality
+    # deletes is worth offering it, and writes the answer into --json (#300).
+    _add_engine_choice(
+        h,
+        "the engine that maintains these tables. Read from the profile or "
+        "ZAMBONI_ENGINE like every other verb's; --json records whether its "
+        "compaction clears a table's equality deletes, which `zamboni serve`'s "
+        "pressure check needs",
+    )
     _add_catalog_args(h)
 
     for name, help_text in [
@@ -735,12 +745,16 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _add_engine_choice(p: argparse.ArgumentParser, help_text: str) -> None:
+    """``--engine`` alone. Its default is the literal "local", which `_settle`
+    relies on to let a profile's engine replace it."""
+    p.add_argument("--engine", default="local", choices=maintainers.available(), help=help_text)
+
+
 def _add_engine_arg(p: argparse.ArgumentParser) -> None:
-    p.add_argument(
-        "--engine",
-        default="local",
-        choices=maintainers.available(),
-        help="which engine performs the operation. `zamboni engines` reports what "
+    _add_engine_choice(
+        p,
+        "which engine performs the operation. `zamboni engines` reports what "
         "each one supports, and what it refuses.",
     )
     # Connection details for a non-local engine. Environment fallbacks match the
@@ -1366,7 +1380,7 @@ def _health(session: CatalogSession, args: argparse.Namespace) -> int:
         signals[name] = table_signals(health, mark)
 
     if args.json:
-        doc = health_record(getattr(args, "warehouse", None), signals)
+        doc = health_record(getattr(args, "warehouse", None), signals, engine=args.engine)
         with Path(args.json).open("a", encoding="utf-8") as out:
             out.write(json.dumps(doc) + "\n")
     if failed:

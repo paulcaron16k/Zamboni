@@ -504,25 +504,50 @@ def unreadable(exc: BaseException) -> dict[str, Any]:
     return {"error": f"{type(exc).__name__}: {exc}"}
 
 
-def health_record(warehouse: str | None, tables: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def health_record(
+    warehouse: str | None, tables: dict[str, dict[str, Any]], *, engine: str | None = None
+) -> dict[str, Any]:
     """The whole record: one line of ``health --json``, and what a pressure
-    check's entry returns (docs/maintenance-runtime.md §7)."""
-    return {
+    check's entry returns (docs/maintenance-runtime.md §7).
+
+    ``engine`` is the one that would compact these tables. Given, the record
+    says in ``equality_deletes_eligible`` whether a pressure check may offer
+    it a table carrying equality deletes -- a fact of the deployment, not of
+    any table, so it sits beside ``tables`` (#300). True only where the
+    engine's compaction both applies them and removes their files; see
+    ``MaintainerCapabilities.clears_equality_deletes``. Not given, the key is
+    absent and the check skips such tables, as it always has.
+    Asked here, in the worker, because the local engine's answer is a PyIceberg
+    probe, and the service process that reads the record loads no engine.
+    """
+    record: dict[str, Any] = {
         "warehouse": warehouse,
         "checked_at": dt.datetime.now(dt.UTC).isoformat(),
         "tables": tables,
     }
+    if engine is not None:
+        # Not at module scope: `maintainers` loads every engine at import,
+        # and they import from this module (see the stamp vocabulary above).
+        from .maintainers import offers_equality_deletes_to_pressure
+
+        record["engine"] = engine
+        record["equality_deletes_eligible"] = offers_equality_deletes_to_pressure(engine)
+    return record
 
 
 def check_tables(
-    catalog: Catalog, tables: Iterable[str], *, warehouse: str | None
+    catalog: Catalog,
+    tables: Iterable[str],
+    *,
+    warehouse: str | None,
+    engine: str | None = None,
 ) -> dict[str, Any]:
     """Measure ``tables`` from metadata and return the health record.
 
     The ``health`` verb's measurement without its printing, for an application
     whose pressure-check entry builds its own catalog: the record comes out
     the shape the runtime reads whichever session measured it. One
-    ``load_table`` per table.
+    ``load_table`` per table. ``engine``: see :func:`health_record`.
     """
     signals: dict[str, dict[str, Any]] = {}
     for name in tables:
@@ -532,4 +557,4 @@ def check_tables(
             signals[name] = unreadable(exc)
             continue
         signals[name] = table_signals(table_health(table), maintenance_watermark(table))
-    return health_record(warehouse, signals)
+    return health_record(warehouse, signals, engine=engine)

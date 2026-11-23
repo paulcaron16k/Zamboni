@@ -83,11 +83,52 @@ def test_a_copy_on_write_table_is_never_offered():
     assert eager.triggered(health(delete_files=0, position_deletes=0)) is None
 
 
-def test_equality_deletes_make_a_table_ineligible():
-    """Compaction refuses them (ZMBNI-11): offering would be refused, then
-    offered again every check, forever."""
+def test_equality_deletes_make_a_table_ineligible_unless_the_engine_clears_them():
+    """Where compaction refuses them (ZMBNI-11), or applies them and keeps their
+    files (Spark), the next check finds the table as it was and offers it again,
+    forever; where compaction applies and removes them, the table is over like
+    any other (#300). Not saying is the old rule."""
     over = health(delete_files=50, equality_deletes=3)
     assert PressureSettings().triggered(over) is None
+    assert PressureSettings().triggered(over, equality_deletes_eligible=False) is None
+    assert PressureSettings().triggered(over, equality_deletes_eligible=True)
+
+
+@pytest.mark.parametrize("engine", ["local", "trino", "spark"])
+def test_each_engine_is_offered_equality_delete_tables_as_it_declares(engine):
+    """The outcome is derived from the engine's declarations through the record
+    the worker builds, so a declaration that changes moves the decision with it
+    and no second copy of the fact exists to fall behind."""
+    from zamboni import maintainers
+    from zamboni.health import health_record
+
+    record = health_record(
+        "acme", {"db.cdc": health(delete_files=50, equality_deletes=3)}, engine=engine
+    )
+    assert record["engine"] == engine
+    caps = maintainers.get(engine).capabilities()
+    eligible = caps.compacts_equality_deletes and caps.clears_equality_deletes
+    assert record["equality_deletes_eligible"] is eligible
+    offered = pressure_offers_(warehouse(), record)["over"]
+    assert ("db.cdc" in offered) is eligible
+
+
+def test_an_unreported_equality_count_is_ineligible_whatever_the_engine():
+    """Unknown is not zero: the table might carry deletes some engine refuses."""
+    unknown = health(delete_files=50, equality_deletes=None)
+    assert PressureSettings().triggered(unknown, equality_deletes_eligible=True) is None
+
+
+@pytest.mark.parametrize("said", [None, False, "true", 1])
+def test_only_a_record_that_says_true_lifts_the_equality_rule(said):
+    """An application's own entry may omit the key or write something else; only
+    the JSON boolean the worker writes counts."""
+    record = {"tables": {"db.cdc": health(delete_files=50, equality_deletes=3)}}
+    if said is not None:
+        record["equality_deletes_eligible"] = said
+    assert pressure_offers_(warehouse(), record)["over"] == {}
+    record["equality_deletes_eligible"] = True
+    assert list(pressure_offers_(warehouse(), record)["over"]) == ["db.cdc"]
 
 
 def test_unreported_counters_meet_no_threshold():
@@ -233,6 +274,37 @@ def test_a_real_worker_measures_a_merge_on_read_table_over_the_default_threshold
     found = pressure_offers(wh, result.record)
     assert list(found["over"]) == ["db.mor"] and "0.25" in found["over"]["db.mor"]
     assert list(found["errors"]) == ["db.absent"], "the rest are still checked"
+    from zamboni.maintainers import offers_equality_deletes_to_pressure
+
+    assert result.record["engine"] == "local", "no profile or variable names another"
+    assert result.record["equality_deletes_eligible"] is offers_equality_deletes_to_pressure(
+        "local"
+    )
+
+
+def test_the_deployments_engine_reaches_the_record_the_decision_reads(
+    tmp_path, monkeypatch, mor_table
+):
+    """#300: a `serve` worker picks its engine the way a cron line does, from
+    the profile or ZAMBONI_ENGINE, and the pressure check's record must carry
+    *that* engine's answer -- not the local engine's, which is what a check
+    that ignored the deployment would report."""
+    import os
+
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)  # no developer zamboni.yml or .env
+    environ = {
+        "PATH": os.environ.get("PATH", ""),
+        "ZAMBONI_LOCAL_WAREHOUSE": str(tmp_path / "warehouse"),
+        "ZAMBONI_ENGINE": "trino",
+    }
+    result = run_check(workdir, environ, warehouse(None, "mor"))
+    assert result.exit_code == 0, result.output
+    assert (result.record["engine"], result.record["equality_deletes_eligible"]) == (
+        "trino",
+        True,
+    )
 
 
 def run_check(workdir, environ, wh, **config):
