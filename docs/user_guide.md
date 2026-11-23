@@ -575,12 +575,20 @@ one installation upgrades without asking the other's permission.
 If you do want the in-process form, the dependency to check is **SQLAlchemy**,
 which Airflow uses for its own metadata database. Since 0.6.1 every install of
 Zamboni brings SQLAlchemy 2, through PyIceberg's SQL catalog, because the safety
-probes need it (ZMBNI-213). Against PyPI's metadata, checked 2026-10-16:
+probes need it (ZMBNI-213). Against PyPI's metadata, checked 2026-11-23:
 
 | Airflow | Its SQLAlchemy requirement | In-process Zamboni |
 |---|---|---|
-| 3.x (`apache-airflow-core` 3.3.2) | `>=2.0.50` | Resolves |
-| 2.x (`apache-airflow` 2.10.5) | `<2.0,>=1.4.36` | **Does not resolve.** Use the `BashOperator` form, with Zamboni in its own venv or `pipx` |
+| 3.x (`apache-airflow-core` 3.4.0) | `>=2.0.50,!=2.1.0` | Resolves |
+| 2.x (`apache-airflow` 2.11.2, the last 2.x release) | `<2.0,>=1.4.36` | **Does not resolve.** Use the `BashOperator` form, with Zamboni in its own venv or `pipx` |
+
+Airflow 2 is past end of life: Apache's
+[supported-versions page](https://airflow.apache.org/docs/apache-airflow/stable/installation/supported-versions.html)
+gives limited maintenance from 2025-10-22 and EOL on 2026-04-22. Zamboni will
+not trade its safety probes for in-process Airflow 2 support. Removing
+SQLAlchemy would mean committing through a hand-built catalog, which uses more
+private PyIceberg API and is a less faithful probe. That idea was ZMBNI-214,
+closed as not planned.
 
 Whatever the versions, read the resolver's output before trusting an install
 into a shared Airflow environment.
