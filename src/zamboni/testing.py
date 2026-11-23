@@ -320,3 +320,65 @@ def add_position_deletes(
         tbl, {target_path: positions}, name_hint=name_hint, file_scoped=file_scoped
     )
     return tbl
+
+
+def write_equality_deletes(
+    tbl: Table, values: dict[str, list], *, name_hint: str = "sim"
+) -> DataFile:
+    """Commit one equality delete file removing every row whose ``values`` match.
+
+    ``values`` maps column names to equal-length lists: row *i* of the file is
+    ``{column: values[column][i]}``, and the columns are the file's equality
+    fields. What Flink's upsert writer and other CDC sinks emit, and what no
+    PyIceberg line can write or read (ZMBNI-705) -- so this exists for the
+    engines that can, Trino and Spark, to be tested on such a table (#300).
+
+    Unpartitioned tables only. An equality delete applies within its own
+    partition, so on a partitioned table one file per partition would be
+    needed, carrying each partition's tuple; nothing needs that yet, and
+    refusing beats writing a file that silently deletes nothing.
+
+    The file carries no column bounds. Bounds only let a reader skip it, so
+    leaving them out costs a reader time and cannot hide a delete.
+    """
+    from pyiceberg.io.pyarrow import schema_to_pyarrow
+
+    if not tbl.spec().is_unpartitioned():
+        raise ValueError(f"{tbl.name()}: write_equality_deletes supports unpartitioned tables")
+    columns = list(values)
+    lengths = {len(v) for v in values.values()}
+    if len(lengths) != 1 or not columns:
+        raise ValueError("values: name at least one column, each with the same number of rows")
+
+    delete_schema = tbl.schema().select(*columns)
+    arrow_schema = schema_to_pyarrow(delete_schema)
+    rows = pa.table({name: values[name] for name in columns}, schema=arrow_schema)
+    snapshot_id = tbl.metadata.current_snapshot_id or 0
+    path = (
+        f"{tbl.location()}/data/equality-deletes-{name_hint}-{snapshot_id}-{rows.num_rows}.parquet"
+    )
+    with (
+        tbl.io.new_output(path).create(overwrite=True) as fh,
+        pq.ParquetWriter(fh, arrow_schema) as writer,
+    ):
+        writer.write_table(rows)
+
+    delete_file = DataFile.from_args(
+        content=DataFileContent.EQUALITY_DELETES,
+        file_path=path,
+        file_format=FileFormat.PARQUET,
+        partition=Record(),
+        file_size_in_bytes=len(tbl.io.new_input(path)),
+        record_count=rows.num_rows,
+        spec_id=tbl.spec().spec_id,
+        equality_ids=[delete_schema.find_field(name).field_id for name in columns],
+        key_metadata=None,
+    )
+    delete_file.spec_id = tbl.spec().spec_id
+
+    with tbl.transaction() as txn:
+        producer = _CommitDeleteFiles(operation=Operation.DELETE, transaction=txn, io=tbl.io)
+        with producer as update:
+            update.append_data_file(delete_file)
+    tbl.refresh()
+    return delete_file

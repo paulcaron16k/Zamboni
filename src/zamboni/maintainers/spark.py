@@ -229,6 +229,17 @@ class SparkMaintainer(Maintainer):
                     LayoutFeature.TARGET_FILE_SIZE,
                 }
             ),
+            # `rewrite_data_files` reads through Iceberg's Java reader, which
+            # applies equality deletes -- but keeps their files. Measured on
+            # Spark 4.1.3 (test_spark_compaction_applies_equality_deletes): the
+            # delete was committed at sequence number 7, the rewritten file
+            # took the *starting* sequence number, also 7, and an equality
+            # delete applies only to older data, so it now deletes nothing.
+            # With `remove-dangling-deletes` on it stayed live all the same,
+            # and the table summary still counted it. apache/iceberg#8933 asks
+            # for exactly this and was closed as not planned.
+            compacts_equality_deletes=True,
+            clears_equality_deletes=False,
             operations={
                 Operation.COMPACT: OperationSupport(
                     Operation.COMPACT,

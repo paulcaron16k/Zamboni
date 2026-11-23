@@ -68,7 +68,75 @@ def test_an_unsupported_operation_cannot_claim_to_preview():
 
 def test_capabilities_reject_a_missing_operation():
     with pytest.raises(ValueError, match="no declared support"):
-        MaintainerCapabilities(engine="partial", operations={})
+        MaintainerCapabilities(
+            engine="partial",
+            operations={},
+            compacts_equality_deletes=False,
+            clears_equality_deletes=False,
+        )
+
+
+@pytest.mark.parametrize("omitted", ["compacts_equality_deletes", "clears_equality_deletes"])
+def test_capabilities_require_both_equality_delete_declarations(omitted):
+    """Omitting either is a construction error, not a quiet False (#300)."""
+    from zamboni.maintainers.local import LocalMaintainer
+
+    declared = {"compacts_equality_deletes": False, "clears_equality_deletes": False}
+    del declared[omitted]
+    operations = LocalMaintainer.capabilities().operations
+    with pytest.raises(TypeError, match=omitted):
+        MaintainerCapabilities(engine="silent", operations=operations, **declared)  # type: ignore[call-arg]
+
+
+def test_an_engine_cannot_clear_equality_deletes_it_cannot_compact():
+    from zamboni.maintainers.local import LocalMaintainer
+
+    with pytest.raises(ValueError, match="clears equality deletes it cannot compact"):
+        MaintainerCapabilities(
+            engine="contradiction",
+            operations=LocalMaintainer.capabilities().operations,
+            compacts_equality_deletes=False,
+            clears_equality_deletes=True,
+        )
+
+
+def test_compaction_on_equality_deletes_agrees_with_the_compact_declaration(monkeypatch):
+    """The flag and COMPACT's limitation are two renderings of one probe on the
+    local engine; on every engine, an equality-delete limitation and the flag
+    cannot both say yes."""
+    from zamboni import maintainers
+
+    for readable in (True, False):
+        caps = local_with(monkeypatch, equality_deletes_readable=readable)
+        assert caps.compacts_equality_deletes is readable
+        limited = any("equality deletes" in text for text in caps.of(Operation.COMPACT).limitations)
+        assert limited is not readable
+    for name in maintainers.available():
+        caps = maintainers.get(name).capabilities()
+        limited = any("equality deletes" in text for text in caps.of(Operation.COMPACT).limitations)
+        assert not (caps.compacts_equality_deletes and limited), name
+
+
+def test_pressure_eligibility_needs_compaction_to_apply_and_clear_equality_deletes():
+    """The measured facts behind it (#300), so a changed declaration fails by
+    name. Trino applies and clears; Spark applies and keeps the files; the
+    local engine follows its PyIceberg probe and has never been measured
+    clearing them."""
+    from zamboni import maintainers
+    from zamboni.capabilities import detect
+
+    declared = {
+        name: (caps.compacts_equality_deletes, caps.clears_equality_deletes)
+        for name in maintainers.available()
+        if (caps := maintainers.get(name).capabilities())
+    }
+    assert declared == {
+        "local": (detect().equality_deletes_readable, False),
+        "spark": (True, False),
+        "trino": (True, True),
+    }
+    for name, (compacts, clears) in declared.items():
+        assert maintainers.offers_equality_deletes_to_pressure(name) is (compacts and clears)
 
 
 # -- support is not binary -----------------------------------------------

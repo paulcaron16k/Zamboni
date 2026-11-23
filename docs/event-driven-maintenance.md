@@ -335,10 +335,16 @@ pressure:                   # top level: the fleet's; per warehouse: over it
 - **The signal is the snapshot summary**, the same one metadata load as
   `zamboni health`. A counter the summary did not report meets no threshold:
   "not reported" is neither zero nor over.
-- **Equality deletes make a table ineligible.** Compaction refuses them, so an
-  offer would be refused at every check; and `total-delete-files` counts both
-  kinds together, so position delete files cannot be counted on their own.
-  An unreported equality-delete count is treated the same way.
+- **Equality deletes make a table ineligible unless the engine clears them.**
+  The local engine refuses them, so an offer would be refused at every check;
+  Spark applies them but keeps the delete files, so the next check would read
+  the same table and offer it again. Trino applies them and removes the files,
+  so on Trino such a table is offered like any other (#300). The worker writes
+  the engine's answer into the record as `equality_deletes_eligible`, from the
+  engine's declarations; a record without it is read as "not eligible". And
+  `total-delete-files` counts both kinds together, so position delete files
+  cannot be counted on their own. An unreported equality-delete count is
+  ineligible on every engine.
 - **Measured in a worker, decided in the service.** Each check is
   `zamboni health --table-config … --json`, run through the pool like a table.
   The service reads the record and applies the thresholds without importing an

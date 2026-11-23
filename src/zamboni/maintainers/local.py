@@ -84,6 +84,15 @@ class LocalMaintainer(Maintainer):
             # `MultiSpecReplaceFiles` does it instead, so the feature is
             # available on every supported build rather than only on the fork.
             layout=frozenset(LayoutFeature),
+            # The probe, and the same one `_compact_support` and the compaction
+            # blocker in profile.py read, so the three cannot disagree.
+            compacts_equality_deletes=probes.equality_deletes_readable,
+            # Not measured: no PyIceberg line reads equality deletes yet
+            # (ZMBNI-705), so no local compaction of such a table has ever run
+            # to show whether it removes their files. False is the direction
+            # that costs a missed pressure offer rather than one repeated at
+            # every check; measure it when the probe first answers true.
+            clears_equality_deletes=False,
             operations={
                 Operation.COMPACT: cls._compact_support(probes),
                 Operation.EXPIRE: OperationSupport(

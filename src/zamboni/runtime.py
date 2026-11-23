@@ -260,10 +260,15 @@ def pressure_offers(warehouse: FleetWarehouse, record: dict[str, Any] | None) ->
     tables = (record or {}).get("tables") or {}
     if record is None:
         errors["*"] = "the check wrote no record"
+    # `is True`, not truthiness: only a record that says so, as a JSON boolean,
+    # lifts the equality-delete rule (#300). Absent reads as "not eligible".
+    equality_ok = (record or {}).get("equality_deletes_eligible") is True
     for table, signals in tables.items():
         if "error" in signals:
             errors[table] = signals["error"]
-        elif settings is not None and (why := settings.triggered(signals)):
+        elif settings is not None and (
+            why := settings.triggered(signals, equality_deletes_eligible=equality_ok)
+        ):
             over[table] = why
     return {"over": over, "errors": errors, "checked": len(tables)}
 

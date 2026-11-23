@@ -191,6 +191,19 @@ class MaintainerCapabilities:
     #: engine that forgot to declare would silently read as "none of them", and
     #: a summary would then warn about a Z-order that works perfectly well.
     layout: frozenset[LayoutFeature] = field(default_factory=frozenset)
+    #: Whether COMPACT applies a table's equality deletes as it rewrites, so that
+    #: a table carrying them is compacted rather than refused. Declared as a
+    #: fact and not left as prose in COMPACT's ``limitations``, because a caller
+    #: has to *decide* on it (#300). No default, for ``layout``'s reason: an
+    #: engine that forgot to declare would read as one or the other, silently.
+    compacts_equality_deletes: bool = field(kw_only=True)
+    #: Whether that compaction also leaves no equality delete file behind once
+    #: it no longer applies to anything. A separate fact because Spark applies
+    #: them and keeps the files (measured, #300): the table then still reports
+    #: delete files after a successful compaction, which a pressure check reads
+    #: as pressure. The check offers an equality-delete table only where both
+    #: hold, or it would offer the same table again at every check.
+    clears_equality_deletes: bool = field(kw_only=True)
 
     def __post_init__(self) -> None:
         missing = [op for op in Operation if op not in self.operations]
@@ -201,6 +214,18 @@ class MaintainerCapabilities:
             raise ValueError(
                 f"{self.engine}: no declared support for {', '.join(op.value for op in missing)}"
             )
+        if self.clears_equality_deletes and not self.compacts_equality_deletes:
+            raise ValueError(
+                f"{self.engine}: clears equality deletes it cannot compact. A compaction "
+                "that refuses the table cannot be what removed its delete files."
+            )
+
+    @property
+    def offers_equality_deletes_to_pressure(self) -> bool:
+        """Whether a pressure check may offer a table carrying equality deletes:
+        compacting it must help, and must leave a table the next check reads as
+        relieved."""
+        return self.compacts_equality_deletes and self.clears_equality_deletes
 
     def of(self, operation: Operation) -> OperationSupport:
         return self.operations[operation]
@@ -223,6 +248,16 @@ class MaintainerCapabilities:
             rows.extend(f"      - {limitation}" for limitation in support.limitations)
         rows.append(
             "  layout: " + (", ".join(sorted(self.layout)) if self.layout else "none declared")
+        )
+        rows.append(
+            "  equality deletes: "
+            + (
+                "block compaction"
+                if not self.compacts_equality_deletes
+                else "applied by compaction, which removes their files"
+                if self.clears_equality_deletes
+                else "applied by compaction, which keeps their files"
+            )
         )
         return "\n".join(rows)
 
@@ -426,6 +461,14 @@ def engines_lacking(feature: LayoutFeature) -> tuple[str, ...]:
     return tuple(name for name in available() if not get(name).capabilities().can(feature))
 
 
+def offers_equality_deletes_to_pressure(engine: str) -> bool:
+    """Whether a pressure check may offer ``engine`` a table carrying equality
+    deletes. Asked of the declaration, never written out a second time: the
+    local engine's answer is a PyIceberg probe, so it changes with the install.
+    """
+    return get(engine).capabilities().offers_equality_deletes_to_pressure
+
+
 __all__ = [
     "EngineConfigProblem",
     "LayoutFeature",
@@ -441,5 +484,6 @@ __all__ = [
     "available",
     "engines_lacking",
     "get",
+    "offers_equality_deletes_to_pressure",
     "register",
 ]
