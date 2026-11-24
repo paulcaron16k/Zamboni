@@ -301,7 +301,7 @@ class PyIcebergCapabilities:
             ("delete manifests writable", self.delete_manifests_writable),
             ("S3 signer registered once", self.s3_signer_registered_once),
             ("S3 signing overlaps", self.s3_signing_overlaps),
-            ("string upper bounds encodable", self.string_upper_bounds_encodable),
+            ("library string bounds encodable", self.string_upper_bounds_encodable),
         ]
         return "\n".join(f"  {name:<28} {value}" for name, value in rows)
 

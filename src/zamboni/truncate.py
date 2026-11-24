@@ -22,7 +22,7 @@ There is no subclass seam: ``StatsAggregator`` is built inside
 seam is the name ``pyiceberg.io.pyarrow.truncate_upper_bound_text_string``,
 which ``StatsAggregator.max_as_bytes`` looks up on each call. :func:`install`
 replaces it, refuses rather than override a name that is neither the stock
-function nor this module's and still yields a surrogate, and stands down where
+function nor this module's and still yields a surrogate (or raises), and stands down where
 the function that name holds already returns an encodable bound.
 
 **Decided live, not from** :func:`zamboni.capabilities.detect`. What that name
@@ -38,7 +38,12 @@ release carries the fix.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from zamboni.committer import UnsupportedPyIceberg
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _MIN_SURROGATE = 0xD800
 _MAX_SURROGATE = 0xDFFF
@@ -71,7 +76,7 @@ def truncate_upper_bound_text_string(value: str, trunc_length: int | None) -> st
     return None
 
 
-def bounds_are_encodable(function) -> bool:
+def bounds_are_encodable(function: Callable[[str, int | None], str | None]) -> bool:
     """Whether ``function`` rounds a truncated prefix ending in U+D7FF to an encodable bound.
 
     A function that raises is not: it cannot be trusted to bound anything.
@@ -108,8 +113,8 @@ def install() -> None:
     Raises:
         UnsupportedPyIceberg: If the name ``pyiceberg.io.pyarrow`` looks up is
             neither the stock function nor this module's and still returns a
-            bound that cannot be encoded, so whatever replaced it would be
-            silently overridden.
+            bound that cannot be encoded (or raises), so whatever replaced it
+            would be silently overridden.
     """
     if writer_bounds_are_encodable():
         return
