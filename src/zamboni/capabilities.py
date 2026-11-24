@@ -54,6 +54,11 @@ fork tag ``maintenance/2026-10-28.2``, which signs inline, 1370 ms first, then
 mirror down on a build that signs inline, a wrong False installs a redundant
 but correct one.
 
+``string_upper_bounds_encodable`` (#303) asks one function one question and
+encodes the answer: microseconds, so it was not timed. It selects nothing:
+:mod:`zamboni.truncate` asks the function the writer calls itself, live, because
+what that name holds depends on the process, not the build.
+
 ``detect()`` is **330 ms** cold, and since ZMBNI-88 that is paid once per
 install rather than once per process, so the cost argument that once justified
 leaving a probe structural has largely expired.
@@ -218,6 +223,16 @@ class PyIcebergCapabilities:
     #: correctness.
     s3_signing_overlaps: bool
 
+    #: The build rounds a truncated string upper bound up past the surrogate
+    #: block, so it can be serialized. Established by asking the library's
+    #: definition, ``pyiceberg.utils.truncate.truncate_upper_bound_text_string``,
+    #: for the bound of a prefix ending in U+D7FF and encoding it (#303) -- the
+    #: build, which is what the cache key describes. False on stock 0.12.0,
+    #: which answers U+D800; True on the fork from ``maintenance/2026-11-23``.
+    #: Reported by ``doctor``; :mod:`zamboni.truncate` decides whether to
+    #: install from the function the writer calls, asked live.
+    string_upper_bounds_encodable: bool
+
     #: *How* ``derives_delete_predicate`` was established. Reported by
     #: ``zamboni doctor``, because "we proved it" and "we recognised a name" are
     #: different confidences, and an operator deciding whether to trust a new
@@ -286,6 +301,7 @@ class PyIcebergCapabilities:
             ("delete manifests writable", self.delete_manifests_writable),
             ("S3 signer registered once", self.s3_signer_registered_once),
             ("S3 signing overlaps", self.s3_signing_overlaps),
+            ("library string bounds encodable", self.string_upper_bounds_encodable),
         ]
         return "\n".join(f"  {name:<28} {value}" for name, value in rows)
 
@@ -429,6 +445,8 @@ def _probe() -> Probed:
         # Unknown -> assume NOT, for the same reason: the mirror installs, and
         # on a library that does overlap signing it is redundant but correct.
         s3_signing_overlaps=signing_overlaps is True,
+        # Never unknown: an exception from the call counts as not encodable.
+        string_upper_bounds_encodable=_string_upper_bounds_encodable(),
     )
     return Probed(capabilities, unobserved)
 
@@ -758,6 +776,21 @@ def _rewrite_ignores_unrelated_append() -> bool | CouldNotRun:
     except Exception as exc:  # pragma: no cover - any failure means "could not establish"
         logger.debug("concurrent-append behavioural probe did not complete", exc_info=True)
         return CouldNotRun.from_exception(exc)
+
+
+def _string_upper_bounds_encodable() -> bool:
+    """Does the library's definition round a truncated string bound up to something UTF-8 encodes?
+
+    Asks ``pyiceberg.utils.truncate``, where the function is defined, because
+    the answer is cached under a key that describes the installed build. Which
+    function ``pyiceberg.io.pyarrow``'s name holds is a fact about one process,
+    and :func:`zamboni.truncate.install` asks it live.
+    """
+    from pyiceberg.utils import truncate as library
+
+    from .truncate import bounds_are_encodable
+
+    return bounds_are_encodable(library.truncate_upper_bound_text_string)
 
 
 def _s3_signer_registered_once() -> bool | CouldNotRun:

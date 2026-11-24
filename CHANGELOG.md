@@ -124,6 +124,16 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **A string value whose truncated upper bound ends in U+D7FF no longer fails
+  a write or a compaction** (#303). When a file's largest value in a string
+  column is longer than the metrics truncation length (16 by default) and the
+  last code point of its truncated prefix that is not U+10FFFF is U+D7FF,
+  PyIceberg 0.12 rounded the upper bound up to U+D800, which it then could not
+  serialize, so every compaction of that file group failed. The bound now steps
+  over the surrogate block to U+E000, through a mirror of the fork's fix
+  installed by `CatalogSession`; it stands down on a PyIceberg that already
+  does this. Stored probe answers are re-probed once (cache schema 5). The
+  development pin moves to the fork's tag `maintenance/2026-11-23`.
 - **The sdist contains only what rebuilds the wheel** (#212). It was the
   working tree minus `.gitignore`, so a local `uv build` shipped untracked
   files -- `todo.txt` and `.claude/settings.local.json` among them. It is now

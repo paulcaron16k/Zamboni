@@ -53,8 +53,8 @@ logger = logging.getLogger(__name__)
 #: answers. The installed Zamboni version covers a released change; this covers
 #: the rest, and costs nothing to bump.
 # 2: rewrite_ignores_unrelated_append (#239); 3: s3_signer_registered_once (#245);
-# 4: s3_signing_overlaps (#250)
-CACHE_SCHEMA = 4
+# 4: s3_signing_overlaps (#250); 5: string_upper_bounds_encodable (#303)
+CACHE_SCHEMA = 5
 
 #: Both are fingerprinted: PyIceberg because it is what the probes ask about,
 #: Zamboni because it is what does the asking.
