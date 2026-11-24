@@ -22,10 +22,18 @@ There is no subclass seam: ``StatsAggregator`` is built inside
 seam is the name ``pyiceberg.io.pyarrow.truncate_upper_bound_text_string``,
 which ``StatsAggregator.max_as_bytes`` looks up on each call. :func:`install`
 replaces it, refuses rather than override a name that is neither the stock
-function nor this module's, and stands down where
+function nor this module's and still yields a surrogate, and stands down where
+the function that name holds already returns an encodable bound.
+
+**Decided live, not from** :func:`zamboni.capabilities.detect`. What that name
+holds is a fact about the running process -- another library's mirror may hold
+it -- while ``detect()`` is cached per process and on disk under a key that
+covers only the installed builds. A cached answer could stand the mirror down in
+a process where the stock function is back, or refuse a working replacement
+installed after the first probe. The capability
 :attr:`~zamboni.capabilities.PyIcebergCapabilities.string_upper_bounds_encodable`
-holds: the function that name holds already returns an encodable bound.
-**Deletes entirely**, probe included, when a release carries the fix.
+reports the build, for ``doctor``. **Deletes entirely**, probe included, when a
+release carries the fix.
 """
 
 from __future__ import annotations
@@ -37,8 +45,8 @@ _MAX_SURROGATE = 0xDFFF
 _MAX_CODE_POINT = 0x10FFFF
 
 #: A truncated prefix ending in U+D7FF, which 0.12 rounds up to U+D800. Read by
-#: :func:`zamboni.capabilities._string_upper_bounds_encodable`.
-PROBE = ("퟿퟿a", 2)
+#: :func:`bounds_are_encodable`.
+PROBE = ("\ud7ff\ud7ffa", 2)
 
 
 def truncate_upper_bound_text_string(value: str, trunc_length: int | None) -> str | None:
@@ -63,15 +71,33 @@ def truncate_upper_bound_text_string(value: str, trunc_length: int | None) -> st
     return None
 
 
-def library_bounds_are_encodable() -> bool:
-    """Whether the installed PyIceberg already rounds a bound up past the surrogate block.
+def bounds_are_encodable(function) -> bool:
+    """Whether ``function`` rounds a truncated prefix ending in U+D7FF to an encodable bound.
 
-    Asked of the library's behaviour by :func:`zamboni.capabilities.detect`, and
-    cached with the other probes.
+    A function that raises is not: it cannot be trusted to bound anything.
     """
-    from .capabilities import detect
+    try:
+        upper = function(*PROBE)
+        if upper is not None:
+            upper.encode("utf-8")
+    except Exception:
+        return False
+    return True
 
-    return detect().string_upper_bounds_encodable
+
+def writer_bounds_are_encodable() -> bool:
+    """Whether the function the writer calls now already returns encodable bounds.
+
+    The name ``pyiceberg.io.pyarrow`` looks up, or, once this module's function
+    holds it, the library's own. Asked on every call: a few microseconds.
+    """
+    from pyiceberg.io import pyarrow as pyarrow_io
+    from pyiceberg.utils import truncate
+
+    called = pyarrow_io.truncate_upper_bound_text_string
+    if called is truncate_upper_bound_text_string:
+        called = truncate.truncate_upper_bound_text_string
+    return bounds_are_encodable(called)
 
 
 def install() -> None:
@@ -85,7 +111,7 @@ def install() -> None:
             bound that cannot be encoded, so whatever replaced it would be
             silently overridden.
     """
-    if library_bounds_are_encodable():
+    if writer_bounds_are_encodable():
         return
 
     from pyiceberg.io import pyarrow as pyarrow_io

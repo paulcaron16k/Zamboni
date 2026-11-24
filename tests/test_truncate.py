@@ -23,8 +23,8 @@ from zamboni.capabilities import detect
 from zamboni.committer import UnsupportedPyIceberg
 
 # Longer than truncate(16), with U+D7FF as the 16th code point.
-POISON = "a" * 15 + "퟿" + "tail"
-POISON_UPPER = ("a" * 15 + "").encode()
+POISON = "a" * 15 + "\ud7ff" + "tail"
+POISON_UPPER = ("a" * 15 + "\ue000").encode()
 
 SCHEMA = Schema(
     NestedField(1, "id", LongType(), required=True),
@@ -54,14 +54,14 @@ def _stock_0_12(value: str, trunc_length: int | None) -> str | None:
 
 @pytest.fixture
 def stock_0_12(monkeypatch):
-    """0.12.0's function where PyIceberg defines it and where it looks it up."""
+    """0.12.0's function where PyIceberg defines it and where it looks it up.
+
+    ``detect()`` is left alone: :func:`zamboni.truncate.install` must not
+    consult it, and the tests below give it the wrong answer on purpose.
+    """
     monkeypatch.setattr(library, "truncate_upper_bound_text_string", _stock_0_12)
     monkeypatch.setattr(pyarrow_io, "truncate_upper_bound_text_string", _stock_0_12)
-    encodable = capabilities._string_upper_bounds_encodable()
-    monkeypatch.setattr(
-        capabilities, "detect", lambda: replace(detect(), string_upper_bounds_encodable=encodable)
-    )
-    return encodable
+    return capabilities._string_upper_bounds_encodable()
 
 
 def _upper_bounds(tbl) -> set[bytes]:
@@ -145,39 +145,67 @@ def test_install_refuses_a_foreign_replacement(stock_0_12, monkeypatch):
     assert pyarrow_io.truncate_upper_bound_text_string is foreign
 
 
-def test_install_stands_down_where_the_library_is_fixed(stock_0_12, monkeypatch):
+def _fixed(value, trunc_length):
+    """Another library's correct mirror, holding the writer's name."""
+    return truncate.truncate_upper_bound_text_string(value, trunc_length)
+
+
+def test_install_stands_down_where_the_writer_already_gets_encodable_bounds(
+    stock_0_12, monkeypatch
+):
+    """A working replacement is left alone, even after detect() answered for stock (p3)."""
+    monkeypatch.setattr(
+        capabilities, "detect", lambda: replace(detect(), string_upper_bounds_encodable=False)
+    )
+    monkeypatch.setattr(pyarrow_io, "truncate_upper_bound_text_string", _fixed)
+
+    truncate.install()
+
+    assert pyarrow_io.truncate_upper_bound_text_string is _fixed
+
+
+def test_a_cached_true_does_not_stand_down_over_the_stock_function(stock_0_12, monkeypatch):
+    """A probe cache another process wrote while something else held the name (p1, p2)."""
     monkeypatch.setattr(
         capabilities, "detect", lambda: replace(detect(), string_upper_bounds_encodable=True)
     )
 
     truncate.install()
 
-    assert pyarrow_io.truncate_upper_bound_text_string is _stock_0_12
+    assert pyarrow_io.truncate_upper_bound_text_string is truncate.truncate_upper_bound_text_string
 
 
-def test_a_fixed_function_where_the_writer_looks_reads_as_encodable(stock_0_12, monkeypatch):
-    """Only the writer's name fixed, the definition still 0.12's: the probe stands it down."""
+def test_install_refuses_a_foreign_replacement_that_raises(stock_0_12, monkeypatch):
+    def raising(value, trunc_length):
+        raise TypeError(value)
 
-    def fixed(value, trunc_length):
-        return truncate.truncate_upper_bound_text_string(value, trunc_length)
+    monkeypatch.setattr(pyarrow_io, "truncate_upper_bound_text_string", raising)
 
-    monkeypatch.setattr(pyarrow_io, "truncate_upper_bound_text_string", fixed)
-
-    assert capabilities._string_upper_bounds_encodable() is True
+    with pytest.raises(UnsupportedPyIceberg, match="not the stock function"):
+        truncate.install()
 
 
-def test_the_probe_asks_the_function_the_writer_calls(stock_0_12, monkeypatch):
-    """A fixed definition the writer never looks up does not make the probe report encodable."""
+def test_the_live_check_asks_the_function_the_writer_calls(stock_0_12, monkeypatch):
+    """A fixed definition the writer never looks up does not stand the mirror down."""
     monkeypatch.setattr(
         library, "truncate_upper_bound_text_string", truncate.truncate_upper_bound_text_string
     )
-    assert capabilities._string_upper_bounds_encodable() is False
+    assert truncate.writer_bounds_are_encodable() is False
+
+    monkeypatch.setattr(pyarrow_io, "truncate_upper_bound_text_string", _fixed)
+    monkeypatch.setattr(library, "truncate_upper_bound_text_string", _stock_0_12)
+    assert truncate.writer_bounds_are_encodable() is True
 
     monkeypatch.setattr(
         pyarrow_io, "truncate_upper_bound_text_string", truncate.truncate_upper_bound_text_string
     )
-    monkeypatch.setattr(library, "truncate_upper_bound_text_string", _stock_0_12)
-    assert capabilities._string_upper_bounds_encodable() is False, "observed the mirror"
+    assert truncate.writer_bounds_are_encodable() is False, "observed the mirror"
+
+
+def test_the_capability_describes_the_build_not_the_process(stock_0_12, monkeypatch):
+    """What the cache stores: the library's definition, whatever holds the writer's name."""
+    monkeypatch.setattr(pyarrow_io, "truncate_upper_bound_text_string", _fixed)
+    assert capabilities._string_upper_bounds_encodable() is False
 
 
 def test_the_bound_skips_the_surrogate_block():
@@ -186,8 +214,8 @@ def test_the_bound_skips_the_surrogate_block():
     assert fixed("ab", 2) == "ab"
     assert fixed("ab", None) == "ab"
     assert fixed("\U0010ffff\U0010ffff\x00", 2) is None
-    assert fixed("퟿퟿a", 2) == "퟿"
-    assert fixed("퟿\U0010ffffa", 2) == "\U0010ffff"
+    assert fixed("\ud7ff\ud7ffa", 2) == "\ud7ff\ue000"
+    assert fixed("\ud7ff\U0010ffffa", 2) == "\ue000\U0010ffff"
 
 
 def test_every_bound_encodes_and_bounds_its_value():

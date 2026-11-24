@@ -55,9 +55,9 @@ mirror down on a build that signs inline, a wrong False installs a redundant
 but correct one.
 
 ``string_upper_bounds_encodable`` (#303) asks one function one question and
-encodes the answer: microseconds, so it was not timed. A wrong True stands the
-mirror down on a build that still writes a surrogate bound, and the write fails
-as before; a wrong False installs a redundant but correct mirror.
+encodes the answer: microseconds, so it was not timed. It selects nothing:
+:mod:`zamboni.truncate` asks the function the writer calls itself, live, because
+what that name holds depends on the process, not the build.
 
 ``detect()`` is **330 ms** cold, and since ZMBNI-88 that is paid once per
 install rather than once per process, so the cost argument that once justified
@@ -223,12 +223,14 @@ class PyIcebergCapabilities:
     #: correctness.
     s3_signing_overlaps: bool
 
-    #: A truncated string upper bound is rounded up past the surrogate block,
-    #: so it can be serialized. Established by asking the library's own
-    #: ``truncate_upper_bound_text_string`` for the bound of a prefix ending in
-    #: U+D7FF and encoding it (#303). False on stock 0.12.0, which answers
-    #: U+D800 and fails the write; True on the fork from
-    #: ``maintenance/2026-11-23``. False installs :mod:`zamboni.truncate`.
+    #: The build rounds a truncated string upper bound up past the surrogate
+    #: block, so it can be serialized. Established by asking the library's
+    #: definition, ``pyiceberg.utils.truncate.truncate_upper_bound_text_string``,
+    #: for the bound of a prefix ending in U+D7FF and encoding it (#303) -- the
+    #: build, which is what the cache key describes. False on stock 0.12.0,
+    #: which answers U+D800; True on the fork from ``maintenance/2026-11-23``.
+    #: Reported by ``doctor``; :mod:`zamboni.truncate` decides whether to
+    #: install from the function the writer calls, asked live.
     string_upper_bounds_encodable: bool
 
     #: *How* ``derives_delete_predicate`` was established. Reported by
@@ -443,7 +445,7 @@ def _probe() -> Probed:
         # Unknown -> assume NOT, for the same reason: the mirror installs, and
         # on a library that does overlap signing it is redundant but correct.
         s3_signing_overlaps=signing_overlaps is True,
-        # Never unknown: a plain function call, with nothing to import or write.
+        # Never unknown: an exception from the call counts as not encodable.
         string_upper_bounds_encodable=_string_upper_bounds_encodable(),
     )
     return Probed(capabilities, unobserved)
@@ -777,29 +779,18 @@ def _rewrite_ignores_unrelated_append() -> bool | CouldNotRun:
 
 
 def _string_upper_bounds_encodable() -> bool:
-    """Does the library round a truncated string bound up to something UTF-8 can encode?
+    """Does the library's definition round a truncated string bound up to something UTF-8 encodes?
 
-    Behavioural, because the answer selects an implementation: false installs
-    :mod:`zamboni.truncate`. It asks the function the writer calls --
-    ``pyiceberg.io.pyarrow``'s name for it -- because a fixed definition that
-    name never held fixes nothing. Once the mirror holds that name, it asks
-    ``pyiceberg.utils.truncate``'s instead, so as not to observe our own code.
+    Asks ``pyiceberg.utils.truncate``, where the function is defined, because
+    the answer is cached under a key that describes the installed build. Which
+    function ``pyiceberg.io.pyarrow``'s name holds is a fact about one process,
+    and :func:`zamboni.truncate.install` asks it live.
     """
-    from pyiceberg.io import pyarrow as pyarrow_io
     from pyiceberg.utils import truncate as library
 
-    from .truncate import PROBE, truncate_upper_bound_text_string
+    from .truncate import bounds_are_encodable
 
-    called = pyarrow_io.truncate_upper_bound_text_string
-    if called is truncate_upper_bound_text_string:
-        called = library.truncate_upper_bound_text_string
-    upper = called(*PROBE)
-    try:
-        if upper is not None:
-            upper.encode("utf-8")
-    except UnicodeEncodeError:
-        return False
-    return True
+    return bounds_are_encodable(library.truncate_upper_bound_text_string)
 
 
 def _s3_signer_registered_once() -> bool | CouldNotRun:
