@@ -84,6 +84,7 @@ def _caps(**overrides) -> PyIcebergCapabilities:
         "delete_manifests_writable": False,
         "s3_signer_registered_once": False,
         "s3_signing_overlaps": False,
+        "string_upper_bounds_encodable": False,
     }
     base.update(overrides)
     return PyIcebergCapabilities(**base)

@@ -92,9 +92,12 @@ class CatalogSession:
         # filesystem registry when it is built, so the S3 signer fix must already
         # be in it (ZMBNI-51). Here rather than in `from_catalog`, so a session an
         # integrator constructs directly is covered too.
-        from . import signer
+        from . import signer, truncate
 
         signer.install()
+        # Before any write: 0.12 rounds some string upper bounds up to a
+        # surrogate it then cannot serialize, failing the write (#303).
+        truncate.install()
 
     def table(self, identifier: str, *, reclaiming: bool = False) -> Table:
         """Load a table by ``namespace.name`` identifier.
