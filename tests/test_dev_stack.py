@@ -936,6 +936,93 @@ def test_spark_compaction_applies_equality_deletes(spark_env, session, request, 
 
 
 @pytest.mark.spark
+def test_dangling_removal_keeps_a_global_equality_delete(spark_env, session, request):
+    """#306: an equality delete written under the unpartitioned spec that
+    partition evolution left is global, so it applies to files written under
+    the old spec. Zamboni's removal used to call it dangling -- it matched a
+    delete only against its own spec -- and Spark then read the deleted row
+    again: [0, 1, 2, 4, 5] before, [0, 1, 2, 3, 4, 5] after, measured on
+    `main` at e8fc17c."""
+    from zamboni.deletes import DanglingDeleteCleaner
+    from zamboni.testing import write_equality_deletes
+
+    namespace = f"zs306_{uuid.uuid4().hex[:8]}"
+    session.catalog.create_namespace(namespace)
+    request.addfinalizer(lambda: _drop_namespace(session, namespace))
+    identifier = f"{namespace}.events"
+    tbl = session.catalog.create_table(
+        identifier, schema=SCHEMA, partition_spec=SPEC, properties={"format-version": "2"}
+    )
+    for i in range(3):
+        tbl.append(
+            pa.table(
+                {
+                    "id": pa.array([i * 2, i * 2 + 1], type=pa.int32()),
+                    "category": pa.array(["a", "b"], type=pa.string()),
+                },
+                schema=ARROW,
+            )
+        )
+    with tbl.update_spec() as update:
+        update.remove_field("category")
+    tbl.refresh()
+    write_equality_deletes(tbl, {"id": [3]})
+
+    spark = spark_maintainer(spark_env, session).connect()
+
+    def ids() -> list[int]:
+        spark.sql(f"REFRESH TABLE iceberg.{identifier}")
+        return sorted(row[0] for row in spark.sql(f"SELECT id FROM iceberg.{identifier}").collect())
+
+    assert ids() == [0, 1, 2, 4, 5], "Spark does not apply the delete globally: this proves nothing"
+
+    result = DanglingDeleteCleaner(dry_run=False).run(session.table(identifier))
+
+    assert result.removed == 0
+    assert ids() == [0, 1, 2, 4, 5], "removing dangling deletes brought a deleted row back"
+
+
+@pytest.mark.spark
+def test_dangling_removal_clears_the_equality_delete_spark_compaction_leaves(
+    spark_env, session, request
+):
+    """#306, for #305: on a table whose only spec is unpartitioned, a Spark
+    compaction leaves the equality delete at the rewritten files' sequence
+    number, where it applies to nothing (strictly lower only). Zamboni's
+    removal now calls it dangling; Spark reads the same rows afterwards."""
+    from zamboni.config import CompactionConfig
+    from zamboni.deletes import DanglingDeleteCleaner
+    from zamboni.maintainers import Operation
+    from zamboni.testing import write_equality_deletes
+
+    identifier, _ = _spark_equality_delete_table(session, request, "unpartitioned")
+    write_equality_deletes(session.table(identifier), {"id": sorted(EQUALITY_DELETED)})
+    engine = spark_maintainer(spark_env, session)
+    spark = engine.connect()
+
+    def ids() -> list[int]:
+        spark.sql(f"REFRESH TABLE iceberg.{identifier}")
+        return sorted(row[0] for row in spark.sql(f"SELECT id FROM iceberg.{identifier}").collect())
+
+    engine.execute(
+        Operation.COMPACT,
+        identifier,
+        request=spark_request(compaction=CompactionConfig(delete_file_threshold=1)),
+        dry_run=False,
+    )
+    survivors = sorted(set(range(12)) - EQUALITY_DELETED)
+    assert equality_delete_signals(session, identifier) == (1, len(EQUALITY_DELETED)), (
+        "Spark cleared it itself: this test no longer exercises the leftover"
+    )
+
+    result = DanglingDeleteCleaner(dry_run=False).run(session.table(identifier))
+
+    assert result.removed == 1
+    assert equality_delete_signals(session, identifier) == (0, 0)
+    assert ids() == survivors, "removing the leftover delete changed what Spark reads"
+
+
+@pytest.mark.spark
 def test_zorder_is_accepted_by_the_server(spark_env, session, spark_table):
     """The one thing Spark does that Trino cannot, so nothing else can cover it.
 

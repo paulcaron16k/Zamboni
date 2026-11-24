@@ -46,10 +46,11 @@ class LiveFile:
     sequence_number: int | None
     spec_id: int
     partition: Record
-    #: The delete files a scan would apply to this file, as PyIceberg's own
-    #: ``DeleteFileIndex`` answers it -- so a delete at a lower sequence number
-    #: than the file (one a rewrite already applied) is not among them. What the
-    #: planner reads to find files worth rewriting for their deletes (#288).
+    #: The delete files a scan would apply to this file, as
+    #: :class:`~zamboni.deletes.DeleteIndex` answers it -- so a delete at a lower
+    #: sequence number than the file (one a rewrite already applied) is not among
+    #: them, and a global equality delete is (#306). What the planner reads to
+    #: find files worth rewriting for their deletes (#288).
     deletes: tuple[DataFile, ...] = ()
 
     @property
@@ -169,11 +170,11 @@ class TableProfile:
 
 def profile_table(tbl: Table) -> TableProfile:
     """Walk the current snapshot's manifests and assess compaction eligibility."""
-    from pyiceberg.table.delete_file_index import DeleteFileIndex
+    from .deletes import DeleteIndex
 
     snapshot = tbl.current_snapshot()
     data_entries: list[ManifestEntry] = []
-    index = DeleteFileIndex()
+    index = DeleteIndex.for_table(tbl)
     position_deletes = 0
     equality_deletes = 0
 
@@ -188,7 +189,7 @@ def profile_table(tbl: Table) -> TableProfile:
                     position_deletes += 1
                 elif data_file.content == DataFileContent.EQUALITY_DELETES:
                     equality_deletes += 1
-                index.add_delete_file(entry, data_file.partition)
+                index.add(entry)
 
     # Every delete file has been seen before any is looked up: a manifest
     # listing need not put delete manifests first.
@@ -198,14 +199,7 @@ def profile_table(tbl: Table) -> TableProfile:
             sequence_number=entry.sequence_number,
             spec_id=entry.data_file.spec_id,
             partition=entry.data_file.partition,
-            deletes=tuple(
-                sorted(
-                    index.for_data_file(
-                        entry.sequence_number or 0, entry.data_file, entry.data_file.partition
-                    ),
-                    key=lambda d: d.file_path,
-                )
-            ),
+            deletes=tuple(sorted(index.for_data_file(entry), key=lambda d: d.file_path)),
         )
         for entry in data_entries
     ]

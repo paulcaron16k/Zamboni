@@ -27,10 +27,11 @@ its manifest is also dangling. Anything else is reported as retained, with the
 reason. Reclaiming less is the conservative error; the alternative is silent
 metadata corruption.
 
-Whether a delete file still applies is not decided here. That question is
+Whether a position delete still applies is not decided here. That question is
 answered by ``pyiceberg.table.delete_file_index``, which is the same code the
-scan planner uses -- so a delete file this module calls dangling is, by
-construction, one no scan would have applied.
+scan planner uses. Equality deletes are the exception, decided here by the
+spec's rules in :class:`DeleteIndex`: that index treats them as position
+deletes, and in one case that called a live delete dangling (#306).
 """
 
 from __future__ import annotations
@@ -49,6 +50,7 @@ from pyiceberg.manifest import (
 )
 from pyiceberg.table import Table
 from pyiceberg.table.snapshots import Operation
+from pyiceberg.typedef import Record
 
 from .committer import ConcurrentModification, _ReplaceFiles
 from .health import OPERATION_STAMP, REMOVE_DANGLING_DELETES_STAMP
@@ -171,13 +173,81 @@ class DanglingReport:
         return "\n".join(lines)
 
 
+class DeleteIndex:
+    """Which delete files a scan would apply to each data file.
+
+    Position deletes and deletion vectors go through PyIceberg's
+    ``DeleteFileIndex``, the index its scan planner builds. Equality deletes do
+    not, because that index treats every delete as a position delete (its
+    docstring: "Indexes position delete files"), and the spec's "Scan Planning"
+    section gives equality deletes two rules it gets wrong:
+
+    * An equality delete applies to a data file whose data sequence number is
+      *strictly lower* than its own. The index also applies it at an equal one,
+      which keeps a file that could go -- the file a Spark compaction leaves on
+      an unpartitioned table (#305).
+    * An equality delete whose spec is unpartitioned is *global*: it applies to
+      data files of every spec. The index matches it only against its own
+      spec, so after partition evolution it called a live delete dangling, and
+      removing it brought deleted rows back (#306).
+
+    Otherwise an equality delete applies within its own spec and partition, as
+    a position delete does. Neither path prunes by column bounds, so both can
+    only over-apply -- which keeps a delete file, never removes a live one.
+
+    Add every delete before asking: a manifest listing need not put delete
+    manifests first.
+    """
+
+    def __init__(self, *, unpartitioned_specs: Set[int]) -> None:
+        from pyiceberg.table.delete_file_index import DeleteFileIndex
+
+        self._unpartitioned_specs = unpartitioned_specs
+        self._positional = DeleteFileIndex()
+        self._global_equality: list[tuple[int, DataFile]] = []
+        self._scoped_equality: dict[tuple[int, Record], list[tuple[int, DataFile]]] = defaultdict(
+            list
+        )
+
+    @classmethod
+    def for_table(cls, tbl: Table) -> DeleteIndex:
+        return cls(
+            unpartitioned_specs={
+                spec_id for spec_id, spec in tbl.specs().items() if spec.is_unpartitioned()
+            }
+        )
+
+    def add(self, entry: ManifestEntry) -> None:
+        delete = entry.data_file
+        seq = entry.sequence_number or 0
+        if delete.content != DataFileContent.EQUALITY_DELETES:
+            self._positional.add_delete_file(entry, delete.partition)
+        elif delete.spec_id in self._unpartitioned_specs:
+            self._global_equality.append((seq, delete))
+        else:
+            self._scoped_equality[(delete.spec_id, delete.partition)].append((seq, delete))
+
+    def for_data_file(self, entry: ManifestEntry) -> set[DataFile]:
+        data = entry.data_file
+        seq = entry.sequence_number or 0
+        applied: set[DataFile] = set()
+        if not self._positional.is_empty():
+            applied |= self._positional.for_data_file(seq, data, data.partition)
+        for delete_seq, delete in (
+            *self._global_equality,
+            *self._scoped_equality.get((data.spec_id, data.partition), ()),
+        ):
+            if seq < delete_seq:
+                applied.add(delete)
+        return applied
+
+
 def find_dangling(tbl: Table, *, assuming_rewritten: Set[str] = frozenset()) -> DanglingReport:
     """Delete files the current snapshot references but no live data file needs.
 
-    Applicability is delegated to PyIceberg's own ``DeleteFileIndex`` -- the
-    index the scan planner builds -- so "dangling" here means precisely "no scan
-    would apply it", rather than a restatement of the rule that could drift from
-    it.
+    Which delete files a data file pulls in is :class:`DeleteIndex`: position
+    deletes through PyIceberg's own ``DeleteFileIndex``, equality deletes by the
+    spec's rules, which that index does not know (#306).
 
     ``assuming_rewritten`` answers the same question for the table a rewrite of
     those data files (by path) would leave, which is how a compaction preview
@@ -187,8 +257,6 @@ def find_dangling(tbl: Table, *, assuming_rewritten: Set[str] = frozenset()) -> 
     below its own (position) or below it (equality). So they are left out of
     the live set rather than replaced in it.
     """
-    from pyiceberg.table.delete_file_index import DeleteFileIndex
-
     identifier = ".".join(tbl.name())
     report = DanglingReport(identifier=identifier)
 
@@ -196,14 +264,14 @@ def find_dangling(tbl: Table, *, assuming_rewritten: Set[str] = frozenset()) -> 
     if snapshot is None:
         return report
 
-    index = DeleteFileIndex()
     per_manifest: dict[str, list[DataFile]] = defaultdict(list)
+    delete_entries: list[ManifestEntry] = []
     data_entries: list[ManifestEntry] = []
 
     for manifest in snapshot.manifests(io=tbl.io):
         for entry in manifest.fetch_manifest_entry(io=tbl.io, discard_deleted=True):
             if entry.data_file.content in DELETE_CONTENT:
-                index.add_delete_file(entry, entry.data_file.partition)
+                delete_entries.append(entry)
                 per_manifest[manifest.manifest_path].append(entry.data_file)
                 report.delete_files += 1
             elif entry.data_file.content == DataFileContent.DATA:
@@ -212,14 +280,14 @@ def find_dangling(tbl: Table, *, assuming_rewritten: Set[str] = frozenset()) -> 
     if not report.delete_files:
         return report
 
+    index = DeleteIndex.for_table(tbl)
+    for entry in delete_entries:
+        index.add(entry)
     # Every delete file some live data file would pull in.
     applied: set[DataFile] = set()
     for entry in data_entries:
-        if entry.data_file.file_path in assuming_rewritten:
-            continue
-        applied |= index.for_data_file(
-            entry.sequence_number or 0, entry.data_file, entry.data_file.partition
-        )
+        if entry.data_file.file_path not in assuming_rewritten:
+            applied |= index.for_data_file(entry)
 
     for path, delete_files in per_manifest.items():
         dangling = tuple(f for f in delete_files if f not in applied)
