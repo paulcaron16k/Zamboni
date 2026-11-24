@@ -85,9 +85,10 @@ def test_a_copy_on_write_table_is_never_offered():
 
 def test_equality_deletes_make_a_table_ineligible_unless_the_engine_clears_them():
     """Where compaction refuses them (ZMBNI-11), or applies them and keeps their
-    files (Spark), the next check finds the table as it was and offers it again,
-    forever; where compaction applies and removes them, the table is over like
-    any other (#300). Not saying is the old rule."""
+    files (Spark, on a table whose only spec is unpartitioned), the next check
+    finds the table as it was and offers it again, forever; where compaction
+    applies and removes them, the table is over like any other (#300). Not
+    saying is the old rule."""
     over = health(delete_files=50, equality_deletes=3)
     assert PressureSettings().triggered(over) is None
     assert PressureSettings().triggered(over, equality_deletes_eligible=False) is None
@@ -95,22 +96,52 @@ def test_equality_deletes_make_a_table_ineligible_unless_the_engine_clears_them(
 
 
 @pytest.mark.parametrize("engine", ["local", "trino", "spark"])
-def test_each_engine_is_offered_equality_delete_tables_as_it_declares(engine):
-    """The outcome is derived from the engine's declarations through the record
-    the worker builds, so a declaration that changes moves the decision with it
-    and no second copy of the fact exists to fall behind."""
+@pytest.mark.parametrize(("specs", "partitioned"), [(1, False), (1, True), (2, False)])
+def test_each_engine_is_offered_equality_delete_tables_as_it_declares(engine, specs, partitioned):
+    """The outcome is derived from the engine's declarations and the table's
+    partitioning through the record the worker builds, so a declaration that
+    changes moves the decision with it and no second copy of the fact exists
+    to fall behind (#300, #301)."""
     from zamboni import maintainers
     from zamboni.health import health_record
 
+    table = {"partition_specs": specs, "partitioned": partitioned}
     record = health_record(
-        "acme", {"db.cdc": health(delete_files=50, equality_deletes=3)}, engine=engine
+        "acme", {"db.cdc": health(delete_files=50, equality_deletes=3, **table)}, engine=engine
     )
     assert record["engine"] == engine
     caps = maintainers.get(engine).capabilities()
-    eligible = caps.compacts_equality_deletes and caps.clears_equality_deletes
-    assert record["equality_deletes_eligible"] is eligible
+    eligible = caps.compacts_equality_deletes and caps.clears_equality_deletes.applies_to(**table)
+    assert record["tables"]["db.cdc"]["equality_deletes_eligible"] is eligible
     offered = pressure_offers_(warehouse(), record)["over"]
     assert ("db.cdc" in offered) is eligible
+
+
+def test_spark_is_offered_a_partitioned_equality_delete_table_and_not_an_unpartitioned_one():
+    """The case #301 exists for, spelled out rather than derived: one record,
+    two tables, one engine, two answers."""
+    from zamboni.health import health_record
+
+    cdc = health(delete_files=50, equality_deletes=3, partition_specs=1)
+    record = health_record(
+        "acme",
+        {"db.flat": cdc | {"partitioned": False}, "db.daily": cdc | {"partitioned": True}},
+        engine="spark",
+    )
+    assert list(pressure_offers_(warehouse(), record)["over"]) == ["db.daily"]
+
+
+@pytest.mark.parametrize("unmeasured", ["partition_specs", "partitioned"])
+def test_a_table_whose_partitioning_was_not_measured_is_not_offered(unmeasured):
+    """No answer is written without both facts, even for an engine that clears
+    every table, and no answer is "not eligible"."""
+    from zamboni.health import health_record
+
+    signals = health(delete_files=50, equality_deletes=3, partition_specs=1, partitioned=True)
+    signals[unmeasured] = None
+    record = health_record("acme", {"db.cdc": signals}, engine="trino")
+    assert "equality_deletes_eligible" not in record["tables"]["db.cdc"]
+    assert pressure_offers_(warehouse(), record)["over"] == {}
 
 
 def test_an_unreported_equality_count_is_ineligible_whatever_the_engine():
@@ -120,14 +151,17 @@ def test_an_unreported_equality_count_is_ineligible_whatever_the_engine():
 
 
 @pytest.mark.parametrize("said", [None, False, "true", 1])
-def test_only_a_record_that_says_true_lifts_the_equality_rule(said):
+def test_only_a_table_entry_that_says_true_lifts_the_equality_rule(said):
     """An application's own entry may omit the key or write something else; only
-    the JSON boolean the worker writes counts."""
-    record = {"tables": {"db.cdc": health(delete_files=50, equality_deletes=3)}}
+    the JSON boolean the worker writes, in the table's own entry, counts."""
+    signals = health(delete_files=50, equality_deletes=3)
+    record = {"tables": {"db.cdc": signals}}
     if said is not None:
-        record["equality_deletes_eligible"] = said
+        signals["equality_deletes_eligible"] = said
     assert pressure_offers_(warehouse(), record)["over"] == {}
-    record["equality_deletes_eligible"] = True
+    record["equality_deletes_eligible"] = True  # #300's place for it, beside the tables
+    assert pressure_offers_(warehouse(), record)["over"] == {}
+    signals["equality_deletes_eligible"] = True
     assert list(pressure_offers_(warehouse(), record)["over"]) == ["db.cdc"]
 
 
@@ -277,18 +311,21 @@ def test_a_real_worker_measures_a_merge_on_read_table_over_the_default_threshold
     from zamboni.maintainers import offers_equality_deletes_to_pressure
 
     assert result.record["engine"] == "local", "no profile or variable names another"
-    assert result.record["equality_deletes_eligible"] is offers_equality_deletes_to_pressure(
-        "local"
+    assert (signals["partition_specs"], signals["partitioned"]) == (1, False)
+    assert signals["equality_deletes_eligible"] is offers_equality_deletes_to_pressure(
+        "local", partition_specs=1, partitioned=False
     )
 
 
+@pytest.mark.parametrize(("engine", "eligible"), [("trino", True), ("spark", False)])
 def test_the_deployments_engine_reaches_the_record_the_decision_reads(
-    tmp_path, monkeypatch, mor_table
+    tmp_path, monkeypatch, mor_table, engine, eligible
 ):
     """#300: a `serve` worker picks its engine the way a cron line does, from
     the profile or ZAMBONI_ENGINE, and the pressure check's record must carry
     *that* engine's answer -- not the local engine's, which is what a check
-    that ignored the deployment would report."""
+    that ignored the deployment would report. db.mor has one unpartitioned
+    spec, the one shape Spark leaves its equality delete files on (#301)."""
     import os
 
     workdir = tmp_path / "work"
@@ -297,14 +334,12 @@ def test_the_deployments_engine_reaches_the_record_the_decision_reads(
     environ = {
         "PATH": os.environ.get("PATH", ""),
         "ZAMBONI_LOCAL_WAREHOUSE": str(tmp_path / "warehouse"),
-        "ZAMBONI_ENGINE": "trino",
+        "ZAMBONI_ENGINE": engine,
     }
     result = run_check(workdir, environ, warehouse(None, "mor"))
     assert result.exit_code == 0, result.output
-    assert (result.record["engine"], result.record["equality_deletes_eligible"]) == (
-        "trino",
-        True,
-    )
+    said = result.record["tables"]["db.mor"]["equality_deletes_eligible"]
+    assert (result.record["engine"], said) == (engine, eligible)
 
 
 def run_check(workdir, environ, wh, **config):

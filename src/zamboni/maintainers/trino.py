@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any
 from ..properties import ApplyResult
 from . import (
     EngineConfigProblem,
+    EqualityDeleteClearing,
     LayoutFeature,
     Maintainer,
     MaintainerCapabilities,
@@ -203,7 +204,7 @@ class TrinoMaintainer(Maintainer):
             # when it skips a data file that is alone in its partition -- not
             # reproduced: test_trino_clears_equality_deletes_on_a_one_file_table.
             compacts_equality_deletes=True,
-            clears_equality_deletes=True,
+            clears_equality_deletes=EqualityDeleteClearing.ALL,
             operations={
                 Operation.COMPACT: OperationSupport(
                     Operation.COMPACT,

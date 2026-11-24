@@ -79,10 +79,12 @@ delete manifests only. ⁸ No procedure and no side effect achieves it; run this
 one elsewhere. ⁹ No size control. ¹⁰ Translated to Trino's own property names.
 ¹¹ PyIceberg cannot read them, so the table is refused (exit 3) rather than
 compacted into one that resurrects deleted rows; the refusal lifts on its own
-when a PyIceberg build can. ¹² Applies them but keeps the delete files, so the
-table still reports them afterwards; `zamboni serve`'s pressure check therefore
-offers such a table to Trino and not to Spark (#300). Both measured on the dev
-stack (`test_trino_compaction_applies_equality_deletes`,
+when a PyIceberg build can. ¹² Applies them, and removes the delete files
+except on a table whose only partition spec is unpartitioned, where Iceberg's
+dangling-delete removal skips the table: it then still reports them afterwards.
+`zamboni serve`'s pressure check therefore offers such a table to Trino always
+and to Spark unless it has only an unpartitioned spec (#300, #301). Both
+measured on the dev stack (`test_trino_compaction_applies_equality_deletes`,
 `test_spark_compaction_applies_equality_deletes`).
 
 `zamboni engines` prints this from the code, with the reason attached to every

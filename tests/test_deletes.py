@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 from pyiceberg.manifest import DataFileContent, ManifestContent
+from pyiceberg.typedef import Record
 
 from zamboni import CompactionConfig, TableCompactor
 from zamboni.deletes import (
@@ -273,3 +274,35 @@ def test_delete_files_land_in_a_delete_manifest(mor_table):
                 f"{manifest.manifest_path} content={manifest.content} holds "
                 f"a file with content={entry.data_file.content}"
             )
+
+
+# -- the equality-delete simulator (#300, #301) ----------------------------------
+
+
+def test_an_equality_delete_is_written_into_the_partition_it_names(partitioned):
+    """An equality delete applies only within its partition, so the file must
+    carry the partition's tuple; one that did not would delete nothing."""
+    from zamboni.testing import write_equality_deletes
+
+    written = write_equality_deletes(partitioned, {"id": [500]}, partition={"category": "b"})
+
+    assert written.content == DataFileContent.EQUALITY_DELETES
+    assert written.partition == Record("b")
+    assert partitioned.current_snapshot().summary["total-equality-deletes"] == "1"
+
+
+@pytest.mark.parametrize("partition", [None, {}, {"id": 1}, {"category": "b", "id": 1}])
+def test_a_partitioned_table_refuses_an_equality_delete_without_its_partition(
+    partitioned, partition
+):
+    from zamboni.testing import write_equality_deletes
+
+    with pytest.raises(ValueError, match=r"partition must name exactly .*\['category'\]"):
+        write_equality_deletes(partitioned, {"id": [500]}, partition=partition)
+
+
+def test_an_unpartitioned_table_refuses_a_partition(unpartitioned):
+    from zamboni.testing import write_equality_deletes
+
+    with pytest.raises(ValueError, match=r"partition must name exactly .*\[\]"):
+        write_equality_deletes(unpartitioned, {"id": [1]}, partition={"category": "a"})

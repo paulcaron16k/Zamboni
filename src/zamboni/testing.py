@@ -37,6 +37,8 @@ ELT-1267 commits them, declaring ``delete`` because only deletes are added.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 from pyiceberg.manifest import (
@@ -323,7 +325,11 @@ def add_position_deletes(
 
 
 def write_equality_deletes(
-    tbl: Table, values: dict[str, list], *, name_hint: str = "sim"
+    tbl: Table,
+    values: dict[str, list],
+    *,
+    partition: dict[str, Any] | None = None,
+    name_hint: str = "sim",
 ) -> DataFile:
     """Commit one equality delete file removing every row whose ``values`` match.
 
@@ -333,18 +339,28 @@ def write_equality_deletes(
     PyIceberg line can write or read (ZMBNI-705) -- so this exists for the
     engines that can, Trino and Spark, to be tested on such a table (#300).
 
-    Unpartitioned tables only. An equality delete applies within its own
-    partition, so on a partitioned table one file per partition would be
-    needed, carrying each partition's tuple; nothing needs that yet, and
-    refusing beats writing a file that silently deletes nothing.
+    An equality delete applies only within its own partition. On a
+    partitioned table, ``partition`` names that partition by the current
+    spec's field names and their values -- ``{"category": "b"}`` -- and is
+    required, because a file written without it would silently delete
+    nothing. On an unpartitioned table it must be left out, and the delete is
+    then global: Spark applied one written under an evolved table's
+    unpartitioned spec to files written under its old partitioned spec too
+    (test_spark_compaction_applies_equality_deletes). One call is one
+    partition; a delete spanning several is one call per partition.
 
     The file carries no column bounds. Bounds only let a reader skip it, so
     leaving them out costs a reader time and cannot hide a delete.
     """
     from pyiceberg.io.pyarrow import schema_to_pyarrow
 
-    if not tbl.spec().is_unpartitioned():
-        raise ValueError(f"{tbl.name()}: write_equality_deletes supports unpartitioned tables")
+    spec = tbl.spec()
+    fields = [f.name for f in spec.fields]
+    if sorted(partition or {}) != sorted(fields):
+        raise ValueError(
+            f"{tbl.name()}: partition must name exactly the current spec's fields "
+            f"{fields}, found {sorted(partition or {})}"
+        )
     columns = list(values)
     lengths = {len(v) for v in values.values()}
     if len(lengths) != 1 or not columns:
@@ -367,7 +383,7 @@ def write_equality_deletes(
         content=DataFileContent.EQUALITY_DELETES,
         file_path=path,
         file_format=FileFormat.PARQUET,
-        partition=Record(),
+        partition=Record(*((partition or {})[name] for name in fields)),
         file_size_in_bytes=len(tbl.io.new_input(path)),
         record_count=rows.num_rows,
         spec_id=tbl.spec().spec_id,

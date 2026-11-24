@@ -53,7 +53,10 @@ def commits_anyway(item: WorkItem, context: WorkerContext) -> dict[str, Any]:
 def says_true_as_a_string(check: PressureCheck, context: WorkerContext) -> dict[str, Any]:
     """Breaks rule 3 (#300): the runtime reads only the boolean, so this entry
     would mean "not eligible" while appearing to say the opposite."""
-    return run_health(check, context) | {"equality_deletes_eligible": "true"}
+    record = run_health(check, context)
+    for signals in record["tables"].values():
+        signals["equality_deletes_eligible"] = "true"
+    return record
 
 
 def bare_exit_code(item: WorkItem, context: WorkerContext) -> dict[str, Any]:
@@ -213,7 +216,7 @@ def test_a_health_entry_saying_true_as_a_string_is_refused(harness):
     broken = dataclasses.replace(
         harness, health_entry="tests.test_entry_conformance:says_true_as_a_string"
     )
-    with pytest.raises(ConformanceError, match="rule 3: equality_deletes_eligible must be"):
+    with pytest.raises(ConformanceError, match=r"rule 3: .*'s equality_deletes_eligible must be"):
         check_health_entry_returns_a_health_record(broken)
 
 

@@ -556,15 +556,15 @@ def check_health_entry_returns_a_health_record(h: EntryHarness) -> None:
     )
     lacking = sorted(set(HEALTH_FIELDS) - set(signals))
     _require(not lacking, "rule 3", f"{h.item.table}'s signals lack {lacking}")
-    # Optional (#300): absent means equality-delete tables are not offered.
-    # Present, it must be the boolean `health_record` writes -- the runtime
-    # accepts only `True`, so a "true" string would silently mean "not eligible".
-    assert isinstance(result.record, dict)  # established by the tables check above
-    said = result.record.get("equality_deletes_eligible", False)
+    # Optional (#300, #301): absent means the table is not offered while it
+    # carries equality deletes. Present, it must be the boolean `health_record`
+    # writes -- the runtime accepts only `True`, so a "true" string would
+    # silently mean "not eligible".
+    said = signals.get("equality_deletes_eligible", False)
     _require(
         isinstance(said, bool),
         "rule 3",
-        f"equality_deletes_eligible must be true or false, found {said!r}",
+        f"{h.item.table}'s equality_deletes_eligible must be true or false, found {said!r}",
     )
 
 
