@@ -18,6 +18,7 @@ from zamboni import maintainers
 from zamboni.capabilities import detect
 from zamboni.maintainers import (
     EngineConfigProblem,
+    EqualityDeleteClearing,
     MaintainerCapabilities,
     MaintenanceRequest,
     Operation,
@@ -72,7 +73,7 @@ def test_capabilities_reject_a_missing_operation():
             engine="partial",
             operations={},
             compacts_equality_deletes=False,
-            clears_equality_deletes=False,
+            clears_equality_deletes=EqualityDeleteClearing.NONE,
         )
 
 
@@ -81,14 +82,20 @@ def test_capabilities_require_both_equality_delete_declarations(omitted):
     """Omitting either is a construction error, not a quiet False (#300)."""
     from zamboni.maintainers.local import LocalMaintainer
 
-    declared = {"compacts_equality_deletes": False, "clears_equality_deletes": False}
+    declared = {
+        "compacts_equality_deletes": False,
+        "clears_equality_deletes": EqualityDeleteClearing.NONE,
+    }
     del declared[omitted]
     operations = LocalMaintainer.capabilities().operations
     with pytest.raises(TypeError, match=omitted):
         MaintainerCapabilities(engine="silent", operations=operations, **declared)  # type: ignore[call-arg]
 
 
-def test_an_engine_cannot_clear_equality_deletes_it_cannot_compact():
+@pytest.mark.parametrize(
+    "clearing", [c for c in EqualityDeleteClearing if c is not EqualityDeleteClearing.NONE]
+)
+def test_an_engine_cannot_clear_equality_deletes_it_cannot_compact(clearing):
     from zamboni.maintainers.local import LocalMaintainer
 
     with pytest.raises(ValueError, match="clears equality deletes it cannot compact"):
@@ -96,8 +103,30 @@ def test_an_engine_cannot_clear_equality_deletes_it_cannot_compact():
             engine="contradiction",
             operations=LocalMaintainer.capabilities().operations,
             compacts_equality_deletes=False,
-            clears_equality_deletes=True,
+            clears_equality_deletes=clearing,
         )
+
+
+#: (partition specs, current spec partitioned): a table never partitioned, one
+#: always partitioned, and the two ways a spec evolves. Each measured on Spark
+#: in test_dev_stack.py.
+PARTITIONINGS = [(1, False), (1, True), (2, False), (2, True)]
+
+
+@pytest.mark.parametrize(("specs", "partitioned"), PARTITIONINGS)
+def test_which_tables_each_clearing_covers(specs, partitioned):
+    """Iceberg's own condition for skipping dangling-delete removal is one
+    spec, unpartitioned (`RemoveDanglingDeletesSparkAction.execute`); a table
+    that ever had another spec is not skipped, whatever the current one is."""
+    covered = {
+        clearing: clearing.applies_to(partition_specs=specs, partitioned=partitioned)
+        for clearing in EqualityDeleteClearing
+    }
+    assert covered == {
+        EqualityDeleteClearing.NONE: False,
+        EqualityDeleteClearing.ALL: True,
+        EqualityDeleteClearing.UNLESS_ONLY_UNPARTITIONED: (specs, partitioned) != (1, False),
+    }
 
 
 def test_compaction_on_equality_deletes_agrees_with_the_compact_declaration(monkeypatch):
@@ -117,11 +146,14 @@ def test_compaction_on_equality_deletes_agrees_with_the_compact_declaration(monk
         assert not (caps.compacts_equality_deletes and limited), name
 
 
-def test_pressure_eligibility_needs_compaction_to_apply_and_clear_equality_deletes():
-    """The measured facts behind it (#300), so a changed declaration fails by
-    name. Trino applies and clears; Spark applies and keeps the files; the
-    local engine follows its PyIceberg probe and has never been measured
-    clearing them."""
+@pytest.mark.parametrize(("specs", "partitioned"), PARTITIONINGS)
+def test_pressure_eligibility_needs_compaction_to_apply_and_clear_equality_deletes(
+    specs, partitioned
+):
+    """The measured facts behind it (#300, #301), so a changed declaration
+    fails by name. Trino applies and clears; Spark applies, and clears unless
+    the table's only spec is unpartitioned; the local engine follows its
+    PyIceberg probe and has never been measured clearing them."""
     from zamboni import maintainers
     from zamboni.capabilities import detect
 
@@ -131,12 +163,15 @@ def test_pressure_eligibility_needs_compaction_to_apply_and_clear_equality_delet
         if (caps := maintainers.get(name).capabilities())
     }
     assert declared == {
-        "local": (detect().equality_deletes_readable, False),
-        "spark": (True, False),
-        "trino": (True, True),
+        "local": (detect().equality_deletes_readable, EqualityDeleteClearing.NONE),
+        "spark": (True, EqualityDeleteClearing.UNLESS_ONLY_UNPARTITIONED),
+        "trino": (True, EqualityDeleteClearing.ALL),
     }
     for name, (compacts, clears) in declared.items():
-        assert maintainers.offers_equality_deletes_to_pressure(name) is (compacts and clears)
+        table = {"partition_specs": specs, "partitioned": partitioned}
+        assert maintainers.offers_equality_deletes_to_pressure(name, **table) is (
+            compacts and clears.applies_to(**table)
+        )
 
 
 # -- support is not binary -----------------------------------------------

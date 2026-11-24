@@ -172,6 +172,13 @@ class TableHealth:
     #: properties of the metadata document itself.
     snapshots: int = 0
     metadata_log_entries: int = 0
+    #: Partition specs the table has had, and whether the current one has a
+    #: field. Facts of the metadata document, like the two above. ``None``
+    #: where nothing measured them, which no engine reads as clearable. Spark
+    #: leaves equality delete files behind only on a table with one,
+    #: unpartitioned, spec (#301).
+    partition_specs: int | None = None
+    partitioned: bool | None = None
     #: Signals a deeper tier would have to answer. See
     #: :data:`UNSEEN_FROM_METADATA`.
     unseen: tuple[str, ...] = field(default_factory=lambda: UNSEEN_FROM_METADATA)
@@ -300,6 +307,8 @@ def table_health(tbl: Table) -> TableHealth:
         records=_counter(summary, TOTAL_RECORDS),
         snapshots=len(tbl.metadata.snapshots),
         metadata_log_entries=len(tbl.metadata.metadata_log),
+        partition_specs=len(tbl.metadata.partition_specs),
+        partitioned=not tbl.metadata.spec().is_unpartitioned(),
     )
 
 
@@ -511,12 +520,15 @@ def health_record(
     check's entry returns (docs/maintenance-runtime.md §7).
 
     ``engine`` is the one that would compact these tables. Given, the record
-    says in ``equality_deletes_eligible`` whether a pressure check may offer
-    it a table carrying equality deletes -- a fact of the deployment, not of
-    any table, so it sits beside ``tables`` (#300). True only where the
-    engine's compaction both applies them and removes their files; see
-    ``MaintainerCapabilities.clears_equality_deletes``. Not given, the key is
-    absent and the check skips such tables, as it always has.
+    names it, and each table's entry says in ``equality_deletes_eligible``
+    whether a pressure check may offer that engine the table if it carries
+    equality deletes (#300). True only where the engine's compaction both
+    applies them and removes their files from a table partitioned as this one
+    is; see ``MaintainerCapabilities.clears_equality_deletes``. Per table
+    because Spark's answer depends on the partitioning (#301). Not given, the
+    key is absent and the check skips such tables, as it always has; nor is
+    it written for a table that could not be read, or whose partitioning was
+    not measured.
     Asked here, in the worker, because the local engine's answer is a PyIceberg
     probe, and the service process that reads the record loads no engine.
     """
@@ -531,7 +543,16 @@ def health_record(
         from .maintainers import offers_equality_deletes_to_pressure
 
         record["engine"] = engine
-        record["equality_deletes_eligible"] = offers_equality_deletes_to_pressure(engine)
+        answered: dict[str, dict[str, Any]] = {}
+        for name, signals in tables.items():
+            specs, partitioned = signals.get("partition_specs"), signals.get("partitioned")
+            if isinstance(specs, int) and isinstance(partitioned, bool):
+                eligible = offers_equality_deletes_to_pressure(
+                    engine, partition_specs=specs, partitioned=partitioned
+                )
+                signals = signals | {"equality_deletes_eligible": eligible}
+            answered[name] = signals
+        record["tables"] = answered
     return record
 
 

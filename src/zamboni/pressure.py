@@ -18,13 +18,15 @@ nothing from the engine, and the service process that evaluates it stays light
 **Equality deletes make a table ineligible unless the engine both compacts
 them and removes their files.** The local engine refuses a table carrying them
 while PyIceberg cannot read them (ZMBNI-11), so a trigger that fired on one
-would be refused and fire again every check. Spark applies them but keeps the
-files, so the table still reports its delete files after a successful
-compaction and would be offered again every check just the same. Trino does
-both, so there such a table is as eligible as any other (#300). Which engine,
-this module cannot know: it is told, by the health record's
-``equality_deletes_eligible``, which the worker took from the engine's
-declarations. A record that does not say -- an application's own entry, say --
+would be refused and fire again every check. An engine that applies them but
+keeps the files leaves a table that still reports its delete files after a
+successful compaction, so it would be offered again every check just the same.
+Trino does both, so there such a table is as eligible as any other (#300).
+Spark does both except on a table whose only partition spec is unpartitioned,
+where it keeps the files (#301). Which engine and which table, this module cannot
+know: it is told, by each table's ``equality_deletes_eligible`` in the health
+record, which the worker took from the engine's declarations and the table's
+partitioning. An entry that does not say -- an application's own entry, say --
 reads as "not eligible", the old rule. An unreported count stays ineligible on
 every engine, because a table the summary says nothing about might be one the
 engine refuses. And the summary's ``total-delete-files`` counts equality and
@@ -131,8 +133,8 @@ class PressureSettings:
         ``health`` is a health record: TableHealth's fields, as data. A counter
         the summary did not report is ``None`` and meets no threshold -- "not
         reported" is not "zero", and neither is it "over".
-        ``equality_deletes_eligible`` is the record's own answer for the engine
-        that would run the offer; the default is the safe one.
+        ``equality_deletes_eligible`` is the table's own answer, in the record,
+        for the engine that would run the offer; the default is the safe one.
         """
         delete_files = health.get("delete_files")
         if not delete_files:  # copy-on-write, a table without deletes, or unreported

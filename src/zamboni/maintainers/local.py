@@ -19,6 +19,7 @@ from ..capabilities import detect
 from ..health import COMPACT_INCOMPLETE, EVOLUTION_RELEASE
 from . import (
     EngineConfigProblem,
+    EqualityDeleteClearing,
     LayoutFeature,
     Maintainer,
     MaintainerCapabilities,
@@ -92,7 +93,7 @@ class LocalMaintainer(Maintainer):
             # to show whether it removes their files. False is the direction
             # that costs a missed pressure offer rather than one repeated at
             # every check; measure it when the probe first answers true.
-            clears_equality_deletes=False,
+            clears_equality_deletes=EqualityDeleteClearing.NONE,
             operations={
                 Operation.COMPACT: cls._compact_support(probes),
                 Operation.EXPIRE: OperationSupport(

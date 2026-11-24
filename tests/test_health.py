@@ -34,6 +34,24 @@ def test_reads_the_signals_from_the_snapshot_summary(unpartitioned):
     assert health.snapshots == 6
 
 
+def test_it_reads_how_the_table_is_partitioned(unpartitioned, partitioned):
+    """The two facts Spark's clearing depends on (#301), from the metadata
+    document: specs ever defined, and whether the current one has a field.
+    Evolving the partitioned table away from its field leaves two specs, the
+    current one unpartitioned -- a table Spark still clears."""
+
+    def facts(tbl):
+        health = table_health(tbl)
+        return health.partition_specs, health.partitioned
+
+    assert facts(unpartitioned) == (1, False)
+    assert facts(partitioned) == (1, True)
+    with partitioned.update_spec() as update:
+        update.remove_field("category")
+    partitioned.refresh()
+    assert facts(partitioned) == (2, False)
+
+
 def test_no_manifest_is_read(unpartitioned, monkeypatch):
     """The whole argument for this tier is that it costs one metadata load.
 

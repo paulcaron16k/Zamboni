@@ -102,6 +102,44 @@ class Support(StrEnum):
     UNSUPPORTED = "unsupported"
 
 
+class EqualityDeleteClearing(StrEnum):
+    """Which tables a compaction leaves with no equality delete file behind,
+    once the rewrite has applied them (#300, #301).
+
+    Not a boolean because Spark's answer depends on the table. Its
+    ``rewrite_data_files`` removes them through ``remove-dangling-deletes``,
+    and Iceberg's ``RemoveDanglingDeletesSparkAction.execute`` returns at once
+    for a table whose only partition spec is unpartitioned, leaving the work to
+    a commit-time filter that removed nothing in any case measured
+    (test_dev_stack.py's Spark equality-delete tests).
+    """
+
+    #: No table: the files outlive the rewrite.
+    NONE = "none"
+    #: Every table.
+    ALL = "all"
+    #: Every table except one whose only partition spec is unpartitioned. A
+    #: table whose spec evolved has two, whatever the current one is, and is
+    #: cleared.
+    UNLESS_ONLY_UNPARTITIONED = "unless-only-unpartitioned"
+
+    def applies_to(self, *, partition_specs: int, partitioned: bool) -> bool:
+        """Whether a table with this partitioning is left without them."""
+        if self is EqualityDeleteClearing.UNLESS_ONLY_UNPARTITIONED:
+            return partition_specs > 1 or partitioned
+        return self is EqualityDeleteClearing.ALL
+
+
+#: How ``zamboni engines`` finishes "applied by compaction, which ...".
+_CLEARING_SAYS = {
+    EqualityDeleteClearing.NONE: "keeps their files",
+    EqualityDeleteClearing.ALL: "removes their files",
+    EqualityDeleteClearing.UNLESS_ONLY_UNPARTITIONED: (
+        "removes their files, unless the table's only partition spec is unpartitioned"
+    ),
+}
+
+
 class Reportable(Protocol):
     """What every operation returns: something that can describe itself.
 
@@ -197,13 +235,14 @@ class MaintainerCapabilities:
     #: has to *decide* on it (#300). No default, for ``layout``'s reason: an
     #: engine that forgot to declare would read as one or the other, silently.
     compacts_equality_deletes: bool = field(kw_only=True)
-    #: Whether that compaction also leaves no equality delete file behind once
-    #: it no longer applies to anything. A separate fact because Spark applies
-    #: them and keeps the files (measured, #300): the table then still reports
-    #: delete files after a successful compaction, which a pressure check reads
-    #: as pressure. The check offers an equality-delete table only where both
-    #: hold, or it would offer the same table again at every check.
-    clears_equality_deletes: bool = field(kw_only=True)
+    #: On which tables that compaction also leaves no equality delete file
+    #: behind once it no longer applies to anything. A separate fact because
+    #: Spark applies them everywhere but keeps the files on one shape of table
+    #: (measured, #301): that table still reports delete files after a
+    #: successful compaction, which a pressure check reads as pressure. The
+    #: check offers an equality-delete table only where both hold, or it would
+    #: offer the same table again at every check.
+    clears_equality_deletes: EqualityDeleteClearing = field(kw_only=True)
 
     def __post_init__(self) -> None:
         missing = [op for op in Operation if op not in self.operations]
@@ -214,18 +253,25 @@ class MaintainerCapabilities:
             raise ValueError(
                 f"{self.engine}: no declared support for {', '.join(op.value for op in missing)}"
             )
-        if self.clears_equality_deletes and not self.compacts_equality_deletes:
+        if (
+            self.clears_equality_deletes is not EqualityDeleteClearing.NONE
+            and not self.compacts_equality_deletes
+        ):
             raise ValueError(
                 f"{self.engine}: clears equality deletes it cannot compact. A compaction "
                 "that refuses the table cannot be what removed its delete files."
             )
 
-    @property
-    def offers_equality_deletes_to_pressure(self) -> bool:
+    def offers_equality_deletes_to_pressure(
+        self, *, partition_specs: int, partitioned: bool
+    ) -> bool:
         """Whether a pressure check may offer a table carrying equality deletes:
         compacting it must help, and must leave a table the next check reads as
-        relieved."""
-        return self.compacts_equality_deletes and self.clears_equality_deletes
+        relieved. ``partition_specs`` and ``partitioned`` describe the table:
+        how many specs it has had, and whether the current one has a field."""
+        return self.compacts_equality_deletes and self.clears_equality_deletes.applies_to(
+            partition_specs=partition_specs, partitioned=partitioned
+        )
 
     def of(self, operation: Operation) -> OperationSupport:
         return self.operations[operation]
@@ -254,9 +300,7 @@ class MaintainerCapabilities:
             + (
                 "block compaction"
                 if not self.compacts_equality_deletes
-                else "applied by compaction, which removes their files"
-                if self.clears_equality_deletes
-                else "applied by compaction, which keeps their files"
+                else "applied by compaction, which " + _CLEARING_SAYS[self.clears_equality_deletes]
             )
         )
         return "\n".join(rows)
@@ -461,16 +505,26 @@ def engines_lacking(feature: LayoutFeature) -> tuple[str, ...]:
     return tuple(name for name in available() if not get(name).capabilities().can(feature))
 
 
-def offers_equality_deletes_to_pressure(engine: str) -> bool:
+def offers_equality_deletes_to_pressure(
+    engine: str, *, partition_specs: int, partitioned: bool
+) -> bool:
     """Whether a pressure check may offer ``engine`` a table carrying equality
-    deletes. Asked of the declaration, never written out a second time: the
-    local engine's answer is a PyIceberg probe, so it changes with the install.
+    deletes, given the table's partitioning. Asked of the declaration, never
+    written out a second time: the local engine's answer is a PyIceberg probe,
+    so it changes with the install.
     """
-    return get(engine).capabilities().offers_equality_deletes_to_pressure
+    return (
+        get(engine)
+        .capabilities()
+        .offers_equality_deletes_to_pressure(
+            partition_specs=partition_specs, partitioned=partitioned
+        )
+    )
 
 
 __all__ = [
     "EngineConfigProblem",
+    "EqualityDeleteClearing",
     "LayoutFeature",
     "Maintainer",
     "MaintainerCapabilities",

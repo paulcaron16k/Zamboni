@@ -847,43 +847,91 @@ def test_spark_compaction_actually_compacts(spark_env, session, spark_table):
     assert tbl.scan().to_arrow().num_rows == 12, "compaction changed the data"
 
 
-@pytest.mark.spark
-def test_spark_compaction_applies_equality_deletes(spark_env, session, spark_table):
-    """#300: Spark's half of test_trino_compaction_applies_equality_deletes,
-    with the opposite answer on the last of its three checks.
+def _spark_equality_delete_table(session, request, shape: str) -> tuple[str, dict | None]:
+    """spark_table's six files, in one of three partitionings, and the
+    partition an equality delete of EQUALITY_DELETED (both odd, so both
+    category "b") must name. "evolved" starts partitioned and drops the field
+    before its last three appends: two specs, the current one unpartitioned."""
+    namespace = f"zs301_{uuid.uuid4().hex[:8]}"
+    session.catalog.create_namespace(namespace)
+    request.addfinalizer(lambda: _drop_namespace(session, namespace))
+    identifier = f"{namespace}.events"
+    tbl = session.catalog.create_table(
+        identifier,
+        schema=SCHEMA,
+        partition_spec=PartitionSpec() if shape == "unpartitioned" else SPEC,
+        properties={"format-version": "2"},
+    )
+    for i in range(6):
+        if shape == "evolved" and i == 3:
+            with tbl.update_spec() as update:
+                update.remove_field("category")
+            tbl.refresh()
+        tbl.append(
+            pa.table(
+                {
+                    "id": pa.array([i * 2, i * 2 + 1], type=pa.int32()),
+                    "category": pa.array(["a", "b"], type=pa.string()),
+                },
+                schema=ARROW,
+            )
+        )
+    return identifier, ({"category": "b"} if shape == "partitioned" else None)
 
-    Spark applies the deletes and keeps the delete file, even with
-    `remove-dangling-deletes` on, so the table still reports it and a pressure
-    check would read the relieved table as still under pressure. That is why
-    Spark declares `clears_equality_deletes=False`; the assertion pins it, so
-    a Spark that starts removing them fails here and the declaration can flip.
+
+@pytest.mark.spark
+@pytest.mark.parametrize("shape", ["unpartitioned", "partitioned", "evolved"])
+def test_spark_compaction_applies_equality_deletes(spark_env, session, request, shape):
+    """#300 and #301: Spark's half of test_trino_compaction_applies_equality_deletes.
+
+    Spark applies the deletes on every table. Whether their file goes too
+    depends on the table: `remove-dangling-deletes` drops it, except that
+    Iceberg's `RemoveDanglingDeletesSparkAction` skips a table whose only spec
+    is unpartitioned, and nothing else removed it there. The last assertion
+    takes its expectation from Spark's `clears_equality_deletes` and the
+    table's own partitioning, as a pressure check does, so a Spark that starts
+    clearing the unpartitioned case fails here and the declaration can change.
+
+    In "evolved" the delete is written under the current, unpartitioned spec,
+    which makes it global: Spark applies it to the files written under the
+    old partitioned spec too, so 3 goes as well as 7.
 
     `delete_file_threshold=1` so the files are chosen for their deletes and
     not only for their size: Iceberg's default threshold is Integer.MAX_VALUE.
     """
     from zamboni.config import CompactionConfig
+    from zamboni.health import table_health
     from zamboni.maintainers import Operation
+    from zamboni.maintainers.spark import SparkMaintainer
     from zamboni.testing import write_equality_deletes
 
-    write_equality_deletes(session.table(spark_table), {"id": sorted(EQUALITY_DELETED)})
+    identifier, partition = _spark_equality_delete_table(session, request, shape)
+    write_equality_deletes(
+        session.table(identifier), {"id": sorted(EQUALITY_DELETED)}, partition=partition
+    )
     engine = spark_maintainer(spark_env, session)
     spark = engine.connect()
 
     def ids() -> list[int]:
-        return sorted(
-            row[0] for row in spark.sql(f"SELECT id FROM iceberg.{spark_table}").collect()
-        )
+        return sorted(row[0] for row in spark.sql(f"SELECT id FROM iceberg.{identifier}").collect())
 
     survivors = sorted(set(range(12)) - EQUALITY_DELETED)
     assert ids() == survivors, "Spark does not read the simulated delete: this proves nothing"
 
-    request = spark_request(compaction=CompactionConfig(delete_file_threshold=1))
-    engine.execute(Operation.COMPACT, spark_table, request=request, dry_run=False)
+    request_ = spark_request(compaction=CompactionConfig(delete_file_threshold=1))
+    engine.execute(Operation.COMPACT, identifier, request=request_, dry_run=False)
 
     assert ids() == survivors, "compaction resurrected deleted rows"
-    assert physically_live(session, spark_table) == [len(survivors)]
-    assert equality_delete_signals(session, spark_table) == (1, len(EQUALITY_DELETED)), (
-        "Spark now removes the delete file: clears_equality_deletes can become True"
+    assert sum(physically_live(session, identifier)) == len(survivors), (
+        "the rewritten files still hold deleted rows: the deletes were not applied"
+    )
+    health = table_health(session.table(identifier))
+    cleared = SparkMaintainer.capabilities().clears_equality_deletes.applies_to(
+        partition_specs=health.partition_specs, partitioned=health.partitioned
+    )
+    expected = (0, 0) if cleared else (1, len(EQUALITY_DELETED))
+    assert equality_delete_signals(session, identifier) == expected, (
+        f"{shape}: Spark's clears_equality_deletes no longer matches what it does"
     )
 
 

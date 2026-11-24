@@ -782,11 +782,13 @@ warehouses:
 Any one threshold met is enough; `null` switches one off. **The defaults are
 starting values someone chose, not measurements.** Raise them for a table whose
 readers do not mind, or lower them for one queried all day. A table with
-equality deletes is offered only when the deployment's engine is Trino: the
-local engine refuses it, and Spark compacts it but keeps the delete files, so
-the next check would find it unchanged and offer it again. The engine is the
-one `zamboni.yml` or `ZAMBONI_ENGINE` names, and `health --json` records the
-answer as `equality_deletes_eligible` (#300).
+equality deletes is offered only when the deployment's engine removes their
+files as it compacts: Trino always, Spark unless the table's only partition
+spec is unpartitioned. The local engine refuses such a table, and on that one
+shape Spark compacts it but keeps the delete files, so the next check would
+find it unchanged and offer it again. The engine is the one `zamboni.yml` or
+`ZAMBONI_ENGINE` names, and `health --json` records the answer per table as
+`equality_deletes_eligible` (#300, #301).
 
 A check is `zamboni health --table-config … --json` in a worker, one
 metadata load per table (about 25 ms on the dev stack). It queues for a worker

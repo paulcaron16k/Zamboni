@@ -336,12 +336,14 @@ pressure:                   # top level: the fleet's; per warehouse: over it
   `zamboni health`. A counter the summary did not report meets no threshold:
   "not reported" is neither zero nor over.
 - **Equality deletes make a table ineligible unless the engine clears them.**
-  The local engine refuses them, so an offer would be refused at every check;
-  Spark applies them but keeps the delete files, so the next check would read
-  the same table and offer it again. Trino applies them and removes the files,
-  so on Trino such a table is offered like any other (#300). The worker writes
-  the engine's answer into the record as `equality_deletes_eligible`, from the
-  engine's declarations; a record without it is read as "not eligible". And
+  The local engine refuses them, so an offer would be refused at every check.
+  Trino applies them and removes the files, so on Trino such a table is
+  offered like any other (#300). Spark does the same except on a table whose
+  only partition spec is unpartitioned, where it keeps the delete files and
+  the next check would read the same table and offer it again (#301). The
+  worker writes the answer into each table's entry as
+  `equality_deletes_eligible`, from the engine's declarations and the table's
+  partitioning; an entry without it is read as "not eligible". And
   `total-delete-files` counts both kinds together, so position delete files
   cannot be counted on their own. An unreported equality-delete count is
   ineligible on every engine.

@@ -54,14 +54,19 @@ def recorded(item: WorkItem, context: WorkerContext) -> dict[str, Any]:
 
 def own_session_health(check: PressureCheck, context: WorkerContext) -> dict[str, Any]:
     """A health entry that builds its catalog its own way: from a variable no
-    profile or flag knows, as an application with its own store would."""
+    profile or flag knows, as an application with its own store would. It
+    names the engine the CLI's run resolves to with no profile, so the two
+    records' table entries are comparable whole (#301)."""
     from zamboni import CatalogSession
     from zamboni.health import check_tables
 
     session = CatalogSession.for_local(warehouse_path=os.environ["TEST_OWN_WAREHOUSE"])
     try:
         return check_tables(
-            session.catalog, sorted(check.table_config.tables), warehouse=check.warehouse
+            session.catalog,
+            sorted(check.table_config.tables),
+            warehouse=check.warehouse,
+            engine="local",
         )
     finally:
         session.close()

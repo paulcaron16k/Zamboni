@@ -38,6 +38,7 @@ from ..properties import ApplyResult
 from ..tableconfig import DELETE_RATIO_THRESHOLD_DEFAULT
 from . import (
     EngineConfigProblem,
+    EqualityDeleteClearing,
     LayoutFeature,
     Maintainer,
     MaintainerCapabilities,
@@ -230,16 +231,20 @@ class SparkMaintainer(Maintainer):
                 }
             ),
             # `rewrite_data_files` reads through Iceberg's Java reader, which
-            # applies equality deletes -- but keeps their files. Measured on
-            # Spark 4.1.3 (test_spark_compaction_applies_equality_deletes): the
-            # delete was committed at sequence number 7, the rewritten file
-            # took the *starting* sequence number, also 7, and an equality
-            # delete applies only to older data, so it now deletes nothing.
-            # With `remove-dangling-deletes` on it stayed live all the same,
-            # and the table summary still counted it. apache/iceberg#8933 asks
-            # for exactly this and was closed as not planned.
+            # applies equality deletes. Their files are removed by the
+            # `remove-dangling-deletes` option we send, which drops an equality
+            # delete whose sequence number is at or below every live data
+            # file's in its partition -- what the rewrite leaves, since the
+            # rewritten files take the starting sequence number. Except where
+            # the table's only spec is unpartitioned:
+            # `RemoveDanglingDeletesSparkAction.execute` returns at once there,
+            # trusting a commit-time filter that removed nothing in any case we
+            # measured, including after a further compaction and an INSERT.
+            # Spark 4.1.3 on Iceberg 1.11.0, on an unpartitioned, a partitioned
+            # and an evolved table: test_spark_compaction_applies_equality_deletes
+            # (#301).
             compacts_equality_deletes=True,
-            clears_equality_deletes=False,
+            clears_equality_deletes=EqualityDeleteClearing.UNLESS_ONLY_UNPARTITIONED,
             operations={
                 Operation.COMPACT: OperationSupport(
                     Operation.COMPACT,

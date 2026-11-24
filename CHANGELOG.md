@@ -39,45 +39,61 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Added
 
-- **`zamboni health --engine`, and two keys in its `--json` record** (#300).
+- **`zamboni health --engine`, and new keys in its `--json` record** (#300,
+  #301).
   - The engine is resolved like every other verb's: the flag, then `engine:`
     in `zamboni.yml`, then `ZAMBONI_ENGINE`.
-  - The record gains `engine` and `equality_deletes_eligible`, beside
-    `tables`. They are what the pressure check reads.
+  - The record gains `engine`, beside `tables`. Each table's entry gains
+    `partition_specs` and `partitioned` (also on `TableHealth`), and, when an
+    engine is named, `equality_deletes_eligible`. That last one is what the
+    pressure check reads; it is per table because Spark's answer depends on
+    the partitioning.
   - `zamboni.health.check_tables` and `health_record` take the same `engine`
     argument, for an application's own health entry.
   - Entry conformance checks that `equality_deletes_eligible`, if present, is a
     boolean.
   - `zamboni.testing.write_equality_deletes` commits an equality delete file,
     which no PyIceberg line can, so the Trino and Spark engines can be tested
-    on such a table.
+    on such a table. On a partitioned table it takes the partition to write
+    into, and refuses to write without one.
 
 ### Changed
 
-- **On Trino, `zamboni serve`'s pressure check now offers tables carrying
-  equality deletes** (#300). It skipped every such table because "compaction
-  refuses equality deletes", which is true of the local engine only.
-  Measured on the dev stack:
+- **On Trino, and on Spark for most tables, `zamboni serve`'s pressure check
+  now offers tables carrying equality deletes** (#300, #301). It skipped
+  every such table because "compaction refuses equality deletes", which is
+  true of the local engine only. Measured on the dev stack:
   - Trino 483's `OPTIMIZE` applies equality deletes, rewrites only the
     surviving rows, and removes the delete files.
-  - Spark 4.1.3's `rewrite_data_files` applies them but keeps the delete file,
-    even with `remove-dangling-deletes` on. The table then still reports it,
-    and a check would offer it again every interval.
+  - Spark 4.1.3's `rewrite_data_files` (Iceberg 1.11.0) applies them, and the
+    `remove-dangling-deletes` option Zamboni sends removes the delete files,
+    on partitioned tables and on tables whose spec has evolved. On a table
+    whose only spec is unpartitioned it keeps them:
+    `RemoveDanglingDeletesSparkAction` skips such a table, and nothing else
+    removed them, not even a further compaction or an `INSERT`. That table
+    still reports them afterwards, and a check would offer it again every
+    interval.
 
   So the check now asks the deployment's engine, the one `zamboni.yml` or
-  `ZAMBONI_ENGINE` names. Each engine declares two new facts,
-  `MaintainerCapabilities.compacts_equality_deletes` and
-  `clears_equality_deletes`, and an equality-delete table is offered only
-  where both hold. Today that is Trino. `zamboni engines` prints the answer
-  per engine.
+  `ZAMBONI_ENGINE` names, about each table. Each engine declares two new
+  facts, `MaintainerCapabilities.compacts_equality_deletes` and
+  `clears_equality_deletes` (an `EqualityDeleteClearing`: none, all, or all
+  unless the table's only spec is unpartitioned), and an equality-delete
+  table is offered only where both hold for it. `zamboni engines` prints the
+  answer per engine.
 
-  **A Trino `serve` deployment now compacts these tables between schedules**,
-  typically CDC and upsert tables, where before only the schedule reached
-  them. To keep the old behaviour, set `pressure: false` for the warehouse.
+  **A Trino or Spark `serve` deployment now compacts these tables between
+  schedules**, typically CDC and upsert tables, where before only the
+  schedule reached them. To keep the old behaviour, set `pressure: false`
+  for the warehouse.
 
-  Other engines are unchanged: the local engine and Spark still skip these
-  tables, and so does a record from an application's own health entry that
-  does not set the new key.
+  Unchanged: the local engine skips these tables, Spark skips them when the
+  table has only an unpartitioned spec, and so does a record from an
+  application's own health entry that does not set the new key. Nothing
+  changes in what Zamboni sends Spark. Rejected: sending
+  `use-starting-sequence-number=false` did not clear the unpartitioned case,
+  and with it a rewrite failed outright when an equality delete was committed
+  while it ran, which the default absorbs.
 
 - **Compaction rewrites files for their deletes, not only for their size**
   (#288). A partition left with one or two data files and a pile of position
