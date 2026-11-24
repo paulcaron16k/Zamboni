@@ -32,7 +32,7 @@ from . import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from ..session import CatalogSession
 
 
 PREVIEWS_EVERYTHING = ("previews without committing; without --yes nothing is written",)
@@ -137,7 +137,7 @@ class LocalMaintainer(Maintainer):
                     ),
                     invariants=RECLAIM_INVARIANTS,
                 ),
-                Operation.REMOVE_DANGLING_DELETES: cls._dangling_support(probes),
+                Operation.REMOVE_DANGLING_DELETES: dangling_delete_support(probes),
                 Operation.REWRITE_MANIFESTS: cls._producer_gated(
                     Operation.REWRITE_MANIFESTS,
                     probes,
@@ -241,49 +241,6 @@ class LocalMaintainer(Maintainer):
             invariants=tuple(invariants),
         )
 
-    @staticmethod
-    def _dangling_support(probes) -> OperationSupport:
-        """Whole-manifest-only is a property of the installed writer.
-
-        ``ManifestWriterV2.content()`` returning DATA unconditionally is what
-        limits this to dropping entire delete manifests. When a build can write
-        a delete manifest, the limitation is gone and this must stop claiming it
-        (ZMBNI-604).
-        """
-        if reason := probes.unsupported_reason():
-            # Commits through `_RemoveDeleteFiles`, a `_ReplaceFiles` subclass,
-            # so the same gate as compaction applies. See `_producer_gated`.
-            return OperationSupport(
-                Operation.REMOVE_DANGLING_DELETES,
-                Support.UNSUPPORTED,
-                can_preview=False,
-                limitations=(f"this PyIceberg build cannot be used: {reason}",),
-            )
-        if probes.delete_manifests_writable:
-            return OperationSupport(
-                Operation.REMOVE_DANGLING_DELETES,
-                Support.FULL,
-                can_preview=True,
-                invariants=(
-                    *PREVIEWS_EVERYTHING,
-                    "rewrites a partially dangling delete manifest rather than leaving it alone",
-                ),
-            )
-        return OperationSupport(
-            Operation.REMOVE_DANGLING_DELETES,
-            Support.PARTIAL,
-            can_preview=True,
-            limitations=(
-                (
-                    "drops whole delete manifests only; a partially dangling manifest "
-                    "is left alone because ManifestWriterV2.content() returns DATA "
-                    f"unconditionally in PyIceberg {probes.version}, so it cannot write "
-                    "a delete manifest (ZMBNI-604)"
-                ),
-            ),
-            invariants=PREVIEWS_EVERYTHING,
-        )
-
     def execute(
         self,
         operation: Operation,
@@ -368,11 +325,7 @@ class LocalMaintainer(Maintainer):
     def _remove_dangling_deletes(
         self, table: str, request: MaintenanceRequest, dry_run: bool
     ) -> Reportable:
-        from ..deletes import DanglingDeleteCleaner
-
-        return DanglingDeleteCleaner(dry_run=dry_run, stamp=_left_by_compaction(request)).run(
-            self._session.table(table)
-        )
+        return remove_dangling_deletes(self._session, table, request, dry_run=dry_run)
 
     def _rewrite_manifests(
         self, table: str, request: MaintenanceRequest, dry_run: bool
@@ -397,6 +350,69 @@ class LocalMaintainer(Maintainer):
         return apply_metadata_properties(
             self._session.table(table), request.retention.metadata, dry_run=dry_run
         )
+
+
+def dangling_delete_support(probes) -> OperationSupport:
+    """Zamboni's own dangling-delete removal, as this PyIceberg build allows it.
+
+    Declared once for every engine that runs it: the local one, and Spark,
+    which runs it after its own compaction (#305).
+
+    Whole-manifest-only is a property of the installed writer.
+
+    ``ManifestWriterV2.content()`` returning DATA unconditionally is what
+    limits this to dropping entire delete manifests. When a build can write
+    a delete manifest, the limitation is gone and this must stop claiming it
+    (ZMBNI-604).
+    """
+    if reason := probes.unsupported_reason():
+        # Commits through `_RemoveDeleteFiles`, a `_ReplaceFiles` subclass,
+        # so the same gate as compaction applies. See `_producer_gated`.
+        return OperationSupport(
+            Operation.REMOVE_DANGLING_DELETES,
+            Support.UNSUPPORTED,
+            can_preview=False,
+            limitations=(f"this PyIceberg build cannot be used: {reason}",),
+        )
+    if probes.delete_manifests_writable:
+        return OperationSupport(
+            Operation.REMOVE_DANGLING_DELETES,
+            Support.FULL,
+            can_preview=True,
+            invariants=(
+                *PREVIEWS_EVERYTHING,
+                "rewrites a partially dangling delete manifest rather than leaving it alone",
+            ),
+        )
+    return OperationSupport(
+        Operation.REMOVE_DANGLING_DELETES,
+        Support.PARTIAL,
+        can_preview=True,
+        limitations=(
+            (
+                "drops whole delete manifests only; a partially dangling manifest "
+                "is left alone because ManifestWriterV2.content() returns DATA "
+                f"unconditionally in PyIceberg {probes.version}, so it cannot write "
+                "a delete manifest (ZMBNI-604)"
+            ),
+        ),
+        invariants=PREVIEWS_EVERYTHING,
+    )
+
+
+def remove_dangling_deletes(
+    session: CatalogSession, table: str, request: MaintenanceRequest, *, dry_run: bool
+) -> Reportable:
+    """Zamboni's dangling-delete removal, through PyIceberg, for any engine.
+
+    The local engine's only implementation of the operation, and Spark's since
+    #305: Spark's own removal skips a table whose only spec is unpartitioned.
+    """
+    from ..deletes import DanglingDeleteCleaner
+
+    return DanglingDeleteCleaner(dry_run=dry_run, stamp=_left_by_compaction(request)).run(
+        session.table(table)
+    )
 
 
 def _left_by_compaction(request: MaintenanceRequest) -> dict[str, str]:

@@ -868,9 +868,10 @@ def _run(
 
     support = maintainer.capabilities().of(operation)
     if support.fulfilled_by and support.fulfilled_by in done:
-        # Not decoration. On Spark, dangling-delete removal *is* an option of
-        # rewrite_data_files, so running both compacts the table twice -- the
-        # second time to no effect.
+        # Not decoration. Where an operation is an option of another -- as
+        # Spark's dangling-delete removal was of rewrite_data_files until #305
+        # -- running both would do the work twice, the second time to no
+        # effect. No built-in engine declares one now; a registered one may.
         return Outcome(table, operation, 0, f"already done by {support.fulfilled_by.value}")
 
     try:

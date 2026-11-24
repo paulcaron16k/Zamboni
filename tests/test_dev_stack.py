@@ -809,7 +809,8 @@ def spark_request(**overrides):
         "apply-properties",
         "expire",
         "remove-orphans",
-        "remove-dangling-deletes",
+        # Not remove-dangling-deletes: since #305 it runs no SQL, and
+        # test_spark_maintenance_clears_equality_deletes runs it on Spark.
     ],
 )
 @pytest.mark.spark
@@ -887,10 +888,11 @@ def test_spark_compaction_applies_equality_deletes(spark_env, session, request, 
     Spark applies the deletes on every table. Whether their file goes too
     depends on the table: `remove-dangling-deletes` drops it, except that
     Iceberg's `RemoveDanglingDeletesSparkAction` skips a table whose only spec
-    is unpartitioned, and nothing else removed it there. The last assertion
-    takes its expectation from Spark's `clears_equality_deletes` and the
-    table's own partitioning, as a pressure check does, so a Spark that starts
-    clearing the unpartitioned case fails here and the declaration can change.
+    is unpartitioned, and nothing else in Spark removed it there. That is
+    compaction alone, pinned per shape: since #305 Zamboni's own removal clears
+    the rest, and test_spark_maintenance_clears_equality_deletes holds the
+    declaration to the two together. A Spark that starts clearing the
+    unpartitioned case itself fails here, and the extra step can go.
 
     In "evolved" the delete is written under the current, unpartitioned spec,
     which makes it global: Spark applies it to the files written under the
@@ -900,9 +902,7 @@ def test_spark_compaction_applies_equality_deletes(spark_env, session, request, 
     not only for their size: Iceberg's default threshold is Integer.MAX_VALUE.
     """
     from zamboni.config import CompactionConfig
-    from zamboni.health import table_health
     from zamboni.maintainers import Operation
-    from zamboni.maintainers.spark import SparkMaintainer
     from zamboni.testing import write_equality_deletes
 
     identifier, partition = _spark_equality_delete_table(session, request, shape)
@@ -925,14 +925,74 @@ def test_spark_compaction_applies_equality_deletes(spark_env, session, request, 
     assert sum(physically_live(session, identifier)) == len(survivors), (
         "the rewritten files still hold deleted rows: the deletes were not applied"
     )
+    expected = (1, len(EQUALITY_DELETED)) if shape == "unpartitioned" else (0, 0)
+    assert equality_delete_signals(session, identifier) == expected, (
+        f"{shape}: Spark's compaction no longer does what #301 measured"
+    )
+
+
+@pytest.mark.spark
+@pytest.mark.parametrize("shape", ["unpartitioned", "partitioned", "evolved"])
+def test_spark_maintenance_clears_equality_deletes(spark_env, session, request, shape):
+    """#305: what a pressure check offers Spark, it relieves. Spark's
+    `clears_equality_deletes` is a claim about the whole maintenance line --
+    compaction, then Zamboni's own `remove-dangling-deletes` for what Spark's
+    left -- so this runs that line through `maintain()` and takes its
+    expectation from the declaration and the table's own partitioning, as a
+    pressure check does.
+
+    `delete_file_threshold` 1 for the reason given in
+    test_spark_compaction_applies_equality_deletes.
+    """
+    from zamboni import maintain
+    from zamboni.health import table_health
+    from zamboni.maintainers import Operation
+    from zamboni.maintainers.spark import SparkMaintainer
+    from zamboni.tableconfig import TableConfig
+    from zamboni.testing import write_equality_deletes
+
+    identifier, partition = _spark_equality_delete_table(session, request, shape)
+    write_equality_deletes(
+        session.table(identifier), {"id": sorted(EQUALITY_DELETED)}, partition=partition
+    )
+    namespace, name = identifier.split(".")
+    config = TableConfig.from_dict(
+        {
+            "version": 2,
+            "warehouse": spark_env["WAREHOUSE_NAME"],
+            "namespaces": {namespace: {"tables": {name: {"delete_file_threshold": 1}}}},
+        }
+    )
+
+    report = maintain(
+        session,
+        table_config=config,
+        engine="spark",
+        engine_options={
+            "remote": f"sc://localhost:{spark_env['SPARK_CONNECT_PORT']}",
+            "catalog": "iceberg",
+        },
+        operations=[Operation.COMPACT, Operation.REMOVE_DANGLING_DELETES],
+        commit=True,
+    )
+
+    assert [(o.operation, o.exit_code) for o in report.outcomes] == [
+        (Operation.COMPACT, 0),
+        (Operation.REMOVE_DANGLING_DELETES, 0),
+    ], [o.detail for o in report.outcomes]
     health = table_health(session.table(identifier))
     cleared = SparkMaintainer.capabilities().clears_equality_deletes.applies_to(
         partition_specs=health.partition_specs, partitioned=health.partitioned
     )
     expected = (0, 0) if cleared else (1, len(EQUALITY_DELETED))
     assert equality_delete_signals(session, identifier) == expected, (
-        f"{shape}: Spark's clears_equality_deletes no longer matches what it does"
+        f"{shape}: Spark's clears_equality_deletes no longer matches what its maintenance does"
     )
+    spark = spark_maintainer(spark_env, session).connect()
+    spark.sql(f"REFRESH TABLE iceberg.{identifier}")
+    assert sorted(
+        row[0] for row in spark.sql(f"SELECT id FROM iceberg.{identifier}").collect()
+    ) == sorted(set(range(12)) - EQUALITY_DELETED), "maintenance changed what Spark reads"
 
 
 @pytest.mark.spark

@@ -22,8 +22,11 @@ would be refused and fire again every check. An engine that applies them but
 keeps the files leaves a table that still reports its delete files after a
 successful compaction, so it would be offered again every check just the same.
 Trino does both, so there such a table is as eligible as any other (#300).
-Spark does both except on a table whose only partition spec is unpartitioned,
-where it keeps the files (#301). Which engine and which table, this module cannot
+Spark's compaction does both except on a table whose only partition spec is
+unpartitioned, where it keeps the files (#301); Zamboni's own dangling-delete
+removal, which runs after it, removes them there, so Spark is eligible on every
+table wherever this PyIceberg build can run that removal (#305). Which engine
+and which table, this module cannot
 know: it is told, by each table's ``equality_deletes_eligible`` in the health
 record, which the worker took from the engine's declarations and the table's
 partitioning. An entry that does not say -- an application's own entry, say --

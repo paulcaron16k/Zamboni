@@ -783,12 +783,15 @@ Any one threshold met is enough; `null` switches one off. **The defaults are
 starting values someone chose, not measurements.** Raise them for a table whose
 readers do not mind, or lower them for one queried all day. A table with
 equality deletes is offered only when the deployment's engine removes their
-files as it compacts: Trino always, Spark unless the table's only partition
-spec is unpartitioned. The local engine refuses such a table, and on that one
-shape Spark compacts it but keeps the delete files, so the next check would
-find it unchanged and offer it again. The engine is the one `zamboni.yml` or
-`ZAMBONI_ENGINE` names, and `health --json` records the answer per table as
-`equality_deletes_eligible` (#300, #301).
+files as it maintains it: Trino always; Spark always where the installed
+PyIceberg can run Zamboni's own `remove-dangling-deletes`, which clears the
+delete files Spark's compaction keeps on a table whose only partition spec is
+unpartitioned, and otherwise every table but that one. The local engine refuses
+such a table, so the next check would find it unchanged and offer it again.
+The engine is the one `zamboni.yml` or `ZAMBONI_ENGINE` names, and
+`health --json` records the answer per table as `equality_deletes_eligible`
+(#300, #301, #305). A table whose config disables `remove_dangling_deletes`
+keeps them on either engine and is offered again at each check.
 
 A check is `zamboni health --table-config … --json` in a worker, one
 metadata load per table (about 25 ms on the dev stack). It queues for a worker
