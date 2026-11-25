@@ -363,9 +363,12 @@ leaves behind on a merge-on-read table, since the rewritten rows already have th
 applied and the new files carry a higher sequence number.
 
 On by default, and unlike the other two it cannot change what a query returns: a dangling
-delete is *by definition* one no scan would have applied. Whether a delete still applies is
-decided by PyIceberg's own `DeleteFileIndex` — the index the scan planner builds — rather
-than by a restatement of the rule here.
+delete is *by definition* one no scan would have applied. Whether a position delete still
+applies is decided by PyIceberg's own `DeleteFileIndex` — the index the scan planner builds
+— rather than by a restatement of the rule here. Equality deletes are the exception: that
+index treats them as position deletes, so they follow the spec's rules in
+`deletes.DeleteIndex`. An equality delete under an unpartitioned spec applies to data files
+of every spec, and only to those with a lower sequence number (#306).
 
 Metadata only. The delete files stay on disk, still referenced by older snapshots, exactly
 as compaction's superseded data files do; expiry and orphan removal free the bytes.

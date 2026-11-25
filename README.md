@@ -1179,8 +1179,11 @@ file. Compaction creates them by construction: it applies the deletes as it rewr
 the new data files carry a higher sequence number, so the old delete files stop applying —
 but `_OverwriteFiles._deleted_entries` filters entries to `DataFileContent.DATA`, so
 PyIceberg cannot remove them. It is metadata-only and cannot change a query result, because
-a dangling delete is one no scan would have applied; the applicability question is answered
-by PyIceberg's own `DeleteFileIndex` rather than by a second implementation of the rule.
+a dangling delete is one no scan would have applied; for position deletes the applicability
+question is answered by PyIceberg's own `DeleteFileIndex` rather than by a second
+implementation of the rule. Equality deletes follow the spec's rules in `deletes.DeleteIndex`,
+because that index treats them as position deletes and misses that one written under an
+unpartitioned spec applies across every spec (#306).
 
 Removal is limited to **whole delete manifests**, because `ManifestWriterV2` hardcodes
 `content()` to `DATA` and there is no delete-manifest writer in PyIceberg. A partially

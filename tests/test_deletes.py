@@ -306,3 +306,102 @@ def test_an_unpartitioned_table_refuses_a_partition(unpartitioned):
 
     with pytest.raises(ValueError, match=r"partition must name exactly .*\[\]"):
         write_equality_deletes(unpartitioned, {"id": [1]}, partition={"category": "a"})
+
+
+# -- which delete files a data file pulls in (#306) ------------------------------
+
+#: Spec 0 partitioned, spec 1 unpartitioned, spec 2 partitioned differently:
+#: the three specs a table can have accumulated by evolution.
+UNPARTITIONED_SPECS = frozenset({1})
+DATA_KEYS = [(0, Record("a")), (1, Record()), (2, Record("a"))]
+DELETE_KEYS = [(0, Record("a")), (0, Record("b")), (1, Record()), (2, Record("a"))]
+KINDS = [DataFileContent.POSITION_DELETES, DataFileContent.EQUALITY_DELETES]
+DELETE_SEQ = 5
+
+
+def spec_says_it_applies(kind, delete_key, data_key, data_seq) -> bool:
+    """The Iceberg spec's "Scan Planning" rules, written out on their own.
+
+    A position delete applies to data in its own spec and partition at or
+    below its sequence number. An equality delete applies strictly below its
+    sequence number, within its own spec and partition -- or to every data file
+    when its spec is unpartitioned.
+    """
+    if kind == DataFileContent.POSITION_DELETES:
+        return delete_key == data_key and data_seq <= DELETE_SEQ
+    in_scope = delete_key[0] in UNPARTITIONED_SPECS or delete_key == data_key
+    return in_scope and data_seq < DELETE_SEQ
+
+
+def _entry(content, key, seq, path):
+    from pyiceberg.manifest import DataFile, FileFormat, ManifestEntry, ManifestEntryStatus
+
+    data_file = DataFile.from_args(
+        content=content,
+        file_path=path,
+        file_format=FileFormat.PARQUET,
+        partition=key[1],
+        file_size_in_bytes=1,
+        record_count=1,
+        equality_ids=[1] if content == DataFileContent.EQUALITY_DELETES else None,
+    )
+    data_file.spec_id = key[0]
+    return ManifestEntry.from_args(
+        status=ManifestEntryStatus.ADDED, sequence_number=seq, data_file=data_file
+    )
+
+
+@pytest.mark.parametrize("kind", KINDS, ids=lambda k: k.name.lower())
+@pytest.mark.parametrize("delete_key", DELETE_KEYS, ids=lambda k: f"delete{k[0]}{tuple(k[1])}")
+@pytest.mark.parametrize("data_key", DATA_KEYS, ids=lambda k: f"data{k[0]}{tuple(k[1])}")
+@pytest.mark.parametrize("data_seq", [DELETE_SEQ - 1, DELETE_SEQ, DELETE_SEQ + 1])
+def test_a_delete_applies_as_the_spec_says(kind, delete_key, data_key, data_seq):
+    from zamboni.deletes import DeleteIndex
+
+    delete = _entry(kind, delete_key, DELETE_SEQ, "s3://w/delete.parquet")
+    data = _entry(DataFileContent.DATA, data_key, data_seq, "s3://w/data.parquet")
+    index = DeleteIndex(unpartitioned_specs=UNPARTITIONED_SPECS)
+    index.add(delete)
+
+    applied = index.for_data_file(data)
+
+    assert (delete.data_file in applied) == spec_says_it_applies(
+        kind, delete_key, data_key, data_seq
+    )
+
+
+def test_a_global_equality_delete_survives_partition_evolution(session, partitioned):
+    """#306: written under the unpartitioned spec evolution left, an equality
+    delete applies to the files written under the old one too. Before the fix
+    it was called dangling and removed, and Spark then read the row again
+    (test_dangling_removal_keeps_a_global_equality_delete is the live half)."""
+    from zamboni.testing import write_equality_deletes
+
+    with partitioned.update_spec() as update:
+        update.remove_field("category")
+    partitioned.refresh()
+    write_equality_deletes(partitioned, {"id": [500]})
+
+    report = find_dangling(partitioned)
+    assert report.delete_files == 1
+    assert report.dangling_files == 0, "a live global equality delete was called dangling"
+
+    result = DanglingDeleteCleaner(dry_run=False).run(partitioned)
+    assert result.removed == 0
+    assert len(delete_files(session.table("db.partitioned"))) == 1
+
+
+def test_a_partition_scoped_equality_delete_with_no_data_left_in_its_partition_is_dangling(
+    partitioned,
+):
+    """The other side of the rule: scoped to "b", the delete is dangling once
+    no data file in "b" is older than it -- here, once "b" is overwritten."""
+    from pyiceberg.expressions import EqualTo
+
+    from zamboni.testing import write_equality_deletes
+
+    write_equality_deletes(partitioned, {"id": [500]}, partition={"category": "b"})
+    partitioned.delete(EqualTo("category", "b"))
+
+    report = find_dangling(partitioned)
+    assert (report.delete_files, report.dangling_files) == (1, 1)

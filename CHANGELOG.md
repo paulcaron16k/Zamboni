@@ -37,6 +37,33 @@ Two categories beyond the usual set, because this tool deletes files:
   `ZAMBONI_TOKEN` in `.env`. The fleet file's `uri` and NATS URLs have refused
   this since 0.6.0 (ZMBNI-194).
 
+### SAFETY
+
+- **`remove-dangling-deletes` no longer removes an equality delete that still
+  applies after partition evolution** (#306). An equality delete written under
+  an unpartitioned spec is global: it applies to data files of every spec,
+  including those written before the table's partitioning was removed or
+  changed. The dangling check took its answer from PyIceberg's
+  `DeleteFileIndex`, which treats every delete as a position delete and so
+  matched it only against data files of its own spec. On a table whose only
+  data predated the evolution, it called the delete dangling, and removing it
+  **brought the deleted rows back**: on the dev stack Spark read
+  `[0, 1, 2, 4, 5]` before the removal and `[0, 1, 2, 3, 4, 5]` after. Affected:
+  the local engine's `remove-dangling-deletes` (and the `maintenance` line
+  that runs it) on a v2 table with equality deletes, written by a CDC writer such
+  as Flink, after partition evolution. Trino does not run this operation and
+  Spark's is its own; neither was affected. No action is needed beyond upgrading;
+  a row resurrected by an earlier run is not restored by this fix.
+
+  Equality deletes are now decided by the spec's rules, in a new
+  `deletes.DeleteIndex` that the compaction planner's per-file delete count
+  (`LiveFile.deletes`) also reads. Besides the scope fix, an equality delete now
+  applies only to data with a *strictly lower* sequence number, as the spec
+  says. One at the same sequence number as every data file it could touch is
+  now dangling and removed. That is the file a Spark compaction leaves on a
+  table whose only spec is unpartitioned, and the reason #305 can rely on this
+  operation. Position deletes and deletion vectors are unchanged.
+
 ### Added
 
 - **`zamboni health --engine`, and new keys in its `--json` record** (#300,

@@ -47,8 +47,9 @@ before the referenced-file set it depends on was proven complete.
   level, preserving sequence numbers exactly.
 - **Dangling-delete removal**: compaction leaves every position delete file referenced
   forever, because `_OverwriteFiles._deleted_entries` filters to `DataFileContent.DATA`.
-  Applicability is delegated to PyIceberg's own `DeleteFileIndex`, so a file called dangling
-  is one no scan would have applied.
+  Applicability of position deletes is delegated to PyIceberg's own `DeleteFileIndex`;
+  equality deletes, which that index treats as position deletes, follow the spec's own rules
+  in `deletes.DeleteIndex` (#306). A file called dangling is one no scan would have applied.
 - **Storage reclamation**: snapshot expiry against the spec's retention algorithm, and
   orphan-file removal fenced by list-before-reachable ordering, an age guard, and
   abort-on-doubt invariants.
