@@ -121,7 +121,7 @@ exit 0, and telling them apart is usually the whole of the triage:
 |---|---|
 | `disabled in the config (expire_snapshots)` | the retention block turned it off |
 | `skipped -- <engine> cannot …` | the engine declares it cannot do this. Trino and dangling deletes, for instance |
-| `already done by compact` | another operation in this run fulfils it; running both would compact the table twice |
+| `already done by compact` | another operation in this run fulfils it, as an engine's declaration says. No built-in engine declares one since #305 |
 | `nothing to do -- nothing written since compact` | **no snapshot has landed since maintenance last ran**, so `compact`, `rewrite-manifests` and `remove-dangling-deletes` have no input |
 
 The last one is the one that is new and the one that looks alarming the first

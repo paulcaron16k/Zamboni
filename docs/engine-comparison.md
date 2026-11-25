@@ -332,7 +332,7 @@ this; what follows is what the analysis got right and wrong.
 | Capability is per operation, not per engine | `MaintainerCapabilities.of(operation)`, and `can_preview` is per operation | yes |
 | Support is three-valued, not boolean | `Support.FULL/PARTIAL/UNSUPPORTED`, and an `OperationSupport` that is not FULL **refuses to construct** without a named limitation | yes, and stricter than proposed |
 | Config translation validates, not just formats | `Maintainer.validate(operation, request)` at plan time; Trino's retention floors reject valid configs there | yes |
-| An operation may be fulfilled by another | `OperationSupport.fulfilled_by`; Spark's dangling-delete removal rides on `rewrite_data_files`, and `maintenance` skips the second run | yes |
+| An operation may be fulfilled by another | `OperationSupport.fulfilled_by`; Spark's dangling-delete removal rode on `rewrite_data_files`, and `maintenance` skipped the second run. Since #305 Spark's operation is Zamboni's own removal after compaction, because Iceberg's skips a table whose only spec is unpartitioned; the field remains for registered engines | yes, then superseded |
 | Guarantee level is part of the contract | `OperationSupport.invariants`, reported by `describe()` | yes |
 | Parameters translate, they do not pass through | `MaintenanceRequest` carries intent; each maintainer renders it | yes |
 

@@ -28,7 +28,9 @@ Everything below exists to make that impossible:
   remove-orphans" is true and misleading -- ours aborts on four checked
   conditions, a server-side procedure does its own thing.
 * ``fulfilled_by`` exists because Spark removes dangling deletes as an option of
-  compaction rather than as an operation of its own.
+  compaction rather than as an operation of its own. No built-in engine
+  declares it since #305, when Spark's operation became Zamboni's own removal
+  run after compaction; a registered engine still may.
 """
 
 from __future__ import annotations
@@ -103,15 +105,17 @@ class Support(StrEnum):
 
 
 class EqualityDeleteClearing(StrEnum):
-    """Which tables a compaction leaves with no equality delete file behind,
-    once the rewrite has applied them (#300, #301).
+    """Which tables an engine's maintenance leaves with no equality delete
+    file behind, once compaction has applied them (#300, #301, #305).
 
-    Not a boolean because Spark's answer depends on the table. Its
+    Not a boolean because Spark's compaction answer depends on the table. Its
     ``rewrite_data_files`` removes them through ``remove-dangling-deletes``,
     and Iceberg's ``RemoveDanglingDeletesSparkAction.execute`` returns at once
     for a table whose only partition spec is unpartitioned, leaving the work to
     a commit-time filter that removed nothing in any case measured
-    (test_dev_stack.py's Spark equality-delete tests).
+    (test_dev_stack.py's Spark equality-delete tests). Zamboni's own removal,
+    run after it, clears that case, so Spark declares ALL wherever the
+    PyIceberg build can run it and UNLESS_ONLY_UNPARTITIONED where it cannot.
     """
 
     #: No table: the files outlive the rewrite.

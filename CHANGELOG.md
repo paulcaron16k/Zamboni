@@ -86,8 +86,8 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Changed
 
-- **On Trino, and on Spark for most tables, `zamboni serve`'s pressure check
-  now offers tables carrying equality deletes** (#300, #301). It skipped
+- **On Trino and Spark, `zamboni serve`'s pressure check now offers tables
+  carrying equality deletes** (#300, #301, #305). It skipped
   every such table because "compaction refuses equality deletes", which is
   true of the local engine only. Measured on the dev stack:
   - Trino 483's `OPTIMIZE` applies equality deletes, rewrites only the
@@ -97,30 +97,56 @@ Two categories beyond the usual set, because this tool deletes files:
     on partitioned tables and on tables whose spec has evolved. On a table
     whose only spec is unpartitioned it keeps them:
     `RemoveDanglingDeletesSparkAction` skips such a table, and nothing else
-    removed them, not even a further compaction or an `INSERT`. That table
-    still reports them afterwards, and a check would offer it again every
-    interval.
+    in Spark removed them, not even a further compaction that committed
+    nothing or an `INSERT`. They are left at the rewritten files' sequence
+    number, where they apply to nothing, and Zamboni's own
+    `remove-dangling-deletes`, which now runs after Spark's compaction (below),
+    removes them.
 
   So the check now asks the deployment's engine, the one `zamboni.yml` or
   `ZAMBONI_ENGINE` names, about each table. Each engine declares two new
   facts, `MaintainerCapabilities.compacts_equality_deletes` and
   `clears_equality_deletes` (an `EqualityDeleteClearing`: none, all, or all
   unless the table's only spec is unpartitioned), and an equality-delete
-  table is offered only where both hold for it. `zamboni engines` prints the
-  answer per engine.
+  table is offered only where both hold for it. Spark declares all where the
+  installed PyIceberg can run Zamboni's removal, and all-unless-unpartitioned
+  where it cannot. `zamboni engines` prints the answer per engine.
 
   **A Trino or Spark `serve` deployment now compacts these tables between
   schedules**, typically CDC and upsert tables, where before only the
   schedule reached them. To keep the old behaviour, set `pressure: false`
   for the warehouse.
 
-  Unchanged: the local engine skips these tables, Spark skips them when the
-  table has only an unpartitioned spec, and so does a record from an
-  application's own health entry that does not set the new key. Nothing
-  changes in what Zamboni sends Spark. Rejected: sending
+  Unchanged: the local engine skips these tables, and so does a record from an
+  application's own health entry that does not set the new key. A table
+  whose config disables `remove_dangling_deletes` keeps its delete files on
+  either engine and is offered again at each check. Nothing changes in what
+  Zamboni sends Spark. Rejected: sending
   `use-starting-sequence-number=false` did not clear the unpartitioned case,
   and with it a rewrite failed outright when an equality delete was committed
-  while it ran, which the default absorbs.
+  while it ran, which the default absorbs. Also rejected: a second Spark
+  `rewrite_data_files` with `rewrite-all`, which does clear the file in its
+  own commit but rewrites the whole table again to remove one metadata entry.
+
+- **Spark's `remove-dangling-deletes` is Zamboni's own removal, through
+  PyIceberg** (#305). It was declared fulfilled by compaction: Spark has no
+  standalone procedure, and the `remove-dangling-deletes` option on
+  `rewrite_data_files` does the work as it rewrites. So `maintenance` skipped
+  it as `already done by compact`, and `zamboni remove-dangling-deletes
+  --engine spark` ran a compaction. Spark's removal skips a table whose only
+  partition spec is unpartitioned, though, so the operation now runs the local
+  engine's removal against the same catalog, after compaction. What changes:
+  - `maintenance` on Spark runs it after compaction, with one extra manifest
+    read per table, rather than reporting `already done by compact`.
+    Compaction still sends Spark's option, which drops dangling deletes per
+    file where Spark does.
+  - `zamboni remove-dangling-deletes --engine spark` is metadata only and no
+    longer rewrites data. It previews without `--yes`, where it used to refuse.
+  - It is declared as the local engine's is, from the same PyIceberg probes,
+    including the whole-delete-manifest limitation on stock PyIceberg.
+  - `SparkMaintainer.statement_for` raises for it, since no SQL runs.
+  No built-in engine now declares `OperationSupport.fulfilled_by`; the field
+  and the skip remain for registered engines.
 
 - **Compaction rewrites files for their deletes, not only for their size**
   (#288). A partition left with one or two data files and a pile of position

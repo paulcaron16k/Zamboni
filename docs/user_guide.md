@@ -60,11 +60,11 @@ decided by one row of this table.
 | Partition evolution (day → month for old data) | **yes** | no | no |
 | Snapshot expiry | yes | yes³ | yes³ |
 | Orphan-file removal | yes⁴ | yes⁵ | yes⁵ ⁶ |
-| Dangling-delete removal | partial⁷ | **no**⁸ | yes |
+| Dangling-delete removal | partial⁷ | **no**⁸ | yes¹³ |
 | Compact a table carrying equality deletes | **no**¹¹ | yes | yes¹² |
 | Manifest rewriting | yes | yes⁹ | yes |
 | Metadata retention properties | yes | yes¹⁰ | yes |
-| Preview before committing (no `--yes`) | **every operation** | none | orphans only |
+| Preview before committing (no `--yes`) | **every operation** | none | orphans and dangling deletes |
 | Needs a JVM | no | server-side | server-side |
 | Needs a cluster | no | yes | yes |
 
@@ -81,11 +81,16 @@ one elsewhere. ⁹ No size control. ¹⁰ Translated to Trino's own property nam
 compacted into one that resurrects deleted rows; the refusal lifts on its own
 when a PyIceberg build can. ¹² Applies them, and removes the delete files
 except on a table whose only partition spec is unpartitioned, where Iceberg's
-dangling-delete removal skips the table: it then still reports them afterwards.
-`zamboni serve`'s pressure check therefore offers such a table to Trino always
-and to Spark unless it has only an unpartitioned spec (#300, #301). Both
-measured on the dev stack (`test_trino_compaction_applies_equality_deletes`,
-`test_spark_compaction_applies_equality_deletes`).
+dangling-delete removal skips the table. Zamboni's own `remove-dangling-deletes`,
+which runs after compaction, removes them there (#305). `zamboni serve`'s
+pressure check therefore offers such a table to Trino always, and to Spark
+always where the installed PyIceberg can run that removal (#300, #301, #305).
+Measured on the dev stack (`test_trino_compaction_applies_equality_deletes`,
+`test_spark_compaction_applies_equality_deletes`,
+`test_spark_maintenance_clears_equality_deletes`). ¹³ Compaction drops
+dangling deletes per file as it rewrites; the operation itself is Zamboni's
+own removal through PyIceberg, run after it, with the local engine's
+limitation⁷ (#305).
 
 `zamboni engines` prints this from the code, with the reason attached to every
 limitation. **When this table and that command disagree, the command is right** —

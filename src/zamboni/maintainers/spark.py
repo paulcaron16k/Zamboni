@@ -13,17 +13,20 @@ builders would be a maintainer nobody exercises.
 
 Three declarations here shaped the interface:
 
-* ``remove-dangling-deletes`` is ``fulfilled_by`` COMPACT. Spark has no
-  standalone procedure for it -- it is the ``remove-dangling-deletes`` option on
+* ``remove-dangling-deletes`` is two halves. Spark has no standalone procedure
+  for it -- it is the ``remove-dangling-deletes`` option on
   ``rewrite_data_files``, which "will generate an additional commit for the
-  removal". Without that field the interface would have to call this
-  unsupported, which is wrong, or supported, which is misleading about *how*.
+  removal", and compaction sends it. That once made the operation
+  ``fulfilled_by`` COMPACT. But Spark's removal skips a table whose only spec
+  is unpartitioned, so the operation itself is now Zamboni's own removal,
+  through PyIceberg, run after compaction for what Spark left (#305).
 * ``remove-orphans`` previews and nothing else does. ``remove_orphan_files``
   takes ``dry_run``; no other Spark procedure does. This single asymmetry is why
   ``can_preview`` is per operation.
 * Spark does something we cannot: it drops dangling deletes *per file*, where we
-  can only drop whole manifests (ZMBNI-604). Capability flows in both
-  directions, and the interface has to carry that.
+  can only drop whole manifests (ZMBNI-604) -- and we do something it will not,
+  on an unpartitioned table. Capability flows in both directions, and the
+  interface has to carry that.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ import logging
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
+from ..capabilities import detect
 from ..config import orders_by_declared_order
 from ..properties import ApplyResult
 from ..tableconfig import DELETE_RATIO_THRESHOLD_DEFAULT
@@ -50,6 +54,7 @@ from . import (
     Support,
     register,
 )
+from .local import dangling_delete_support, remove_dangling_deletes
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -217,6 +222,19 @@ class SparkMaintainer(Maintainer):
 
     @classmethod
     def capabilities(cls) -> MaintainerCapabilities:
+        local = dangling_delete_support(detect())
+        dangling = replace(
+            local,
+            invariants=(
+                *local.invariants,
+                (
+                    "Zamboni's own removal through PyIceberg, run after compaction: "
+                    "`rewrite_data_files` already drops dangling deletes per file, "
+                    "except on a table whose only partition spec is unpartitioned, "
+                    "which Iceberg's `RemoveDanglingDeletesSparkAction` skips (#305)"
+                ),
+            ),
+        )
         return MaintainerCapabilities(
             engine=cls.name,
             # Everything except partition evolution: `rewrite_data_files` takes
@@ -239,12 +257,21 @@ class SparkMaintainer(Maintainer):
             # the table's only spec is unpartitioned:
             # `RemoveDanglingDeletesSparkAction.execute` returns at once there,
             # trusting a commit-time filter that removed nothing in any case we
-            # measured, including after a further compaction and an INSERT.
-            # Spark 4.1.3 on Iceberg 1.11.0, on an unpartitioned, a partitioned
-            # and an evolved table: test_spark_compaction_applies_equality_deletes
-            # (#301).
+            # measured, including after a further compaction that committed
+            # nothing and an INSERT. Spark 4.1.3 on Iceberg 1.11.0, on an
+            # unpartitioned, a partitioned and an evolved table:
+            # test_spark_compaction_applies_equality_deletes (#301). There the
+            # leftover sits at the rewritten files' sequence number, applying to
+            # nothing, and Zamboni's own `remove-dangling-deletes`, which runs
+            # after compaction, removes it: test_spark_maintenance_clears_equality_deletes
+            # (#305). So every table is cleared wherever that removal can run on
+            # this PyIceberg build.
             compacts_equality_deletes=True,
-            clears_equality_deletes=EqualityDeleteClearing.UNLESS_ONLY_UNPARTITIONED,
+            clears_equality_deletes=(
+                EqualityDeleteClearing.ALL
+                if dangling.usable
+                else EqualityDeleteClearing.UNLESS_ONLY_UNPARTITIONED
+            ),
             operations={
                 Operation.COMPACT: OperationSupport(
                     Operation.COMPACT,
@@ -254,8 +281,8 @@ class SparkMaintainer(Maintainer):
                         (
                             "also removes dangling deletes in the same statement, unless "
                             "`remove_dangling_deletes` is disabled or "
-                            "`dangling_delete_policy` is `block` -- Spark has no standalone "
-                            "procedure, so the two operations share one call"
+                            "`dangling_delete_policy` is `block` -- per file, except on a "
+                            "table whose only partition spec is unpartitioned"
                         ),
                         (
                             "`partial-progress.enabled` defaults to false, so a run "
@@ -320,22 +347,7 @@ class SparkMaintainer(Maintainer):
                         ),
                     ),
                 ),
-                Operation.REMOVE_DANGLING_DELETES: OperationSupport(
-                    Operation.REMOVE_DANGLING_DELETES,
-                    Support.FULL,
-                    can_preview=False,
-                    fulfilled_by=Operation.COMPACT,
-                    invariants=(
-                        (
-                            "the `remove-dangling-deletes` option on `rewrite_data_files`; "
-                            "generates an additional commit for the removal"
-                        ),
-                        (
-                            "drops deletes per file, where the local engine can only drop "
-                            "whole manifests -- strictly better than ours here"
-                        ),
-                    ),
-                ),
+                Operation.REMOVE_DANGLING_DELETES: dangling,
                 Operation.REWRITE_MANIFESTS: OperationSupport(
                     Operation.REWRITE_MANIFESTS,
                     Support.FULL,
@@ -416,6 +428,11 @@ class SparkMaintainer(Maintainer):
         preview statement inspectable without running anything.
         """
         self.check_supported(operation)
+        if operation is Operation.REMOVE_DANGLING_DELETES:
+            raise ValueError(
+                "spark runs no statement for remove-dangling-deletes: it is Zamboni's own "
+                "removal, through PyIceberg (#305)"
+            )
         target = qualified(table, catalog=self.catalog)
         plain = self._plain(table)
         if operation is Operation.REMOVE_ORPHANS:
@@ -424,20 +441,19 @@ class SparkMaintainer(Maintainer):
             Operation.COMPACT: self._compact_sql,
             Operation.EXPIRE: self._expire_sql,
             Operation.REMOVE_ORPHANS: self._remove_orphans_sql,
-            Operation.REMOVE_DANGLING_DELETES: self._compact_sql,
             Operation.REWRITE_MANIFESTS: self._rewrite_manifests_sql,
             Operation.APPLY_PROPERTIES: self._apply_properties_sql,
         }[operation]
         return builder(target, plain, request)
 
     def _compact_sql(self, target: str, plain: str, request: MaintenanceRequest) -> str:
-        """``rewrite_data_files``, which also carries dangling-delete removal.
+        """``rewrite_data_files``, which also carries Spark's dangling-delete removal.
 
         Spark has no standalone procedure for dangling deletes -- it is the
         ``remove-dangling-deletes`` option here, which "will generate an
-        additional commit for the removal". That is why the capability
-        declaration marks the operation ``fulfilled_by`` COMPACT, and why both
-        route to this builder.
+        additional commit for the removal". The `remove-dangling-deletes`
+        operation is Zamboni's own removal, run after this for what Spark's
+        leaves (#305).
         """
         arguments: list[tuple[str, str]] = [("table", _literal(plain))]
 
@@ -706,7 +722,7 @@ class SparkMaintainer(Maintainer):
         """
         compaction = request.compaction
         if (
-            operation not in (Operation.COMPACT, Operation.REMOVE_DANGLING_DELETES)
+            operation is not Operation.COMPACT
             or compaction is None
             or not compaction.sort_by_declared_order_if_any
         ):
@@ -735,6 +751,11 @@ class SparkMaintainer(Maintainer):
         request: MaintenanceRequest,
         dry_run: bool,
     ) -> Reportable:
+        if operation is Operation.REMOVE_DANGLING_DELETES:
+            # No SQL: Zamboni's own removal, through the PyIceberg catalog this
+            # maintainer already holds (#305). It previews, so no refusal here.
+            self.check_supported(operation)
+            return remove_dangling_deletes(self._session, table, request, dry_run=dry_run)
         request = self._settle_declared_order(operation, table, request)
         statement = self.statement_for(operation, table, request, dry_run=dry_run)
         if statement is None:

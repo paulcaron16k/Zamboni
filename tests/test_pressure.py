@@ -117,10 +117,14 @@ def test_each_engine_is_offered_equality_delete_tables_as_it_declares(engine, sp
     assert ("db.cdc" in offered) is eligible
 
 
-def test_spark_is_offered_a_partitioned_equality_delete_table_and_not_an_unpartitioned_one():
-    """The case #301 exists for, spelled out rather than derived: one record,
-    two tables, one engine, two answers."""
+def test_spark_is_offered_an_unpartitioned_equality_delete_table_where_zamboni_clears_it():
+    """The cases #301 and #305 exist for, spelled out: one record, two tables,
+    one engine. Spark's compaction clears the partitioned table itself; the
+    unpartitioned one is cleared by Zamboni's own dangling-delete removal after
+    it, so it is offered only where this PyIceberg build can run that."""
+    from zamboni.capabilities import detect
     from zamboni.health import health_record
+    from zamboni.maintainers.local import dangling_delete_support
 
     cdc = health(delete_files=50, equality_deletes=3, partition_specs=1)
     record = health_record(
@@ -128,7 +132,8 @@ def test_spark_is_offered_a_partitioned_equality_delete_table_and_not_an_unparti
         {"db.flat": cdc | {"partitioned": False}, "db.daily": cdc | {"partitioned": True}},
         engine="spark",
     )
-    assert list(pressure_offers_(warehouse(), record)["over"]) == ["db.daily"]
+    expected = ["db.flat", "db.daily"] if dangling_delete_support(detect()).usable else ["db.daily"]
+    assert list(pressure_offers_(warehouse(), record)["over"]) == expected
 
 
 @pytest.mark.parametrize("unmeasured", ["partition_specs", "partitioned"])
@@ -317,16 +322,27 @@ def test_a_real_worker_measures_a_merge_on_read_table_over_the_default_threshold
     )
 
 
-@pytest.mark.parametrize(("engine", "eligible"), [("trino", True), ("spark", False)])
+@pytest.mark.parametrize("engine", ["trino", "spark"])
 def test_the_deployments_engine_reaches_the_record_the_decision_reads(
-    tmp_path, monkeypatch, mor_table, engine, eligible
+    tmp_path, monkeypatch, mor_table, engine
 ):
     """#300: a `serve` worker picks its engine the way a cron line does, from
     the profile or ZAMBONI_ENGINE, and the pressure check's record must carry
     *that* engine's answer -- not the local engine's, which is what a check
     that ignored the deployment would report. db.mor has one unpartitioned
-    spec, the one shape Spark leaves its equality delete files on (#301)."""
+    spec, the one shape Spark's own compaction leaves its equality delete
+    files on (#301); whether Spark is offered it depends on the PyIceberg
+    build's dangling-delete removal (#305), which the local engine's answer
+    never would."""
     import os
+
+    from zamboni.maintainers import offers_equality_deletes_to_pressure
+
+    eligible = offers_equality_deletes_to_pressure(engine, partition_specs=1, partitioned=False)
+    if eligible is offers_equality_deletes_to_pressure(
+        "local", partition_specs=1, partitioned=False
+    ):
+        pytest.skip(f"{engine} and local agree on db.mor here, so this cannot tell which answered")
 
     workdir = tmp_path / "work"
     workdir.mkdir()

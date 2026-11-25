@@ -150,12 +150,15 @@ def test_compaction_on_equality_deletes_agrees_with_the_compact_declaration(monk
 def test_pressure_eligibility_needs_compaction_to_apply_and_clear_equality_deletes(
     specs, partitioned
 ):
-    """The measured facts behind it (#300, #301), so a changed declaration
-    fails by name. Trino applies and clears; Spark applies, and clears unless
-    the table's only spec is unpartitioned; the local engine follows its
-    PyIceberg probe and has never been measured clearing them."""
+    """The measured facts behind it (#300, #301, #305), so a changed
+    declaration fails by name. Trino applies and clears. Spark applies; its
+    compaction clears unless the table's only spec is unpartitioned, and
+    Zamboni's own dangling-delete removal, run after it, clears the rest
+    wherever this PyIceberg build can run that removal. The local engine
+    follows its PyIceberg probe and has never been measured clearing them."""
     from zamboni import maintainers
     from zamboni.capabilities import detect
+    from zamboni.maintainers.local import dangling_delete_support
 
     declared = {
         name: (caps.compacts_equality_deletes, caps.clears_equality_deletes)
@@ -164,7 +167,12 @@ def test_pressure_eligibility_needs_compaction_to_apply_and_clear_equality_delet
     }
     assert declared == {
         "local": (detect().equality_deletes_readable, EqualityDeleteClearing.NONE),
-        "spark": (True, EqualityDeleteClearing.UNLESS_ONLY_UNPARTITIONED),
+        "spark": (
+            True,
+            EqualityDeleteClearing.ALL
+            if dangling_delete_support(detect()).usable
+            else EqualityDeleteClearing.UNLESS_ONLY_UNPARTITIONED,
+        ),
         "trino": (True, EqualityDeleteClearing.ALL),
     }
     for name, (compacts, clears) in declared.items():
@@ -205,12 +213,38 @@ def test_trino_cannot_remove_dangling_deletes_at_all():
         TrinoMaintainer(None).check_supported(Operation.REMOVE_DANGLING_DELETES)
 
 
-def test_spark_fulfils_dangling_deletes_through_compaction():
-    """Not a standalone procedure there -- an option on rewrite_data_files."""
-    support = SparkMaintainer.capabilities().of(Operation.REMOVE_DANGLING_DELETES)
+def test_spark_removes_dangling_deletes_with_zamboni_s_own_removal():
+    """#305: Spark's own removal, an option on rewrite_data_files, skips a
+    table whose only spec is unpartitioned. So the operation is the local
+    engine's removal, declared as it is there, and no longer rides on
+    compaction -- which would skip it as already done."""
+    from zamboni.maintainers.local import dangling_delete_support
 
-    assert support.support is Support.FULL
-    assert support.fulfilled_by is Operation.COMPACT
+    spark = SparkMaintainer.capabilities().of(Operation.REMOVE_DANGLING_DELETES)
+    local = dangling_delete_support(detect())
+
+    assert (spark.support, spark.can_preview, spark.limitations) == (
+        local.support,
+        local.can_preview,
+        local.limitations,
+    )
+    assert spark.fulfilled_by is None
+    assert any("#305" in text for text in spark.invariants)
+
+
+def test_spark_s_dangling_delete_removal_runs_without_spark(session, mor_table):
+    """It is PyIceberg's commit, so it needs the catalog and not a Spark
+    session: this maintainer has no `remote` and would fail to connect."""
+    from zamboni.deletes import DeleteCleanupResult
+
+    engine = SparkMaintainer(session, {"catalog": "iceberg"})
+    result = engine.execute(
+        Operation.REMOVE_DANGLING_DELETES, "db.mor", request=spark_request(), dry_run=True
+    )
+
+    assert isinstance(result, DeleteCleanupResult)
+    assert result.dry_run
+    assert result.report.delete_files == 1
 
 
 # -- preview is per operation --------------------------------------------
@@ -338,7 +372,14 @@ def test_describe_reports_limitations_so_they_are_discoverable():
 
 
 def test_describe_says_when_an_operation_rides_on_another():
-    assert "via compact" in SparkMaintainer.capabilities().describe()
+    """No built-in engine declares one since #305; a registered engine may."""
+    real = SparkMaintainer.capabilities()
+    operations = dict(real.operations)
+    operations[Operation.REMOVE_DANGLING_DELETES] = replace(
+        operations[Operation.REMOVE_DANGLING_DELETES], fulfilled_by=Operation.COMPACT
+    )
+
+    assert "via compact" in replace(real, operations=operations).describe()
 
 
 # -- the declarations match the analysis they came from ------------------
@@ -732,14 +773,11 @@ def test_compaction_always_asks_spark_to_drop_dangling_deletes():
     assert "'remove-dangling-deletes', 'true'" in sql
 
 
-def test_dangling_delete_removal_is_the_compaction_statement():
-    """Not a separate procedure in Spark. Both must emit the same SQL, or the
-    `fulfilled_by` declaration is a lie."""
-    request = spark_request()
-    compact = spark().statement_for(Operation.COMPACT, "db.events", request)
-    dangling = spark().statement_for(Operation.REMOVE_DANGLING_DELETES, "db.events", request)
-
-    assert compact == dangling
+def test_spark_has_no_statement_for_dangling_delete_removal():
+    """#305: it runs through PyIceberg, so a caller asking for its SQL is told
+    so rather than handed compaction's, which it used to be."""
+    with pytest.raises(ValueError, match="no statement for remove-dangling-deletes"):
+        spark().statement_for(Operation.REMOVE_DANGLING_DELETES, "db.events", spark_request())
 
 
 def test_partial_progress_is_passed_explicitly_not_left_to_a_default():
