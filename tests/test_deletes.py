@@ -163,11 +163,12 @@ def test_running_twice_is_a_no_op(session, mor_table):
 
 
 def test_a_partially_dangling_manifest_is_retained_not_rewritten(session, mor_table, monkeypatch):
-    """PyIceberg cannot write a delete manifest, so a mixed one must be left.
+    """Nothing splits a delete manifest yet (#9), so a mixed one must be left.
 
-    Rewriting it through ``write_manifest`` would stamp ``content: data`` and a
-    reader would then treat position deletes as rows. Reclaiming less is the
-    only safe answer available.
+    PyIceberg's rewrite of a partly emptied manifest would stamp
+    ``content: data``, on the fork as on stock, and a reader would then treat
+    position deletes as rows. Reclaiming less is the only safe answer
+    available.
     """
     from zamboni.deletes import DeleteManifest
 
@@ -186,11 +187,67 @@ def test_a_partially_dangling_manifest_is_retained_not_rewritten(session, mor_ta
     assert report.dangling_files == 1
     assert report.removable == []
     assert len(report.stuck) == 1
-    assert "cannot write a delete manifest" in report.describe()
+    assert "does not split a delete manifest (#9)" in report.describe()
 
     result = DanglingDeleteCleaner().run(tbl)
     assert result.removed == 0
     assert delete_files(session.table("db.mor")), "a stuck delete file was removed anyway"
+
+
+@pytest.mark.parametrize("writable", [True, False], ids=["writer-can", "writer-cannot"])
+def test_the_declaration_matches_what_removal_does_to_a_partially_dangling_manifest(
+    session, partitioned, writable
+):
+    """#310: the declaration is checked against the operation, not its own text.
+
+    A real partially dangling delete manifest: a position delete in each of
+    two partitions lands in one delete manifest, then partition b's data is
+    deleted, so b's delete applies to nothing while a's still applies. Run
+    the removal and look. FULL promises the dangling file goes and the live
+    one stays; anything less must be declared as less.
+
+    Parametrized over the delete-manifest probe because the declaration is
+    computed from it, while what the removal does is not. A build that can
+    write a delete manifest was declared FULL, but nothing here split one.
+    """
+    from dataclasses import replace
+
+    from zamboni.capabilities import detect
+    from zamboni.maintainers import Support
+    from zamboni.maintainers.local import dangling_delete_support
+    from zamboni.testing import write_position_deletes
+
+    by_partition: dict = {}
+    for task in partitioned.scan().plan_files():
+        by_partition.setdefault(task.file.partition[0], task.file.file_path)
+    assert sorted(by_partition) == ["a", "b"], "the fixture no longer has partitions a and b"
+    assert write_position_deletes(partitioned, {p: [0] for p in by_partition.values()}) == 2
+    partitioned.delete("category == 'b'")
+
+    tbl = session.table("db.partitioned")
+    delete_manifests = [
+        m
+        for m in tbl.current_snapshot().manifests(io=tbl.io)
+        if m.content == ManifestContent.DELETES
+    ]
+    assert len(delete_manifests) == 1, "expected both delete files in one delete manifest"
+    report = find_dangling(tbl)
+    assert (report.delete_files, report.dangling_files) == (2, 1), "not partially dangling"
+    rows_before = live_ids(tbl)
+
+    DanglingDeleteCleaner(dry_run=False).run(tbl)
+    after = session.table("db.partitioned")
+    left = delete_files(after)
+    split = len(left) == 1 and left[0].partition[0] == "a"
+
+    support = dangling_delete_support(replace(detect(), delete_manifests_writable=writable))
+    assert (support.support is Support.FULL) == split, (
+        f"declared {support.support.name}, but the removal "
+        f"{'split' if split else 'did not split'} the manifest"
+    )
+    if not split:
+        assert len(left) == 2, "a delete file went without the manifest being split"
+    assert live_ids(after) == rows_before
 
 
 def test_the_producer_refuses_to_rewrite_a_delete_manifest(session, partitioned):

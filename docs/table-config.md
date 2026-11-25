@@ -373,14 +373,13 @@ of every spec, and only to those with a lower sequence number (#306).
 Metadata only. The delete files stay on disk, still referenced by older snapshots, exactly
 as compaction's superseded data files do; expiry and orphan removal free the bytes.
 
-> **Limited to whole manifests.** `ManifestWriterV2.content()` returns
-> `ManifestContent.DATA` unconditionally and writes `content: data` into the avro metadata,
-> so PyIceberg cannot write a delete manifest at all. A delete manifest can therefore be
-> dropped whole or left alone, never rewritten — rewriting one would produce a manifest
-> claiming to hold data files, and a reader would treat position deletes as rows. A dangling
-> delete sharing a manifest with one that still applies is reported as retained, with the
-> reason. This lifts automatically if PyIceberg gains a delete-manifest writer; the
-> capability is probed, not assumed (`zamboni doctor`).
+> **Limited to whole manifests.** A delete manifest is dropped whole or left alone, never
+> rewritten — PyIceberg's rewrite of a partly emptied manifest labels it `content: data`, and
+> a reader would then treat position deletes as rows. On stock PyIceberg 0.12
+> `ManifestWriterV2.content()` returns `DATA` unconditionally, so no delete manifest can be
+> written at all; the maintenance fork can write one, but Zamboni does not split a manifest
+> yet (#9). A dangling delete sharing a manifest with one that still applies is reported as
+> retained, with the reason. `zamboni engines` declares this limitation on every build.
 
 ---
 

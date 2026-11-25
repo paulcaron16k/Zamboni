@@ -143,7 +143,7 @@ Two categories beyond the usual set, because this tool deletes files:
   - `zamboni remove-dangling-deletes --engine spark` is metadata only and no
     longer rewrites data. It previews without `--yes`, where it used to refuse.
   - It is declared as the local engine's is, from the same PyIceberg probes,
-    including the whole-delete-manifest limitation on stock PyIceberg.
+    including the whole-delete-manifest limitation (on every build since #310).
   - `SparkMaintainer.statement_for` raises for it, since no SQL runs.
   No built-in engine now declares `OperationSupport.fulfilled_by`; the field
   and the skip remain for registered engines.
@@ -177,6 +177,16 @@ Two categories beyond the usual set, because this tool deletes files:
 
 ### Fixed
 
+- **`zamboni engines` no longer claims `remove-dangling-deletes` rewrites a
+  partially dangling delete manifest** (#310). On a PyIceberg that can write a
+  delete manifest -- the maintenance fork -- the operation was declared FULL,
+  "rewrites a partially dangling delete manifest rather than leaving it
+  alone". Nothing did: such a manifest's dangling files were retained, and the
+  commit refuses a partial rewrite. It is now PARTIAL on every build, on the
+  local engine and on Spark (#305), with the reason this build gives: stock
+  PyIceberg cannot write a delete manifest, and on the fork Zamboni does not
+  split one yet (#9). What the operation removes is unchanged. The pressure
+  check reads only whether it can run, so it offers the same tables.
 - **A string value whose truncated upper bound ends in U+D7FF no longer fails
   a write or a compaction** (#303). When a file's largest value in a string
   column is longer than the metrics truncation length (16 by default) and the

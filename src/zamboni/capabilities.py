@@ -197,11 +197,13 @@ class PyIcebergCapabilities:
     equality_deletes_readable: bool
 
     #: A *delete* manifest can be written. Established by writing one and
-    #: reading the label back, not by inspecting the writer: on 0.12.0
+    #: reading the label back, not by inspecting the writer: on stock 0.12.0
     #: ``ManifestWriterV2.content`` returns ``ManifestContent.DATA``
     #: unconditionally, so a manifest written through it claims to hold data
-    #: files whatever it was handed. Dangling-delete removal is therefore
-    #: limited to dropping whole delete manifests; see :mod:`zamboni.deletes`.
+    #: files whatever it was handed. True on the maintenance fork (#240).
+    #: Dangling-delete removal drops whole delete manifests either way, since
+    #: nothing splits one yet (#9, #310); this only chooses the reason it
+    #: gives. See :mod:`zamboni.deletes`.
     delete_manifests_writable: bool
 
     #: Every S3 filesystem PyIceberg builds is signed by its own request signer,
@@ -433,9 +435,10 @@ def _probe() -> Probed:
         # the other would skip a library check on a build nobody observed.
         rewrite_ignores_unrelated_append=unrelated_append is not False,
         equality_deletes_readable=not _guard_anywhere_in_scan_planning(),
-        # Unknown -> assume NOT writable, which limits dangling-delete removal
-        # to whole manifests. Guessing the other way would let us rewrite a
-        # delete manifest into one labelled as data.
+        # Unknown -> assume NOT writable. Nothing rewrites a delete manifest
+        # yet (#9), so today this only picks the limitation's wording. Once
+        # something does, guessing the other way would let it rewrite a delete
+        # manifest into one labelled as data.
         delete_manifests_writable=delete_manifests is True,
         # Unknown -> assume NOT, so the mirror installs. On a library that does
         # sign once it is redundant but correct; standing down on one that does

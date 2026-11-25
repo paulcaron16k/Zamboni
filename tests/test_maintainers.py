@@ -189,15 +189,12 @@ def test_support_is_three_valued_in_practice_not_just_in_theory():
     """If every declaration were FULL or UNSUPPORTED the third state would be
     dead weight. These are the real ones, from the engine comparison.
 
-    Local dangling-delete removal is PARTIAL only where a delete manifest
-    cannot be written -- stock 0.12.0 and the pinned fork, not a fork carrying
-    the delete-manifest writer (#240) -- so that one follows the probe. The
-    two `expire` declarations are PARTIAL on every build.
+    Local dangling-delete removal drops whole delete manifests only, on
+    every build, until #9 splits one (#310). The two `expire` declarations
+    are PARTIAL on every build too.
     """
-    from zamboni.capabilities import detect
-
     local = LocalMaintainer.capabilities().of(Operation.REMOVE_DANGLING_DELETES).support
-    assert local is (Support.FULL if detect().delete_manifests_writable else Support.PARTIAL)
+    assert local is Support.PARTIAL
     assert TrinoMaintainer.capabilities().of(Operation.EXPIRE).support is Support.PARTIAL
     assert SparkMaintainer.capabilities().of(Operation.EXPIRE).support is Support.PARTIAL
 
@@ -564,24 +561,36 @@ def local_with(monkeypatch, **overrides):
     return LocalMaintainer.capabilities()
 
 
-def test_dangling_deletes_becomes_full_when_the_writer_can_write_one(monkeypatch):
-    """ZMBNI-604's caveat is a property of ManifestWriterV2, not of us. A build
-    that can write a delete manifest must stop being told it cannot."""
-    caps = local_with(monkeypatch, delete_manifests_writable=True)
-    support = caps.of(Operation.REMOVE_DANGLING_DELETES)
-
-    assert support.support is Support.FULL
-    assert not support.limitations
-    assert any("partially dangling" in inv for inv in support.invariants)
-
-
-def test_dangling_deletes_stays_partial_when_it_cannot(monkeypatch):
-    support = local_with(monkeypatch, delete_manifests_writable=False).of(
+@pytest.mark.parametrize("writable", [True, False])
+def test_dangling_deletes_is_partial_whatever_the_writer_can_do(monkeypatch, writable):
+    """#310: a build that can write a delete manifest was declared FULL,
+    claiming a rewrite nothing performs. The probe now picks only the reason;
+    whether the removal splits a manifest is checked against the removal
+    itself in test_deletes.py."""
+    support = local_with(monkeypatch, delete_manifests_writable=writable).of(
         Operation.REMOVE_DANGLING_DELETES
     )
 
     assert support.support is Support.PARTIAL
-    assert "ZMBNI-604" in support.limitations[0]
+    assert support.can_preview
+    assert "#9" in support.limitations[0]
+    assert not any("partially dangling" in inv for inv in support.invariants)
+
+
+def test_the_dangling_limitation_gives_the_reason_the_probe_found(monkeypatch):
+    """Two builds, two different reasons for the same limitation. Stock
+    PyIceberg cannot write a delete manifest; the fork can and Zamboni does
+    not yet. Saying the first on the fork would be false."""
+    cannot = local_with(monkeypatch, delete_manifests_writable=False).of(
+        Operation.REMOVE_DANGLING_DELETES
+    )
+    can = local_with(monkeypatch, delete_manifests_writable=True).of(
+        Operation.REMOVE_DANGLING_DELETES
+    )
+
+    assert "cannot write a delete manifest" in cannot.limitations[0]
+    assert "cannot write" not in can.limitations[0]
+    assert "can write a delete manifest" in can.limitations[0]
 
 
 def test_compaction_becomes_full_when_equality_deletes_are_readable(monkeypatch):
