@@ -1079,15 +1079,17 @@ This is not defensive over-engineering; it is the shape of the problem. Eight pr
 | producer derives the delete predicate | yes |
 | added files honour their own partition spec | yes |
 | equality deletes readable | no |
-| delete manifests writable | no |
+| delete manifests writable | yes |
 
 Run it yourself rather than trusting the table — that is the point of the command.
 
 **Two installs of the same declared range differ here.** On stock PyIceberg 0.12 from PyPI,
 `added files honour their own partition spec` is **no**; it is yes only on the maintenance
 fork. No version number distinguishes those two, which is the argument for probes in one
-line. The last two rows are why `remove-dangling-deletes` and equality-delete tables stay
-blocked; they lift on their own the day upstream supports them, with nothing changed here.
+line. `equality deletes readable` is why equality-delete tables stay blocked for local
+compaction, and lifts on its own the day upstream reads them. `delete manifests writable`
+is **no** on stock 0.12 and yes on the fork, but `remove-dangling-deletes` drops whole
+delete manifests on both: splitting one is #9, not yet written.
 
 The probes also gate safety. `manifest_pruning_is_safe` requires the delete-predicate
 derivation whenever predicate pruning is on; a build with pruning and no derivation would
@@ -1185,10 +1187,10 @@ implementation of the rule. Equality deletes follow the spec's rules in `deletes
 because that index treats them as position deletes and misses that one written under an
 unpartitioned spec applies across every spec (#306).
 
-Removal is limited to **whole delete manifests**, because `ManifestWriterV2` hardcodes
-`content()` to `DATA` and there is no delete-manifest writer in PyIceberg. A partially
-dangling manifest is reported and left alone; rewriting it would label position deletes as
-data. On the demo's merge-on-read run this clears all 32 dangling deletes and takes the
+Removal is limited to **whole delete manifests**. Stock PyIceberg cannot write a delete
+manifest (`ManifestWriterV2` hardcodes `content()` to `DATA`); the maintenance fork can, but
+Zamboni does not split one yet (#9). A partially dangling manifest is reported and left
+alone; PyIceberg's own rewrite would label position deletes as data. On the demo's merge-on-read run this clears all 32 dangling deletes and takes the
 table from 57 manifests to 3.
 
 Both reclaim verbs read one referenced-file set (`reachable.py`) covering all six places Iceberg
@@ -1242,6 +1244,6 @@ verbatim, `first_row_id` included.
 
 ## Not in scope
 
-Rewriting a *partially* dangling delete manifest, and splitting a single partition across
-manifests. Both are limited by PyIceberg having no delete-manifest writer; both lift
-automatically if one appears, and `zamboni doctor` probes for it rather than assuming.
+Rewriting a *partially* dangling delete manifest (#9), and splitting a single partition
+across manifests. Stock PyIceberg has no delete-manifest writer; the maintenance fork has
+one, but neither is written in Zamboni yet, so neither lifts on its own.

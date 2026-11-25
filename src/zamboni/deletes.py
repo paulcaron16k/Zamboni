@@ -15,12 +15,17 @@ Two upstream facts shape the design, both verified against 0.11.1 and main:
    drops it from the rewritten manifest without recording a DELETED entry.
    :class:`_RemoveDeleteFiles` overrides that.
 
-2. ``ManifestWriterV2.content()`` returns ``ManifestContent.DATA``
-   unconditionally, and the avro metadata it writes agrees. There is no way to
-   write a delete manifest. So a delete manifest can be **dropped whole** or
-   left alone, but never rewritten -- rewriting one would produce a manifest
-   claiming to hold data files, and a reader would then treat position deletes
-   as rows.
+2. A partly emptied manifest is rewritten by
+   ``_OverwriteFiles._existing_manifests`` through
+   ``new_manifest_writer(spec)``, whose ``content`` defaults to DATA. On stock
+   0.12.0 ``ManifestWriterV2.content()`` returns ``ManifestContent.DATA``
+   unconditionally, so no delete manifest can be written at all. The
+   maintenance fork can write one (#240, probed as
+   ``delete_manifests_writable``), but its rewrite path still asks for DATA.
+   So a delete manifest is **dropped whole** or left alone, never rewritten
+   -- rewriting one would produce a manifest claiming to hold data files, and
+   a reader would then treat position deletes as rows. Splitting one with a
+   writer that can label it is #9, not done.
 
 Hence the contract: a delete file is removed only when *every* live entry in
 its manifest is also dangling. Anything else is reported as retained, with the
@@ -167,8 +172,8 @@ class DanglingReport:
         if self.stuck:
             lines.append(
                 f"  {len(self.stuck)} dangling file(s) retained: their manifest also holds "
-                "a delete file that still applies, and PyIceberg cannot write a delete "
-                "manifest to split it"
+                "a delete file that still applies, and Zamboni does not split a delete "
+                "manifest (#9)"
             )
         return "\n".join(lines)
 

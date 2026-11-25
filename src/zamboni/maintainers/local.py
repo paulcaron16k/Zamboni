@@ -358,12 +358,26 @@ def dangling_delete_support(probes) -> OperationSupport:
     Declared once for every engine that runs it: the local one, and Spark,
     which runs it after its own compaction (#305).
 
-    Whole-manifest-only is a property of the installed writer.
+    PARTIAL on every usable build: a delete file goes only with its whole
+    manifest, because nothing here splits a partially dangling one (#9).
+    ``find_dangling`` reports such files as ``stuck``, and
+    ``_RemoveDeleteFiles._existing_manifests`` refuses a partial rewrite.
+    The probe chooses only which reason the limitation gives:
 
-    ``ManifestWriterV2.content()`` returning DATA unconditionally is what
-    limits this to dropping entire delete manifests. When a build can write
-    a delete manifest, the limitation is gone and this must stop claiming it
-    (ZMBNI-604).
+    - Where ``delete_manifests_writable`` is false (stock 0.12.0),
+      ``ManifestWriterV2.content()`` returns DATA unconditionally, so no
+      delete manifest can be written at all.
+    - Where it is true (the maintenance fork, #240), one can be written, but
+      Zamboni does not write one yet. PyIceberg's own path for a partly
+      emptied manifest is no help: ``_OverwriteFiles._existing_manifests``
+      rewrites it through ``new_manifest_writer(spec)``, whose ``content``
+      defaults to DATA.
+
+    Before #310 this declared FULL on a writable build, claiming a rewrite
+    nothing performed. FULL waits for #9's code that splits a manifest,
+    which will need the probe to be true.
+    ``test_the_declaration_matches_what_removal_does_to_a_partially_dangling_manifest``
+    checks this declaration against what the removal does.
     """
     if reason := probes.unsupported_reason():
         # Commits through `_RemoveDeleteFiles`, a `_ReplaceFiles` subclass,
@@ -375,14 +389,14 @@ def dangling_delete_support(probes) -> OperationSupport:
             limitations=(f"this PyIceberg build cannot be used: {reason}",),
         )
     if probes.delete_manifests_writable:
-        return OperationSupport(
-            Operation.REMOVE_DANGLING_DELETES,
-            Support.FULL,
-            can_preview=True,
-            invariants=(
-                *PREVIEWS_EVERYTHING,
-                "rewrites a partially dangling delete manifest rather than leaving it alone",
-            ),
+        why = (
+            f"PyIceberg {probes.version} can write a delete manifest, but Zamboni "
+            "does not split one yet (#9)"
+        )
+    else:
+        why = (
+            "ManifestWriterV2.content() returns DATA unconditionally in PyIceberg "
+            f"{probes.version}, so it cannot write a delete manifest (#9)"
         )
     return OperationSupport(
         Operation.REMOVE_DANGLING_DELETES,
@@ -390,10 +404,8 @@ def dangling_delete_support(probes) -> OperationSupport:
         can_preview=True,
         limitations=(
             (
-                "drops whole delete manifests only; a partially dangling manifest "
-                "is left alone because ManifestWriterV2.content() returns DATA "
-                f"unconditionally in PyIceberg {probes.version}, so it cannot write "
-                "a delete manifest (ZMBNI-604)"
+                "drops whole delete manifests only; a partially dangling manifest is "
+                f"left alone: {why}"
             ),
         ),
         invariants=PREVIEWS_EVERYTHING,

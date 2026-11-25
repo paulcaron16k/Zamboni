@@ -60,7 +60,7 @@ decided by one row of this table.
 | Partition evolution (day → month for old data) | **yes** | no | no |
 | Snapshot expiry | yes | yes³ | yes³ |
 | Orphan-file removal | yes⁴ | yes⁵ | yes⁵ ⁶ |
-| Dangling-delete removal | partial⁷ | **no**⁸ | yes¹³ |
+| Dangling-delete removal | partial⁷ | **no**⁸ | partial¹³ |
 | Compact a table carrying equality deletes | **no**¹¹ | yes | yes¹² |
 | Manifest rewriting | yes | yes⁹ | yes |
 | Metadata retention properties | yes | yes¹⁰ | yes |
